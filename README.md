@@ -18,12 +18,10 @@ go build -o metatube ./cmd/metatube
 ### 运行
 
 ```bash
-# Linux/macOS
-EMBY_CONFIG=config.yaml ./metatube
-
-# Windows
-set EMBY_CONFIG=config.yaml
-metatube.exe
+# 默认读取 ./config.yaml；也可用 -c 指定其它配置文件
+./metatube
+./metatube -c /etc/emby-go/config.yaml
+./metatube -version
 ```
 
 `config.yaml` 属本地私人配置（已在 .gitignore 中，不入库）；首次使用复制示例并修改：
@@ -32,7 +30,7 @@ metatube.exe
 cp config.example.yaml config.yaml
 ```
 
-浏览器打开 `http://127.0.0.1:18080` 走初始化向导（创建管理员账号）。
+监听端口在配置文件的 `port`（或 `listen`）中设置，命令行只负责选择配置文件。浏览器打开 `http://127.0.0.1:<port>` 走初始化向导（创建管理员账号）。
 
 ### 目录约定
 

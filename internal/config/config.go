@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -14,7 +15,8 @@ type ServerDomain struct {
 }
 
 type Config struct {
-	Listen        string         `yaml:"listen"`
+	Listen        string         `yaml:"listen"` // 兼容旧字段；配置了 Port 时以 Port 为准
+	Port          int            `yaml:"port"`   // 监听端口（如 18080），覆盖 listen
 	DBPath        string         `yaml:"db_path"`
 	ServerName    string         `yaml:"server_name"` // 对外站点名（System/Info 的 ServerName）
 	ServerID      string         `yaml:"server_id"`   // Emby ServerId；留空则首次启动生成稳定 UUID 存 DB 并回写
@@ -38,6 +40,13 @@ func Load(path string) (Config, error) {
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	// 端口以配置文件 port 为准（存在则覆盖 listen），最终必然得到非空 listen。
+	if cfg.Port > 0 {
+		cfg.Listen = fmt.Sprintf(":%d", cfg.Port)
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = ":18080"
 	}
 	cfg.path = path
 	return cfg, nil
