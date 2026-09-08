@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -297,6 +298,18 @@ func TestCoreAPI(t *testing.T) {
 	unplayedResp.Body.Close()
 	if unplayedResp.StatusCode != http.StatusOK {
 		t.Fatalf("unplayed filter: %d", unplayedResp.StatusCode)
+	}
+	// Latest 需支持媒体库外部 id（libraryIDBase+内部 id）作为 ParentId，否则客户端首页媒体库行恒为空。
+	for _, pid := range []string{"1", strconv.FormatInt(libraryIDBase+1, 10)} {
+		latestReq, _ := http.NewRequest("GET", ts.URL+"/Users/1/Items/Latest?ParentId="+pid+"&Limit=10", nil)
+		latestReq.Header.Set("X-Emby-Token", token)
+		latestResp, _ := http.DefaultClient.Do(latestReq)
+		var latestItems []any
+		json.NewDecoder(latestResp.Body).Decode(&latestItems)
+		latestResp.Body.Close()
+		if latestResp.StatusCode != http.StatusOK || len(latestItems) == 0 {
+			t.Fatalf("latest by parent %s: status=%d items=%d", pid, latestResp.StatusCode, len(latestItems))
+		}
 	}
 	authHeaderReq, _ := http.NewRequest("GET", ts.URL+"/Items/Counts?UserId=1", nil)
 	authHeaderReq.Header.Set("X-Emby-Authorization", `Emby UserId="1", Client="test", Token="`+token+`"`)

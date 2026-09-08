@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -31,6 +32,25 @@ type App struct {
 	taskMu     sync.Mutex
 	tasks      []task
 	nextTaskID int64
+
+	// 进程内短缓存：图片 mtime tag 与 NFO 流信息解析结果，
+	// 避免列表/详情请求对媒体盘反复 stat / XML 解析（媒体盘可能较慢）。
+	tagMu sync.Mutex
+	tags  map[string]tagEntry
+	nfoMu sync.Mutex
+	nfos  map[string]nfoCacheEntry
+}
+
+// tagEntry / nfoCacheEntry 为上述短缓存的条目（neg 表示负缓存，TTL 更短）。
+type tagEntry struct {
+	tag string
+	ts  time.Time
+	neg bool
+}
+type nfoCacheEntry struct {
+	streams []gin.H
+	ts      time.Time
+	neg     bool
 }
 
 // New 强制 Redis 为缓存后端：redis_addr 必填，连接失败拒绝启动。
@@ -51,7 +71,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, db: db, cache: cacheStore}
+	a := &App{cfg: cfg, db: db, cache: cacheStore, tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry)}
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
 		a.serverName = "Emby-go"

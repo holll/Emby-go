@@ -180,19 +180,29 @@ async function pageItems() {
       ${items.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>影片</th><th>状态</th><th>源协议</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${items.map(item => `
+          <tbody>${items.map(item => {
+            const st = item.Status || item.status || '';
+            const title = item.Title || item.title || '';
+            // 待补录/不兼容/失败等无 NFO 缺标题的记录：主行显示 .strm 文件路径，便于定位补录。
+            const showPath = !title && ['pending', 'incompatible', 'failed'].includes(st);
+            const subParts = [item.Number || item.number, item.Year || item.year, item.OriginalTitle || item.original_title].filter(Boolean);
+            return `
             <tr>
               <td>
-                <strong class="title">${esc(item.Title || item.title || '—')}</strong>
-                ${(item.Number || item.year || item.OriginalTitle) ? `<span class="sub">${[item.Number, item.year, item.OriginalTitle].filter(Boolean).join(' · ')}</span>` : ''}
+                ${showPath
+                  ? `<strong class="title is-path" title="${esc(item.source_path)}">${esc(item.source_path)}</strong>`
+                  : `<strong class="title">${esc(title || '—')}</strong>
+                     ${subParts.length ? `<span class="sub">${esc(subParts.join(' · '))}</span>` : ''}`}
               </td>
-              <td>${statusBadge(item.Status || item.status)}</td>
+              <td>${statusBadge(st)}</td>
               <td>${protoBadge(item.source_protocol)} ${item.source_container ? `<span class="protocol">${esc(item.source_container)}</span>` : ''}</td>
               <td><div class="row-actions">
                 <button class="btn btn-sm" data-reread="${item.id}" title="重读 .strm 与 NFO">${icon('refresh')}<span>重读源</span></button>
                 <button class="icon-btn danger" data-delete="${item.id}" title="删除索引（不删文件）">${icon('trash')}</button>
               </div></td>
-            </tr>`).join('')}</tbody>
+            </tr>
+            `;
+          }).join('')}</tbody>
         </table></div>` : empty(active ? `没有 ${STATUS_TEXT[active] || active} 的影片` : '没有影片', search ? '试试其它关键词。' : '开始扫描或手动补录后再来看看。')}
       <p class="hint">不兼容源不会进入 Emby；更换为 http(s) .strm 后点击「重读源」即可重新判定。删除索引不会触碰磁盘文件。</p>
     </section>`;

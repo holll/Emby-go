@@ -467,6 +467,67 @@ func (s *Store) Data(id int64) (UserData, error) {
 	}
 	return d, err
 }
+
+// DataFor 批量读取多部影片的 UserData（一次 IN 查询，替代列表页逐片 Data() 的 N+1）。
+func (s *Store) DataFor(ids []int64) (map[int64]UserData, error) {
+	out := make(map[int64]UserData, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.Query(`SELECT movie_id,position_ticks,play_count,played,COALESCE(last_played_at,''),COALESCE(last_stopped_ticks,-1),
+		COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE movie_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d UserData
+		var id int64
+		var played, favorite, likes, hidden int
+		if err := rows.Scan(&id, &d.PositionTicks, &d.PlayCount, &played, &d.LastPlayedAt, &d.StoppedTicks, &favorite, &likes, &hidden); err != nil {
+			return nil, err
+		}
+		d.Played = played != 0
+		d.IsFavorite = favorite != 0
+		d.Likes = likes
+		d.HideFromResume = hidden != 0
+		out[id] = d
+	}
+	return out, rows.Err()
+}
+
+// ActorsFor 批量读取多部影片的演员列表（一次 IN 查询，替代列表页逐片 Actors() 的 N+1）。
+func (s *Store) ActorsFor(ids []int64) (map[int64][]string, error) {
+	out := make(map[int64][]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.Query(`SELECT movie_id,actor_name FROM movie_actors WHERE movie_id IN (`+placeholders+`) ORDER BY movie_id,actor_name`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], name)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SaveData(id int64, d UserData) error {
 	played := 0
 	if d.Played {
