@@ -12,7 +12,8 @@
 *.db-shm
 *.db-wal
 
-# Local config secrets / logs
+# Local config（私人配置不入库，示例见 config.example.yaml）
+/config.yaml
 /config.local.yaml
 *.log
 

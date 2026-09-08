@@ -1,0 +1,33 @@
+# Emby-go 服务默认配置示例
+# 用法：复制为 config.yaml（本文件可安全入库），再按需修改：
+#   cp config.example.yaml config.yaml
+#   EMBY_CONFIG=config.yaml ./metatube
+
+# 监听地址（端口）
+listen: ":18080"
+
+# SQLite 数据文件路径（相对路径基于进程启动目录）
+db_path: "emby-go.db"
+
+# 站点名（Emby 客户端登录后显示的名称）
+server_name: "Emby-go"
+
+# 服务唯一标识（ServerId）。
+# 留空：首次启动自动生成稳定 UUID 并存入 db 对应的 kv，重启不变。
+# 若需固定（如迁移/多实例），填一段全局唯一字符串。
+server_id: ""
+
+# 缓存后端：
+#   - redis_addr 留空  -> 使用进程内 LRU 缓存（默认，零外部依赖）
+#   - 填写 redis_addr -> 启用 Redis（如 "127.0.0.1:6379"），可跨重启保留会话/token
+redis_addr: ""
+redis_password: ""
+redis_db: 0
+
+# 前端“服务器域名切换”候选列表（供 Web 客户端在多个入口间切换；可选）
+# server_domains:
+#   - name: "内网"
+#     url: "http://127.0.0.1:18080/emby"
+#   - name: "公网"
+#     url: "https://emby.example.com/emby"
+server_domains: []
