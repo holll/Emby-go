@@ -6,6 +6,7 @@ import (
 	"emby-go/internal/nfo"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -59,6 +60,7 @@ func (a *App) startTask(kind string) int64 {
 	if len(a.tasks) > 100 {
 		a.tasks = a.tasks[:100]
 	}
+	slog.Info("任务开始", "task_id", id, "type", kind)
 	return id
 }
 
@@ -72,9 +74,11 @@ func (a *App) finishTask(id int64, err error) {
 		a.tasks[i].EndedAt = time.Now().UTC().Format(time.RFC3339)
 		if err != nil {
 			a.tasks[i].Status, a.tasks[i].Error = "failed", err.Error()
+			slog.Error("任务失败", "task_id", id, "type", a.tasks[i].Type, "error", err)
 			return
 		}
 		a.tasks[i].Status = "success"
+		slog.Info("任务成功", "task_id", id, "type", a.tasks[i].Type)
 		return
 	}
 }
@@ -91,10 +95,15 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 			continue
 		}
 		matched = true
+		slog.Info("正在扫描媒体库", "library_id", library.ID, "name", library.Name, "path", library.Path)
 		current, err := scanner.Scan(a.db, library)
 		if err != nil {
+			slog.Error("媒体库扫描失败", "library", library.Name, "error", err)
 			return result, err
 		}
+		slog.Info("媒体库扫描完成", "library", library.Name,
+			"success", current.Success, "pending", current.Pending,
+			"incompatible", current.Incompatible, "failed", current.Failed)
 		result.Success += current.Success
 		result.Pending += current.Pending
 		result.Incompatible += current.Incompatible
@@ -130,9 +139,12 @@ func (a *App) adminReindex(c *gin.Context) {
 		return
 	}
 	result := scanner.Result{}
+	slog.Info("开始重建索引", "libraries", len(libs))
 	for _, lib := range libs {
+		slog.Info("正在重建媒体库索引", "library_id", lib.ID, "name", lib.Name, "path", lib.Path)
 		current, err := scanner.Scan(a.db, lib)
 		if err != nil {
+			slog.Error("重建索引失败", "library", lib.Name, "error", err)
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
@@ -141,6 +153,8 @@ func (a *App) adminReindex(c *gin.Context) {
 		result.Incompatible += current.Incompatible
 		result.Failed += current.Failed
 	}
+	slog.Info("重建索引完成", "success", result.Success, "pending", result.Pending,
+		"incompatible", result.Incompatible, "failed", result.Failed)
 	a.cache.Clear()
 	c.JSON(200, result)
 }
@@ -258,6 +272,7 @@ func (a *App) adminManual(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	slog.Info("手动补录入库", "movie_id", id, "title", req.Title, "path", req.SourcePath)
 	c.JSON(200, gin.H{"id": id, "status": "success"})
 }
 
@@ -416,6 +431,7 @@ func (a *App) adminSettings(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"listen":       a.cfg.Addr(),
 		"db_path":      a.cfg.DBPath,
+		"debug":        a.cfg.Debug,
 		"cache":        "redis",
 		"redis_addr":   a.cfg.RedisAddr,
 		"redis_db":     a.cfg.RedisDB,

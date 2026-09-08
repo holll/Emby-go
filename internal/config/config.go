@@ -19,6 +19,7 @@ type Config struct {
 	DBPath        string         `yaml:"db_path"`
 	ServerName    string         `yaml:"server_name"` // 对外站点名（System/Info 的 ServerName）
 	ServerID      string         `yaml:"server_id"`   // Emby ServerId；留空则首次启动生成稳定 UUID 存 DB 并回写
+	Debug         bool           `yaml:"debug"`       // 开启后启用 gin 调试模式与详细请求日志
 	RedisAddr     string         `yaml:"redis_addr"`
 	RedisPassword string         `yaml:"redis_password"`
 	RedisDB       int            `yaml:"redis_db"`
