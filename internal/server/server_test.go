@@ -155,23 +155,24 @@ func TestCoreAPI(t *testing.T) {
 	if providers["metatube"] != "M:1" {
 		t.Fatalf("uniqueid metatube not parsed: %v", itemMap["ProviderIds"])
 	}
-	if _, err := os.Stat(filepath.Join(root, "poster.webp")); err != nil {
-		t.Fatal("poster webp missing")
+	// 扫描不再转 webp：源图保留，直接作为封面/背景被引用。
+	if _, err := os.Stat(filepath.Join(root, "poster.webp")); !os.IsNotExist(err) {
+		t.Fatal("poster.webp should not be generated during scan")
 	}
-	if _, err := os.Stat(filepath.Join(root, "poster.jpg")); !os.IsNotExist(err) {
-		t.Fatal("source jpg was not removed")
+	if _, err := os.Stat(filepath.Join(root, "poster.jpg")); err != nil {
+		t.Fatal("source poster.jpg should be kept")
 	}
 	for _, kind := range []string{"Primary", "Backdrop", "Landscape"} {
 		imageReq, _ := http.NewRequest("GET", ts.URL+"/Items/1/Images/"+kind, nil)
 		imageReq.Header.Set("X-Emby-Token", token)
 		imageResp, _ := http.DefaultClient.Do(imageReq)
 		if imageResp.StatusCode != 200 {
-			t.Fatalf("webp %s: %d", kind, imageResp.StatusCode)
+			t.Fatalf("image %s: %d", kind, imageResp.StatusCode)
 		}
 		imageBody, _ := io.ReadAll(imageResp.Body)
 		imageResp.Body.Close()
-		if len(imageBody) == 0 || imageResp.Header.Get("Content-Type") != "image/webp" {
-			t.Fatalf("webp %s response invalid: type=%q size=%d", kind, imageResp.Header.Get("Content-Type"), len(imageBody))
+		if len(imageBody) == 0 || imageResp.Header.Get("Content-Type") != "image/jpeg" {
+			t.Fatalf("image %s response invalid: type=%q size=%d", kind, imageResp.Header.Get("Content-Type"), len(imageBody))
 		}
 	}
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
@@ -449,7 +450,7 @@ func TestCoreAPI(t *testing.T) {
 	libImgReq.Header.Set("X-Emby-Token", token)
 	libImgResp, _ := http.DefaultClient.Do(libImgReq)
 	libImgResp.Body.Close()
-	if libImgResp.StatusCode != http.StatusOK || libImgResp.Header.Get("Content-Type") != "image/webp" {
+	if libImgResp.StatusCode != http.StatusOK || libImgResp.Header.Get("Content-Type") != "image/jpeg" {
 		t.Fatalf("library cover image: status=%d type=%q", libImgResp.StatusCode, libImgResp.Header.Get("Content-Type"))
 	}
 	boxList := get("/Users/1/Items?ParentId=boxsets&IncludeItemTypes=BoxSet")
@@ -468,7 +469,7 @@ func TestCoreAPI(t *testing.T) {
 	bsImgReq.Header.Set("X-Emby-Token", token)
 	bsImgResp, _ := http.DefaultClient.Do(bsImgReq)
 	bsImgResp.Body.Close()
-	if bsImgResp.StatusCode != http.StatusOK || bsImgResp.Header.Get("Content-Type") != "image/webp" {
+	if bsImgResp.StatusCode != http.StatusOK || bsImgResp.Header.Get("Content-Type") != "image/jpeg" {
 		t.Fatalf("boxset cover image: status=%d type=%q", bsImgResp.StatusCode, bsImgResp.Header.Get("Content-Type"))
 	}
 	children := get("/Users/1/Items?ParentId=" + bsID + "&IncludeItemTypes=Movie")
@@ -507,7 +508,7 @@ func TestCoreAPI(t *testing.T) {
 	genreImgResp, _ := http.DefaultClient.Do(genreImgReq)
 	genreImgBody, _ := io.ReadAll(genreImgResp.Body)
 	genreImgResp.Body.Close()
-	if genreImgResp.StatusCode != http.StatusOK || genreImgResp.Header.Get("Content-Type") != "image/webp" || len(genreImgBody) == 0 {
+	if genreImgResp.StatusCode != http.StatusOK || genreImgResp.Header.Get("Content-Type") != "image/jpeg" || len(genreImgBody) == 0 {
 		t.Fatalf("genre cover image: status=%d type=%q size=%d", genreImgResp.StatusCode, genreImgResp.Header.Get("Content-Type"), len(genreImgBody))
 	}
 	// 系统存活/公开信息/搜索占位/显示偏好：这些端点客户端会探，须返回 2xx 而非 404。

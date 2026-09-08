@@ -9,52 +9,65 @@ import (
 	"testing"
 )
 
-func TestEnsurePosterFallbackFromFolder(t *testing.T) {
-	dir := t.TempDir()
+func writeJPEG(t *testing.T, path string) {
+	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	img.Set(0, 0, color.RGBA{R: 255, A: 255})
-	file, err := os.Create(filepath.Join(dir, "folder.jpg"))
+	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = jpeg.Encode(file, img, nil)
-	file.Close()
-
-	path, err := EnsurePoster(dir)
-	if err != nil {
+	defer file.Close()
+	if err := jpeg.Encode(file, img, nil); err != nil {
 		t.Fatal(err)
-	}
-	if filepath.Base(path) != "poster.webp" {
-		t.Fatalf("expected poster.webp, got %s", path)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "poster.webp")); err != nil {
-		t.Fatalf("poster.webp not created: %v", err)
-	}
-	// 源 folder.jpg 应被清理
-	if _, err := os.Stat(filepath.Join(dir, "folder.jpg")); !os.IsNotExist(err) {
-		t.Fatal("folder.jpg should be removed after conversion")
 	}
 }
 
-func TestEnsurePosterExistingPosterWins(t *testing.T) {
+func TestFindPosterFolderSourceKept(t *testing.T) {
 	dir := t.TempDir()
-	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
-	f, _ := os.Create(filepath.Join(dir, "folder.jpg"))
-	_ = jpeg.Encode(f, img, nil)
-	f.Close()
+	writeJPEG(t, filepath.Join(dir, "folder.jpg"))
 
-	// 先转换 poster.jpg → poster.webp
-	pf, _ := os.Create(filepath.Join(dir, "poster.jpg"))
-	_ = jpeg.Encode(pf, img, nil)
-	pf.Close()
-	if _, err := EnsurePoster(dir); err != nil {
-		t.Fatal(err)
+	path := FindPoster(dir)
+	if path == "" || filepath.Base(path) != "folder.jpg" {
+		t.Fatalf("expected folder.jpg, got %q", path)
 	}
-	// 已有 poster.webp 时优先返回它，folder.webp 不应生成
-	if _, err := os.Stat(filepath.Join(dir, "poster.webp")); err != nil {
-		t.Fatal(err)
+	// 不生成 webp、不删除源文件
+	if _, err := os.Stat(filepath.Join(dir, "poster.webp")); !os.IsNotExist(err) {
+		t.Fatal("poster.webp should not be generated")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "folder.webp")); !os.IsNotExist(err) {
-		t.Fatal("folder.webp should not exist when poster.webp present")
+	if _, err := os.Stat(filepath.Join(dir, "folder.jpg")); err != nil {
+		t.Fatal("folder.jpg source should be kept")
+	}
+}
+
+func TestFindPosterPriority(t *testing.T) {
+	dir := t.TempDir()
+	// 已有 webp（旧版本扫描产物）应优先于 folder.jpg
+	writeJPEG(t, filepath.Join(dir, "poster.webp"))
+	writeJPEG(t, filepath.Join(dir, "folder.jpg"))
+
+	if path := FindPoster(dir); filepath.Base(path) != "poster.webp" {
+		t.Fatalf("expected poster.webp to win, got %q", path)
+	}
+
+	// 无任何海报 → 空串
+	empty := t.TempDir()
+	if path := FindPoster(empty); path != "" {
+		t.Fatalf("expected empty, got %q", path)
+	}
+}
+
+func TestFindImage(t *testing.T) {
+	dir := t.TempDir()
+	writeJPEG(t, filepath.Join(dir, "fanart.jpg"))
+	if path := FindImage(dir, "fanart"); filepath.Base(path) != "fanart.jpg" {
+		t.Fatalf("expected fanart.jpg, got %q", path)
+	}
+	writeJPEG(t, filepath.Join(dir, "landscape.png"))
+	if path := FindImage(dir, "landscape"); filepath.Base(path) != "landscape.png" {
+		t.Fatalf("expected landscape.png, got %q", path)
+	}
+	if path := FindImage(dir, "backdrop"); path != "" {
+		t.Fatalf("expected empty, got %q", path)
 	}
 }

@@ -102,18 +102,12 @@ func Scan(s *store.Store, lib store.Library) (Result, error) {
 		return result, err
 	}
 	for _, scanned := range imageMovies {
-		var imageErr error
-		// Emby 兼容：poster 可来自 poster/folder/cover/default 任一命名的源图。
-		if scanned.movie.PosterPath, imageErr = imageutil.EnsurePoster(scanned.movie.OutputDir); imageErr != nil {
-			return result, imageErr
-		}
-		if scanned.movie.BackdropPath, imageErr = imageutil.EnsureWebP(scanned.movie.OutputDir, "fanart"); imageErr != nil {
-			return result, imageErr
-		}
-		if scanned.movie.LandscapePath, imageErr = imageutil.EnsureWebP(scanned.movie.OutputDir, "landscape"); imageErr != nil {
-			return result, imageErr
-		}
-		if _, imageErr = s.UpsertMovie(scanned.movie, scanned.size, scanned.mtime); imageErr != nil {
+		// 直接引用目录里已有的图片，不做 webp 转换、不生成新文件、不删除源图。
+		// poster 兼容 poster/folder/cover/default 任一命名。
+		scanned.movie.PosterPath = imageutil.FindPoster(scanned.movie.OutputDir)
+		scanned.movie.BackdropPath = imageutil.FindImage(scanned.movie.OutputDir, "fanart")
+		scanned.movie.LandscapePath = imageutil.FindImage(scanned.movie.OutputDir, "landscape")
+		if _, imageErr := s.UpsertMovie(scanned.movie, scanned.size, scanned.mtime); imageErr != nil {
 			return result, imageErr
 		}
 	}
