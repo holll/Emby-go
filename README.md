@@ -26,7 +26,13 @@ set EMBY_CONFIG=config.yaml
 metatube.exe
 ```
 
-首次启动前在 `config.yaml` 配置监听地址与 SQLite 路径；浏览器打开 `http://127.0.0.1:18080` 走初始化向导（创建管理员账号）。
+`config.yaml` 属本地私人配置（已在 .gitignore 中，不入库）；首次使用复制示例并修改：
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+浏览器打开 `http://127.0.0.1:18080` 走初始化向导（创建管理员账号）。
 
 ### 目录约定
 
