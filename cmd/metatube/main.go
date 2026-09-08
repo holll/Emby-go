@@ -46,8 +46,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer app.Close()
-	slog.Info("Emby-go listening", "addr", cfg.Listen, "version", version, "config", path)
-	if err := http.ListenAndServe(cfg.Listen, app.Handler()); err != nil {
+	slog.Info("Emby-go listening", "addr", cfg.Addr(), "version", version, "config", path)
+	if err := http.ListenAndServe(cfg.Addr(), app.Handler()); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}

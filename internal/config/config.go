@@ -15,8 +15,7 @@ type ServerDomain struct {
 }
 
 type Config struct {
-	Listen        string         `yaml:"listen"` // 兼容旧字段；配置了 Port 时以 Port 为准
-	Port          int            `yaml:"port"`   // 监听端口（如 18080），覆盖 listen
+	Port          int            `yaml:"port"` // 监听端口（如 18080）
 	DBPath        string         `yaml:"db_path"`
 	ServerName    string         `yaml:"server_name"` // 对外站点名（System/Info 的 ServerName）
 	ServerID      string         `yaml:"server_id"`   // Emby ServerId；留空则首次启动生成稳定 UUID 存 DB 并回写
@@ -28,9 +27,17 @@ type Config struct {
 	path string // 配置文件来源路径（非 yaml 字段），供写回使用
 }
 
+// Addr 返回 http 监听地址（":"+port；默认 18080）。
+func (c Config) Addr() string {
+	if c.Port <= 0 {
+		return ":18080"
+	}
+	return fmt.Sprintf(":%d", c.Port)
+}
+
 // Redis 为必选缓存后端：服务启动时即连接并 Ping，连不上直接拒绝启动。
 func Load(path string) (Config, error) {
-	cfg := Config{Listen: ":18080", DBPath: "emby-go.db", ServerName: "Emby-go", path: path}
+	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", path: path}
 	if path == "" {
 		return cfg, nil
 	}
@@ -41,12 +48,8 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
-	// 端口以配置文件 port 为准（存在则覆盖 listen），最终必然得到非空 listen。
-	if cfg.Port > 0 {
-		cfg.Listen = fmt.Sprintf(":%d", cfg.Port)
-	}
-	if cfg.Listen == "" {
-		cfg.Listen = ":18080"
+	if cfg.Port <= 0 {
+		cfg.Port = 18080
 	}
 	cfg.path = path
 	return cfg, nil

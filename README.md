@@ -75,15 +75,17 @@ Emby 兼容 API 同时注册在根路径与 `/emby` 前缀下：
 ## 配置（config.yaml）
 
 ```yaml
-listen: ":18080"          # 监听地址
+port: 18080               # 监听端口
 db_path: "emby-go.db"     # SQLite 文件
 server_name: "Emby-go"    # 对外站名
 server_id: ""             # 留空自动生成稳定 UUID
-redis_addr: ""            # 可选 Redis；留空使用进程内内存缓存
+redis_addr: "127.0.0.1:6379"   # Redis 必选缓存后端
+redis_password: ""
+redis_db: 0
 server_domains: []        # 前端“服务器域名切换”候选
 ```
 
-`server_id` 会写入配置文件以保持稳定；`redis_addr` 为空时自动退化为进程内 LRU 缓存。
+`server_id` 会写入配置文件以保持稳定；`redis_addr` 必填，连接失败将拒绝启动。
 
 ## 开发
 

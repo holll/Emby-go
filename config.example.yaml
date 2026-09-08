@@ -5,9 +5,8 @@
 #   ./metatube -c x.yaml  # 或指定其它配置文件
 # 注意：直接以本文件运行会把自动生成的 server_id 回写到本文件，请勿直接运行本示例。
 
-# 监听端口（覆盖 listen；二者至少提供一个）
+# 监听端口
 port: 18080
-# listen: ":18080"
 
 # SQLite 数据文件路径（相对路径基于进程启动目录）
 db_path: "emby-go.db"

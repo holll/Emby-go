@@ -414,7 +414,7 @@ func (a *App) adminImage(c *gin.Context) {
 
 func (a *App) adminSettings(c *gin.Context) {
 	c.JSON(200, gin.H{
-		"listen":       a.cfg.Listen,
+		"listen":       a.cfg.Addr(),
 		"db_path":      a.cfg.DBPath,
 		"cache":        "redis",
 		"redis_addr":   a.cfg.RedisAddr,
