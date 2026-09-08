@@ -31,15 +31,6 @@ func (a *App) entityPosterPath(kind, name string) string {
 	return p
 }
 
-// posterTag 用海报文件 mtime 生成稳定缓存标签，文件被替换后 tag 变化触发客户端刷新。
-func posterTag(path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "0"
-	}
-	return strconv.FormatInt(info.ModTime().UnixNano(), 36)
-}
-
 // entityKind 解析 “genre:<base64url>” 这类虚拟实体 id 为规范实体类型与名称。
 // 名称 base64url 编码是为了放进 URL 路径时不含 / ? # 等破坏路径的字符。
 func entityKind(rawID string) (kind, name string, ok bool) {
@@ -132,6 +123,39 @@ func artRatio(path string) float64 {
 	return 2.0 / 3.0
 }
 
+// posterTag 用海报文件 mtime 生成稳定缓存标签，文件被替换后 tag 变化触发客户端刷新。
+// 结果做进程内短缓存，避免列表/图片请求对（可能较慢的）媒体盘反复 stat。
+func (a *App) posterTag(path string) string {
+	now := time.Now()
+	a.tagMu.Lock()
+	if a.tags == nil {
+		a.tags = make(map[string]tagEntry)
+	}
+	if e, ok := a.tags[path]; ok {
+		ttl := 5 * time.Minute
+		if e.neg {
+			ttl = 30 * time.Second
+		}
+		if now.Sub(e.ts) < ttl {
+			a.tagMu.Unlock()
+			return e.tag
+		}
+	}
+	a.tagMu.Unlock()
+	info, err := os.Stat(path)
+	if err != nil {
+		a.tagMu.Lock()
+		a.tags[path] = tagEntry{tag: "0", ts: now, neg: true}
+		a.tagMu.Unlock()
+		return "0"
+	}
+	tag := strconv.FormatInt(info.ModTime().UnixNano(), 36)
+	a.tagMu.Lock()
+	a.tags[path] = tagEntry{tag: tag, ts: now}
+	a.tagMu.Unlock()
+	return tag
+}
+
 // libraryCoverPath 决定媒体库在 Views 卡片上“实际可被取到”的主图路径。
 // libraryCoverPath 返回媒体库主视觉路径（优先宽图 fanart，无则回退海报）。
 func (a *App) libraryCoverPath(libraryID int64) string {
@@ -162,7 +186,7 @@ func (a *App) collectionFolderDTO(l store.Library) gin.H {
 		},
 	}
 	if cover := a.libraryCoverPath(l.ID); cover != "" {
-		item["ImageTags"] = gin.H{"Primary": posterTag(cover)}
+		item["ImageTags"] = gin.H{"Primary": a.posterTag(cover)}
 		item["PrimaryImageAspectRatio"] = artRatio(cover)
 	}
 	return item
@@ -179,7 +203,7 @@ func (a *App) boxsetFolderDTO(collections []string) gin.H {
 	}
 	for _, name := range collections {
 		if poster, _ := a.db.CollectionPoster(name); poster != "" {
-			item["ImageTags"] = gin.H{"Primary": posterTag(poster)}
+			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 			item["PrimaryImageAspectRatio"] = artRatio(poster)
 			break
 		}
@@ -197,7 +221,7 @@ func (a *App) boxsetItemDTO(name string) gin.H {
 		"UserData":          zeroUserData(),
 	}
 	if poster, _ := a.db.CollectionPoster(name); poster != "" {
-		item["ImageTags"] = gin.H{"Primary": posterTag(poster)}
+		item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 		item["PrimaryImageAspectRatio"] = artRatio(poster)
 	}
 	if len(genres) > 0 {
@@ -250,21 +274,26 @@ func (a *App) resume(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	items := make([]gin.H, 0)
+	dataMap, _ := a.db.DataFor(movieIDs(movies))
+	resumed := make([]store.Movie, 0)
 	for _, movie := range movies {
-		data, err := a.db.Data(movie.ID)
-		if err == nil && data.PositionTicks > 0 && !data.HideFromResume {
-			items = append(items, a.embyItem(movie, data))
+		if data := dataMap[movie.ID]; data.PositionTicks > 0 && !data.HideFromResume {
+			resumed = append(resumed, movie)
 		}
 	}
-	if start > len(items) {
-		start = len(items)
+	if start > len(resumed) {
+		start = len(resumed)
 	}
 	end := start + limit
-	if end > len(items) {
-		end = len(items)
+	if end > len(resumed) {
+		end = len(resumed)
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": items[start:end], "TotalRecordCount": len(items), "StartIndex": start})
+	actorMap, _ := a.db.ActorsFor(movieIDs(resumed[start:end]))
+	items := make([]gin.H, 0, end-start)
+	for _, movie := range resumed[start:end] {
+		items = append(items, a.embyItemActors(movie, dataMap[movie.ID], actorMap[movie.ID], true))
+	}
+	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(resumed), "StartIndex": start})
 }
 
 // nextUp 无剧集库，恒为空结果（Emby 客户端主屏会调用）。
@@ -291,6 +320,12 @@ func (a *App) similar(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "12"))
 	if limit < 1 || limit > 50 {
 		limit = 12
+	}
+	// 相似度扫描整库成本较高，按 (版本,影片,limit) 短缓存，重复进入详情页直接命中。
+	simKey := "similar:" + a.db.Version("g:version") + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
+	if b, ok := a.cache.Get(simKey); ok {
+		c.Data(200, "application/json", b)
+		return
 	}
 	movies, _, err := a.db.SearchFiltered(0, "", "", "", false, "title", false, 10000, 0)
 	if err != nil {
@@ -328,12 +363,19 @@ func (a *App) similar(c *gin.Context) {
 	if len(results) > limit {
 		results = results[:limit]
 	}
+	ids := make([]int64, 0, len(results))
+	for _, r := range results {
+		ids = append(ids, r.movie.ID)
+	}
+	dataMap, _ := a.db.DataFor(ids)
 	out := make([]gin.H, 0, len(results))
 	for _, r := range results {
-		d, _ := a.db.Data(r.movie.ID)
-		out = append(out, a.embyItem(r.movie, d))
+		// actorMap 来自 AllActors，已含全部可见影片（无演员的影片缺省 nil，标记 loaded 避免回查）。
+		out = append(out, a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true))
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
+	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
+	a.cache.Set(simKey, body, 20*time.Second)
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 // similarityScore 按 Emby 3.5.2 SimilarItemsHelper 权重给两片打分：
@@ -430,17 +472,26 @@ func nameObjects(kind string, names []string) []gin.H {
 
 // peopleOf 组装影片人员：导演（若 NFO 有）+ 演员。Type 与真实 Emby 一致。
 func (a *App) peopleOf(m store.Movie) []gin.H {
+	return a.peopleOfActors(m, nil, false)
+}
+
+// peopleOfActors 允许调用方传入批量预取的演员名。
+// loaded=false 时 actors 视为未预取，回退单条查询；loaded=true 时即使 actors 为空也不查库。
+func (a *App) peopleOfActors(m store.Movie, actors []string, loaded bool) []gin.H {
 	people := make([]gin.H, 0, 4)
 	if name := strings.TrimSpace(m.Director); name != "" {
 		people = append(people, gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Director"})
 	}
-	if names, err := a.db.Actors(m.ID); err == nil {
-		for _, name := range names {
-			if name = strings.TrimSpace(name); name == "" {
-				continue
-			}
-			people = append(people, gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Actor"})
+	if !loaded {
+		if names, err := a.db.Actors(m.ID); err == nil {
+			actors = names
 		}
+	}
+	for _, name := range actors {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		people = append(people, gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Actor"})
 	}
 	return people
 }
@@ -448,6 +499,12 @@ func (a *App) peopleOf(m store.Movie) []gin.H {
 // embyItem 把 DB 影片映射为 BaseItemDto（Movie）。字段名与真实 Emby 对齐，
 // 并保证 iPlay 等脆弱客户端必须的 UserData / ImageTags / BackdropImageTags 恒存在。
 func (a *App) embyItem(m store.Movie, d store.UserData) gin.H {
+	return a.embyItemActors(m, d, nil, false)
+}
+
+// embyItemActors 与 embyItem 相同，但允许传入批量预取的演员列表避免逐片查库。
+// loaded=true 表示 actors 已由调用方批量取回（可为空，不再单条回查）。
+func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []string, loaded bool) gin.H {
 	id := strconv.FormatInt(m.ID, 10)
 	sortName := m.SortName
 	if sortName == "" {
@@ -500,23 +557,23 @@ func (a *App) embyItem(m store.Movie, d store.UserData) gin.H {
 	if len(m.Studios) > 0 {
 		v["Studios"] = nameObjects("Studio", m.Studios)
 	}
-	if people := a.peopleOf(m); len(people) > 0 {
+	if people := a.peopleOfActors(m, actors, loaded); len(people) > 0 {
 		v["People"] = people
 	}
 
 	imageTags := gin.H{}
 	backdrops := make([]string, 0, 1)
 	if m.PosterPath != "" {
-		imageTags["Primary"] = posterTag(m.PosterPath)
+		imageTags["Primary"] = a.posterTag(m.PosterPath)
 	}
 	if m.LandscapePath != "" {
-		imageTags["Thumb"] = posterTag(m.LandscapePath)
+		imageTags["Thumb"] = a.posterTag(m.LandscapePath)
 	} else if m.PosterPath != "" {
 		// 无宽图时 Thumb 回退主海报，保证给客户端的 Thumb 标记总是可取图。
-		imageTags["Thumb"] = posterTag(m.PosterPath)
+		imageTags["Thumb"] = a.posterTag(m.PosterPath)
 	}
 	if m.BackdropPath != "" {
-		tag := posterTag(m.BackdropPath)
+		tag := a.posterTag(m.BackdropPath)
 		backdrops = append(backdrops, tag)
 		imageTags["Backdrop"] = tag
 	}
@@ -577,7 +634,8 @@ func (a *App) latest(c *gin.Context) {
 	if !a.validUser(c) {
 		return
 	}
-	libraryID, _ := strconv.ParseInt(c.Query("ParentId"), 10, 64)
+	// ParentId 可能是媒体库外部 id（libraryIDBase+内部 id）或旧内部 id，统一换算。
+	libraryID, _ := parseParentScope(c.Query("ParentId"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "20"))
 	if limit < 1 || limit > 100 {
 		limit = 20
@@ -587,10 +645,11 @@ func (a *App) latest(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	dataMap, _ := a.db.DataFor(movieIDs(movies))
+	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
-		d, _ := a.db.Data(m.ID)
-		out = append(out, a.embyItem(m, d))
+		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -609,10 +668,11 @@ func (a *App) suggestions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	dataMap, _ := a.db.DataFor(movieIDs(movies))
+	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
-		d, _ := a.db.Data(m.ID)
-		out = append(out, a.embyItem(m, d))
+		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
 	}
 	c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
 }
@@ -712,7 +772,12 @@ func (a *App) itemsQuery(c *gin.Context) {
 	unplayed := strings.Contains(filterLower, "isunplayed")
 	favorite := strings.Contains(filterLower, "isfavorite")
 
-	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), termOf(c), c.Query("Years"), genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	// 响应体是否带 MediaSources 会影响内容，须纳入缓存键，避免不同 Fields 请求互相串缓存。
+	fieldsMark := ""
+	if strings.Contains(strings.ToLower(c.Query("Fields")), "mediasources") {
+		fieldsMark = "src"
+	}
+	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), termOf(c), c.Query("Years"), genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fieldsMark, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -728,12 +793,15 @@ func (a *App) itemsQuery(c *gin.Context) {
 func termOf(c *gin.Context) string { return c.Query("SearchTerm") }
 
 // respondItems 统一输出影片分页结果。cacheKey 非空时写入 15s 缓存（供 itemsQuery 命中复用）。
+// UserData 与演员表按整页批量取回，避免逐片 N+1 查询。
 func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, cacheKey string) {
 	wantSources := strings.Contains(strings.ToLower(c.Query("Fields")), "mediasources")
+	ids := movieIDs(ms)
+	dataMap, _ := a.db.DataFor(ids)
+	actorMap, _ := a.db.ActorsFor(ids)
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
-		d, _ := a.db.Data(m.ID)
-		item := a.embyItem(m, d)
+		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
 		if wantSources {
 			item["MediaSources"] = []gin.H{a.mediaSource(m, c)}
 		}
@@ -745,6 +813,15 @@ func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, c
 		a.cache.Set("items:"+cacheKey, b, 15*time.Second)
 	}
 	c.Data(200, "application/json", b)
+}
+
+// movieIDs 提取影片列表的 id 切片（供批量查询）。
+func movieIDs(ms []store.Movie) []int64 {
+	ids := make([]int64, 0, len(ms))
+	for _, m := range ms {
+		ids = append(ids, m.ID)
+	}
+	return ids
 }
 
 // boxsetListResponse 分页返回「合集」媒体库的 BoxSet 列表。
@@ -873,7 +950,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 			"IsFolder": false, "ServerId": a.serverID,
 		}
 		if poster := a.entityPosterPath(kind, name); poster != "" {
-			item["ImageTags"] = gin.H{"Primary": posterTag(poster)}
+			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 		}
 		items = append(items, item)
 	}
@@ -905,7 +982,7 @@ func (a *App) item(c *gin.Context) {
 				"IsFolder": false, "ServerId": a.serverID,
 			}
 			if poster := a.entityPosterPath(kind, name); poster != "" {
-				item["ImageTags"] = gin.H{"Primary": posterTag(poster)}
+				item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 			}
 			c.JSON(http.StatusOK, item)
 			return

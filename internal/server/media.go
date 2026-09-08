@@ -112,7 +112,7 @@ func (a *App) imageInfo(c *gin.Context) {
 		}
 		movie, err := a.db.Movie(id)
 		if err == nil && movie.IsVisible() {
-			c.JSON(http.StatusOK, movieImageInfo(movie))
+			c.JSON(http.StatusOK, a.movieImageInfo(movie))
 			return
 		}
 		// 媒体库（旧内部 id 兼容）：给出 RepresentativeArt（优先宽图 fanart），避免列表页拿空数组。
@@ -125,14 +125,14 @@ func (a *App) imageInfo(c *gin.Context) {
 	}
 	// 合集：仅 Primary（代表海报）。
 	if p := a.boxsetPoster(rawID); p != "" {
-		c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": p, "Filename": filepath.Base(p), "ImageTag": posterTag(p)}})
+		c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": p, "Filename": filepath.Base(p), "ImageTag": a.posterTag(p)}})
 		return
 	}
 	// 虚拟实体：仅 Primary（代表性海报）。
 	images := []gin.H{}
 	if kind, name, ok := entityKind(rawID); ok {
 		if poster := a.entityPosterPath(kind, name); poster != "" {
-			images = append(images, gin.H{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster), "ImageTag": posterTag(poster)})
+			images = append(images, gin.H{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster), "ImageTag": a.posterTag(poster)})
 		}
 	}
 	c.JSON(http.StatusOK, images)
@@ -140,7 +140,7 @@ func (a *App) imageInfo(c *gin.Context) {
 
 // movieImageInfo 组装与真实 Emby 一致的图片清单：
 // poster→Primary、landscape→Thumb、fanart→Backdrop（首个 index 0）。
-func movieImageInfo(m store.Movie) []gin.H {
+func (a *App) movieImageInfo(m store.Movie) []gin.H {
 	images := make([]gin.H, 0, 3)
 	for _, item := range []struct {
 		imageType string
@@ -154,7 +154,7 @@ func movieImageInfo(m store.Movie) []gin.H {
 			continue
 		}
 		// 兼容 3.5.2 的 ImageInfo 契约：带 ImageTag（真机 4.9 列表无此键，多给无害）。
-		info := gin.H{"ImageType": item.imageType, "Path": item.path, "Filename": filepath.Base(item.path), "ImageTag": posterTag(item.path)}
+		info := gin.H{"ImageType": item.imageType, "Path": item.path, "Filename": filepath.Base(item.path), "ImageTag": a.posterTag(item.path)}
 		if item.imageType == "Backdrop" {
 			info["ImageIndex"] = 0
 		}
@@ -215,13 +215,35 @@ func (a *App) mediaSource(m store.Movie, c *gin.Context) gin.H {
 
 // mediaStreams 从同目录 NFO 的 <fileinfo><streamdetails> 组装真实音视频轨。
 // 读不到时回退一个通用视频轨（仅驱动直连播放决策，不伪造具体参数）。
+// 结果按 NFO 路径做进程内短缓存：列表页 MediaSources 大批量请求时避免反复读盘解析。
 func (a *App) mediaStreams(m store.Movie) []gin.H {
 	fallback := []gin.H{{"Type": "Video", "Index": 0, "IsDefault": true, "IsForced": false, "IsExternal": false}}
 	if m.NFOPath == "" {
 		return fallback
 	}
+	now := time.Now()
+	a.nfoMu.Lock()
+	if a.nfos == nil {
+		a.nfos = make(map[string]nfoCacheEntry)
+	}
+	if e, ok := a.nfos[m.NFOPath]; ok {
+		ttl := 2 * time.Minute
+		if e.neg {
+			ttl = 30 * time.Second
+		}
+		if now.Sub(e.ts) < ttl {
+			cached := e.streams
+			a.nfoMu.Unlock()
+			return cached
+		}
+	}
+	a.nfoMu.Unlock()
+
 	meta, err := nfo.Read(m.NFOPath)
 	if err != nil || meta.FileInfo == nil || meta.FileInfo.StreamDetails == nil {
+		a.nfoMu.Lock()
+		a.nfos[m.NFOPath] = nfoCacheEntry{streams: fallback, ts: now, neg: true}
+		a.nfoMu.Unlock()
 		return fallback
 	}
 	details := meta.FileInfo.StreamDetails
@@ -263,8 +285,14 @@ func (a *App) mediaStreams(m store.Movie) []gin.H {
 		index++
 	}
 	if len(out) == 0 {
+		a.nfoMu.Lock()
+		a.nfos[m.NFOPath] = nfoCacheEntry{streams: fallback, ts: now, neg: true}
+		a.nfoMu.Unlock()
 		return fallback
 	}
+	a.nfoMu.Lock()
+	a.nfos[m.NFOPath] = nfoCacheEntry{streams: out, ts: now}
+	a.nfoMu.Unlock()
 	return out
 }
 
