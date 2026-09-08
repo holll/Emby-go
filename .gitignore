@@ -1,0 +1,23 @@
+# Build artifacts
+/metatube.exe
+/metatube
+*.exe
+*.exe~
+
+# 第三方参考源码（体积大，不随仓库同步）
+/src/
+
+# Runtime data (SQLite WAL/shm 一并忽略)
+*.db
+*.db-shm
+*.db-wal
+
+# Local config secrets / logs
+/config.local.yaml
+*.log
+
+# Editors / OS
+/.idea/
+.vscode/
+.DS_Store
+Thumbs.db
