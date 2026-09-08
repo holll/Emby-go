@@ -33,7 +33,7 @@ type App struct {
 	nextTaskID int64
 }
 
-// New 以 Redis 为必选缓存后端装配服务：Redis 不可用则启动失败。
+// New 强制 Redis 为缓存后端：redis_addr 必填，连接失败拒绝启动。
 func New(cfg config.Config) (*App, error) {
 	if cfg.RedisAddr == "" {
 		return nil, errors.New("缺少 redis_addr：Redis 为必选缓存后端")

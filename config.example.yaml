@@ -1,10 +1,13 @@
 # Emby-go 服务默认配置示例
 # 用法：复制为 config.yaml（本文件可安全入库），再按需修改：
 #   cp config.example.yaml config.yaml
-#   EMBY_CONFIG=config.yaml ./metatube
+#   ./metatube            # 默认读 config.yaml
+#   ./metatube -c x.yaml  # 或指定其它配置文件
+# 注意：直接以本文件运行会把自动生成的 server_id 回写到本文件，请勿直接运行本示例。
 
-# 监听地址（端口）
-listen: ":18080"
+# 监听端口（覆盖 listen；二者至少提供一个）
+port: 18080
+# listen: ":18080"
 
 # SQLite 数据文件路径（相对路径基于进程启动目录）
 db_path: "emby-go.db"
@@ -17,10 +20,8 @@ server_name: "Emby-go"
 # 若需固定（如迁移/多实例），填一段全局唯一字符串。
 server_id: ""
 
-# 缓存后端：
-#   - redis_addr 留空  -> 使用进程内 LRU 缓存（默认，零外部依赖）
-#   - 填写 redis_addr -> 启用 Redis（如 "127.0.0.1:6379"），可跨重启保留会话/token
-redis_addr: ""
+# Redis 为必选缓存后端：地址必填，连不上/Ping 失败将拒绝启动。
+redis_addr: "127.0.0.1:6379"
 redis_password: ""
 redis_db: 0
 
