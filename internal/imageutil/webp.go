@@ -11,6 +11,8 @@ import (
 	_ "image/png"
 )
 
+// EncodeWebP 把读取到的图片编码为 webp 写入 destination（destination 为最终路径）。
+// 仅用于管理端“上传即转 webp”这类显式操作；扫描不再做格式转换。
 func EncodeWebP(src io.Reader, destination string) error {
 	img, _, err := image.Decode(src)
 	if err != nil {
@@ -27,85 +29,33 @@ func EncodeWebP(src io.Reader, destination string) error {
 	return file.Close()
 }
 
-func EnsureWebP(dir, base string) (string, error) {
-	webpPath := filepath.Join(dir, base+".webp")
-	if _, err := os.Stat(webpPath); err == nil {
-		return webpPath, nil
+// imageExts 目录里认可的目标图片扩展名。含 webp：兼容旧版本扫描已生成的
+// poster.webp/fanart.webp/landscape.webp，重扫时不丢封面。
+var imageExts = []string{".webp", ".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG", ".WebP", ".WEBP"}
+
+// findImage 返回 dir 下 base.<ext> 中第一个已存在的图片路径；不转换、不生成、不删除源文件。
+func findImage(dir, base string) string {
+	for _, ext := range imageExts {
+		path := filepath.Join(dir, base+ext)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
 	}
-	for _, ext := range []string{".jpg", ".jpeg", ".JPG", ".JPEG"} {
-		sourcePath := filepath.Join(dir, base+ext)
-		source, err := os.Open(sourcePath)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		tmpPath := webpPath + ".tmp"
-		err = EncodeWebP(source, tmpPath)
-		closeErr := source.Close()
-		if err != nil {
-			_ = os.Remove(tmpPath)
-			return "", err
-		}
-		if closeErr != nil {
-			_ = os.Remove(tmpPath)
-			return "", closeErr
-		}
-		if err = os.Rename(tmpPath, webpPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return "", err
-		}
-		_ = os.Remove(sourcePath)
-		return webpPath, nil
-	}
-	return "", nil
+	return ""
 }
 
-// EnsurePoster 生成主海报 poster.webp。Emby 兼容：目录里可能只有 folder.jpg/cover.jpg/default.jpg，
-// 按 poster → folder → cover → default 的顺序找源图/已生成的 webp，转成 poster.webp。
-func EnsurePoster(dir string) (string, error) {
+// FindPoster 返回目录中可作主海报的已有图片（poster→folder→cover→default，按此顺序）。
+// 找不到返回空串。不做 webp 转换，也不删除任何源文件。
+func FindPoster(dir string) string {
 	for _, base := range []string{"poster", "folder", "cover", "default"} {
-		if webpPath := filepath.Join(dir, base+".webp"); fileExists(webpPath) {
-			return webpPath, nil
-		}
-		for _, ext := range []string{".jpg", ".jpeg", ".JPG", ".JPEG"} {
-			sourcePath := filepath.Join(dir, base+ext)
-			if !fileExists(sourcePath) {
-				continue
-			}
-			// 只有 poster 本名产物固定叫 poster.webp；其它候选源也转成 poster.webp 统一。
-			out := filepath.Join(dir, "poster.webp")
-			if base != "poster" {
-				source, err := os.Open(sourcePath)
-				if err != nil {
-					return "", err
-				}
-				tmpPath := out + ".tmp"
-				err = EncodeWebP(source, tmpPath)
-				closeErr := source.Close()
-				if err != nil {
-					_ = os.Remove(tmpPath)
-					return "", err
-				}
-				if closeErr != nil {
-					_ = os.Remove(tmpPath)
-					return "", closeErr
-				}
-				if err = os.Rename(tmpPath, out); err != nil {
-					_ = os.Remove(tmpPath)
-					return "", err
-				}
-				_ = os.Remove(sourcePath)
-				return out, nil
-			}
-			return EnsureWebP(dir, base)
+		if path := findImage(dir, base); path != "" {
+			return path
 		}
 	}
-	return "", nil
+	return ""
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// FindImage 返回目录中指定命名（如 fanart / landscape）的已有图片；找不到返回空串。
+func FindImage(dir, base string) string {
+	return findImage(dir, base)
 }
