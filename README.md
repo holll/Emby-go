@@ -76,6 +76,7 @@ Emby 兼容 API 同时注册在根路径与 `/emby` 前缀下：
 
 ```yaml
 port: 18080               # 监听端口
+debug: false              # true 时启用 gin 调试 + 详细请求体日志
 db_path: "emby-go.db"     # SQLite 文件
 server_name: "Emby-go"    # 对外站名
 server_id: ""             # 留空自动生成稳定 UUID

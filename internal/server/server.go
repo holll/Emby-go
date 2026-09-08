@@ -83,9 +83,18 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 			return nil, err
 		}
 	}
-	gin.SetMode(gin.DebugMode)
+	if cfg.Debug {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	r := gin.New()
-	r.Use(gin.Logger(), requestContentLogger(), gin.Recovery())
+	middlewares := []gin.HandlerFunc{gin.Logger()}
+	if cfg.Debug {
+		middlewares = append(middlewares, requestContentLogger())
+	}
+	middlewares = append(middlewares, gin.Recovery())
+	r.Use(middlewares...)
 	a.router = r
 	a.routes()
 	return a, nil

@@ -8,6 +8,9 @@
 # 监听端口
 port: 18080
 
+# 调试模式：true 时启用 gin 调试模式并在控制台打印详细请求体日志
+debug: false
+
 # SQLite 数据文件路径（相对路径基于进程启动目录）
 db_path: "emby-go.db"
 
