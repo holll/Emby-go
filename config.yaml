@@ -1,0 +1,28 @@
+# MetaTube / Emby-go 服务默认配置
+# 用法：EMBY_CONFIG=config.yaml ./metatube
+
+# 监听地址（端口）
+listen: ":18080"
+
+# SQLite 数据文件路径（相对路径基于进程启动目录）
+db_path: "emby-go.db"
+
+# 站点名（Emby 客户端登录后显示的名称）
+server_name: "Emby-go"
+
+# 服务唯一标识（ServerId）。
+# 留空：首次启动自动生成稳定 UUID 并存入 db_path 对应的 kv，重启不变。
+# 若需固定（如迁移/多实例），填一段全局唯一字符串。
+server_id: "8dcb27d80c7145a331dc61f4b6a7cb73"
+
+# Redis 为必选缓存后端：地址必填，连不上/Ping 失败将拒绝启动。
+redis_addr: "127.0.0.1:6379"
+redis_password: ""
+redis_db: 0
+
+# 前端"服务器域名切换"候选列表（供 Web 客户端在多个入口间切换；可选）
+server_domains:
+  - name: "内网"
+    url: "http://127.0.0.1:18080/emby"
+  - name: "公网"
+    url: "https://emby.example.com/emby"

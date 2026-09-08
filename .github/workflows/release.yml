@@ -1,0 +1,49 @@
+name: release
+
+# 仅在推送 v* 标签时触发，构建多平台二进制并发布到 GitHub Release。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          version="${GITHUB_REF_NAME#v}"
+          for target in "linux/amd64/emby-go-linux-amd64" \
+                         "linux/arm64/emby-go-linux-arm64" \
+                         "windows/amd64/emby-go-windows-amd64.exe" \
+                         "darwin/amd64/emby-go-darwin-amd64" \
+                         "darwin/arm64/emby-go-darwin-arm64"; do
+            goos="${target%%/*}"
+            rest="${target#*/}"
+            goarch="${rest%%/*}"
+            name="${rest#*/}"
+            echo ">> ${goos}/${goarch} -> dist/${name}"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${version}" \
+              -o "dist/${name}" ./cmd/metatube
+          done
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
