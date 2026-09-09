@@ -206,58 +206,84 @@ func (a *App) routes() {
 	r.NoRoute(a.noRoute)
 }
 
-// registerEmby 注册全部 Emby 兼容路由。注意 Gin 大小写敏感，
-// 而 Emby 生态按规范大小写发请求，因此流端点同时注册 /Videos 与 /videos。
+// embyRoute 一条 Emby 兼容端点；auth 为真时挂 requireAuth。
+type embyRoute struct {
+	method  string
+	path    string
+	auth    bool
+	handler gin.HandlerFunc
+}
+
+// embyRoutes 声明全部 Emby 兼容端点。路径按 PascalCase 写，注册时会额外生成
+// 全小写变体：真实 Emby 路由大小写不敏感，实测同一端点会被不同客户端以
+// /Users/... 与 /users/... 两种写法请求，而 Gin 路由是大小写敏感的。
+func (a *App) embyRoutes() []embyRoute {
+	return []embyRoute{
+		{"POST", "/Users/AuthenticateByName", false, a.authenticate},
+		{"GET", "/Users/Public", false, a.publicUsers},
+		{"GET", "/Users/Me", true, a.me},
+		{"GET", "/Users/:uid/Items/Latest", true, a.latest},
+		{"GET", "/Users/:uid/Suggestions", true, a.suggestions},
+		{"GET", "/System/Info/Public", false, a.publicInfo},
+		{"GET", "/System/Info", true, a.info},
+		{"GET", "/System/Configuration", true, a.configuration},
+		{"GET", "/System/Endpoint", true, a.endpoint},
+		{"GET", "/System/Ping", false, a.ping},
+		{"POST", "/System/Ping", false, a.ping},
+		{"POST", "/Sessions/Playing/Ping", true, a.noContent},
+		{"POST", "/Sessions/Capabilities", true, a.noContent},
+		{"POST", "/Sessions/Capabilities/Full", true, a.noContent},
+		{"POST", "/Sessions/Logout", true, a.noContent},
+		{"GET", "/DisplayPreferences/:pref", true, a.displayPreferences},
+		{"POST", "/DisplayPreferences/:pref", true, a.displayPreferences},
+		{"GET", "/System/Ext/ServerDomains", true, a.serverDomains},
+		{"GET", "/Items/Counts", true, a.counts},
+		{"GET", "/Search/Hints", true, a.searchHints},
+		{"GET", "/Genres", true, a.genres},
+		{"GET", "/Users/:uid/Items/Resume", true, a.resume},
+		{"GET", "/Shows/NextUp", true, a.nextUp},
+		{"GET", "/Users/:uid/Views", true, a.views},
+		{"GET", "/Users/:uid/Items", true, a.items},
+		{"GET", "/Items", true, a.rootItems},
+		{"GET", "/Users/:uid/Items/:id", true, a.item},
+		{"GET", "/Items/:id", true, a.item},
+		{"GET", "/Items/:id/Images/:kind", false, a.image},
+		{"GET", "/Items/:id/Images/:kind/:index", false, a.image},
+		{"GET", "/Items/:id/Images", true, a.imageInfo},
+		{"GET", "/Items/:id/Similar", true, a.similar},
+		{"GET", "/Items/:id/PlaybackInfo", true, a.playback},
+		{"POST", "/Items/:id/PlaybackInfo", true, a.playback},
+		{"GET", "/Videos/:id/AdditionalParts", true, a.additionalParts},
+		{"GET", "/Episode/:id/IntroSkipperSegments", true, a.emptyList},
+		{"GET", "/MediaSegments/:id", true, a.emptyList},
+		{"POST", "/Sessions/Playing", true, a.playing},
+		{"POST", "/Sessions/Playing/Progress", true, a.playing},
+		{"POST", "/Sessions/Playing/Stopped", true, a.playing},
+		{"POST", "/Users/:uid/PlayedItems/:id", true, a.played},
+		{"DELETE", "/Users/:uid/PlayedItems/:id", true, a.unplayed},
+		{"POST", "/Users/:uid/FavoriteItems/:id", true, a.favorite},
+		{"DELETE", "/Users/:uid/FavoriteItems/:id", true, a.unfavorite},
+		{"POST", "/Users/:uid/FavoriteItems/:id/Delete", true, a.unfavorite},
+		{"POST", "/Users/:uid/Items/:id/Rating", true, a.rating},
+		{"DELETE", "/Users/:uid/Items/:id/Rating", true, a.unrate},
+		{"POST", "/Users/:uid/Items/:id/Rating/Delete", true, a.unrate},
+		{"POST", "/Users/:uid/Items/:id/HideFromResume", true, a.hideFromResume},
+	}
+}
+
+// registerEmby 注册全部 Emby 兼容路由，每条同时挂 PascalCase 与全小写变体。
 func (a *App) registerEmby(g *gin.RouterGroup) {
-	g.POST("/Users/AuthenticateByName", a.authenticate)
-	g.GET("/Users/Public", a.publicUsers)
-	g.GET("/Users/Me", a.requireAuth, a.me)
-	g.GET("/Users/:uid/Items/Latest", a.requireAuth, a.latest)
-	g.GET("/Users/:uid/Suggestions", a.requireAuth, a.suggestions)
-	g.GET("/System/Info/Public", a.publicInfo)
-	g.GET("/System/Info", a.requireAuth, a.info)
-	g.GET("/System/Configuration", a.requireAuth, a.configuration)
-	g.GET("/System/Endpoint", a.requireAuth, a.endpoint)
-	g.GET("/System/Ping", a.ping)
-	g.POST("/System/Ping", a.ping)
-	g.POST("/Sessions/Playing/Ping", a.requireAuth, a.noContent)
-	g.POST("/Sessions/Capabilities", a.requireAuth, a.noContent)
-	g.POST("/Sessions/Capabilities/Full", a.requireAuth, a.noContent)
-	g.POST("/Sessions/Logout", a.requireAuth, a.noContent)
-	g.GET("/DisplayPreferences/:pref", a.requireAuth, a.displayPreferences)
-	g.POST("/DisplayPreferences/:pref", a.requireAuth, a.displayPreferences)
-	g.GET("/System/Ext/ServerDomains", a.requireAuth, a.serverDomains)
-	g.GET("/Items/Counts", a.requireAuth, a.counts)
-	g.GET("/Search/Hints", a.requireAuth, a.searchHints)
-	g.GET("/Genres", a.requireAuth, a.genres)
-	g.GET("/Users/:uid/Items/Resume", a.requireAuth, a.resume)
-	g.GET("/Shows/NextUp", a.requireAuth, a.nextUp)
-	g.GET("/Users/:uid/Views", a.requireAuth, a.views)
-	g.GET("/Users/:uid/Items", a.requireAuth, a.items)
-	g.GET("/Items", a.requireAuth, a.rootItems)
-	g.GET("/Users/:uid/Items/:id", a.requireAuth, a.item)
-	g.GET("/Items/:id", a.requireAuth, a.item)
-	g.GET("/Items/:id/Images/:kind", a.image)
-	g.GET("/Items/:id/Images/:kind/:index", a.image)
-	g.GET("/Items/:id/Images", a.requireAuth, a.imageInfo)
-	g.GET("/Items/:id/Similar", a.requireAuth, a.similar)
-	g.GET("/Items/:id/PlaybackInfo", a.requireAuth, a.playback)
-	g.POST("/Items/:id/PlaybackInfo", a.requireAuth, a.playback)
-	g.GET("/Videos/:id/AdditionalParts", a.requireAuth, a.additionalParts)
-	g.GET("/Episode/:id/IntroSkipperSegments", a.requireAuth, a.emptyList)
-	g.GET("/MediaSegments/:id", a.requireAuth, a.emptyList)
-	g.POST("/Sessions/Playing", a.requireAuth, a.playing)
-	g.POST("/Sessions/Playing/Progress", a.requireAuth, a.playing)
-	g.POST("/Sessions/Playing/Stopped", a.requireAuth, a.playing)
-	g.POST("/Users/:uid/PlayedItems/:id", a.requireAuth, a.played)
-	g.DELETE("/Users/:uid/PlayedItems/:id", a.requireAuth, a.unplayed)
-	g.POST("/Users/:uid/FavoriteItems/:id", a.requireAuth, a.favorite)
-	g.DELETE("/Users/:uid/FavoriteItems/:id", a.requireAuth, a.unfavorite)
-	g.POST("/Users/:uid/FavoriteItems/:id/Delete", a.requireAuth, a.unfavorite)
-	g.POST("/Users/:uid/Items/:id/Rating", a.requireAuth, a.rating)
-	g.DELETE("/Users/:uid/Items/:id/Rating", a.requireAuth, a.unrate)
-	g.POST("/Users/:uid/Items/:id/Rating/Delete", a.requireAuth, a.unrate)
-	g.POST("/Users/:uid/Items/:id/HideFromResume", a.requireAuth, a.hideFromResume)
+	for _, route := range a.embyRoutes() {
+		handlers := make([]gin.HandlerFunc, 0, 2)
+		if route.auth {
+			handlers = append(handlers, a.requireAuth)
+		}
+		handlers = append(handlers, route.handler)
+		g.Handle(route.method, route.path, handlers...)
+		if lower := strings.ToLower(route.path); lower != route.path {
+			g.Handle(route.method, lower, handlers...)
+		}
+	}
 	registerStreamRoutes(g, a.stream)
 	registerProxyRoutes(g, a.proxyStream)
 }
