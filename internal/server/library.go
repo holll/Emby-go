@@ -735,9 +735,10 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 	}
 
-	// 实体（Genre/Tag/Studio/Person）浏览：无论在哪一层上下文都先处理，
-	// 并按合集范围过滤，保证只返回该上下文内数量≥1 的类型。
-	if len(virtual) > 0 {
+	// 实体（Genre/Tag/Studio/Person）浏览：仅在客户端「只要实体」时处理。
+	// 若同时请求了影片（如搜索页的 IncludeItemTypes=Movie,Series,Video,Person），
+	// 以影片结果为准，否则 SearchTerm 会被整份实体列表顶掉。
+	if len(virtual) > 0 && !movieWanted {
 		a.entityBrowse(c, virtual[0], lib, collection)
 		return
 	}
