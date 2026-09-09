@@ -483,15 +483,16 @@ func (a *App) playing(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	d.PositionTicks = req.PositionTicks
-	if strings.HasSuffix(c.Request.URL.Path, "Stopped") && d.StoppedTicks != req.PositionTicks {
-		d.PlayCount++
-		d.StoppedTicks = req.PositionTicks
-	} else if !strings.HasSuffix(c.Request.URL.Path, "Stopped") {
-		d.StoppedTicks = -1
+	positionTicks := req.PositionTicks
+	stoppedTicks := int64(-1)
+	playCount := d.PlayCount
+	if strings.HasSuffix(c.Request.URL.Path, "Stopped") {
+		stoppedTicks = req.PositionTicks
+		if d.StoppedTicks != req.PositionTicks {
+			playCount++
+		}
 	}
-	d.LastPlayedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := a.db.SaveData(id, d); err != nil {
+	if err := a.db.SavePlayback(id, positionTicks, playCount, time.Now().UTC().Format(time.RFC3339), stoppedTicks); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -499,7 +500,8 @@ func (a *App) playing(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	a.cache.Clear()
+	// 不再 Clear：列表/详情缓存 key 含库版本号，BumpVersion 后自然失效；
+	// 播放进度每秒上报一次，全量 SCAN 会连带清掉 token 缓存。
 	c.Status(http.StatusNoContent)
 }
 
@@ -525,7 +527,6 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	a.cache.Clear()
 	c.Status(http.StatusNoContent)
 }
 
@@ -605,14 +606,6 @@ func parseVirtualPartID(raw string) (int64, int, bool) {
 	movieID, movieErr := strconv.ParseInt(pieces[1], 10, 64)
 	part, partErr := strconv.Atoi(pieces[2])
 	return movieID, part, movieErr == nil && part >= 2 && partErr == nil
-}
-
-func resolveMoviePart(movie store.Movie, rawID string) (store.Movie, string, bool) {
-	movieID, part, ok := parseVirtualPartID(rawID)
-	if !ok || movieID != movie.ID || part-2 >= len(movie.AdditionalParts) {
-		return store.Movie{}, "", false
-	}
-	return movie, movie.AdditionalParts[part-2], true
 }
 
 // emptyList 供非官方插件探针端点（IntroSkipper / MediaSegments）返回空数组占位。

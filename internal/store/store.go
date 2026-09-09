@@ -7,13 +7,19 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+// Store 的 gversion 是 kv 中 'g:version' 的进程内镜像：列表/详情缓存键都含该值，
+// 每个请求都要读一次，走内存可免去单连接 SQLite 的串行查询。
+type Store struct {
+	db       *sql.DB
+	gversion atomic.Int64
+}
 
 type Library struct {
 	ID   int64  `json:"Id"`
@@ -95,6 +101,16 @@ func Open(path string) (*Store, error) {
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN taglines TEXT")
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN provider_id TEXT")
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN additional_parts TEXT NOT NULL DEFAULT '[]'")
+	// 列表/详情/续播/实体聚合都按 status（+ library_id/collection）过滤，建索引避免全表扫描。
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)")
+	// 载入全局版本号到内存（kv 无该行时视为 0）。
+	var version string
+	_ = db.QueryRow("SELECT value FROM kv WHERE key='g:version'").Scan(&version)
+	if n, err := strconv.ParseInt(version, 10, 64); err == nil {
+		s.gversion.Store(n)
+	}
 	return s, nil
 }
 
@@ -278,10 +294,14 @@ func (s *Store) BumpVersion(libraryID int64) error {
 	if err != nil {
 		return err
 	}
+	s.gversion.Add(1)
 	_, err = s.db.Exec(`INSERT INTO kv(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`, "lib:"+strconv.FormatInt(libraryID, 10)+":version")
 	return err
 }
 func (s *Store) Version(key string) string {
+	if key == "g:version" {
+		return strconv.FormatInt(s.gversion.Load(), 10)
+	}
 	var value string
 	_ = s.db.QueryRow("SELECT value FROM kv WHERE key=?", key).Scan(&value)
 	return value
@@ -404,31 +424,27 @@ func (s *Store) Movie(id int64) (Movie, error) {
 	}
 	return movieScan(row)
 }
-func (s *Store) Search(libraryID int64, term string, limit, offset int) ([]Movie, int, error) {
-	return s.SearchFiltered(libraryID, term, "", "", false, "title", false, limit, offset)
-}
-func (s *Store) SearchOrdered(libraryID int64, term, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.SearchFiltered(libraryID, term, "", "", false, sortBy, desc, limit, offset)
-}
 func (s *Store) SearchFiltered(libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
-}
-
-// SearchFilteredFull 带标签/制片商/演员/收藏过滤的检索，供 Emby Items 使用。
-func (s *Store) SearchFilteredFull(libraryID int64, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, tags, studios, person, "", unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
 func (s *Store) SearchScoped(libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, status, "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
 }
-func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+
+// SearchAdmin 供管理端列表：在 SearchAll 基础上按 source_protocol 过滤，
+// 过滤与分页同在 SQL 层，避免先分页再过滤导致每页条数与总数失真。
+func (s *Store) SearchAdmin(term, status, protocol, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+	return s.search(0, term, status, "", "", "", "", "", "", protocol, false, false, sortBy, desc, limit, offset)
+}
+
+func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	where := []string{}
 	if status == "" {
 		where = append(where, "status IN ('success','manual')")
@@ -448,6 +464,10 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	} else if collection != "" {
 		where = append(where, "collection=?")
 		args = append(args, collection)
+	}
+	if protocol != "" {
+		where = append(where, "source_protocol=?")
+		args = append(args, protocol)
 	}
 	if term != "" {
 		where = append(where, "(title LIKE ? OR original_title LIKE ? OR number LIKE ?)")
@@ -533,17 +553,6 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	}
 	return out, total, rows.Err()
 }
-func (s *Store) MovieByPath(path string) (Movie, error) {
-	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE source_path=?", path)
-	if err != nil {
-		return Movie{}, err
-	}
-	defer row.Close()
-	if !row.Next() {
-		return Movie{}, sql.ErrNoRows
-	}
-	return movieScan(row)
-}
 func (s *Store) Data(id int64) (UserData, error) {
 	var d UserData
 	var played, favorite, likes, hidden int
@@ -619,51 +628,51 @@ func (s *Store) ActorsFor(ids []int64) (map[int64][]string, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) SaveData(id int64, d UserData) error {
-	played := 0
-	if d.Played {
-		played = 1
+// b2i 把布尔值转成 SQLite 的 0/1。
+func b2i(v bool) int {
+	if v {
+		return 1
 	}
-	favorite := 0
-	if d.IsFavorite {
-		favorite = 1
-	}
-	hidden := 0
-	if d.HideFromResume {
-		hidden = 1
-	}
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,position_ticks,play_count,played,last_played_at,last_stopped_ticks,is_favorite,likes,hide_from_resume)
-		VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,played=excluded.played,
-		last_played_at=excluded.last_played_at,last_stopped_ticks=excluded.last_stopped_ticks,
-		is_favorite=excluded.is_favorite,likes=excluded.likes,hide_from_resume=excluded.hide_from_resume`, id, d.PositionTicks, d.PlayCount, played, d.LastPlayedAt, d.StoppedTicks, favorite, d.Likes, hidden)
+	return 0
+}
+
+// SavePlayback 只写播放相关列。播放上报与各 setter 各写各的列，
+// 避免「读整行→改一列→写回整行」时用旧值覆盖并发的收藏/评分变更。
+func (s *Store) SavePlayback(id int64, positionTicks, playCount int64, lastPlayedAt string, stoppedTicks int64) error {
+	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,
+		last_played_at=excluded.last_played_at,last_stopped_ticks=excluded.last_stopped_ticks`,
+		id, positionTicks, playCount, lastPlayedAt, stoppedTicks)
 	return err
 }
+
+// SetPlayed 只更新已播标记。
 func (s *Store) SetPlayed(id int64, played bool) error {
-	d, _ := s.Data(id)
-	d.Played = played
-	return s.SaveData(id, d)
+	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,played) VALUES(?,?)
+		ON CONFLICT(movie_id) DO UPDATE SET played=excluded.played`, id, b2i(played))
+	return err
 }
 
 // SetFavorite 收藏/取消收藏。
 func (s *Store) SetFavorite(id int64, favorite bool) error {
-	d, _ := s.Data(id)
-	d.IsFavorite = favorite
-	return s.SaveData(id, d)
+	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,is_favorite) VALUES(?,?)
+		ON CONFLICT(movie_id) DO UPDATE SET is_favorite=excluded.is_favorite`, id, b2i(favorite))
+	return err
 }
 
 // SetLikes 个人评分：1 赞 / -1 踩 / 0 清除。
 func (s *Store) SetLikes(id int64, likes int) error {
-	d, _ := s.Data(id)
-	d.Likes = likes
-	return s.SaveData(id, d)
+	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,likes) VALUES(?,?)
+		ON CONFLICT(movie_id) DO UPDATE SET likes=excluded.likes`, id, likes)
+	return err
 }
 
 // SetHideFromResume 隐藏/恢复续播。
 func (s *Store) SetHideFromResume(id int64, hidden bool) error {
-	d, _ := s.Data(id)
-	d.HideFromResume = hidden
-	return s.SaveData(id, d)
+	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,hide_from_resume) VALUES(?,?)
+		ON CONFLICT(movie_id) DO UPDATE SET hide_from_resume=excluded.hide_from_resume`, id, b2i(hidden))
+	return err
 }
 func (s *Store) Probe(method, path, query, body string) error {
 	tx, err := s.db.Begin()
@@ -775,21 +784,36 @@ func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) MoviesByStatus(status string) ([]Movie, error) {
-	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE status=? ORDER BY id", status)
+// Resumed 返回有播放进度且未隐藏续播的可见影片（按标题排序，与列表口径一致），
+// 供「继续观看」直接分页，避免全量载入后在内存里过滤。
+func (s *Store) Resumed(limit, offset int) ([]Movie, int, error) {
+	const cond = ` FROM movies JOIN userdata u ON u.movie_id=movies.id
+		WHERE movies.status IN ('success','manual') AND u.position_ticks>0 AND COALESCE(u.hide_from_resume,0)=0`
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*)" + cond).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query("SELECT "+movieCols+cond+" ORDER BY movies.title, movies.id LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []Movie
 	for rows.Next() {
 		m, err := movieScan(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+// CountByStatus 统计某状态的影片数（管理端总览用，避免为计数拉回整批影片）。
+func (s *Store) CountByStatus(status string) (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM movies WHERE status=?", status).Scan(&count)
+	return count, err
 }
 
 func (s *Store) Probes(limit int) ([]map[string]any, error) {
@@ -977,19 +1001,6 @@ func (s *Store) EntityPoster(kind, name string, libraryID int64, collection stri
 	return path, err
 }
 
-// RepresentativePoster 返回某媒体库最近入库且带海报的影片海报路径（用作库封面）。
-// 无海报时返回空串与 nil 错误。
-func (s *Store) RepresentativePoster(libraryID int64) (string, error) {
-	var path string
-	err := s.db.QueryRow(`SELECT poster_path FROM movies
-		WHERE library_id=? AND status IN ('success','manual') AND poster_path<>''
-		ORDER BY id DESC LIMIT 1`, libraryID).Scan(&path)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return path, err
-}
-
 // RepresentativeArt 返回媒体库“主视觉”路径：优先取最近入库且带 fanart 的宽图，
 // 无宽图则回退 poster。对应 4.9 媒体库 auto_poster 用宽图当封面的观感。
 func (s *Store) RepresentativeArt(libraryID int64) (string, error) {
@@ -1022,6 +1033,74 @@ func (s *Store) CollectionPoster(collection string) (string, error) {
 		return "", nil
 	}
 	return path, err
+}
+
+// CollectionStat 合集的聚合信息：影片数、代表海报、去重流派。
+type CollectionStat struct {
+	Count  int
+	Poster string
+	Genres []string
+}
+
+// CollectionStats 批量返回各合集的聚合信息，供合集列表一次取回，
+// 避免逐项调 CollectionSummary/CollectionPoster 造成的 N+1 查询。
+func (s *Store) CollectionStats() (map[string]CollectionStat, error) {
+	rows, err := s.db.Query(`SELECT m1.collection, COUNT(*),
+		COALESCE((SELECT m2.poster_path FROM movies m2
+			WHERE m2.collection=m1.collection AND m2.status IN ('success','manual') AND m2.poster_path<>''
+			ORDER BY m2.id DESC LIMIT 1),'')
+		FROM movies m1
+		WHERE m1.status IN ('success','manual') AND COALESCE(m1.collection,'')<>''
+		GROUP BY m1.collection`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]CollectionStat)
+	for rows.Next() {
+		var name, poster string
+		var count int
+		if err := rows.Scan(&name, &count, &poster); err != nil {
+			return nil, err
+		}
+		out[name] = CollectionStat{Count: count, Poster: poster}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 流派存在每行的 JSON 列里，单独取两列后在内存聚合去重。
+	rows2, err := s.db.Query(`SELECT collection, genres FROM movies
+		WHERE status IN ('success','manual') AND COALESCE(collection,'')<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows2.Close()
+	genres := make(map[string]map[string]struct{})
+	for rows2.Next() {
+		var name, raw string
+		if err := rows2.Scan(&name, &raw); err != nil {
+			return nil, err
+		}
+		for _, g := range parseStrings(raw) {
+			if g = strings.TrimSpace(g); g != "" {
+				if genres[name] == nil {
+					genres[name] = make(map[string]struct{})
+				}
+				genres[name][g] = struct{}{}
+			}
+		}
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, err
+	}
+	for name, set := range genres {
+		stat := out[name]
+		for g := range set {
+			stat.Genres = append(stat.Genres, g)
+		}
+		out[name] = stat
+	}
+	return out, nil
 }
 
 // CollectionSummary 返回合集内可见影片数与该合集聚合出的流派（去重）。

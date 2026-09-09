@@ -32,12 +32,6 @@ type candidate struct {
 	groupKey string
 }
 
-type scannedMovie struct {
-	movie store.Movie
-	size  int64
-	mtime time.Time
-}
-
 // Progress 单次媒体库扫描的进度快照，供管理端轮询展示。
 type Progress struct {
 	LibraryID   int64  `json:"library_id"`
@@ -95,7 +89,6 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 	report(0, "")
 
 	paths := make(map[string]struct{})
-	var successful []scannedMovie
 	groupKeys := make([]string, 0, len(groups))
 	for key := range groups {
 		groupKeys = append(groupKeys, key)
@@ -107,7 +100,7 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 		primary, parts, ok := stackedGroup(group)
 		if !ok {
 			for _, item := range group {
-				if err := scanCandidate(s, lib, item, nil, "", &result, paths, &successful); err != nil {
+				if err := scanCandidate(s, lib, item, nil, "", &result, paths); err != nil {
 					return result, err
 				}
 			}
@@ -117,7 +110,7 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 				partPaths = append(partPaths, part.path)
 			}
 			fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
-			if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, &result, paths, &successful); err != nil {
+			if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, &result, paths); err != nil {
 				return result, err
 			}
 		}
@@ -125,14 +118,6 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 		report(done, key)
 	}
 
-	for _, scanned := range successful {
-		scanned.movie.PosterPath = imageutil.FindPoster(scanned.movie.OutputDir)
-		scanned.movie.BackdropPath = imageutil.FindImage(scanned.movie.OutputDir, "fanart")
-		scanned.movie.LandscapePath = imageutil.FindImage(scanned.movie.OutputDir, "landscape")
-		if _, err := s.UpsertMovie(scanned.movie, scanned.size, scanned.mtime); err != nil {
-			return result, err
-		}
-	}
 	if err := s.DeleteMissingSources(lib.ID, paths); err != nil {
 		return result, err
 	}
@@ -161,7 +146,7 @@ func stackedGroup(group []candidate) (candidate, []candidate, bool) {
 	return primary, parts, true
 }
 
-func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, fallbackNFO string, result *Result, paths map[string]struct{}, successful *[]scannedMovie) error {
+func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, fallbackNFO string, result *Result, paths map[string]struct{}) error {
 	paths[item.path] = struct{}{}
 	movie := store.Movie{LibraryID: lib.ID, SourcePath: item.path, OutputDir: filepath.Dir(item.path), Status: "pending", AdditionalParts: additionalParts}
 	line, err := ReadSource(item.path)
@@ -183,6 +168,10 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 			for _, actor := range meta.Actors {
 				actors = append(actors, actor.Name)
 			}
+			// 图片与元数据同一趟写入，避免成功影片入库两次。
+			movie.PosterPath = imageutil.FindPoster(movie.OutputDir)
+			movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
+			movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
 			result.Success++
 		} else {
 			result.Pending++
@@ -195,13 +184,7 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	if err != nil {
 		return err
 	}
-	if err := s.ReplaceActors(id, actors); err != nil {
-		return err
-	}
-	if movie.Status == "success" {
-		*successful = append(*successful, scannedMovie{movie: movie, size: item.info.Size(), mtime: item.info.ModTime()})
-	}
-	return nil
+	return s.ReplaceActors(id, actors)
 }
 
 func applyMeta(movie *store.Movie, meta nfo.MovieMeta, nfoPath string) {
@@ -265,10 +248,12 @@ func ValidHTTP(raw string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
-func MTime(path string) time.Time {
-	value, _ := os.Stat(path)
-	if value == nil {
-		return time.Time{}
+// SourceStat 返回 strm 源文件的大小与修改时间；文件不可读（外部库被移动/删除）时
+// 返回零值，让索引里的元数据仍可更新而不至于 panic。
+func SourceStat(path string) (int64, time.Time) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, time.Time{}
 	}
-	return value.ModTime()
+	return info.Size(), info.ModTime()
 }

@@ -14,6 +14,19 @@ import (
 // Redis 仅作每请求校验的快速通道，miss 时回源 DB 并回填。
 const accessTokenTTL = 7 * 24 * time.Hour
 
+// setAdminName / currentAdminName 保护 adminName：初始化与登录会写，其它 handler 并发读。
+func (a *App) setAdminName(name string) {
+	a.adminMu.Lock()
+	a.adminName = name
+	a.adminMu.Unlock()
+}
+
+func (a *App) currentAdminName() string {
+	a.adminMu.RLock()
+	defer a.adminMu.RUnlock()
+	return a.adminName
+}
+
 func (a *App) authOK(c *gin.Context) bool {
 	token := c.GetHeader("X-Emby-Token")
 	if token == "" {
@@ -106,7 +119,7 @@ func (a *App) initialize(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "初始化失败，请更换账号后重试"})
 		return
 	}
-	a.adminName = strings.TrimSpace(req.Username)
+	a.setAdminName(strings.TrimSpace(req.Username))
 	c.Status(http.StatusNoContent)
 }
 
@@ -142,7 +155,7 @@ func (a *App) authenticate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成访问令牌失败"})
 		return
 	}
-	a.adminName = strings.TrimSpace(req.Username)
+	a.setAdminName(strings.TrimSpace(req.Username))
 	token := hex.EncodeToString(b)
 	if err := a.db.SaveAccessToken(token); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存访问令牌失败"})
@@ -153,14 +166,14 @@ func (a *App) authenticate(c *gin.Context) {
 		"AccessToken": token,
 		"ServerId":    a.serverID,
 		"User": gin.H{
-			"Id": "1", "Name": a.adminName, "ServerId": a.serverID, "HasPassword": true,
+			"Id": "1", "Name": a.currentAdminName(), "ServerId": a.serverID, "HasPassword": true,
 			"Configuration": gin.H{}, "Policy": gin.H{},
 		},
 	})
 }
 
 func (a *App) me(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"Id": "1", "Name": a.adminName, "ServerId": a.serverID, "HasPassword": true})
+	c.JSON(http.StatusOK, gin.H{"Id": "1", "Name": a.currentAdminName(), "ServerId": a.serverID, "HasPassword": true})
 }
 
 func (a *App) validUser(c *gin.Context) bool {
