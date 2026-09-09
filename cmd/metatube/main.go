@@ -11,8 +11,12 @@ import (
 	"emby-go/internal/server"
 )
 
-// version 由发布构建通过 -ldflags "-X main.version=..." 注入，默认 dev。
-var version = "dev"
+// 以下变量由发布构建通过 -ldflags "-X main.version=..." 注入，默认值为本地构建。
+var (
+	version   = "dev"
+	commit    = "none"
+	buildTime = "unknown"
+)
 
 func main() {
 	var (
@@ -22,7 +26,7 @@ func main() {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Printf("Emby-go %s\n", version)
+		fmt.Printf("Emby-go %s (commit %s, built %s)\n", version, commit, buildTime)
 		return
 	}
 

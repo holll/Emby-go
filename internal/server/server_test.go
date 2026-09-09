@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -24,11 +26,16 @@ func TestCoreAPI(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "b.strm"), []byte("ed2k://|file|b.mp4|1|abc|/\n"), 0644)
 	os.WriteFile(filepath.Join(root, "c.strm"), []byte("https://media.test/c.mp4\n"), 0644)
 	os.WriteFile(filepath.Join(root, "a.nfo"), []byte(`<movie><title>Alpha</title><originaltitle>Original Alpha</originaltitle><sorttitle>Alpha Sort</sorttitle><mpaa>JP-18+</mpaa><tagline>Hi there</tagline><year>2024</year><premiered>2024-01-02</premiered><runtime>90</runtime><genre>Drama</genre><genre>BoxSetGenre</genre><studio>Studio X</studio><set><name>Drama Series</name></set><uniqueid type="metatube">M:1</uniqueid><fileinfo><streamdetails><video><codec>h264</codec><width>1920</width><height>1080</height><durationinseconds>5400</durationinseconds></video><audio><codec>aac</codec><channels>2</channels></audio></streamdetails></fileinfo><actor><name>Actor One</name><type>Actor</type><metatubeid>G:%31</metatubeid></actor></movie>`), 0644)
-	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
-	img.Set(0, 0, color.RGBA{R: 255, A: 255})
-	for _, base := range []string{"poster", "fanart", "landscape"} {
-		file, _ := os.Create(filepath.Join(root, base+".jpg"))
-		_ = jpeg.Encode(file, img, nil)
+	square := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	square.Set(0, 0, color.RGBA{R: 255, A: 255})
+	wide := image.NewRGBA(image.Rect(0, 0, 8, 4)) // 2:1，用于验证库根封面按真实尺寸识别
+	wide.Set(0, 0, color.RGBA{R: 255, A: 255})
+	for _, item := range []struct {
+		base string
+		img  image.Image
+	}{{"poster", wide}, {"fanart", square}, {"landscape", square}} {
+		file, _ := os.Create(filepath.Join(root, item.base+".jpg"))
+		_ = jpeg.Encode(file, item.img, nil)
 		file.Close()
 	}
 	db := filepath.Join(root, "test.db")
@@ -220,6 +227,19 @@ func TestCoreAPI(t *testing.T) {
 		t.Fatalf("web asset: %d", assetResp.StatusCode)
 	}
 	assetResp.Body.Close()
+	vendorResp, _ := http.Get(ts.URL + "/web/vendor/artplayer.min.js")
+	if vendorResp.StatusCode != 200 || vendorResp.Header.Get("Content-Type") != "application/javascript; charset=utf-8" {
+		t.Fatalf("player asset: status=%d type=%q", vendorResp.StatusCode, vendorResp.Header.Get("Content-Type"))
+	}
+	vendorResp.Body.Close()
+	// 网页播放器代理端点已注册（不存在的影片返回 404，而非路由缺失的 404 页面）。
+	proxyReq, _ := http.NewRequest("GET", ts.URL+"/Videos/999999/proxy", nil)
+	proxyReq.Header.Set("X-Emby-Token", token)
+	proxyResp, _ := http.DefaultClient.Do(proxyReq)
+	proxyResp.Body.Close()
+	if proxyResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("proxy route: %d", proxyResp.StatusCode)
+	}
 	filterReq, _ := http.NewRequest("GET", ts.URL+"/Users/1/Items?Years=2025&Genres=Drama&StartIndex=-10", nil)
 	filterReq.Header.Set("X-Emby-Token", token)
 	filterResp, _ := http.DefaultClient.Do(filterReq)
@@ -421,7 +441,7 @@ func TestCoreAPI(t *testing.T) {
 	if !boxsetViewFound {
 		t.Fatalf("Views should include 合集(boxsets) folder: %v", viewsBody)
 	}
-	// 媒体库 id 使用外部命名空间，与影片 id(1) 不冲突，且封面用宽图 fanart。
+	// 媒体库 id 使用外部命名空间，与影片 id(1) 不冲突；封面优先库根目录自带图片。
 	var avView map[string]any
 	for _, it := range viewsBody["Items"].([]any) {
 		m := it.(map[string]any)
@@ -436,8 +456,9 @@ func TestCoreAPI(t *testing.T) {
 	if avID == "1" || avID != externalLibraryID(1) {
 		t.Fatalf("library view id should be in external namespace: %v", avView)
 	}
-	if ratio, ok := avView["PrimaryImageAspectRatio"].(float64); !ok || ratio <= 1 {
-		t.Fatalf("library cover should prefer wide fanart (ratio>1): %v", avView)
+	// 库根目录 poster.jpg 为 8x4，真实比例 2.0；若借用影片 fanart 则为 1.0（2x2），据此可区分。
+	if ratio, ok := avView["PrimaryImageAspectRatio"].(float64); !ok || ratio < 1.9 || ratio > 2.1 {
+		t.Fatalf("library cover should come from library root image (ratio≈2.0): %v", avView)
 	}
 	if avView["ImageTags"] == nil {
 		t.Fatalf("library view should carry cover ImageTags: %v", avView)
@@ -604,5 +625,405 @@ func TestEntityIDURLSafeRoundTrip(t *testing.T) {
 	// 旧明文 id 兼容
 	if kind, got, ok := entityKind("genre:Drama"); !ok || kind != "Genre" || got != "Drama" {
 		t.Fatalf("legacy plaintext id failed: %q %q %v", kind, got, ok)
+	}
+}
+
+func TestMultiPartScan(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "Movie-CD1.strm"), []byte("http://media.test/movie-part1.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "Movie-CD2.strm"), []byte("http://media.test/movie-part2.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "Movie-CD1.nfo"), []byte(`<movie><title>Split Movie</title><year>2024</year><genre>Action</genre></movie>`), 0644)
+
+	db := filepath.Join(root, "test.db")
+	a, err := newApp(config.Config{DBPath: db}, cache.NewMemory(512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	post := func(path, body string) (*http.Response, map[string]any) {
+		r, e := http.Post(ts.URL+path, "application/json", strings.NewReader(body))
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		json.NewDecoder(r.Body).Decode(&v)
+		r.Body.Close()
+		return r, v
+	}
+	if r, _ := post("/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("initialize: %d", r.StatusCode)
+	}
+	r, v := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("auth: %d", r.StatusCode)
+	}
+	token := v["AccessToken"].(string)
+	authReq := func(method, path string, body string) (*http.Response, map[string]any) {
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, reader)
+		req.Header.Set("X-Emby-Token", token)
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var out map[string]any
+		if resp.Body != nil {
+			json.NewDecoder(resp.Body).Decode(&out)
+			resp.Body.Close()
+		}
+		return resp, out
+	}
+	r, _ = authReq("POST", "/api/admin/libraries", `{"Name":"test","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("library: %d", r.StatusCode)
+	}
+	r, _ = authReq("POST", "/api/admin/scan", "")
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("scan: %d", r.StatusCode)
+	}
+
+	// CD1/CD2 只产生一部可见影片，且带 PartCount=2。
+	itemsResp, items := authReq("GET", "/Users/1/Items?Limit=50", "")
+	if itemsResp.StatusCode != http.StatusOK || items["TotalRecordCount"].(float64) != 1 {
+		t.Fatalf("multipart should count as one movie: %v", items)
+	}
+	item := items["Items"].([]any)[0].(map[string]any)
+	if item["PartCount"].(float64) != 2 {
+		t.Fatalf("main movie should advertise PartCount=2: %v", item)
+	}
+	movieID := item["Id"].(string)
+
+	// AdditionalParts 返回 CD2 及虚拟 id。
+	partsResp, parts := authReq("GET", "/Videos/"+movieID+"/AdditionalParts", "")
+	if partsResp.StatusCode != http.StatusOK || parts["TotalRecordCount"].(float64) != 1 {
+		t.Fatalf("additional parts shape: %v", parts)
+	}
+	partItem := parts["Items"].([]any)[0].(map[string]any)
+	partID, _ := partItem["Id"].(string)
+	if partItem["PartCount"].(float64) != 2 || partID == movieID {
+		t.Fatalf("additional part shape: %v", partItem)
+	}
+
+	// 分段详情（虚拟 part id）可取，避免客户端点开 CD2 时 404。
+	if detailResp, detail := authReq("GET", "/Users/1/Items/"+partID, ""); detailResp.StatusCode != http.StatusOK || detail["ImageTags"] == nil || detail["PartCount"].(float64) != 2 {
+		t.Fatalf("part detail shape: %v", detail)
+	}
+	// 虚拟 part id 可直接播放（302 到 CD2 真实地址）。
+	noRedirect := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	streamReq, _ := http.NewRequest("GET", ts.URL+"/Videos/"+partID+"/stream", nil)
+	streamReq.Header.Set("X-Emby-Token", token)
+	streamResp, _ := noRedirect.Do(streamReq)
+	streamResp.Body.Close()
+	if streamResp.StatusCode != http.StatusFound || streamResp.Header.Get("Location") != "http://media.test/movie-part2.mp4" {
+		t.Fatalf("part stream redirect: status=%d location=%s", streamResp.StatusCode, streamResp.Header.Get("Location"))
+	}
+	// PlaybackInfo 对虚拟 part id 同样返回可播 MediaSource。
+	if pbResp, pb := authReq("GET", "/Items/"+partID+"/PlaybackInfo?UserId=1", ""); pbResp.StatusCode != http.StatusOK || pb["MediaSources"] == nil {
+		t.Fatalf("part playback info: %v", pb)
+	}
+	// CD2 不能作为独立影片在列表中重复出现。
+	if _, ok := items["Items"].([]any); !ok || len(items["Items"].([]any)) != 1 {
+		t.Fatalf("CD2 must not appear as its own movie: %v", items)
+	}
+}
+
+func TestAdminDeleteLibrary(t *testing.T) {
+	root := t.TempDir()
+	db := filepath.Join(root, "test.db")
+	a, err := newApp(config.Config{DBPath: db}, cache.NewMemory(512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	post := func(path, body string) (*http.Response, map[string]any) {
+		resp, e := http.Post(ts.URL+path, "application/json", strings.NewReader(body))
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		json.NewDecoder(resp.Body).Decode(&v)
+		resp.Body.Close()
+		return resp, v
+	}
+	if r, _ := post("/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("initialize: %d", r.StatusCode)
+	}
+	_, auth := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)
+	token, _ := auth["AccessToken"].(string)
+	if token == "" {
+		t.Fatalf("no token: %v", auth)
+	}
+	authed := func(method, path, body string) (*http.Response, map[string]any) {
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		req.Header.Set("X-Emby-Token", token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		if resp.StatusCode != http.StatusNoContent {
+			json.NewDecoder(resp.Body).Decode(&v)
+		}
+		resp.Body.Close()
+		return resp, v
+	}
+
+	resp, lib := authed("POST", "/api/admin/libraries", `{"Name":"AV","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("add library: %d", resp.StatusCode)
+	}
+	// 列表带 total 计数。
+	resp, list := authed("GET", "/api/admin/libraries", "")
+	if resp.StatusCode != http.StatusOK || list["total"].(float64) != 1 {
+		t.Fatalf("libraries list should report total=1: status=%d body=%v", resp.StatusCode, list)
+	}
+	id := int64(lib["Id"].(float64))
+	if resp, _ := authed("DELETE", "/api/admin/libraries/"+strconv.FormatInt(id, 10), ""); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete library: %d", resp.StatusCode)
+	}
+	if _, list = authed("GET", "/api/admin/libraries", ""); list["total"].(float64) != 0 {
+		t.Fatalf("library should be gone: %v", list)
+	}
+	if items, ok := list["items"].([]any); ok && len(items) != 0 {
+		t.Fatalf("library items should be empty: %v", list)
+	}
+	// 删除不存在的库返回 404。
+	if resp, _ := authed("DELETE", "/api/admin/libraries/"+strconv.FormatInt(id, 10), ""); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete missing library should 404: %d", resp.StatusCode)
+	}
+}
+
+func TestAPIKeysAndScanProgress(t *testing.T) {
+	root := t.TempDir()
+	a, err := newApp(config.Config{DBPath: filepath.Join(root, "test.db")}, cache.NewMemory(512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	post := func(path, body string) (*http.Response, map[string]any) {
+		resp, e := http.Post(ts.URL+path, "application/json", strings.NewReader(body))
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		json.NewDecoder(resp.Body).Decode(&v)
+		resp.Body.Close()
+		return resp, v
+	}
+	if r, _ := post("/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("initialize: %d", r.StatusCode)
+	}
+	_, auth := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)
+	token, _ := auth["AccessToken"].(string)
+
+	call := func(method, path, tok, body string) (*http.Response, map[string]any) {
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		if tok != "" {
+			req.Header.Set("X-Emby-Token", tok)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		if resp.StatusCode != http.StatusNoContent {
+			json.NewDecoder(resp.Body).Decode(&v)
+		}
+		resp.Body.Close()
+		return resp, v
+	}
+
+	if resp, _ := call("POST", "/api/admin/apikeys", token, `{"name":""}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty name should 400: %d", resp.StatusCode)
+	}
+	resp, created := call("POST", "/api/admin/apikeys", token, `{"name":"script"}`)
+	key, _ := created["key"].(string)
+	if resp.StatusCode != http.StatusOK || len(key) != 48 {
+		t.Fatalf("create key: status=%d body=%v", resp.StatusCode, created)
+	}
+	if _, list := call("GET", "/api/admin/apikeys", token, ""); list["total"].(float64) != 1 {
+		t.Fatalf("key list total: %v", list)
+	}
+	// 用 API 密钥直接调用 Emby 接口（X-Emby-Token）。
+	if resp, _ := call("GET", "/Users/1/Views", key, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("api key should authorize: %d", resp.StatusCode)
+	}
+	if resp, _ := call("DELETE", "/api/admin/apikeys/"+key, token, ""); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete key: %d", resp.StatusCode)
+	}
+	if resp, _ := call("GET", "/Users/1/Views", key, ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deleted key should be rejected (cache must be invalidated): %d", resp.StatusCode)
+	}
+	// 扫描进度端点恒可用。
+	resp, progress := call("GET", "/api/admin/scan/progress", token, "")
+	if resp.StatusCode != http.StatusOK || progress["running"].(bool) {
+		t.Fatalf("scan progress: status=%d body=%v", resp.StatusCode, progress)
+	}
+	// 扫描后进度应落定：done==total 且带结束时间。
+	os.WriteFile(filepath.Join(root, "a.strm"), []byte("http://media.test/a.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "a.nfo"), []byte(`<movie><title>A</title></movie>`), 0644)
+	os.WriteFile(filepath.Join(root, "b.strm"), []byte("ed2k://|file|b.mp4|1|abc|/\n"), 0644)
+	if resp, _ := call("POST", "/api/admin/libraries", token, `{"Name":"AV","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("add library for scan: %d", resp.StatusCode)
+	}
+	if resp, scan := call("POST", "/api/admin/scan", token, ""); resp.StatusCode != http.StatusOK || scan["success"].(float64) != 1 || scan["incompatible"].(float64) != 1 {
+		t.Fatalf("scan result: status=%d body=%v", resp.StatusCode, scan)
+	}
+	if _, progress = call("GET", "/api/admin/scan/progress", token, ""); progress["running"].(bool) ||
+		progress["total"].(float64) != 2 || progress["done"].(float64) != 2 || progress["finished_at"] == "" {
+		t.Fatalf("final scan progress: %v", progress)
+	}
+	// 媒体墙无限滚动依赖 admin items 的 limit/offset 分页。
+	if _, page1 := call("GET", "/api/admin/items?limit=1&offset=0", token, ""); page1["total"].(float64) != 1 || len(page1["items"].([]any)) != 1 {
+		t.Fatalf("wall page 1: %v", page1)
+	}
+	if _, page2 := call("GET", "/api/admin/items?limit=1&offset=1", token, ""); page2["total"].(float64) != 1 {
+		t.Fatalf("wall page 2 total: %v", page2)
+	} else if items, ok := page2["items"].([]any); ok && len(items) != 0 {
+		t.Fatalf("wall page 2 should be empty: %v", page2)
+	}
+}
+
+// 网页播放器代理：透传 Range（拖动进度），返回 206 + Content-Range。
+func TestProxyStreamRange(t *testing.T) {
+	body := []byte("0123456789")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "media.mp4", time.Time{}, bytes.NewReader(body))
+	}))
+	defer upstream.Close()
+
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.strm"), []byte(upstream.URL+"/media.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "a.nfo"), []byte(`<movie><title>A</title></movie>`), 0644)
+
+	a, err := newApp(config.Config{DBPath: filepath.Join(root, "test.db")}, cache.NewMemory(512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	post := func(path, payload string) (*http.Response, map[string]any) {
+		resp, e := http.Post(ts.URL+path, "application/json", strings.NewReader(payload))
+		if e != nil {
+			t.Fatal(e)
+		}
+		var v map[string]any
+		json.NewDecoder(resp.Body).Decode(&v)
+		resp.Body.Close()
+		return resp, v
+	}
+	if r, _ := post("/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("initialize: %d", r.StatusCode)
+	}
+	_, auth := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)
+	token, _ := auth["AccessToken"].(string)
+	authed := func(method, path string) (*http.Response, []byte) {
+		req, _ := http.NewRequest(method, ts.URL+path, nil)
+		req.Header.Set("X-Emby-Token", token)
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, data
+	}
+	if resp, _ := authed("POST", "/api/admin/libraries?x=1"); resp.StatusCode == http.StatusOK { // 无 body 的 POST 不应成功建库
+		t.Fatal("library without body should fail")
+	}
+	libReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/libraries", strings.NewReader(`{"Name":"t","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`))
+	libReq.Header.Set("X-Emby-Token", token)
+	libReq.Header.Set("Content-Type", "application/json")
+	if resp, e := http.DefaultClient.Do(libReq); e != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("add library: %v", e)
+	}
+	if resp, _ := authed("POST", "/api/admin/scan"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("scan: %d", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/Videos/1/proxy", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	resp, e := http.DefaultClient.Do(req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent || string(data) != "2345" || resp.Header.Get("Content-Range") == "" {
+		t.Fatalf("range proxy: status=%d body=%q range=%q", resp.StatusCode, data, resp.Header.Get("Content-Range"))
+	}
+
+	// 无 Range 时返回完整内容。
+	resp, data = func() (*http.Response, []byte) {
+		r, e := http.Get(ts.URL + "/Videos/1/proxy")
+		if e != nil {
+			t.Fatal(e)
+		}
+		d, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		return r, d
+	}()
+	if resp.StatusCode != http.StatusOK || string(data) != string(body) {
+		t.Fatalf("full proxy: status=%d body=%q", resp.StatusCode, data)
+	}
+}
+
+// 真实 Emby /System/Ext/ServerDomains 用小写 name/url，客户端按小写键解析。
+func TestServerDomainsJSONShape(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{
+		DBPath:        filepath.Join(root, "test.db"),
+		ServerDomains: []config.ServerDomain{{Name: "国际方向", URL: "https://v1.uhdnow.com"}},
+	}
+	a, err := newApp(cfg, cache.NewMemory(512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler())
+	defer ts.Close()
+
+	if resp, e := http.Post(ts.URL+"/api/auth/initialize", "application/json", strings.NewReader(`{"Username":"admin","Pw":"password-1234"}`)); e != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("initialize: %v %v", e, resp)
+	}
+	resp, err := http.Post(ts.URL+"/Users/AuthenticateByName", "application/json", strings.NewReader(`{"Username":"admin","Pw":"password-1234"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var auth map[string]any
+	json.NewDecoder(resp.Body).Decode(&auth)
+	resp.Body.Close()
+	token, _ := auth["AccessToken"].(string)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/System/Ext/ServerDomains", nil)
+	req.Header.Set("X-Emby-Token", token)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	got := string(body)
+	if r.StatusCode != http.StatusOK || !strings.HasPrefix(got, `{"ok":true,"data":[`) || !strings.Contains(got, `"name":"国际方向"`) || !strings.Contains(got, `"url":"https://v1.uhdnow.com"`) {
+		t.Fatalf("server domains shape: status=%d body=%s", r.StatusCode, got)
+	}
+	if strings.Contains(got, `"Name"`) || strings.Contains(got, `"URL"`) {
+		t.Fatalf("server domains must use lowercase keys: %s", got)
 	}
 }

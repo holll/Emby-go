@@ -42,16 +42,16 @@ func (a *App) image(c *gin.Context) {
 	rawID := c.Param("id")
 	kind := c.Param("kind")
 	if id, err := strconv.ParseInt(rawID, 10, 64); err == nil {
-		// 媒体库外部 id：库封面（优先宽图 fanart），与影片 id 不再冲突。
+		// 媒体库外部 id：库封面（库根目录自带图优先，否则借库内影片代表图）。
 		if libID, ok := parseLibraryExternal(id); ok {
-			if poster, e2 := a.db.RepresentativeArt(libID); e2 == nil && poster != "" {
+			if poster := a.libraryCoverPathByID(libID); poster != "" {
 				c.File(poster)
 				return
 			}
 			c.Status(404)
 			return
 		}
-		// 数值 id 优先命中影片；影片不存在/不可见时回退为该媒体库的代表封面。
+		// 数值 id 优先命中影片；影片不存在/不可见时回退为该媒体库的封面。
 		m, e := a.db.Movie(id)
 		if e == nil && m.IsVisible() {
 			if p := movieImagePath(m, kind); p != "" {
@@ -61,7 +61,7 @@ func (a *App) image(c *gin.Context) {
 			c.Status(404)
 			return
 		}
-		if poster, e2 := a.db.RepresentativeArt(id); e2 == nil && poster != "" && strings.EqualFold(kind, "Primary") {
+		if poster := a.libraryCoverPathByID(id); poster != "" && strings.EqualFold(kind, "Primary") {
 			c.File(poster)
 			return
 		}
@@ -103,7 +103,7 @@ func (a *App) imageInfo(c *gin.Context) {
 	rawID := c.Param("id")
 	if id, err := strconv.ParseInt(rawID, 10, 64); err == nil {
 		if libID, ok := parseLibraryExternal(id); ok {
-			if poster, e2 := a.db.RepresentativeArt(libID); e2 == nil && poster != "" {
+			if poster := a.libraryCoverPathByID(libID); poster != "" {
 				c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
 				return
 			}
@@ -115,8 +115,8 @@ func (a *App) imageInfo(c *gin.Context) {
 			c.JSON(http.StatusOK, a.movieImageInfo(movie))
 			return
 		}
-		// 媒体库（旧内部 id 兼容）：给出 RepresentativeArt（优先宽图 fanart），避免列表页拿空数组。
-		if poster, e2 := a.db.RepresentativeArt(id); e2 == nil && poster != "" {
+		// 媒体库（旧内部 id 兼容）：给出库封面，避免列表页拿空数组。
+		if poster := a.libraryCoverPathByID(id); poster != "" {
 			c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
 			return
 		}
@@ -164,28 +164,45 @@ func (a *App) movieImageInfo(m store.Movie) []gin.H {
 }
 
 func (a *App) playback(c *gin.Context) {
-	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
-	if e != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+	movie, sourcePath, id, ok := a.resolvePlaybackTarget(c.Param("id"))
+	if !ok || !movie.IsVisible() || (movie.SourceProtocol != "http" && movie.SourceProtocol != "https") {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	m, e := a.db.Movie(id)
-	if e != nil || !m.IsVisible() || (m.SourceProtocol != "http" && m.SourceProtocol != "https") {
-		c.JSON(404, gin.H{"error": "not found"})
-		return
-	}
-	c.JSON(200, gin.H{
-		"MediaSources":  []gin.H{a.mediaSource(m, c)},
+	c.JSON(http.StatusOK, gin.H{
+		"MediaSources":  []gin.H{a.mediaSourceFor(movie, id, sourcePath, c)},
 		"PlaySessionId": randomSessionID(),
 	})
+}
+
+func (a *App) resolvePlaybackTarget(rawID string) (store.Movie, string, string, bool) {
+	if movieID, part, ok := parseVirtualPartID(rawID); ok {
+		movie, err := a.db.Movie(movieID)
+		if err != nil || part-2 >= len(movie.AdditionalParts) {
+			return store.Movie{}, "", "", false
+		}
+		return movie, movie.AdditionalParts[part-2], rawID, true
+	}
+	movieID, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return store.Movie{}, "", "", false
+	}
+	movie, err := a.db.Movie(movieID)
+	if err != nil {
+		return store.Movie{}, "", "", false
+	}
+	return movie, movie.SourcePath, rawID, true
 }
 
 // mediaSource 构造 Emby 契约下的 MediaSource。
 // Path / DirectStreamUrl 均指向本服务流端点（stream 再 302 直拉真实地址），
 // 保证 iPlay 等客户端无论走「strm http path」还是 DirectStreamUrl 都能拿到可播地址。
 func (a *App) mediaSource(m store.Movie, c *gin.Context) gin.H {
-	id := strconv.FormatInt(m.ID, 10)
-	stream := streamURL(c, m.ID)
+	return a.mediaSourceFor(m, strconv.FormatInt(m.ID, 10), m.SourcePath, c)
+}
+
+func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Context) gin.H {
+	stream := streamURL(c, id)
 	mediaSourceId := "mediasource_" + id
 	return gin.H{
 		"Id":                         mediaSourceId,
@@ -312,7 +329,7 @@ func setIfNonEmpty(m map[string]any, key, value string) {
 
 // streamURL 生成指向本服务流端点的绝对地址（尊重反向代理前缀与协议头）。
 // 客户端经 /emby 前缀访问时返回含前缀的 URL，确保反向代理只暴露 /emby 子路径也够用。
-func streamURL(c *gin.Context, id int64) string {
+func streamURL(c *gin.Context, id string) string {
 	scheme := c.Request.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
 		scheme = "http"
@@ -324,7 +341,7 @@ func streamURL(c *gin.Context, id int64) string {
 	if strings.HasPrefix(c.Request.URL.Path, "/emby") {
 		prefix = "/emby"
 	}
-	return scheme + "://" + c.Request.Host + prefix + "/Videos/" + strconv.FormatInt(id, 10) + "/stream"
+	return scheme + "://" + c.Request.Host + prefix + "/Videos/" + id + "/stream"
 }
 
 func randomSessionID() string {
@@ -336,17 +353,12 @@ func randomSessionID() string {
 }
 
 func (a *App) stream(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
+	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
+	if !ok || !movie.IsVisible() {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
-	raw, err := scanner.ReadSource(movie.SourcePath)
+	raw, err := scanner.ReadSource(sourcePath)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
 		return
@@ -361,6 +373,81 @@ func (a *App) stream(c *gin.Context) {
 		return
 	}
 	http.Redirect(c.Writer, c.Request, raw, http.StatusFound)
+}
+
+// streamClient 供网页播放器代理播放使用：不设超时（长连接），由请求 context 控制取消。
+var streamClient = &http.Client{}
+
+// proxyStream 为内置网页播放器代理真实媒体地址：透传 Range/状态码/关键响应头。
+// 解决 HTTPS 后台 + HTTP 源站的混合内容、跨域/防盗链导致的播放失败。
+// Emby 客户端仍走 /stream 的 302 直拉（服务端零带宽），此端点只服务网页播放器。
+func (a *App) proxyStream(c *gin.Context) {
+	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
+	if !ok || !movie.IsVisible() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	raw, err := scanner.ReadSource(sourcePath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		return
+	}
+	if !scanner.ValidHTTP(raw) {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported source"})
+		return
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, raw, nil)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if rng := c.GetHeader("Range"); rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	// 必须禁用压缩：否则 transport 自动解压会让 Content-Length/Content-Range 失真、拖动失效。
+	req.Header.Set("Accept-Encoding", "identity")
+	if ua := c.GetHeader("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"} {
+		if value := resp.Header.Get(header); value != "" {
+			c.Header(header, value)
+		}
+	}
+	if c.Writer.Header().Get("Accept-Ranges") == "" {
+		c.Header("Accept-Ranges", "bytes")
+	}
+	if c.Writer.Header().Get("Content-Type") == "" {
+		c.Header("Content-Type", containerMIME(movie.SourceContainer))
+	}
+	c.Status(resp.StatusCode)
+	if c.Request.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.Copy(c.Writer, resp.Body)
+}
+
+// containerMIME 给代理播放一个兜底 Content-Type（源站未给时用）。
+func containerMIME(container string) string {
+	switch strings.ToLower(container) {
+	case "mp4", "m4v":
+		return "video/mp4"
+	case "webm":
+		return "video/webm"
+	case "mkv":
+		return "video/x-matroska"
+	case "mov":
+		return "video/quicktime"
+	case "ts":
+		return "video/mp2t"
+	}
+	return "application/octet-stream"
 }
 
 func (a *App) playing(c *gin.Context) {
@@ -447,7 +534,85 @@ func (a *App) played(c *gin.Context) { a.setPlayed(c, true) }
 func (a *App) unplayed(c *gin.Context) { a.setPlayed(c, false) }
 
 func (a *App) additionalParts(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"Items": []gin.H{}, "TotalRecordCount": 0, "StartIndex": 0})
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	movie, err := a.db.Movie(id)
+	if err != nil || !movie.IsVisible() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	items := make([]gin.H, 0, len(movie.AdditionalParts))
+	for index := range movie.AdditionalParts {
+		items = append(items, a.partItem(movie, index))
+	}
+	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
+}
+
+func virtualPartID(movieID int64, part int) string {
+	return "part-" + strconv.FormatInt(movieID, 10) + "-" + strconv.Itoa(part)
+}
+
+// partItem 渲染影片某 AdditionalPart 的 BaseItemDto，Id 用虚拟 part-<movieID>-<index+2>，
+// 元数据与图片共享主影片，保证 iPlay 点开分段项时详情可取图、不白屏。
+func (a *App) partItem(m store.Movie, index int) gin.H {
+	part := index + 2
+	imageTags := gin.H{}
+	backdrops := make([]string, 0, 1)
+	if m.PosterPath != "" {
+		imageTags["Primary"] = a.posterTag(m.PosterPath)
+	}
+	if m.LandscapePath != "" {
+		imageTags["Thumb"] = a.posterTag(m.LandscapePath)
+	} else if m.PosterPath != "" {
+		imageTags["Thumb"] = a.posterTag(m.PosterPath)
+	}
+	if m.BackdropPath != "" {
+		tag := a.posterTag(m.BackdropPath)
+		backdrops = append(backdrops, tag)
+		imageTags["Backdrop"] = tag
+	}
+	item := gin.H{
+		"Id":                virtualPartID(m.ID, part),
+		"Name":              m.Title + " - CD" + strconv.Itoa(part),
+		"SortName":          m.Title,
+		"Type":              "Movie",
+		"MediaType":         "Video",
+		"ParentId":          strconv.FormatInt(m.ID, 10),
+		"ServerId":          a.serverID,
+		"Container":         m.SourceContainer,
+		"PartCount":         len(m.AdditionalParts) + 1,
+		"IsFolder":          false,
+		"CanDelete":         false,
+		"CanDownload":       false,
+		"SupportsSync":      false,
+		"ImageTags":         imageTags,
+		"BackdropImageTags": backdrops,
+	}
+	if m.RuntimeSeconds > 0 {
+		item["RunTimeTicks"] = m.RuntimeSeconds * 10000000
+	}
+	return item
+}
+
+func parseVirtualPartID(raw string) (int64, int, bool) {
+	pieces := strings.Split(raw, "-")
+	if len(pieces) != 3 || pieces[0] != "part" {
+		return 0, 0, false
+	}
+	movieID, movieErr := strconv.ParseInt(pieces[1], 10, 64)
+	part, partErr := strconv.Atoi(pieces[2])
+	return movieID, part, movieErr == nil && part >= 2 && partErr == nil
+}
+
+func resolveMoviePart(movie store.Movie, rawID string) (store.Movie, string, bool) {
+	movieID, part, ok := parseVirtualPartID(rawID)
+	if !ok || movieID != movie.ID || part-2 >= len(movie.AdditionalParts) {
+		return store.Movie{}, "", false
+	}
+	return movie, movie.AdditionalParts[part-2], true
 }
 
 // emptyList 供非官方插件探针端点（IntroSkipper / MediaSegments）返回空数组占位。

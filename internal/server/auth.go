@@ -50,8 +50,17 @@ func (a *App) authOK(c *gin.Context) bool {
 	valid, err := a.db.HasAccessToken(token)
 	if err == nil && valid {
 		a.cache.Set("token:"+token, []byte("1"), accessTokenTTL)
+		return true
 	}
-	return valid
+	// API 密钥：长期凭据，删除时由管理端显式清缓存。
+	if b, ok := a.cache.Get("apikey:" + token); ok && len(b) > 0 {
+		return true
+	}
+	if key, err := a.db.HasAPIKey(token); err == nil && key {
+		a.cache.Set("apikey:"+token, []byte("1"), accessTokenTTL)
+		return true
+	}
+	return false
 }
 
 func (a *App) requireAuth(c *gin.Context) {

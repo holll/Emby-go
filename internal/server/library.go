@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/imageutil"
 	"emby-go/internal/store"
 )
 
@@ -156,11 +157,31 @@ func (a *App) posterTag(path string) string {
 	return tag
 }
 
-// libraryCoverPath 决定媒体库在 Views 卡片上“实际可被取到”的主图路径。
-// libraryCoverPath 返回媒体库主视觉路径（优先宽图 fanart，无则回退海报）。
-func (a *App) libraryCoverPath(libraryID int64) string {
-	path, _ := a.db.RepresentativeArt(libraryID)
+// libraryCoverPath 返回媒体库封面路径：优先库根目录自带的 poster/folder/cover/default 图片
+// （webp/jpg/jpeg/png 均可），没有则借用库内最近入库影片的代表图（宽图优先）。
+func (a *App) libraryCoverPath(l store.Library) string {
+	if path := imageutil.FindPoster(l.Path); path != "" {
+		return path
+	}
+	path, _ := a.db.RepresentativeArt(l.ID)
 	return path
+}
+
+// libraryCoverPathByID 按库内部 id 解析封面；库不存在返回空串。
+func (a *App) libraryCoverPathByID(libraryID int64) string {
+	l, err := a.db.Library(libraryID)
+	if err != nil {
+		return ""
+	}
+	return a.libraryCoverPath(l)
+}
+
+// coverRatio 优先返回图片真实宽高比（webp/jpg/png 均可读），失败再按文件名猜测。
+func coverRatio(path string) float64 {
+	if ratio := imageutil.AspectRatio(path); ratio > 0 {
+		return ratio
+	}
+	return artRatio(path)
 }
 
 func zeroUserData() gin.H {
@@ -185,9 +206,9 @@ func (a *App) collectionFolderDTO(l store.Library) gin.H {
 			"IsFavorite": false, "Played": false,
 		},
 	}
-	if cover := a.libraryCoverPath(l.ID); cover != "" {
+	if cover := a.libraryCoverPath(l); cover != "" {
 		item["ImageTags"] = gin.H{"Primary": a.posterTag(cover)}
-		item["PrimaryImageAspectRatio"] = artRatio(cover)
+		item["PrimaryImageAspectRatio"] = coverRatio(cover)
 	}
 	return item
 }
@@ -521,6 +542,9 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []string, l
 	}
 	if m.RuntimeSeconds > 0 {
 		v["RunTimeTicks"] = m.RuntimeSeconds * 10000000
+	}
+	if len(m.AdditionalParts) > 0 {
+		v["PartCount"] = len(m.AdditionalParts) + 1
 	}
 	if m.OriginalTitle != "" {
 		v["OriginalTitle"] = m.OriginalTitle
@@ -970,6 +994,15 @@ func (a *App) item(c *gin.Context) {
 	}
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil {
+		// 多分段影片的 AdditionalPart（part-<movieID>-<part>）。
+		if movieID, part, ok := parseVirtualPartID(rawID); ok {
+			if m, e := a.db.Movie(movieID); e == nil && m.IsVisible() && part-2 < len(m.AdditionalParts) {
+				c.JSON(http.StatusOK, a.partItem(m, part-2))
+				return
+			}
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
 		// 单个合集（boxset:<b64>）。
 		if name, ok := parseBoxsetID(rawID); ok {
 			c.JSON(http.StatusOK, a.boxsetItemDTO(name))
