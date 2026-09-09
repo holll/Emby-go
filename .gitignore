@@ -8,6 +8,9 @@
 # 第三方参考源码（体积大，不随仓库同步）
 /src/
 
+# 内部文档（含真实服务校准记录，不入库）
+/docs/
+
 # Runtime data (SQLite WAL/shm 一并忽略)
 *.db
 *.db-shm
