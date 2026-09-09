@@ -6,9 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/deepteams/webp"
 	_ "image/jpeg"
 	_ "image/png"
+
+	"github.com/deepteams/webp"
 )
 
 // EncodeWebP 把读取到的图片编码为 webp 写入 destination（destination 为最终路径）。
@@ -58,4 +59,19 @@ func FindPoster(dir string) string {
 // FindImage 返回目录中指定命名（如 fanart / landscape）的已有图片；找不到返回空串。
 func FindImage(dir, base string) string {
 	return findImage(dir, base)
+}
+
+// AspectRatio 读取图片真实宽高比（宽/高）。jpg/jpeg/png/webp 均可；
+// 读取失败返回 0，由调用方回退到按文件名猜测。
+func AspectRatio(path string) float64 {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+	config, _, err := image.DecodeConfig(file)
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return 0
+	}
+	return float64(config.Width) / float64(config.Height)
 }

@@ -5,6 +5,8 @@ import (
 	"runtime"
 
 	"github.com/gin-gonic/gin"
+
+	"emby-go/internal/config"
 )
 
 // embyVersion 对外通告的 Emby 协议版本。客户端会按此版本做能力判定，
@@ -96,6 +98,17 @@ func (a *App) displayPreferences(c *gin.Context) {
 	})
 }
 
+// serverDomainsResponse 固定 ok 在前、data 在后，与真实 Emby 的响应保持一致。
+// 用结构体而非 map：Go 的 map 序列化会按字典序排列，无法保证字段顺序。
+type serverDomainsResponse struct {
+	OK   bool                  `json:"ok"`
+	Data []config.ServerDomain `json:"data"`
+}
+
 func (a *App) serverDomains(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"data": a.cfg.ServerDomains, "ok": true})
+	domains := a.cfg.ServerDomains
+	if domains == nil {
+		domains = []config.ServerDomain{}
+	}
+	c.JSON(http.StatusOK, serverDomainsResponse{OK: true, Data: domains})
 }

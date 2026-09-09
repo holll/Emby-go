@@ -39,6 +39,28 @@ type App struct {
 	tags  map[string]tagEntry
 	nfoMu sync.Mutex
 	nfos  map[string]nfoCacheEntry
+
+	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
+	scanMu     sync.Mutex
+	scanStatus scanStatus
+}
+
+// scanStatus 管理端可轮询的扫描进度快照。
+type scanStatus struct {
+	Running      bool   `json:"running"`
+	LibraryIndex int    `json:"library_index"`
+	Libraries    int    `json:"libraries"`
+	LibraryName  string `json:"library_name"`
+	Total        int    `json:"total"`
+	Done         int    `json:"done"`
+	Current      string `json:"current"`
+	Success      int    `json:"success"`
+	Pending      int    `json:"pending"`
+	Incompatible int    `json:"incompatible"`
+	Failed       int    `json:"failed"`
+	StartedAt    string `json:"started_at,omitempty"`
+	FinishedAt   string `json:"finished_at,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // tagEntry / nfoCacheEntry 为上述短缓存的条目（neg 表示负缓存，TTL 更短）。
@@ -145,19 +167,25 @@ func (a *App) routes() {
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
+	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/auth/status", a.authStatus)
 	r.POST("/api/auth/initialize", a.initialize)
 
 	admin := r.Group("/api/admin", a.requireAuth)
 	admin.GET("/libraries", a.adminLibraries)
 	admin.POST("/libraries", a.adminAddLibrary)
+	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
 	admin.POST("/scan", a.adminScan)
 	admin.POST("/tasks/scan", a.adminScan)
+	admin.GET("/scan/progress", a.adminScanProgress)
 	admin.POST("/reindex", a.adminReindex)
 	admin.GET("/items", a.adminItems)
 	admin.DELETE("/items/:id", a.adminDelete)
 	admin.GET("/probe", a.adminProbe)
 	admin.DELETE("/probe", a.adminClearProbes)
+	admin.GET("/apikeys", a.adminAPIKeys)
+	admin.POST("/apikeys", a.adminCreateAPIKey)
+	admin.DELETE("/apikeys/:key", a.adminDeleteAPIKey)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)
@@ -227,6 +255,17 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 	g.POST("/Users/:uid/Items/:id/Rating/Delete", a.requireAuth, a.unrate)
 	g.POST("/Users/:uid/Items/:id/HideFromResume", a.requireAuth, a.hideFromResume)
 	registerStreamRoutes(g, a.stream)
+	registerProxyRoutes(g, a.proxyStream)
+}
+
+// registerProxyRoutes 网页播放器代理端点（透传 Range），同样注册大小写与可选扩展名。
+func registerProxyRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
+	for _, base := range []string{"/Videos/:id/proxy", "/videos/:id/proxy"} {
+		g.GET(base, h)
+		g.HEAD(base, h)
+		g.GET(base+".:ext", h)
+		g.HEAD(base+".:ext", h)
+	}
 }
 
 // registerStreamRoutes 同时注册 /Videos 与 /videos 大小写，吞掉可选扩展名。

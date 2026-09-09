@@ -8,7 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-//go:embed web/login.html web/index.html web/login.js web/app.js web/style.css web/favicon.ico
+//go:embed web/login.html web/index.html web/login.js web/app.js web/style.css web/favicon.ico web/vendor/artplayer.min.js
 var webFiles embed.FS
 
 // favicon 返回站点图标（与真机同款），浏览器请求 /favicon.ico 时命中。

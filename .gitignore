@@ -3,6 +3,7 @@
 /metatube
 *.exe
 *.exe~
+/dist/
 
 # 第三方参考源码（体积大，不随仓库同步）
 /src/

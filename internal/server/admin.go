@@ -6,6 +6,7 @@ import (
 	"emby-go/internal/nfo"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
+	"errors"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -34,7 +35,28 @@ func (a *App) adminLibraries(c *gin.Context) {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"items": v})
+	c.JSON(200, gin.H{"items": v, "total": len(v)})
+}
+
+// adminDeleteLibrary 删除媒体库及其影片索引（不删磁盘文件），随后清缓存。
+func (a *App) adminDeleteLibrary(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	if err = a.db.DeleteLibrary(id); err != nil {
+		if store.NotFound(err) {
+			c.JSON(404, gin.H{"error": "library not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	_ = a.db.BumpVersion(id)
+	a.cache.Clear()
+	slog.Info("删除媒体库", "library_id", id)
+	c.Status(http.StatusNoContent)
 }
 
 func (a *App) adminAddLibrary(c *gin.Context) {
@@ -83,23 +105,87 @@ func (a *App) finishTask(id int64, err error) {
 	}
 }
 
+// errScanBusy 同一时刻只允许一个扫描任务，避免并发写库与进度互相覆盖。
+var errScanBusy = errors.New("扫描正在进行中")
+
+// beginScan / updateScanProgress / endScan 维护管理端可轮询的扫描进度。
+// beginScan 返回 false 表示已有扫描在跑。
+func (a *App) beginScan(libraries int) bool {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	if a.scanStatus.Running {
+		return false
+	}
+	a.scanStatus = scanStatus{Running: true, Libraries: libraries, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	return true
+}
+
+func (a *App) setScanLibrary(index int, library store.Library) {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	a.scanStatus.LibraryIndex = index
+	a.scanStatus.LibraryName = library.Name
+	a.scanStatus.Total, a.scanStatus.Done, a.scanStatus.Current = 0, 0, ""
+}
+
+func (a *App) updateScanProgress(p scanner.Progress) {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	a.scanStatus.LibraryName = p.LibraryName
+	a.scanStatus.Total, a.scanStatus.Done, a.scanStatus.Current = p.Total, p.Done, p.Current
+	a.scanStatus.Success, a.scanStatus.Pending = p.Result.Success, p.Result.Pending
+	a.scanStatus.Incompatible, a.scanStatus.Failed = p.Result.Incompatible, p.Result.Failed
+}
+
+func (a *App) endScan(err error) {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	a.scanStatus.Running = false
+	a.scanStatus.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	if err != nil {
+		a.scanStatus.Error = err.Error()
+		return
+	}
+	a.scanStatus.Done = a.scanStatus.Total
+}
+
+func (a *App) adminScanProgress(c *gin.Context) {
+	a.scanMu.Lock()
+	status := a.scanStatus
+	a.scanMu.Unlock()
+	c.JSON(200, status)
+}
+
+// scanLibraries 扫描指定媒体库（libraryID=0 表示全部）。扫描即重建：
+// 逐文件 upsert，收尾按磁盘现状删除失效索引行，再清缓存。
 func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 	libraries, err := a.db.Libraries()
 	if err != nil {
 		return scanner.Result{}, err
 	}
-	result := scanner.Result{}
-	matched := false
+	selected := make([]store.Library, 0, len(libraries))
 	for _, library := range libraries {
 		if libraryID != 0 && library.ID != libraryID {
 			continue
 		}
-		matched = true
+		selected = append(selected, library)
+	}
+	if len(selected) == 0 {
+		return scanner.Result{}, sql.ErrNoRows
+	}
+	if !a.beginScan(len(selected)) {
+		return scanner.Result{}, errScanBusy
+	}
+	result := scanner.Result{}
+	var scanErr error
+	for index, library := range selected {
+		a.setScanLibrary(index+1, library)
 		slog.Info("正在扫描媒体库", "library_id", library.ID, "name", library.Name, "path", library.Path)
-		current, err := scanner.Scan(a.db, library)
+		current, err := scanner.ScanWithProgress(a.db, library, a.updateScanProgress)
 		if err != nil {
 			slog.Error("媒体库扫描失败", "library", library.Name, "error", err)
-			return result, err
+			scanErr = err
+			break
 		}
 		slog.Info("媒体库扫描完成", "library", library.Name,
 			"success", current.Success, "pending", current.Pending,
@@ -109,19 +195,32 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 		result.Incompatible += current.Incompatible
 		result.Failed += current.Failed
 	}
-	if !matched {
-		return result, sql.ErrNoRows
-	}
+	a.endScan(scanErr)
 	a.cache.Clear()
-	return result, nil
+	return result, scanErr
+}
+
+// scanning 返回当前是否已有扫描在跑（仅用于提前拒绝，真正的互斥由 beginScan 保证）。
+func (a *App) scanning() bool {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	return a.scanStatus.Running
 }
 
 func (a *App) adminScan(c *gin.Context) {
+	if a.scanning() {
+		c.JSON(http.StatusConflict, gin.H{"error": errScanBusy.Error()})
+		return
+	}
 	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
 	taskID := a.startTask("scan")
 	result, err := a.scanLibraries(libraryID)
 	a.finishTask(taskID, err)
 	if err != nil {
+		if errors.Is(err, errScanBusy) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		if store.NotFound(err) {
 			c.JSON(404, gin.H{"error": "library not found"})
 			return
@@ -132,30 +231,30 @@ func (a *App) adminScan(c *gin.Context) {
 	c.JSON(200, result)
 }
 
+// adminReindex 全库重建索引（与扫描同一路径，仅范围是全部媒体库）。
 func (a *App) adminReindex(c *gin.Context) {
-	libs, err := a.db.Libraries()
+	if a.scanning() {
+		c.JSON(http.StatusConflict, gin.H{"error": errScanBusy.Error()})
+		return
+	}
+	slog.Info("开始重建索引")
+	taskID := a.startTask("reindex")
+	result, err := a.scanLibraries(0)
+	a.finishTask(taskID, err)
 	if err != nil {
+		if errors.Is(err, errScanBusy) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		if store.NotFound(err) {
+			c.JSON(200, result)
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	result := scanner.Result{}
-	slog.Info("开始重建索引", "libraries", len(libs))
-	for _, lib := range libs {
-		slog.Info("正在重建媒体库索引", "library_id", lib.ID, "name", lib.Name, "path", lib.Path)
-		current, err := scanner.Scan(a.db, lib)
-		if err != nil {
-			slog.Error("重建索引失败", "library", lib.Name, "error", err)
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-		result.Success += current.Success
-		result.Pending += current.Pending
-		result.Incompatible += current.Incompatible
-		result.Failed += current.Failed
-	}
 	slog.Info("重建索引完成", "success", result.Success, "pending", result.Pending,
 		"incompatible", result.Incompatible, "failed", result.Failed)
-	a.cache.Clear()
 	c.JSON(200, result)
 }
 
@@ -183,7 +282,20 @@ func (a *App) adminItems(c *gin.Context) {
 		}
 		ms = filtered
 	}
-	c.JSON(200, gin.H{"items": ms, "total": total, "limit": limit, "offset": offset})
+	// 媒体墙需要观看状态（已看/收藏/进度）做角标与进度条。
+	ids := make([]int64, 0, len(ms))
+	for _, movie := range ms {
+		ids = append(ids, movie.ID)
+	}
+	dataMap, _ := a.db.DataFor(ids)
+	userData := make(map[string]gin.H, len(dataMap))
+	for id, data := range dataMap {
+		userData[strconv.FormatInt(id, 10)] = gin.H{
+			"played": data.Played, "favorite": data.IsFavorite,
+			"position_ticks": data.PositionTicks, "play_count": data.PlayCount,
+		}
+	}
+	c.JSON(200, gin.H{"items": ms, "total": total, "limit": limit, "offset": offset, "userdata": userData})
 }
 
 func (a *App) adminDelete(c *gin.Context) {
@@ -480,5 +592,52 @@ func (a *App) adminClearProbes(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	c.Status(http.StatusNoContent)
+}
+
+// —— API 密钥管理：密钥可作 X-Emby-Token / api_key 直接调用 Emby 接口 ——
+
+func (a *App) adminAPIKeys(c *gin.Context) {
+	keys, err := a.db.APIKeys()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"items": keys, "total": len(keys)})
+}
+
+func (a *App) adminCreateAPIKey(c *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Name) == "" {
+		c.JSON(400, gin.H{"error": "name required"})
+		return
+	}
+	key, err := a.db.CreateAPIKey(req.Name)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	slog.Info("创建 API 密钥", "name", key.Name)
+	c.JSON(200, key)
+}
+
+func (a *App) adminDeleteAPIKey(c *gin.Context) {
+	key := c.Param("key")
+	if err := a.db.DeleteAPIKey(key); err != nil {
+		if store.NotFound(err) {
+			c.JSON(404, gin.H{"error": "key not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.cache.Delete("apikey:" + key)
+	prefix := key
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	slog.Info("删除 API 密钥", "key_prefix", prefix)
 	c.Status(http.StatusNoContent)
 }

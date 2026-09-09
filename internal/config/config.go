@@ -9,9 +9,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ServerDomain 备用线路候选。JSON 字段名必须是小写 name/url，
+// 与真实 Emby /System/Ext/ServerDomains 的返回一致（客户端按小写键解析）。
 type ServerDomain struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+	Name string `yaml:"name" json:"name"`
+	URL  string `yaml:"url" json:"url"`
 }
 
 type Config struct {
