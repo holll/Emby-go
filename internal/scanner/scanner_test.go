@@ -67,7 +67,8 @@ func TestScanPurgesStalePartRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "Movie-CD3.strm"), OutputDir: root, Status: "success", Title: "stale CD3"}
-	if _, err := s.UpsertMovie(stale, 0, MTime(stale.SourcePath)); err != nil {
+	_, staleMTime := SourceStat(stale.SourcePath)
+	if _, err := s.UpsertMovie(stale, 0, staleMTime); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Scan(s, lib); err != nil {

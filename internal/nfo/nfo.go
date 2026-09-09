@@ -3,7 +3,6 @@ package nfo
 import (
 	"encoding/xml"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -184,4 +183,3 @@ func SaveAtomic(path string, m MovieMeta) error {
 	}
 	return os.Rename(tmp, path)
 }
-func ParseRuntime(v string) int64 { n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64); return n }

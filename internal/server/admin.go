@@ -150,9 +150,9 @@ func (a *App) endScan(err error) {
 }
 
 func (a *App) adminScanProgress(c *gin.Context) {
-	a.scanMu.Lock()
+	a.scanMu.RLock()
 	status := a.scanStatus
-	a.scanMu.Unlock()
+	a.scanMu.RUnlock()
 	c.JSON(200, status)
 }
 
@@ -202,8 +202,8 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 
 // scanning 返回当前是否已有扫描在跑（仅用于提前拒绝，真正的互斥由 beginScan 保证）。
 func (a *App) scanning() bool {
-	a.scanMu.Lock()
-	defer a.scanMu.Unlock()
+	a.scanMu.RLock()
+	defer a.scanMu.RUnlock()
 	return a.scanStatus.Running
 }
 
@@ -267,20 +267,10 @@ func (a *App) adminItems(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
-	ms, total, err := a.db.SearchAll(0, c.Query("search"), c.Query("status"), c.DefaultQuery("sort", "title"), strings.EqualFold(c.Query("order"), "desc"), limit, offset)
+	ms, total, err := a.db.SearchAdmin(c.Query("search"), c.Query("status"), strings.ToLower(c.Query("source_protocol")), c.DefaultQuery("sort", "title"), strings.EqualFold(c.Query("order"), "desc"), limit, offset)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
-	}
-	protocol := strings.ToLower(c.Query("source_protocol"))
-	if protocol != "" {
-		filtered := make([]store.Movie, 0, len(ms))
-		for _, movie := range ms {
-			if movie.SourceProtocol == protocol {
-				filtered = append(filtered, movie)
-			}
-		}
-		ms = filtered
 	}
 	// 媒体墙需要观看状态（已看/收藏/进度）做角标与进度条。
 	ids := make([]int64, 0, len(ms))
@@ -372,10 +362,10 @@ func (a *App) adminManual(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	info, _ := os.Stat(req.SourcePath)
+	size, mtime := scanner.SourceStat(req.SourcePath)
 	u, _ := url.Parse(req.SourceURL)
 	m := store.Movie{LibraryID: req.LibraryID, SourcePath: req.SourcePath, SourceProtocol: strings.ToLower(u.Scheme), SourceContainer: strings.TrimPrefix(strings.ToLower(filepath.Ext(u.Path)), "."), Status: "manual", NFOPath: nfoPath, OutputDir: filepath.Dir(req.SourcePath), Number: req.Number, Title: req.Title, OriginalTitle: req.OriginalTitle, Year: req.Year, Plot: req.Plot, Director: req.Director, Series: req.Series, Maker: req.Maker, Label: req.Label, Genres: req.Genres, Tags: req.Tags, Studios: req.Studios, PosterPath: req.PosterPath, BackdropPath: req.BackdropPath}
-	id, err := a.db.UpsertMovie(m, info.Size(), info.ModTime())
+	id, err := a.db.UpsertMovie(m, size, mtime)
 	if err == nil {
 		err = a.db.BumpVersion(req.LibraryID)
 	}
@@ -429,8 +419,8 @@ func (a *App) adminEdit(c *gin.Context) {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	info, _ := os.Stat(m.SourcePath)
-	_, e = a.db.UpsertMovie(m, info.Size(), info.ModTime())
+	size, mtime := scanner.SourceStat(m.SourcePath)
+	_, e = a.db.UpsertMovie(m, size, mtime)
 	if e == nil {
 		e = a.db.BumpVersion(m.LibraryID)
 	}
@@ -527,7 +517,8 @@ func (a *App) adminImage(c *gin.Context) {
 	case "landscape":
 		m.LandscapePath = dest
 	}
-	_, e = a.db.UpsertMovie(m, 0, scanner.MTime(m.SourcePath))
+	size, mtime := scanner.SourceStat(m.SourcePath)
+	_, e = a.db.UpsertMovie(m, size, mtime)
 	if e == nil {
 		e = a.db.BumpVersion(m.LibraryID)
 	}
@@ -568,12 +559,12 @@ func (a *App) adminTasks(c *gin.Context) {
 func (a *App) adminStatus(c *gin.Context) {
 	result := gin.H{}
 	for _, status := range []string{"success", "manual", "pending", "incompatible"} {
-		movies, err := a.db.MoviesByStatus(status)
+		count, err := a.db.CountByStatus(status)
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		result[status] = movies
+		result[status] = count
 	}
 	c.JSON(200, result)
 }

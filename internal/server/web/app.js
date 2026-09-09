@@ -88,11 +88,11 @@ async function pageOverview() {
     api('/items?status=success'),
     api('/status')
   ]);
-  const pendingCount = status.pending?.length || 0;
-  const incompatibleCount = status.incompatible?.length || 0;
+  const pendingCount = status.pending || 0;
+  const incompatibleCount = status.incompatible || 0;
   const rows = [
-    ['success', (status.success || []).length],
-    ['manual', (status.manual || []).length],
+    ['success', status.success || 0],
+    ['manual', status.manual || 0],
     ['pending', pendingCount],
     ['incompatible', incompatibleCount]
   ].filter(([, n]) => n > 0);

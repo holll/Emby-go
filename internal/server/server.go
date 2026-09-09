@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +24,7 @@ type App struct {
 	db         *store.Store
 	router     *gin.Engine
 	cache      cache.Cache
+	adminMu    sync.RWMutex // 保护 adminName：初始化/登录写，其它 handler 并发读
 	adminName  string
 	serverID   string
 	serverName string
@@ -41,8 +40,13 @@ type App struct {
 	nfos  map[string]nfoCacheEntry
 
 	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
-	scanMu     sync.Mutex
+	scanMu     sync.RWMutex
 	scanStatus scanStatus
+
+	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
+	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
+	probeMu   sync.Mutex
+	probeSeen map[string]struct{}
 }
 
 // scanStatus 管理端可轮询的扫描进度快照。
@@ -93,7 +97,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, db: db, cache: cacheStore, tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry)}
+	a := &App{cfg: cfg, db: db, cache: cacheStore, tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{})}
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
 		a.serverName = "Emby-go"
@@ -280,10 +284,18 @@ func registerStreamRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
 
 func (a *App) noRoute(c *gin.Context) {
 	if !strings.HasPrefix(c.Request.URL.Path, "/api/") {
-		body, _ := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
-		_ = a.db.Probe(c.Request.Method, c.Request.URL.Path, c.Request.URL.RawQuery, string(body))
+		key := c.Request.Method + " " + c.Request.URL.Path
+		a.probeMu.Lock()
+		_, seen := a.probeSeen[key]
+		if !seen {
+			a.probeSeen[key] = struct{}{}
+		}
+		a.probeMu.Unlock()
+		// 只记首次：客户端探测期同一端点会反复命中，逐次写库会拖慢 404 响应。
+		if !seen {
+			body, _ := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
+			_ = a.db.Probe(c.Request.Method, c.Request.URL.Path, c.Request.URL.RawQuery, string(body))
+		}
 	}
 	c.JSON(404, gin.H{"error": "not found"})
 }
-
-func (a *App) EnsureDir(path string) error { return os.MkdirAll(filepath.Dir(path), 0755) }

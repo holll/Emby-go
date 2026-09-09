@@ -50,7 +50,3 @@ func (a *App) webAsset(c *gin.Context) {
 	}
 	c.Data(http.StatusOK, contentType, data)
 }
-
-type webRouteRegistrar interface {
-	GET(string, ...gin.HandlerFunc) gin.IRoutes
-}

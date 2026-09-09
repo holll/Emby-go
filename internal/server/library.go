@@ -159,11 +159,17 @@ func (a *App) posterTag(path string) string {
 
 // libraryCoverPath 返回媒体库封面路径：优先库根目录自带的 poster/folder/cover/default 图片
 // （webp/jpg/jpeg/png 均可），没有则借用库内最近入库影片的代表图（宽图优先）。
+// 解析要多次 stat 媒体盘并可能回查库，按库版本号缓存（空结果同样缓存）。
 func (a *App) libraryCoverPath(l store.Library) string {
-	if path := imageutil.FindPoster(l.Path); path != "" {
-		return path
+	key := "libcover:" + a.db.Version("g:version") + ":" + strconv.FormatInt(l.ID, 10)
+	if b, ok := a.cache.Get(key); ok {
+		return string(b)
 	}
-	path, _ := a.db.RepresentativeArt(l.ID)
+	path := imageutil.FindPoster(l.Path)
+	if path == "" {
+		path, _ = a.db.RepresentativeArt(l.ID)
+	}
+	a.cache.Set(key, []byte(path), 5*time.Minute)
 	return path
 }
 
@@ -235,20 +241,26 @@ func (a *App) boxsetFolderDTO(collections []string) gin.H {
 // boxsetItemDTO 返回单个合集（BoxSet）的 BaseItemDto。
 func (a *App) boxsetItemDTO(name string) gin.H {
 	count, genres, _ := a.db.CollectionSummary(name)
+	poster, _ := a.db.CollectionPoster(name)
+	return a.boxsetItemFrom(name, store.CollectionStat{Count: count, Poster: poster, Genres: genres})
+}
+
+// boxsetItemFrom 用已取回的聚合信息渲染 BoxSet DTO（列表页批量取数时复用）。
+func (a *App) boxsetItemFrom(name string, stat store.CollectionStat) gin.H {
 	item := gin.H{
 		"Id": boxsetID(name), "Name": name, "Type": "BoxSet", "IsFolder": true,
-		"ServerId": a.serverID, "ChildCount": count,
+		"ServerId": a.serverID, "ChildCount": stat.Count,
 		"BackdropImageTags": []string{},
 		"UserData":          zeroUserData(),
 	}
-	if poster, _ := a.db.CollectionPoster(name); poster != "" {
-		item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
-		item["PrimaryImageAspectRatio"] = artRatio(poster)
+	if stat.Poster != "" {
+		item["ImageTags"] = gin.H{"Primary": a.posterTag(stat.Poster)}
+		item["PrimaryImageAspectRatio"] = artRatio(stat.Poster)
 	}
-	if len(genres) > 0 {
-		sort.Strings(genres)
-		item["Genres"] = genres
-		item["GenreItems"] = nameObjects("Genre", genres)
+	if len(stat.Genres) > 0 {
+		sort.Strings(stat.Genres)
+		item["Genres"] = stat.Genres
+		item["GenreItems"] = nameObjects("Genre", stat.Genres)
 	}
 	return item
 }
@@ -290,31 +302,18 @@ func (a *App) resume(c *gin.Context) {
 	if limit < 1 || limit > 1000 {
 		limit = 30
 	}
-	movies, _, err := a.db.SearchFiltered(0, "", "", "", false, "title", false, 1000, 0)
+	movies, total, err := a.db.Resumed(limit, start)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	dataMap, _ := a.db.DataFor(movieIDs(movies))
-	resumed := make([]store.Movie, 0)
+	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
+	items := make([]gin.H, 0, len(movies))
 	for _, movie := range movies {
-		if data := dataMap[movie.ID]; data.PositionTicks > 0 && !data.HideFromResume {
-			resumed = append(resumed, movie)
-		}
-	}
-	if start > len(resumed) {
-		start = len(resumed)
-	}
-	end := start + limit
-	if end > len(resumed) {
-		end = len(resumed)
-	}
-	actorMap, _ := a.db.ActorsFor(movieIDs(resumed[start:end]))
-	items := make([]gin.H, 0, end-start)
-	for _, movie := range resumed[start:end] {
 		items = append(items, a.embyItemActors(movie, dataMap[movie.ID], actorMap[movie.ID], true))
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(resumed), "StartIndex": start})
+	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": total, "StartIndex": start})
 }
 
 // nextUp 无剧集库，恒为空结果（Emby 客户端主屏会调用）。
@@ -360,6 +359,9 @@ func (a *App) similar(c *gin.Context) {
 		return
 	}
 	srcActors := actorMap[src.ID]
+	// 源影片的集合只构建一次，避免对每个候选重复转换。
+	srcGenres, srcTags := toSet(src.Genres), toSet(src.Tags)
+	srcStudios, srcActorSet := toSet(src.Studios), toSet(srcActors)
 
 	type scored struct {
 		movie store.Movie
@@ -371,7 +373,7 @@ func (a *App) similar(c *gin.Context) {
 			continue
 		}
 		// 与 Emby 3.5.2 口径一致：总分需 > 2 才进入相似候选。
-		if s := similarityScore(src, m, srcActors, actorMap[m.ID]); s > 2 {
+		if s := similarityScore(src, m, srcGenres, srcTags, srcStudios, srcActorSet, actorMap[m.ID]); s > 2 {
 			results = append(results, scored{movie: m, score: s})
 		}
 	}
@@ -402,23 +404,21 @@ func (a *App) similar(c *gin.Context) {
 // similarityScore 按 Emby 3.5.2 SimilarItemsHelper 权重给两片打分：
 // 同分级 +10；每共同 Genre +10；每共同 Tag +10；每共同 Studio +3；
 // 同导演 +5；每共同演员 +3；年代差 <5 年 +4、<10 年 +2。
-func similarityScore(x, y store.Movie, xActors, yActors []string) int {
+// xGenres/xTags/xStudios/xActors 为源影片预先构建的集合，避免逐候选重复转换。
+func similarityScore(x, y store.Movie, xGenres, xTags, xStudios, xActors map[string]struct{}, yActors []string) int {
 	score := 0
 	if x.OfficialRating != "" && x.OfficialRating == y.OfficialRating {
 		score += 10
 	}
-	score += overlapWeight(x.Genres, y.Genres, 10)
-	score += overlapWeight(x.Tags, y.Tags, 10)
-	score += overlapWeight(x.Studios, y.Studios, 3)
-
+	score += overlapSet(xGenres, y.Genres, 10)
+	score += overlapSet(xTags, y.Tags, 10)
+	score += overlapSet(xStudios, y.Studios, 3)
 	if x.Director != "" && x.Director == y.Director {
 		score += 5
 	}
-	if set := toSet(xActors); set != nil {
-		for _, name := range yActors {
-			if _, ok := set[name]; ok {
-				score += 3
-			}
+	for _, name := range yActors {
+		if _, ok := xActors[name]; ok {
+			score += 3
 		}
 	}
 	if x.Year > 0 && y.Year > 0 {
@@ -436,9 +436,8 @@ func similarityScore(x, y store.Movie, xActors, yActors []string) int {
 	return score
 }
 
-// overlapWeight 统计 y 列表中与 x 集合重叠的去重项数并乘以权重。
-func overlapWeight(x, y []string, weight int) int {
-	set := toSet(x)
+// overlapSet 统计 y 中命中 set 的项数并乘以权重。
+func overlapSet(set map[string]struct{}, y []string, weight int) int {
 	count := 0
 	for _, v := range y {
 		if _, ok := set[v]; ok {
@@ -491,12 +490,8 @@ func nameObjects(kind string, names []string) []gin.H {
 	return out
 }
 
-// peopleOf 组装影片人员：导演（若 NFO 有）+ 演员。Type 与真实 Emby 一致。
-func (a *App) peopleOf(m store.Movie) []gin.H {
-	return a.peopleOfActors(m, nil, false)
-}
-
-// peopleOfActors 允许调用方传入批量预取的演员名。
+// peopleOfActors 组装影片人员：导演（若 NFO 有）+ 演员，Type 与真实 Emby 一致。
+// 允许调用方传入批量预取的演员名。
 // loaded=false 时 actors 视为未预取，回退单条查询；loaded=true 时即使 actors 为空也不查库。
 func (a *App) peopleOfActors(m store.Movie, actors []string, loaded bool) []gin.H {
 	people := make([]gin.H, 0, 4)
@@ -801,20 +796,19 @@ func (a *App) itemsQuery(c *gin.Context) {
 	if strings.Contains(strings.ToLower(c.Query("Fields")), "mediasources") {
 		fieldsMark = "src"
 	}
-	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), termOf(c), c.Query("Years"), genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fieldsMark, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	term, years := c.Query("SearchTerm"), c.Query("Years")
+	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fieldsMark, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		c.Data(200, "application/json", b)
 		return
 	}
-	ms, total, e := a.db.SearchScoped(lib, "", c.Query("SearchTerm"), c.Query("Years"), genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
+	ms, total, e := a.db.SearchScoped(lib, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
 	a.respondItems(c, ms, total, start, key)
 }
-
-func termOf(c *gin.Context) string { return c.Query("SearchTerm") }
 
 // respondItems 统一输出影片分页结果。cacheKey 非空时写入 15s 缓存（供 itemsQuery 命中复用）。
 // UserData 与演员表按整页批量取回，避免逐片 N+1 查询。
@@ -850,20 +844,17 @@ func movieIDs(ms []store.Movie) []int64 {
 
 // boxsetListResponse 分页返回「合集」媒体库的 BoxSet 列表。
 func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
-	names, err := a.db.Collections()
+	stats, err := a.db.CollectionStats()
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 	term = strings.ToLower(strings.TrimSpace(term))
-	if term != "" {
-		filtered := names[:0]
-		for _, n := range names {
-			if strings.Contains(strings.ToLower(n), term) {
-				filtered = append(filtered, n)
-			}
+	names := make([]string, 0, len(stats))
+	for name := range stats {
+		if term == "" || strings.Contains(strings.ToLower(name), term) {
+			names = append(names, name)
 		}
-		names = filtered
 	}
 	sort.Strings(names)
 	if start > len(names) {
@@ -875,7 +866,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	}
 	items := make([]gin.H, 0, end-start)
 	for _, name := range names[start:end] {
-		items = append(items, a.boxsetItemDTO(name))
+		items = append(items, a.boxsetItemFrom(name, stats[name]))
 	}
 	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
 }
@@ -930,6 +921,21 @@ func entityId(kind, name string) string {
 // entityBrowse 对库内影片去重聚合出某类实体列表（Type=kind），按名排序后分页。
 // collection 用于合集上下文限定（""/"*"/具体合集名），保证只返回该上下文内数量≥1 的实体。
 func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collection string) {
+	start, _ := strconv.Atoi(c.DefaultQuery("StartIndex", "0"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "100"))
+	if start < 0 {
+		start = 0
+	}
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	// 实体名需扫全库 JSON 列去重，逐项还要查代表海报，故按（版本/类型/范围/分页）缓存。
+	cacheKey := "entities:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
+		strconv.FormatInt(libraryID, 10) + ":" + collection + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(limit)
+	if b, ok := a.cache.Get(cacheKey); ok {
+		c.Data(http.StatusOK, "application/json", b)
+		return
+	}
 	var (
 		names []string
 		err   error
@@ -952,14 +958,6 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 		return
 	}
 	sort.Strings(names)
-	start, _ := strconv.Atoi(c.DefaultQuery("StartIndex", "0"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "100"))
-	if start < 0 {
-		start = 0
-	}
-	if limit < 1 || limit > 1000 {
-		limit = 100
-	}
 	if start > len(names) {
 		start = len(names)
 	}
@@ -978,7 +976,9 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 		}
 		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
+	body, _ := json.Marshal(gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
+	a.cache.Set(cacheKey, body, 30*time.Second)
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 func (a *App) item(c *gin.Context) {

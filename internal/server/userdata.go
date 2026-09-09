@@ -31,10 +31,9 @@ func (a *App) userDataJSON(id int64) (gin.H, bool) {
 	}, true
 }
 
-// userDataWrite 在用户数据写后统一 bump 版本并清缓存（与播放/续播路径一致）。
+// userDataWrite 在用户数据写后统一 bump 版本：列表/详情缓存 key 均含库版本号，据此自然失效。
 func (a *App) userDataWrite(libraryID int64) {
 	_ = a.db.BumpVersion(libraryID)
-	a.cache.Clear()
 }
 
 func (a *App) favoriteItem(c *gin.Context, favorite bool) {
