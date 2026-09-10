@@ -303,3 +303,67 @@ func TestItemFieldExposure(t *testing.T) {
 		}
 	}
 }
+
+// TestMediaSourcePathIsStrmPath 覆盖 MediaSource.Path 的语义：
+// 它给出 .strm 在服务器文件系统里的路径（与真实 Emby 的绝对路径一致），
+// 可播放地址仍由 DirectStreamUrl 承担。
+// 该字段此前只有 nil 检查、无取值断言，故单独固化，避免被误改回流地址。
+func TestMediaSourcePathIsStrmPath(t *testing.T) {
+	root := t.TempDir()
+	// 单片：一个 .strm + NFO
+	writeFile(t, filepath.Join(root, "solo.strm"), "http://media.test/solo.mp4\n")
+	writeFile(t, filepath.Join(root, "solo.nfo"), "<movie><title>单片</title></movie>\n")
+	// 分集：CD1 为主文件，CD2 为分段，各自有 .strm
+	writeFile(t, filepath.Join(root, "mp-CD1.strm"), "http://media.test/cd1.mp4\n")
+	writeFile(t, filepath.Join(root, "mp-CD2.strm"), "http://media.test/cd2.mp4\n")
+	writeFile(t, filepath.Join(root, "mp.nfo"), "<movie><title>分集</title></movie>\n")
+
+	app, ts, token := newProbeTestApp(t, root)
+
+	sourceOf := func(itemID string) map[string]any {
+		t.Helper()
+		_, body := embyCall(t, ts, "GET", "/Items/"+itemID+"/PlaybackInfo", token, "")
+		sources, _ := body["MediaSources"].([]any)
+		if len(sources) == 0 {
+			t.Fatalf("无媒体源: %v", body)
+		}
+		src, _ := sources[0].(map[string]any)
+		return src
+	}
+
+	// 单片：Path 必须是磁盘上的 .strm 路径
+	soloID, err := app.db.MovieIDByPath(filepath.Join(root, "solo.strm"))
+	if err != nil || soloID == 0 {
+		t.Fatalf("取 solo id 失败: %d %v", soloID, err)
+	}
+	solo := sourceOf(strconv.FormatInt(soloID, 10))
+	if want := filepath.Join(root, "solo.strm"); solo["Path"] != want {
+		t.Errorf("MediaSource.Path = %v, want %s（.strm 系统路径）", solo["Path"], want)
+	}
+	// Path 不应是流地址（那是 DirectStreamUrl 的职责）
+	if p, _ := solo["Path"].(string); strings.Contains(p, "/Videos/") {
+		t.Errorf("MediaSource.Path 不应是流地址: %v", p)
+	}
+	direct, _ := solo["DirectStreamUrl"].(string)
+	if !strings.Contains(direct, "/Videos/"+strconv.FormatInt(soloID, 10)+"/stream") {
+		t.Errorf("DirectStreamUrl 应指向本服务流端点: %v", direct)
+	}
+
+	// 分集：主文件与分段各自指向自己的 .strm
+	mpID, err := app.db.MovieIDByPath(filepath.Join(root, "mp-CD1.strm"))
+	if err != nil || mpID == 0 {
+		t.Fatalf("取 mp id 失败: %d %v", mpID, err)
+	}
+	primary := sourceOf(strconv.FormatInt(mpID, 10))
+	if want := filepath.Join(root, "mp-CD1.strm"); primary["Path"] != want {
+		t.Errorf("分集主文件 Path = %v, want %s", primary["Path"], want)
+	}
+	// 分段虚拟 id：part-<movieID>-<part>，CD2 → part-<id>-2
+	part := sourceOf("part-" + strconv.FormatInt(mpID, 10) + "-2")
+	if want := filepath.Join(root, "mp-CD2.strm"); part["Path"] != want {
+		t.Errorf("CD2 Path = %v, want %s（分段各自的 .strm）", part["Path"], want)
+	}
+	if p, _ := part["Path"].(string); p == primary["Path"] {
+		t.Error("分段与主文件的 Path 不应相同")
+	}
+}

@@ -210,10 +210,20 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 	// 主文件取 NFO 的 streamdetails，分段取它自己的 mediainfo.json；
 	// 两者都没有时才给通用视频轨。
 	streams, size := a.streamsFor(m, sourcePath)
+	// Path 给的是 .strm 在服务器文件系统里的路径，与真实 Emby 一致
+	// （真实 Emby 的 MediaSource.Path 也是服务器绝对路径）。
+	// 可播放地址在 DirectStreamUrl：客户端若直接拿 Path 当 URL 用会取不到内容，
+	// 但 iPlay 只在 Path 以 http 开头时才用它播放（isUseStrmFirst），
+	// 真实 Emby 本身也返回本地路径，故这是符合契约的行为。
+	// sourcePath 缺失时回退到流地址，避免给出空值。
+	mediaPath := sourcePath
+	if strings.TrimSpace(mediaPath) == "" {
+		mediaPath = stream
+	}
 	source := gin.H{
 		"Id":                         mediaSourceId,
 		"Name":                       mediaSourceName(m, sourcePath),
-		"Path":                       stream,
+		"Path":                       mediaPath,
 		"DirectStreamUrl":            stream + "?MediaSourceId=" + mediaSourceId + "&Static=true",
 		"Protocol":                   "Http",
 		"Container":                  m.SourceContainer,
