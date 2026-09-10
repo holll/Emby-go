@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -33,9 +34,20 @@ const maxProbeFailures = 20
 // 刮削器同样会写 streamdetails（且常不完整，缺位深/色彩特性/体积），
 // 按有无判定会把这些条目永久跳过、拿不到补齐。
 //
-// 提升此版本号的时机：探测新增了会改变 NFO 内容的字段时——
+// 提升此版本的时机：探测新增了会改变 NFO 内容的字段时——
 // 旧条目会在下一次全库探测中自动被重探，无需手工清理。
 const probeVersion = 1
+
+const (
+	// maxProbeFailureLogs 完整打印失败详情的条数上限——失败可能多达数千条，
+	// 逐条打全量日志会刷爆日志文件；之后改为按数量级汇总输出。
+	maxProbeFailureLogs = 20
+	// maxProbeConsecutiveFailures 连续失败达到该数量即判定为环境性故障并中止任务。
+	// 库里零散的失效链接不会连续出现这么多，故正常情况下不会误触发；
+	// 而 ffprobe 不可用、媒体库挂载异常这类问题会在几十毫秒内连续失败数千次，
+	// 必须尽早中止，否则白跑一轮全量扫描。
+	maxProbeConsecutiveFailures = 20
+)
 
 // probeStatus 探测任务的进度快照，供管理端轮询。
 type probeStatus struct {
@@ -50,7 +62,12 @@ type probeStatus struct {
 	FinishedAt string   `json:"finished_at,omitempty"`
 	Error      string   `json:"error,omitempty"`
 	Cancelled  bool     `json:"cancelled"`
+	Aborted    bool     `json:"aborted,omitempty"` // 因连续失败被主动中止（区别于人工取消）
 	Failures   []string `json:"failures,omitempty"`
+
+	// 以下为内部状态，不对外输出。
+	consecutiveFailures int `json:"-"` // 连续失败计数，成功即归零
+	failureLogged       int `json:"-"` // 已完整输出日志的失败条数（限流用）
 }
 
 // probeRequest 探测任务入参；零值即「全部媒体库、仅待探测项、不强制覆盖」。
@@ -122,9 +139,15 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": errProbeBusy.Error()})
 		return
 	}
-	// ffprobe 在任务启动前就解析好：缺 ffprobe 时直接给明确错误，而不是让每条都失败一次。
+	// ffprobe 在任务启动前就解析并自检：缺 ffprobe 或它无法执行时直接给明确错误，
+	// 而不是让成千上万条目逐个失败一遍（那既浪费时间又难归因）。
 	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := probe.Verify(a.rootCtx, ffprobe); err != nil {
+		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -298,16 +321,19 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// 熔断/取消后不直接 return，而是继续排空 channel：
+			// worker 一旦退出，还在阻塞投递的派发循环将永远等不到接收者而死锁。
 			for target := range jobs {
-				if ctx.Err() != nil {
-					return
+				if ctx.Err() != nil || a.probeAborted() {
+					continue
 				}
 				a.probeOne(ctx, ffprobe, target, onlyMissing, touched)
 			}
 		}()
 	}
+	// 派发时也提前检查，减少熔断后仍需排空的条目数。
 	for _, target := range targets {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || a.probeAborted() {
 			break
 		}
 		jobs <- target
@@ -329,18 +355,51 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	a.cache.Clear()
 	a.evictNFOStreams()
 
-	cancelled := ctx.Err() != nil
 	a.probeTaskMu.Lock()
-	a.probeStatus.Running = false
-	a.probeStatus.Cancelled = cancelled
-	a.probeStatus.Current = ""
-	a.probeStatus.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	success, skipped, failed := a.probeStatus.Success, a.probeStatus.Skipped, a.probeStatus.Failed
+	status := &a.probeStatus
+	aborted := status.consecutiveFailures >= maxProbeConsecutiveFailures
+	// 熔断本身也会取消 context，这里要把它与「人工取消」区分开，否则会被误报为 cancelled。
+	cancelled := ctx.Err() != nil && !aborted
+	status.Running = false
+	status.Cancelled = cancelled
+	status.Aborted = aborted
+	status.Current = ""
+	status.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	if aborted {
+		// 把「为什么中止」写进任务状态：管理端能直接看到，不必翻日志。
+		status.Error = fmt.Sprintf("连续 %d 条探测失败，疑似探测环境异常（如 ffprobe 不可用或媒体库不可读），任务已提前中止；已处理 %d/%d，失败样例见 failures",
+			status.consecutiveFailures, status.Done, status.Total)
+	}
+	success, skipped, failed, done := status.Success, status.Skipped, status.Failed, status.Done
 	a.probeCancel = nil
 	a.probeTaskMu.Unlock()
 
-	a.finishTask(taskID, nil)
-	slog.Info("媒体信息探测结束", "task_id", taskID, "success", success, "skipped", skipped, "failed", failed, "cancelled", cancelled)
+	if aborted {
+		a.finishTask(taskID, errors.New("连续失败过多已中止"))
+	} else {
+		a.finishTask(taskID, nil)
+	}
+	slog.Info("媒体信息探测结束", "task_id", taskID, "success", success, "skipped", skipped,
+		"failed", failed, "handled", done, "total", len(targets), "aborted", aborted, "cancelled", cancelled)
+	if failed > 0 {
+		// 汇总可能的原因分布，便于一眼定位是环境问题还是个别失效源。
+		slog.Warn("媒体信息探测失败汇总", "failed", failed, "total", len(targets),
+			"samples", a.probeFailureSamples())
+	}
+}
+
+// probeAborted 报告是否已触发熔断（连续失败过多）。
+func (a *App) probeAborted() bool {
+	a.probeTaskMu.RLock()
+	defer a.probeTaskMu.RUnlock()
+	return a.probeStatus.consecutiveFailures >= maxProbeConsecutiveFailures
+}
+
+// probeFailureSamples 返回已留存的失败样例（供日志汇总）。
+func (a *App) probeFailureSamples() []string {
+	a.probeTaskMu.RLock()
+	defer a.probeTaskMu.RUnlock()
+	return append([]string(nil), a.probeStatus.Failures...)
 }
 
 // probeOne 处理单个媒体文件。判定顺序刻意从「最省」到「最贵」：
@@ -372,16 +431,16 @@ func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, 
 			// 数据已就绪。但主文件的 NFO 可能落后（外部改动/丢失），有本地原始数据就顺手回填，不联网。
 			if target.Primary && !nfoCurrent && hasCache && a.backfillFromMediaInfo(target, file) {
 				touched <- movie.LibraryID
-				a.countProbe(func(status *probeStatus) { status.Success++ })
+				a.probeSuccess()
 				return
 			}
-			a.countProbe(func(status *probeStatus) { status.Skipped++ })
+			a.probeSkipped()
 			return
 		case hasCache:
 			// 缓存版本偏低（探测逻辑升级）：本地重新映射即可。
 			if a.backfillFromMediaInfo(target, file) {
 				touched <- movie.LibraryID
-				a.countProbe(func(status *probeStatus) { status.Success++ })
+				a.probeSuccess()
 				return
 			}
 			// 回填失败（缓存原始数据已不可解析）→ 落到下面的真实探测
@@ -406,7 +465,23 @@ func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, 
 		slog.Warn("写入 mediainfo.json 失败（不影响去重，仅失去本地回填）", "path", target.Path, "error", err)
 	}
 	touched <- movie.LibraryID
-	a.countProbe(func(status *probeStatus) { status.Success++ })
+	a.probeSuccess()
+}
+
+// probeSuccess / probeSkipped 记录非失败结果，并把连续失败计数归零——
+// 连续失败计数是熔断的判据，中间只要有一条成功就说明环境是好的，必须重置。
+func (a *App) probeSuccess() {
+	a.countProbe(func(status *probeStatus) {
+		status.Success++
+		status.consecutiveFailures = 0
+	})
+}
+
+func (a *App) probeSkipped() {
+	a.countProbe(func(status *probeStatus) {
+		status.Skipped++
+		status.consecutiveFailures = 0
+	})
 }
 
 // writeProbeNFO 把探测结果写入 NFO，并记录版本与直链（后者用于识别换源）。
@@ -441,13 +516,42 @@ func (a *App) backfillFromMediaInfo(target probeTarget, file mediaInfoFile) bool
 	return true
 }
 
+// probeFailure 记录一次失败：累计计数、留存样例、输出日志，并追踪连续失败次数。
+//
+// 日志必须打——失败详情只回给管理端 API 的话，运维在服务日志里什么都看不到，
+// 生产上出现「几千条全失败」时无从归因。这里对条数做限流，避免刷爆日志。
 func (a *App) probeFailure(movie store.Movie, reason string) {
-	a.countProbe(func(status *probeStatus) {
-		status.Failed++
-		if len(status.Failures) < maxProbeFailures {
-			status.Failures = append(status.Failures, movie.Title+"："+reason)
-		}
-	})
+	a.probeTaskMu.Lock()
+	status := &a.probeStatus
+	status.Failed++
+	status.consecutiveFailures++
+	if len(status.Failures) < maxProbeFailures {
+		// reason 由调用方带上「标题/分段名：」前缀，这里不再重复拼接。
+		status.Failures = append(status.Failures, reason)
+	}
+	shouldLog := status.failureLogged < maxProbeFailureLogs
+	if shouldLog {
+		status.failureLogged++
+	}
+	total, consecutive := status.Failed, status.consecutiveFailures
+	// 刚达到熔断阈值：顺手取消本轮的 context，把还在跑的 ffprobe 一并杀掉。
+	// 否则任务要等这些进程各自超时（可长达 probe_timeout）才结束，白等一场。
+	tripped := consecutive == maxProbeConsecutiveFailures && a.probeCancel != nil
+	cancel := a.probeCancel
+	a.probeTaskMu.Unlock()
+
+	if tripped {
+		slog.Warn("媒体信息探测触发熔断：连续失败过多，中止任务", "consecutive", consecutive, "failed", total, "reason", reason)
+		cancel()
+	}
+
+	switch {
+	case shouldLog:
+		slog.Warn("媒体信息探测失败", "title", movie.Title, "strm", movie.SourcePath, "reason", reason, "failed", total)
+	case total%500 == 0:
+		// 长时间持续失败时给出进度级提示，避免日志完全静默。
+		slog.Warn("媒体信息探测持续失败", "failed", total, "consecutive", consecutive, "last_reason", reason)
+	}
 }
 
 func (a *App) setProbeCurrent(title string) {

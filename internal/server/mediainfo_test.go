@@ -1,14 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -523,3 +526,178 @@ func TestMultiPartDistinctInfo(t *testing.T) {
 		t.Errorf("CD2 BitDepth = %v, want 8", part["BitDepth"])
 	}
 }
+
+// TestProbeVerifyRejectsBrokenFFProbe 覆盖启动自检：
+// ffprobe 路径指向一个不可执行的文件时，任务必须当场拒绝启动并给出明确原因，
+// 而不是起一个任务、让每条都失败一次。
+func TestProbeVerifyRejectsBrokenFFProbe(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "f.strm"), "http://x/f.mp4\n")
+	writeFile(t, filepath.Join(root, "f.nfo"), "<movie><title>F</title></movie>\n")
+
+	// 用一个存在的普通文件冒充 ffprobe：能通过 LookPath，但执行必然失败。
+	fake := filepath.Join(t.TempDir(), "fake-ffprobe")
+	writeFile(t, fake, "这不是可执行文件\n")
+
+	app, err := newApp(config.Config{DBPath: filepath.Join(root, "t.db"), FFProbePath: fake}, cache.NewMemory(64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	ts := httptest.NewServer(app.Handler())
+	defer ts.Close()
+	_, _, token := newProbeTestApp(t, root) // 仅用于复用令牌/建库流程之外的最小初始化
+	_ = token
+
+	// 直接对 app 调用自检，确认会报错（错误里要带路径，便于定位）
+	if err := probe.Verify(context.Background(), fake); err == nil {
+		t.Fatal("不可执行的 ffprobe 应被自检拒绝")
+	} else if !strings.Contains(err.Error(), fake) {
+		t.Errorf("自检错误应包含 ffprobe 路径，实际: %v", err)
+	}
+	if _, err := probe.LookPath(""); err == nil {
+		// 环境有 ffprobe 时，自检必须通过
+		if err := probe.Verify(context.Background(), mustLookPath(t)); err != nil {
+			t.Errorf("正常 ffprobe 自检不应失败: %v", err)
+		}
+	}
+}
+
+func mustLookPath(t *testing.T) string {
+	t.Helper()
+	path, err := probe.LookPath("")
+	if err != nil {
+		t.Skipf("环境无 ffprobe: %v", err)
+	}
+	return path
+}
+
+// TestProbeCircuitBreaker 覆盖熔断：连续失败达到阈值即中止，不再对剩余条目做无意义尝试。
+// 场景取自生产事故：某环境 ffprobe/媒体源整体不可用，几千条全部失败却跑完整轮。
+func TestProbeCircuitBreaker(t *testing.T) {
+	if _, err := probe.LookPath(""); err != nil {
+		t.Skipf("环境无 ffprobe: %v", err)
+	}
+	// 用本地 500 服务让每次探测都「立即失败」：既要快也要确定。
+	// 直接用不可达端口在部分平台上会挂到系统超时（实测单次数十秒），测试会变得又慢又不稳。
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+	deadURL := broken.URL + "/nope.mp4"
+	root := t.TempDir()
+	const count = 60 // 远多于熔断阈值
+	for i := 0; i < count; i++ {
+		base := filepath.Join(root, "m"+strconv.Itoa(i))
+		writeFile(t, base+".strm", deadURL+"\n")
+		writeFile(t, base+".nfo", "<movie><title>M"+strconv.Itoa(i)+"</title></movie>\n")
+	}
+
+	_, ts, token := newProbeTestApp(t, root)
+	resp, started := embyCall(t, ts, "POST", "/api/admin/probe/media", token, `{"only_missing":true,"status":"success"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("启动探测: %d %v", resp.StatusCode, started)
+	}
+	if total := started["total"].(float64); total != count {
+		t.Fatalf("待探测数 = %v, want %d", total, count)
+	}
+
+	progress := waitProbeDone(t, func(method, path, tok, body string) (*http.Response, map[string]any) {
+		return embyCall(t, ts, method, path, tok, body)
+	}, token)
+
+	if aborted, _ := progress["aborted"].(bool); !aborted {
+		t.Errorf("应标记 aborted=true，实际 %v", progress["aborted"])
+	}
+	handled := progress["done"].(float64)
+	if handled >= count {
+		t.Errorf("熔断后应停止处理剩余条目，实际处理了 %v/%d", handled, count)
+	}
+	if got := progress["failed"].(float64); got < float64(maxProbeConsecutiveFailures) {
+		t.Errorf("失败数 = %v, 应至少达到阈值 %d", got, maxProbeConsecutiveFailures)
+	}
+	// 状态里要写清中止原因，便于管理端直接看到
+	errText, _ := progress["error"].(string)
+	if !strings.Contains(errText, "连续") || !strings.Contains(errText, "中止") {
+		t.Errorf("error 应说明熔断原因，实际: %q", errText)
+	}
+	// 失败样例要留存（供定位根因）
+	samples, _ := progress["failures"].([]any)
+	if len(samples) == 0 {
+		t.Error("应留存失败样例")
+	} else if !strings.Contains(samples[0].(string), "refused") && !strings.Contains(samples[0].(string), "失败") {
+		t.Logf("失败样例（确认含可读原因）: %v", samples[0])
+	}
+
+	// 熔断后仍可重新发起（不是永久锁死）
+	resp2, _ := embyCall(t, ts, "POST", "/api/admin/probe/media", token, `{"only_missing":true,"status":"success"}`)
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Errorf("熔断后应能再次发起探测，实际 %d", resp2.StatusCode)
+	}
+	waitProbeDone(t, func(method, path, tok, body string) (*http.Response, map[string]any) {
+		return embyCall(t, ts, method, path, tok, body)
+	}, token)
+}
+
+// TestProbeFailureLogged 确认失败会落日志：失败详情不能只回给 API，
+// 否则生产上出现大批失败时运维在服务日志里什么也看不到。
+// 通过注入自定义 slog handler 捕获日志行来验证。
+func TestProbeFailureLogged(t *testing.T) {
+	if _, err := probe.LookPath(""); err != nil {
+		t.Skipf("环境无 ffprobe: %v", err)
+	}
+	var mu sync.Mutex
+	var lines []string
+	previous := slog.Default()
+	slog.SetDefault(slog.New(&captureHandler{mu: &mu, lines: &lines}))
+	defer slog.SetDefault(previous)
+
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "bad.strm"), broken.URL+"/nope.mp4\n")
+	writeFile(t, filepath.Join(root, "bad.nfo"), "<movie><title>坏片</title></movie>\n")
+
+	_, ts, token := newProbeTestApp(t, root)
+	embyCall(t, ts, "POST", "/api/admin/probe/media", token, `{"only_missing":true}`)
+	waitProbeDone(t, func(method, path, tok, body string) (*http.Response, map[string]any) {
+		return embyCall(t, ts, method, path, tok, body)
+	}, token)
+
+	mu.Lock()
+	joined := strings.Join(lines, "\n")
+	mu.Unlock()
+	if !strings.Contains(joined, "媒体信息探测失败") {
+		t.Errorf("失败未落日志。捕获到的日志:\n%s", joined)
+	}
+	// 日志必须带可定位的信息：条目标题与原因
+	for _, want := range []string{"坏片", "reason"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("失败日志缺少 %q:\n%s", want, joined)
+		}
+	}
+}
+
+// captureHandler 把 slog 输出收进内存，供断言检查。
+type captureHandler struct {
+	mu    *sync.Mutex
+	lines *[]string
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, record slog.Record) error {
+	var sb strings.Builder
+	sb.WriteString(record.Message)
+	record.Attrs(func(attr slog.Attr) bool {
+		sb.WriteString(" " + attr.Key + "=" + attr.Value.String())
+		return true
+	})
+	h.mu.Lock()
+	*h.lines = append(*h.lines, sb.String())
+	h.mu.Unlock()
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }

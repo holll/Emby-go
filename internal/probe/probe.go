@@ -157,6 +157,30 @@ type Result struct {
 	Raw  []byte
 }
 
+// Verify 运行 ffprobe -version 确认它真的能执行。
+//
+// 探测任务启动前调用：早失败早报错。否则一旦 ffprobe 本身不可用（未安装、无执行
+// 权限、架构不匹配、被同名程序占用），会对成千上万条目逐个重试同一个环境问题，
+// 既浪费一轮全量扫描的时间，又只留下一堆难以归因的失败记录。
+func Verify(ctx context.Context, ffprobePath string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, ffprobePath, "-version")
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("ffprobe 无法执行（%s）: %s", ffprobePath, firstLine(message))
+	}
+	if !strings.Contains(stdout.String(), "ffprobe version") {
+		return fmt.Errorf("ffprobe 输出异常（%s）: %s", ffprobePath, firstLine(strings.TrimSpace(stdout.String())))
+	}
+	return nil
+}
+
 // Run 探测 target（本地路径或 http(s) 直链）。timeout<=0 时用 90 秒兜底。
 // 失败时返回的 error 带 ffprobe 的 stderr 摘要，便于在管理端定位（如链接失效返回 5XX）。
 func Run(ctx context.Context, ffprobePath, target string, timeout time.Duration) (Result, error) {
@@ -179,9 +203,15 @@ func Run(ctx context.Context, ffprobePath, target string, timeout time.Duration)
 		return Result{}, fmt.Errorf("探测超时（%s）", timeout)
 	}
 	if err != nil {
+		// 区分「ffprobe 根本没跑起来」与「跑起来了但报错」：两者的排查方向完全不同
+		// （前者是环境问题、需整体中止；后者是本条源的问题、跳过继续即可）。
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return Result{}, fmt.Errorf("ffprobe 无法启动（%s）: %s", ffprobePath, firstLine(err.Error()))
+		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
-			message = err.Error()
+			message = fmt.Sprintf("ffprobe 退出码 %d（无错误输出）", exitErr.ExitCode())
 		}
 		return Result{}, errors.New(firstLine(message))
 	}
