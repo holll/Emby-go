@@ -15,6 +15,7 @@ const icon = name => {
     archive: '<path d="M3 4h18v5H3z"/><path d="M5 9v11h14V9"/><path d="M10 13h4"/>',
     alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    probe: '<path d="M4 12h2.5l2-5.5 3 11 2.5-7 1.5 1.5H20"/>',
     play: '<path d="M8 5v14l11-7z"/>'
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
@@ -26,6 +27,15 @@ function toast(message, type = 'ok') {
   el.textContent = message;
   toasts.appendChild(el);
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 3200);
+}
+
+// debounce 返回防抖包装函数：连续触发时只在停止触发 wait 毫秒后执行一次（用于搜索输入等高频事件）。
+function debounce(fn, wait = 400) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, wait);
+  };
 }
 
 async function api(path, options = {}) {
@@ -204,6 +214,7 @@ function wallCard(item, ud) {
         <div class="wall-badges">${badges}</div>
         ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
         <div class="wall-actions">
+          <button class="icon-btn" data-probe="${item.id}" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
           <button class="icon-btn" data-reread="${item.id}" title="重读 .strm 与 NFO">${icon('refresh')}</button>
           <button class="icon-btn danger" data-delete="${item.id}" title="删除索引（不删文件）">${icon('trash')}</button>
         </div>
@@ -218,6 +229,7 @@ function wallCard(item, ud) {
 
 const WALL_PAGE_SIZE = 100;
 let wallState = null;
+let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索/筛选作废的过期响应
 
 async function pageItems() {
   const params = new URLSearchParams(location.search);
@@ -226,16 +238,28 @@ async function pageItems() {
   const sort = params.get('sort') || 'datecreated';
   const order = params.get('order') || (sort === 'title' ? 'asc' : 'desc');
   wallState = { status, search, sort, order, offset: 0, total: 0, loading: false, done: false, items: [], userdata: {} };
+  wallGen += 1;
 
   const pills = [['', '全部'], ['success', '可播放'], ['manual', '手动'], ['pending', '待补录'], ['incompatible', '不兼容']];
   const sorts = [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
   content.innerHTML = `
     <section class="panel">
-      <div class="panel-head"><h2>媒体墙</h2><span class="hint" id="wall-count" style="margin:0"></span></div>
+      <div class="panel-head">
+        <h2>媒体墙</h2>
+        <div class="panel-actions">
+          <span class="hint" id="wall-count" style="margin:0"></span>
+          <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
+        </div>
+      </div>
       <div class="filters">
         ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}">${esc(label)}</button>`).join('')}
         <input id="item-search" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}" style="min-width:200px">
         <select id="item-sort">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+      </div>
+      <div id="probe-progress" class="probe-progress" hidden>
+        <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
+        <div class="scan-progress-bar"><i id="probe-progress-fill"></i></div>
+        <small id="probe-progress-detail"></small>
       </div>
       <div class="wall" id="wall"></div>
       <div id="wall-empty"></div>
@@ -252,17 +276,14 @@ async function pageItems() {
     pageItems();
   }));
   const searchInput = document.querySelector('#item-search');
-  let timer;
-  searchInput.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      const q = new URLSearchParams(location.search);
-      const value = searchInput.value.trim();
-      if (value) q.set('search', value); else q.delete('search');
-      history.replaceState({}, '', '?' + q.toString());
-      pageItems();
-    }, 260);
-  });
+  searchInput.addEventListener('input', debounce(() => {
+    const q = new URLSearchParams(location.search);
+    const value = searchInput.value.trim();
+    if (value) q.set('search', value); else q.delete('search');
+    history.replaceState({}, '', '?' + q.toString());
+    wallState.search = value;
+    reloadWall();
+  }));
   const sortSelect = document.querySelector('#item-sort');
   if (sortSelect) sortSelect.addEventListener('change', () => {
     const q = new URLSearchParams(location.search);
@@ -271,8 +292,16 @@ async function pageItems() {
     history.replaceState({}, '', '?' + q.toString());
     pageItems();
   });
+  const probeButton = document.querySelector('#probe-media');
+  if (probeButton) probeButton.addEventListener('click', runProbeAll);
   // 事件委托：卡片按页追加，统一在容器上处理，避免每页重新绑定。
   document.querySelector('#wall').addEventListener('click', async event => {
+    const probe = event.target.closest('[data-probe]');
+    if (probe) {
+      event.stopPropagation();
+      probeItem(probe.dataset.probe);
+      return;
+    }
     const reread = event.target.closest('[data-reread]');
     if (reread) {
       event.stopPropagation();
@@ -308,6 +337,25 @@ async function pageItems() {
   await loadWallPage();
 }
 
+// reloadWall 只重置列表并重新拉取，保留筛选栏与搜索框焦点（搜索输入走此路径，避免整页重渲染打断输入）。
+function reloadWall() {
+  if (!wallState) return;
+  wallGen += 1; // 作废尚未返回的旧请求
+  wallState.offset = 0;
+  wallState.total = 0;
+  wallState.items = [];
+  wallState.userdata = {};
+  wallState.done = false;
+  wallState.loading = false;
+  const wall = document.querySelector('#wall');
+  if (wall) wall.innerHTML = '';
+  const emptyBox = document.querySelector('#wall-empty');
+  if (emptyBox) emptyBox.innerHTML = '';
+  const more = document.querySelector('#wall-more');
+  if (more) more.textContent = '';
+  loadWallPage();
+}
+
 // wallMaybeLoadMore 在哨兵接近视口时加载下一页（无限滚动）。
 function wallMaybeLoadMore() {
   if (!wallState || wallState.loading || wallState.done) return;
@@ -319,6 +367,7 @@ function wallMaybeLoadMore() {
 async function loadWallPage() {
   if (!wallState || wallState.loading || wallState.done) return;
   wallState.loading = true;
+  const gen = wallGen;
   const more = document.querySelector('#wall-more');
   if (more) more.textContent = '加载中…';
   try {
@@ -326,6 +375,7 @@ async function loadWallPage() {
     if (wallState.status) query.set('status', wallState.status);
     if (wallState.search) query.set('search', wallState.search);
     const data = await api('/items?' + query.toString());
+    if (!wallState || wallGen !== gen) return; // 已被新的搜索/筛选作废，丢弃过期响应
     wallState.total = data.total;
     Object.assign(wallState.userdata, data.userdata || {});
     const items = data.items || [];
@@ -346,11 +396,14 @@ async function loadWallPage() {
     }
     if (more) more.textContent = wallState.done && data.total > 0 ? `已全部加载（共 ${data.total} 条）` : '';
   } catch (error) {
+    if (!wallState || wallGen !== gen) return;
     if (more) more.textContent = '加载失败：' + (error.message || error);
   } finally {
-    wallState.loading = false;
-    // 首屏未填满时继续加载，直到撑满视口。
-    wallMaybeLoadMore();
+    if (wallState && wallGen === gen) {
+      wallState.loading = false;
+      // 首屏未填满时继续加载，直到撑满视口。
+      wallMaybeLoadMore();
+    }
   }
 }
 
@@ -598,6 +651,118 @@ async function page(name) {
   }
 }
 
+/* ------------------------------------------------------------ 媒体信息探测 */
+// 与扫库相互独立：探测只读 .strm 直链、跑 ffprobe、把结果写回 NFO，不写索引库。
+let probeTimer = null;
+
+function probeEls() {
+  return {
+    panel: document.querySelector('#probe-progress'),
+    title: document.querySelector('#probe-progress-title'),
+    count: document.querySelector('#probe-progress-count'),
+    fill: document.querySelector('#probe-progress-fill'),
+    detail: document.querySelector('#probe-progress-detail')
+  };
+}
+
+function renderProbeProgress(p) {
+  const el = probeEls();
+  if (!el.panel) return; // 不在媒体墙页面时只保持轮询，不渲染
+  if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
+  el.panel.hidden = false;
+  el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : '探测完成');
+  const total = p.total || 0;
+  const done = p.done || 0;
+  el.count.textContent = total ? `${done}/${total}` : String(done);
+  el.fill.classList.toggle('is-indeterminate', !total && p.running);
+  el.fill.style.width = total ? `${Math.min(100, Math.round(done / total * 100))}%` : '100%';
+  const parts = [];
+  if (p.success) parts.push(`成功 ${p.success}`);
+  if (p.skipped) parts.push(`跳过 ${p.skipped}`);
+  if (p.failed) parts.push(`失败 ${p.failed}`);
+  if (p.running && p.current) parts.push(`当前 ${p.current}`);
+  if (p.error) parts.push(`错误：${p.error}`);
+  el.detail.textContent = parts.join(' · ') || (p.running ? '正在读取源信息…' : '');
+}
+
+function stopProbePolling() { if (probeTimer) { clearInterval(probeTimer); probeTimer = null; } }
+
+function setProbeButton(busy) {
+  const btn = document.querySelector('#probe-media');
+  if (!btn) return;
+  btn.disabled = busy;
+  const span = btn.querySelector('span');
+  if (span) span.textContent = busy ? '探测中…' : '探测媒体信息';
+}
+
+function startProbePolling() {
+  if (probeTimer) return;
+  probeTimer = setInterval(async () => {
+    let p = null;
+    try { p = await api('/probe/media/progress'); } catch { /* ignore */ }
+    if (p) renderProbeProgress(p);
+    if (!p || !p.running) {
+      stopProbePolling();
+      setProbeButton(false);
+      if (p) {
+        if (p.cancelled) toast(`探测已中止：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`);
+        else toast(`探测完成：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`, p.failed ? 'error' : 'ok');
+        if (p.failures && p.failures.length) toast(`失败示例：${p.failures[0]}`, 'error');
+        // 自动收起，避免长期占位；有失败时保留，方便对照失败条数。
+        if (!p.failed) {
+          const el = probeEls();
+          setTimeout(() => { if (el.panel && !probeTimer) el.panel.hidden = true; }, 8000);
+        }
+      }
+    }
+  }, 1000);
+}
+
+async function runProbeAll() {
+  setProbeButton(true);
+  const el = probeEls();
+  if (el.panel) el.panel.hidden = false;
+  if (el.title) el.title.textContent = '正在启动探测…';
+  try {
+    // 默认只补缺：已含 streamdetails 的条目跳过，避免每次全库重探（远程探测很慢）。
+    const r = await api('/probe/media', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
+    if (!r.total) {
+      toast(r.message || '没有可探测的影片');
+      setProbeButton(false);
+      if (el.panel) el.panel.hidden = true;
+      return;
+    }
+    toast(`开始探测 ${r.total} 条影片`);
+    startProbePolling();
+  } catch (e) {
+    toast(e.message, 'error');
+    setProbeButton(false);
+    if (el.panel) el.panel.hidden = true;
+  }
+}
+
+async function probeItem(id) {
+  toast('正在探测…');
+  try {
+    const r = await api('/items/' + id + '/probe', { method: 'POST' });
+    toast(probeSummary(r.info), 'ok');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// probeSummary 把探测结果压成一行可读摘要，作为单条探测的即时反馈。
+function probeSummary(info) {
+  if (!info) return '探测完成';
+  const video = info.video || {};
+  const parts = [];
+  if (video.width && video.height) parts.push(`${video.width}x${video.height}`);
+  if (video.codec) parts.push(String(video.codec).toUpperCase());
+  if (video.profile) parts.push(video.profile);
+  if (video.framerate) parts.push(`${Number(video.framerate).toFixed(2)}fps`);
+  const bitrate = info.bitrate || video.bitrate;
+  if (bitrate) parts.push(`${(bitrate / 1000000).toFixed(2)} Mbps`);
+  return parts.length ? '已写入 NFO：' + parts.join(' · ') : '已写入 NFO';
+}
+
 /* ---------------------------------------------------------------- 扫描进度 */
 const scanPanel = document.querySelector('#scan-progress');
 const scanTitle = document.querySelector('#scan-progress-title');
@@ -698,6 +863,15 @@ async function boot() {
       const btn = document.querySelector('#scan');
       btn.disabled = true;
       btn.querySelector('span').textContent = '扫描中…';
+    }
+  } catch { /* ignore */ }
+  // 探测任务在服务端异步执行，切页/刷新后同样要恢复进度显示。
+  try {
+    const p = await api('/probe/media/progress');
+    if (p && p.running) {
+      renderProbeProgress(p);
+      startProbePolling();
+      setProbeButton(true);
     }
   } catch { /* ignore */ }
   const initial = location.hash.replace('#', '');

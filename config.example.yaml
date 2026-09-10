@@ -34,3 +34,24 @@ redis_db: 0
 #   - name: "公网"
 #     url: "https://emby.example.com/emby"
 server_domains: []
+
+# ---- 媒体信息探测（与扫库相互独立）----
+# 媒体墙「探测媒体信息」按钮 / POST /api/admin/probe/media 调用系统 ffprobe 读取
+# 真实码率、分辨率、编码等参数。
+#
+# 探测会写入两类产物：
+#   1) 影片 NFO 的 <fileinfo>：<size>/<probeversion>/<probeurl>/<streamdetails>，
+#      是 Emby 客户端读到媒体信息的地方；
+#   2) .strm 同目录的 mediainfo.json：ffprobe 的完整原始输出 + 探测版本 + 直链。
+#
+# 第 2 项是「不重复探测」的关键：它保存了未经裁剪的原始数据，
+# 因此已探测过的条目在全库探测中只读文件、不发 ffprobe 请求；
+# 将来探测新增字段时也能直接从原始数据本地回填，无需重新联网。
+# 分集影片（CD1/CD2…）的每个 .strm 各自探测、各自生成一份 mediainfo.json；
+# 同目录只有一个 .strm 时为 mediainfo.json，多个时为 <文件名>.mediainfo.json 以免互相覆盖。
+# 探测不写索引库；NFO 与 mediainfo.json 是数据真源，参数在下一次扫库时被带回库中。
+# 前置条件：影片已有 NFO（无 NFO 的待补录条目会被跳过）。
+ffprobe_path: ""          # ffprobe 可执行文件路径；留空则从 PATH 查找
+probe_timeout_seconds: 90 # 单条探测超时（秒）：远程直链建连+读取较慢，建议不低于 30
+probe_concurrency: 2      # 并发探测数（上限 8）：过高会拖慢网盘/代理，反而整体变慢
+

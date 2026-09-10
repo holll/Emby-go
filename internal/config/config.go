@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,7 +28,39 @@ type Config struct {
 	RedisDB       int            `yaml:"redis_db"`
 	ServerDomains []ServerDomain `yaml:"server_domains"`
 
+	// 媒体信息探测（独立于扫库）：调用系统 ffprobe 读取真实技术参数并写回 NFO。
+	FFProbePath      string `yaml:"ffprobe_path"`          // ffprobe 可执行文件路径；留空则从 PATH 查找
+	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测超时（秒），默认 90
+	ProbeConcurrency int    `yaml:"probe_concurrency"`     // 并发探测数，默认 2
+
 	path string // 配置文件来源路径（非 yaml 字段），供写回使用
+}
+
+// 探测相关默认值：超时给足远程直链建连+读取的时间；并发压低避免把网盘/代理打爆。
+const (
+	defaultProbeTimeoutSec  = 90
+	defaultProbeConcurrency = 2
+)
+
+// ProbeTimeout 返回单条探测超时。
+func (c Config) ProbeTimeout() time.Duration {
+	seconds := c.ProbeTimeoutSec
+	if seconds <= 0 {
+		seconds = defaultProbeTimeoutSec
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// ProbeWorkers 返回并发探测协程数，上限 8（再高对远程源没有收益，只会互相拖慢）。
+func (c Config) ProbeWorkers() int {
+	workers := c.ProbeConcurrency
+	if workers <= 0 {
+		return defaultProbeConcurrency
+	}
+	if workers > 8 {
+		return 8
+	}
+	return workers
 }
 
 // Addr 返回 http 监听地址（":"+port；默认 18080）。

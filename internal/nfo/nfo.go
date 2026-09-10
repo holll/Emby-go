@@ -1,8 +1,11 @@
 package nfo
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -24,9 +27,20 @@ type UniqueID struct {
 }
 
 // VideoStream / AudioStream 对应 <fileinfo><streamdetails> 下的音视频轨信息。
+// Profile/Level/PixelFormat/BitDepth/RefFrames 等在 Kodi 之外的实现里用于还原
+// Emby MediaStream 的技术参数，缺失时留空/为零即可。
 type VideoStream struct {
 	Codec           string  `xml:"codec"`
 	CodecTag        string  `xml:"micodec"`
+	Profile         string  `xml:"profile"`
+	Level           int     `xml:"level"`
+	PixelFormat     string  `xml:"pixelformat"`
+	BitDepth        int     `xml:"bitdepth"`
+	RefFrames       int     `xml:"reframes"`
+	ColorTransfer   string  `xml:"colortransfer"`
+	ColorPrimaries  string  `xml:"colorprimaries"`
+	ColorSpace      string  `xml:"colorspace"`
+	ColorRange      string  `xml:"colorrange"`
 	Bitrate         int64   `xml:"bitrate"`
 	Width           int     `xml:"width"`
 	Height          int     `xml:"height"`
@@ -42,14 +56,16 @@ type VideoStream struct {
 
 // AudioStream 对应 <audio> 音轨信息。
 type AudioStream struct {
-	Codec        string `xml:"codec"`
-	CodecTag     string `xml:"micodec"`
-	Bitrate      int64  `xml:"bitrate"`
-	Language     string `xml:"language"`
-	Channels     int    `xml:"channels"`
-	SamplingRate int    `xml:"samplingrate"`
-	Default      string `xml:"default"`
-	Forced       string `xml:"forced"`
+	Codec         string `xml:"codec"`
+	CodecTag      string `xml:"micodec"`
+	Profile       string `xml:"profile"`
+	ChannelLayout string `xml:"channellayout"`
+	Bitrate       int64  `xml:"bitrate"`
+	Language      string `xml:"language"`
+	Channels      int    `xml:"channels"`
+	SamplingRate  int    `xml:"samplingrate"`
+	Default       string `xml:"default"`
+	Forced        string `xml:"forced"`
 }
 
 type StreamDetails struct {
@@ -58,7 +74,27 @@ type StreamDetails struct {
 }
 
 type FileInfo struct {
+	// Size 是媒体文件的字节数，对应 Emby 的 BaseItemDto/MediaSourceInfo.Size。
+	// Kodi/Emby 自身的 NFO 都不写这一项（Emby 把体积存在自己的库里），
+	// 本服务以 NFO 为真源，故在 <fileinfo> 下用 <size> 承载；对其它工具是未知元素，会被忽略。
+	Size int64 `xml:"size,omitempty"`
+	// ProbeVersion 记录本服务写入该 <fileinfo> 时的探测版本。
+	// 用于在全库探测时精确判定「是否已探测过」——不能只看 <streamdetails> 是否存在，
+	// 因为刮削器也会写 streamdetails（且常常不完整），那样会把该补齐的条目永久跳过。
+	// 0（缺省）表示未经本服务探测；探测逻辑新增字段时提升版本即可让旧条目自动重探。
+	ProbeVersion int `xml:"probeversion,omitempty"`
+	// ProbeURL 记录探测时的直链。.strm 换源后（换片源、修失效链接）旧参数即失效，
+	// 必须凭它识别出来并重探，否则会一直沿用错误的分辨率/码率。
+	// 空值表示该条目由旧版本探测写入、未记录直链，此时仅凭 ProbeVersion 判定。
+	ProbeURL      string         `xml:"probeurl,omitempty"`
 	StreamDetails *StreamDetails `xml:"streamdetails,omitempty"`
+}
+
+// FileInfoMeta 写入 <fileinfo> 的探测元信息。
+type FileInfoMeta struct {
+	Size         int64
+	ProbeVersion int
+	ProbeURL     string
 }
 
 type MovieMeta struct {
@@ -179,6 +215,132 @@ func FromFields(title string, year int) MovieMeta { return MovieMeta{Title: titl
 func SaveAtomic(path string, m MovieMeta) error {
 	tmp := path + ".tmp"
 	if err := Save(tmp, m); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// SaveFileInfo 写入 NFO 的 <fileinfo> 块（含媒体体积、探测版本与 <streamdetails>）；
+// 已存在 <fileinfo> 则整块替换，不存在则插到 </movie> 之前。
+//
+// 这里刻意不做「读成 MovieMeta → 整体重写」：NFO 是元数据真源，整文件重写会把
+// 结构体未建模的元素（刮削器写入的扩展标签、属性等）静默丢掉。
+// 因此只做块级替换，其余内容字节级保留（含文件头 BOM 与原有缩进风格）。
+func SaveFileInfo(path string, meta FileInfoMeta, details *StreamDetails) error {
+	if details == nil {
+		return errors.New("nfo: 流信息为空")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	block := renderFileInfo(meta, details)
+	text := string(raw)
+	if start := strings.Index(text, "<fileinfo"); start >= 0 {
+		if rel := strings.Index(text[start:], "</fileinfo>"); rel >= 0 {
+			end := start + rel + len("</fileinfo>")
+			// 匹配从 "<fileinfo" 起，不含它所在行的缩进；若不一并吃掉，
+			// 新块自带的缩进会与残留缩进叠加（<fileinfo> 被顶到 4 空格）。
+			lineStart := start
+			for lineStart > 0 && (text[lineStart-1] == ' ' || text[lineStart-1] == '\t') {
+				lineStart--
+			}
+			return writeFileAtomic(path, text[:lineStart]+block+text[end:])
+		}
+	}
+	index := strings.LastIndex(text, "</movie>")
+	if index < 0 {
+		return errors.New("nfo: 未找到 </movie>，无法写入流信息")
+	}
+	return writeFileAtomic(path, text[:index]+block+"\n"+text[index:])
+}
+
+// renderFileInfo 按 Metatube/Kodi 的既有缩进风格（2 空格逐层）渲染 <fileinfo> 块。
+func renderFileInfo(meta FileInfoMeta, details *StreamDetails) string {
+	var builder strings.Builder
+	builder.WriteString("  <fileinfo>\n")
+	writeNumber(&builder, 4, "size", meta.Size)
+	writeNumber(&builder, 4, "probeversion", int64(meta.ProbeVersion))
+	writeValue(&builder, 4, "probeurl", meta.ProbeURL)
+	builder.WriteString("    <streamdetails>\n")
+	if video := details.Video; video != nil {
+		builder.WriteString("      <video>\n")
+		writeValue(&builder, 8, "codec", video.Codec)
+		writeValue(&builder, 8, "micodec", video.CodecTag)
+		writeValue(&builder, 8, "profile", video.Profile)
+		writeNumber(&builder, 8, "level", int64(video.Level))
+		writeValue(&builder, 8, "pixelformat", video.PixelFormat)
+		writeNumber(&builder, 8, "bitdepth", int64(video.BitDepth))
+		writeNumber(&builder, 8, "reframes", int64(video.RefFrames))
+		writeValue(&builder, 8, "colortransfer", video.ColorTransfer)
+		writeValue(&builder, 8, "colorprimaries", video.ColorPrimaries)
+		writeValue(&builder, 8, "colorspace", video.ColorSpace)
+		writeValue(&builder, 8, "colorrange", video.ColorRange)
+		writeNumber(&builder, 8, "bitrate", video.Bitrate)
+		writeNumber(&builder, 8, "width", int64(video.Width))
+		writeNumber(&builder, 8, "height", int64(video.Height))
+		writeValue(&builder, 8, "aspectratio", video.AspectRatio)
+		writeValue(&builder, 8, "aspect", video.AspectRatio)
+		writeDecimal(&builder, 8, "framerate", video.Framerate)
+		writeValue(&builder, 8, "language", video.Language)
+		writeValue(&builder, 8, "scantype", video.ScanType)
+		writeValue(&builder, 8, "default", video.Default)
+		writeValue(&builder, 8, "forced", video.Forced)
+		writeNumber(&builder, 8, "duration", int64(video.DurationMinutes))
+		writeNumber(&builder, 8, "durationinseconds", video.DurationSeconds)
+		builder.WriteString("      </video>\n")
+	}
+	if audio := details.Audio; audio != nil {
+		builder.WriteString("      <audio>\n")
+		writeValue(&builder, 8, "codec", audio.Codec)
+		writeValue(&builder, 8, "micodec", audio.CodecTag)
+		writeValue(&builder, 8, "profile", audio.Profile)
+		writeNumber(&builder, 8, "bitrate", audio.Bitrate)
+		writeValue(&builder, 8, "language", audio.Language)
+		writeValue(&builder, 8, "channellayout", audio.ChannelLayout)
+		writeNumber(&builder, 8, "channels", int64(audio.Channels))
+		writeNumber(&builder, 8, "samplingrate", int64(audio.SamplingRate))
+		writeValue(&builder, 8, "default", audio.Default)
+		writeValue(&builder, 8, "forced", audio.Forced)
+		builder.WriteString("      </audio>\n")
+	}
+	builder.WriteString("    </streamdetails>\n  </fileinfo>")
+	return builder.String()
+}
+
+// writeValue 写入字符串元素；空值跳过（不写空标签，保持与刮削器输出一致）。
+func writeValue(builder *strings.Builder, indent int, name, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	var escaped bytes.Buffer
+	_ = xml.EscapeText(&escaped, []byte(value))
+	builder.WriteString(strings.Repeat(" ", indent))
+	builder.WriteString("<" + name + ">" + escaped.String() + "</" + name + ">\n")
+}
+
+// writeNumber 写入整数元素；非正值跳过（0 会被误读为真实取值）。
+func writeNumber(builder *strings.Builder, indent int, name string, value int64) {
+	if value <= 0 {
+		return
+	}
+	builder.WriteString(strings.Repeat(" ", indent))
+	builder.WriteString("<" + name + ">" + strconv.FormatInt(value, 10) + "</" + name + ">\n")
+}
+
+// writeDecimal 写入小数元素（帧率保留 5 位，与 Metatube 的 29.97003 风格一致）。
+func writeDecimal(builder *strings.Builder, indent int, name string, value float64) {
+	if value <= 0 {
+		return
+	}
+	builder.WriteString(strings.Repeat(" ", indent))
+	builder.WriteString("<" + name + ">" + strconv.FormatFloat(value, 'f', 5, 64) + "</" + name + ">\n")
+}
+
+// writeFileAtomic 先写临时文件再改名，避免中途失败留下半截 NFO。
+func writeFileAtomic(path string, content string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -43,6 +44,15 @@ type App struct {
 	scanMu     sync.RWMutex
 	scanStatus scanStatus
 
+	// 媒体信息探测任务状态。probeCtx 挂在 rootCtx 之下：
+	// 任务在 goroutine 里跑，必须用常驻 context——用请求 context 会在 handler 返回时被取消。
+	probeTaskMu sync.RWMutex
+	probeStatus probeStatus
+	probeCtx    context.Context
+	probeCancel context.CancelFunc
+	rootCtx     context.Context
+	rootCancel  context.CancelFunc
+
 	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
 	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
 	probeMu   sync.Mutex
@@ -75,6 +85,7 @@ type tagEntry struct {
 }
 type nfoCacheEntry struct {
 	streams []gin.H
+	size    int64 // NFO <fileinfo><size>：媒体文件字节数（探测写入）
 	ts      time.Time
 	neg     bool
 }
@@ -98,6 +109,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		return nil, err
 	}
 	a := &App{cfg: cfg, db: db, cache: cacheStore, tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{})}
+	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
 		a.serverName = "Emby-go"
@@ -156,7 +168,16 @@ func requestContentLogger() gin.HandlerFunc {
 	}
 }
 
-func (a *App) Close()                { a.db.Close() }
+// Close 先中止在跑的探测任务再关库，避免后台 goroutine 继续写 NFO / 访问已关闭的 DB。
+func (a *App) Close() {
+	a.probeTaskMu.Lock()
+	if a.probeCancel != nil {
+		a.probeCancel()
+	}
+	a.probeTaskMu.Unlock()
+	a.rootCancel()
+	a.db.Close()
+}
 func (a *App) Handler() http.Handler { return a.router }
 
 func (a *App) routes() {
@@ -182,6 +203,11 @@ func (a *App) routes() {
 	admin.POST("/scan", a.adminScan)
 	admin.POST("/tasks/scan", a.adminScan)
 	admin.GET("/scan/progress", a.adminScanProgress)
+	// 媒体信息探测（与扫库相互独立）。路径用 probe/media 以区别于已有的
+	// /probe——后者记录客户端调用过的未实现端点，语义完全不同。
+	admin.POST("/probe/media", a.adminProbeMedia)
+	admin.GET("/probe/media/progress", a.adminProbeMediaProgress)
+	admin.POST("/probe/media/cancel", a.adminProbeMediaCancel)
 	admin.POST("/reindex", a.adminReindex)
 	admin.GET("/items", a.adminItems)
 	admin.DELETE("/items/:id", a.adminDelete)
@@ -196,6 +222,7 @@ func (a *App) routes() {
 	admin.POST("/items/manual", a.adminManual)
 	admin.PUT("/items/:id", a.adminEdit)
 	admin.POST("/items/:id/reread", a.adminReread)
+	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
 	admin.POST("/items/:id/images/:kind", a.adminImage)
 
 	// Emby 兼容 API：裸前缀与 /emby 前缀共用同一注册表。

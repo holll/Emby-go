@@ -666,9 +666,13 @@ func (a *App) latest(c *gin.Context) {
 	}
 	dataMap, _ := a.db.DataFor(movieIDs(movies))
 	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
+	// Latest 返回裸数组（实测真实 Emby 不是 {Items:...} 包裹），同样支持 ?Fields=。
+	fields := requestedFields(c)
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
-		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
+		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
+		a.applyItemFields(item, m, fields, c)
+		out = append(out, item)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -792,13 +796,15 @@ func (a *App) itemsQuery(c *gin.Context) {
 	unplayed := strings.Contains(filterLower, "isunplayed")
 	favorite := strings.Contains(filterLower, "isfavorite")
 
-	// 响应体是否带 MediaSources 会影响内容，须纳入缓存键，避免不同 Fields 请求互相串缓存。
-	fieldsMark := ""
-	if strings.Contains(strings.ToLower(c.Query("Fields")), "mediasources") {
-		fieldsMark = "src"
-	}
+	// Fields 决定响应体内容，须纳入缓存键，否则不同 Fields 的请求会互相串缓存。
+	fields := requestedFields(c)
 	term, years := c.Query("SearchTerm"), c.Query("Years")
-	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fieldsMark, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	origin := ""
+	if fields.mediaSources {
+		// MediaSources 内含绝对流地址，必须按请求来源分桶缓存。
+		origin = streamOrigin(c)
+	}
+	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), origin, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -811,19 +817,97 @@ func (a *App) itemsQuery(c *gin.Context) {
 	a.respondItems(c, ms, total, start, key)
 }
 
+// itemFields 客户端通过 ?Fields= 显式索取的可选字段集合。
+// 真实 Emby 的列表接口默认不返回这些内容，只有点名要才给；
+// 详情接口则恒返回（见 item handler）。
+type itemFields struct {
+	mediaSources bool
+	dateCreated  bool
+	path         bool
+}
+
+// key 返回可用于缓存键的稳定标识。
+func (f itemFields) key() string {
+	mark := make([]string, 0, 3)
+	if f.mediaSources {
+		mark = append(mark, "src")
+	}
+	if f.dateCreated {
+		mark = append(mark, "date")
+	}
+	if f.path {
+		mark = append(mark, "path")
+	}
+	return strings.Join(mark, "+")
+}
+
+// requestedFields 解析 ?Fields=a,b,c（大小写不敏感）。
+func requestedFields(c *gin.Context) itemFields {
+	raw := strings.ToLower(c.Query("Fields"))
+	has := func(name string) bool {
+		for _, part := range strings.Split(raw, ",") {
+			if strings.TrimSpace(part) == name {
+				return true
+			}
+		}
+		return false
+	}
+	return itemFields{
+		mediaSources: has("mediasources"),
+		dateCreated:  has("datecreated"),
+		path:         has("path"),
+	}
+}
+
+// applyItemFields 按 Fields 补充真实 Emby 需要显式索取才返回的条目字段。
+// 实测：Fields=MediaSources 时条目还会额外多出顶层 Bitrate/Container/Size
+// （从首个 MediaSource 复制的便捷字段），客户端列表页靠它显示码率与体积。
+func (a *App) applyItemFields(item gin.H, m store.Movie, fields itemFields, c *gin.Context) {
+	if fields.path {
+		item["Path"] = m.SourcePath
+	}
+	if fields.dateCreated {
+		item["DateCreated"] = embyTime(m.CreatedAt)
+		item["DateModified"] = embyTime(m.UpdatedAt)
+	}
+	if !fields.mediaSources {
+		return
+	}
+	sources := []gin.H{a.mediaSource(m, c)}
+	item["MediaSources"] = sources
+	source := sources[0]
+	for _, name := range []string{"Bitrate", "Container", "Size"} {
+		if value, ok := source[name]; ok {
+			item[name] = value
+		}
+	}
+}
+
+// embyTime 把内部存储的 RFC3339 时间转换为 Emby 契约的 7 位小数 UTC 格式
+// （如 2026-03-09T11:35:44.0000000Z）。解析失败时原样返回，避免因格式问题丢字段。
+func embyTime(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return raw
+	}
+	return parsed.UTC().Format("2006-01-02T15:04:05.0000000Z")
+}
+
 // respondItems 统一输出影片分页结果。cacheKey 非空时写入 15s 缓存（供 itemsQuery 命中复用）。
 // UserData 与演员表按整页批量取回，避免逐片 N+1 查询。
 func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, cacheKey string) {
-	wantSources := strings.Contains(strings.ToLower(c.Query("Fields")), "mediasources")
+	fields := requestedFields(c)
 	ids := movieIDs(ms)
 	dataMap, _ := a.db.DataFor(ids)
 	actorMap, _ := a.db.ActorsFor(ids)
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
 		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
-		if wantSources {
-			item["MediaSources"] = []gin.H{a.mediaSource(m, c)}
-		}
+		a.applyItemFields(item, m, fields, c)
 		out = append(out, item)
 	}
 	v := gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start}
@@ -1034,7 +1118,8 @@ func (a *App) item(c *gin.Context) {
 		c.JSON(http.StatusOK, a.collectionFolderDTO(lib))
 		return
 	}
-	key := "item:" + a.db.Version("g:version") + ":" + rawID
+	// 详情恒含 MediaSources（绝对流地址），缓存键必须带请求来源。
+	key := "item:" + a.db.Version("g:version") + ":" + streamOrigin(c) + ":" + rawID
 	if b, ok := a.cache.Get(key); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -1045,7 +1130,63 @@ func (a *App) item(c *gin.Context) {
 		return
 	}
 	d, _ := a.db.Data(id)
-	b, _ := json.Marshal(a.embyItem(m, d))
+	b, _ := json.Marshal(a.embyItemDetail(m, d, c))
 	a.cache.Set(key, b, time.Hour)
 	c.Data(200, "application/json", b)
+}
+
+// embyItemDetail 在列表 DTO 之上补齐详情接口恒返回的字段。
+// 实测真实 Emby 详情（/Users/{uid}/Items/{id}）无需 Fields 即包含：
+// DateCreated/DateModified、Path/FileName、MediaSources、顶层 MediaStreams，
+// 以及从媒体源复制出来的 Bitrate/Container/Size/Width/Height/PartCount/Chapters。
+// 缺了它们客户端详情页会显示不出入库时间、文件路径与媒体参数。
+func (a *App) embyItemDetail(m store.Movie, d store.UserData, c *gin.Context) gin.H {
+	item := a.embyItem(m, d)
+	item["Path"] = m.SourcePath
+	if name := itemFileName(m); name != "" && name != "." {
+		item["FileName"] = name
+	}
+	if created := embyTime(m.CreatedAt); created != "" {
+		item["DateCreated"] = created
+		// 未单独记录修改时间时回退入库时间，与 Emby 对未改动条目的取值一致。
+		modified := embyTime(m.UpdatedAt)
+		if modified == "" {
+			modified = created
+		}
+		item["DateModified"] = modified
+	}
+	if _, ok := item["PartCount"]; !ok {
+		item["PartCount"] = 1
+	}
+
+	source := a.mediaSourceFor(m, strconv.FormatInt(m.ID, 10), m.SourcePath, c)
+	item["MediaSources"] = []gin.H{source}
+	// 顶层 MediaStreams 与首个媒体的 MediaStreams 同源（实测两者相等）。
+	streams, _ := source["MediaStreams"].([]gin.H)
+	item["MediaStreams"] = streams
+	for _, name := range []string{"Bitrate", "Container", "Size"} {
+		if value, ok := source[name]; ok {
+			item[name] = value
+		}
+	}
+	if width, height, ok := videoDimensions(streams); ok {
+		item["Width"] = width
+		item["Height"] = height
+	}
+	return item
+}
+
+// videoDimensions 取首个视频轨的像素尺寸，供条目顶层 Width/Height 使用。
+func videoDimensions(streams []gin.H) (int, int, bool) {
+	for _, stream := range streams {
+		if stream["Type"] != "Video" {
+			continue
+		}
+		width, okW := stream["Width"].(int)
+		height, okH := stream["Height"].(int)
+		if okW && okH && width > 0 && height > 0 {
+			return width, height, true
+		}
+	}
+	return 0, 0, false
 }

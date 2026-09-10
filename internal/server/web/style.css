@@ -425,6 +425,15 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
 .scan-progress small { color: var(--dim); font-size: 12px; }
 @keyframes scan-indeterminate { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
 
+/* 探测进度内嵌在媒体墙面板中（不复用左下角浮层，避免与扫描进度互相遮挡） */
+.probe-progress {
+  display: grid; gap: 8px;
+  margin-bottom: 14px; padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.probe-progress[hidden] { display: none; }
+
 /* 骨架 / 加载 */
 .skeleton { position: relative; overflow: hidden; background: var(--panel-2); border-radius: var(--radius-sm); }
 .skeleton::after {

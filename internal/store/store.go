@@ -60,6 +60,10 @@ type Movie struct {
 	LandscapePath   string
 	RuntimeSeconds  int64
 	AdditionalParts []string
+	// CreatedAt 首次入库时间（重扫不变），UpdatedAt 最近一次索引更新时间。
+	// 对应 Emby 的 DateCreated / DateModified；存储为 RFC3339 字符串。
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 type UserData struct {
@@ -402,7 +406,7 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 func movieScan(row *sql.Rows) (Movie, error) {
 	var m Movie
 	var genres, tags, studios, taglines, parts, mt string
-	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts)
+	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &m.CreatedAt, &m.UpdatedAt)
 	m.Genres = parseStrings(genres)
 	m.Tags = parseStrings(tags)
 	m.Studios = parseStrings(studios)
@@ -411,7 +415,7 @@ func movieScan(row *sql.Rows) (Movie, error) {
 	return m, err
 }
 
-const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,COALESCE(additional_parts,'[]')"
+const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,'')"
 
 func (s *Store) Movie(id int64) (Movie, error) {
 	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id=?", id)
@@ -442,6 +446,47 @@ func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc boo
 // 过滤与分页同在 SQL 层，避免先分页再过滤导致每页条数与总数失真。
 func (s *Store) SearchAdmin(term, status, protocol, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	return s.search(0, term, status, "", "", "", "", "", "", protocol, false, false, sortBy, desc, limit, offset)
+}
+
+// MoviesForProbe 返回媒体信息探测的候选影片，只挑有 NFO 的条目：
+// 探测结果写回 NFO，没有 NFO 的条目（pending）不在其职责范围内——写入 NFO 会让
+// 下次扫库把它误判为 success，破坏「扫描只负责入库」的边界。
+//
+// 同时取出 additional_parts：分集影片的每个分段都有自己的 .strm，
+// 需要逐个探测、各自留下 mediainfo.json，故调用方要能枚举出全部分段文件。
+// status 为空表示不限状态；limit<=0 表示不限条数。
+func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Movie, error) {
+	query := "SELECT id,library_id,nfo_path,source_path,title,COALESCE(additional_parts,'[]') FROM movies WHERE COALESCE(nfo_path,'')<>''"
+	args := []any{}
+	if libraryID > 0 {
+		query += " AND library_id=?"
+		args = append(args, libraryID)
+	}
+	if status != "" {
+		query += " AND status=?"
+		args = append(args, status)
+	}
+	query += " ORDER BY id"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movie
+	for rows.Next() {
+		var m Movie
+		var parts string
+		if err := rows.Scan(&m.ID, &m.LibraryID, &m.NFOPath, &m.SourcePath, &m.Title, &parts); err != nil {
+			return nil, err
+		}
+		m.AdditionalParts = parseStrings(parts)
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
