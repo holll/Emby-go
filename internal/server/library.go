@@ -13,9 +13,41 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/avatar"
 	"emby-go/internal/imageutil"
 	"emby-go/internal/store"
 )
+
+// settingAvatarsDir 演员头像目录的设置键；未设置时用 <db 同级>/avatars（需求 A4 #20）。
+const settingAvatarsDir = "scrape.avatars_dir"
+
+// avatarsDir 返回头像本地副本目录：设置项优先，否则与数据库文件同级。
+func (a *App) avatarsDir() string {
+	if dir, err := a.db.Setting(settingAvatarsDir); err == nil && strings.TrimSpace(dir) != "" {
+		return strings.TrimSpace(dir)
+	}
+	return avatar.DefaultDir(a.cfg.DBPath)
+}
+
+// personAvatar 返回演员本地头像副本的路径与内容标识。
+// 只有在「索引里有该演员」且「本地副本确实存在」时才返回；否则返回空串，
+// 调用方回退到既有的「参演影片海报」占位行为。
+func (a *App) personAvatar(name string) (string, string) {
+	actor, err := a.db.ActorAvatar(name)
+	if err != nil || actor.Name == "" {
+		return "", ""
+	}
+	path := avatar.Path(a.avatarsDir(), actor.Name)
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return "", ""
+	}
+	tag := actor.AvatarTag
+	if tag == "" {
+		// 索引里没记标识（如头像文件由外部直接放入）时按文件 mtime 兜底。
+		tag = a.posterTag(path)
+	}
+	return path, tag
+}
 
 // entityPosterPath 返回某实体（Genre/Tag/Studio/Person）的代表性海报路径（带短缓存）。
 func (a *App) entityPosterPath(kind, name string) string {
@@ -155,6 +187,30 @@ func (a *App) posterTag(path string) string {
 	a.tags[path] = tagEntry{tag: tag, ts: now}
 	a.tagMu.Unlock()
 	return tag
+}
+
+// invalidateImageTag 立即失效指定图片路径的 tag 缓存。
+//
+// posterTag 是 5 分钟进程内缓存，且 cache.Clear() 只清 Redis、清不到它——
+// 覆盖同名图片（上传海报、写入演员头像）后若不显式失效，
+// 客户端会拿着旧的 ImageTag 继续显示旧图，最长 5 分钟。
+func (a *App) invalidateImageTag(paths ...string) {
+	a.tagMu.Lock()
+	defer a.tagMu.Unlock()
+	for _, path := range paths {
+		delete(a.tags, path)
+	}
+}
+
+// invalidateNFOStreams 失效指定 NFO 的流信息缓存（刮削/编辑改写 NFO 后调用）。
+// probe 的整库任务结束后会整体清空；单条写入必须精确失效，否则详情抽屉
+// 与 PlaybackInfo 会继续返回旧参数。
+func (a *App) invalidateNFOStreams(nfoPaths ...string) {
+	a.nfoMu.Lock()
+	defer a.nfoMu.Unlock()
+	for _, path := range nfoPaths {
+		delete(a.nfos, path)
+	}
 }
 
 // libraryCoverPath 返回媒体库封面路径：优先库根目录自带的 poster/folder/cover/default 图片
@@ -358,7 +414,7 @@ func (a *App) similar(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	srcActors := actorMap[src.ID]
+	srcActors := actorNames(actorMap[src.ID])
 	// 源影片的集合只构建一次，避免对每个候选重复转换。
 	srcGenres, srcTags := toSet(src.Genres), toSet(src.Tags)
 	srcStudios, srcActorSet := toSet(src.Studios), toSet(srcActors)
@@ -373,7 +429,7 @@ func (a *App) similar(c *gin.Context) {
 			continue
 		}
 		// 与 Emby 3.5.2 口径一致：总分需 > 2 才进入相似候选。
-		if s := similarityScore(src, m, srcGenres, srcTags, srcStudios, srcActorSet, actorMap[m.ID]); s > 2 {
+		if s := similarityScore(src, m, srcGenres, srcTags, srcStudios, srcActorSet, actorNames(actorMap[m.ID])); s > 2 {
 			results = append(results, scored{movie: m, score: s})
 		}
 	}
@@ -490,24 +546,41 @@ func nameObjects(kind string, names []string) []gin.H {
 	return out
 }
 
+// actorNames 取演员姓名列表（相似度打分等只关心名字的场景）。
+func actorNames(actors []store.ActorRef) []string {
+	out := make([]string, 0, len(actors))
+	for _, actor := range actors {
+		out = append(out, actor.Name)
+	}
+	return out
+}
+
 // peopleOfActors 组装影片人员：导演（若 NFO 有）+ 演员，Type 与真实 Emby 一致。
-// 允许调用方传入批量预取的演员名。
+// 允许调用方传入批量预取的演员（含头像索引）。
 // loaded=false 时 actors 视为未预取，回退单条查询；loaded=true 时即使 actors 为空也不查库。
-func (a *App) peopleOfActors(m store.Movie, actors []string, loaded bool) []gin.H {
+//
+// 有头像时补 PrimaryImageTag：客户端据此请求 Items/{personId}/Images/Primary，
+// 缺这个字段它们根本不会去取图（见需求 R3b 契约一项）。
+func (a *App) peopleOfActors(m store.Movie, actors []store.ActorRef, loaded bool) []gin.H {
 	people := make([]gin.H, 0, 4)
 	if name := strings.TrimSpace(m.Director); name != "" {
 		people = append(people, gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Director"})
 	}
 	if !loaded {
-		if names, err := a.db.Actors(m.ID); err == nil {
-			actors = names
+		if list, err := a.db.Actors(m.ID); err == nil {
+			actors = list
 		}
 	}
-	for _, name := range actors {
-		if name = strings.TrimSpace(name); name == "" {
+	for _, actor := range actors {
+		name := strings.TrimSpace(actor.Name)
+		if name == "" {
 			continue
 		}
-		people = append(people, gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Actor"})
+		person := gin.H{"Name": name, "Id": entityId("Person", name), "Type": "Actor"}
+		if tag := actor.AvatarTag; tag != "" {
+			person["PrimaryImageTag"] = tag
+		}
+		people = append(people, person)
 	}
 	return people
 }
@@ -520,7 +593,7 @@ func (a *App) embyItem(m store.Movie, d store.UserData) gin.H {
 
 // embyItemActors 与 embyItem 相同，但允许传入批量预取的演员列表避免逐片查库。
 // loaded=true 表示 actors 已由调用方批量取回（可为空，不再单条回查）。
-func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []string, loaded bool) gin.H {
+func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.ActorRef, loaded bool) gin.H {
 	id := strconv.FormatInt(m.ID, 10)
 	sortName := m.SortName
 	if sortName == "" {
@@ -799,12 +872,8 @@ func (a *App) itemsQuery(c *gin.Context) {
 	// Fields 决定响应体内容，须纳入缓存键，否则不同 Fields 的请求会互相串缓存。
 	fields := requestedFields(c)
 	term, years := c.Query("SearchTerm"), c.Query("Years")
-	origin := ""
-	if fields.mediaSources {
-		// MediaSources 内含绝对流地址，必须按请求来源分桶缓存。
-		origin = streamOrigin(c)
-	}
-	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), origin, strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	// 缓存键不需要带请求来源：响应里的流地址是相对路径，与宿主无关。
+	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -1118,8 +1187,8 @@ func (a *App) item(c *gin.Context) {
 		c.JSON(http.StatusOK, a.collectionFolderDTO(lib))
 		return
 	}
-	// 详情恒含 MediaSources（绝对流地址），缓存键必须带请求来源。
-	key := "item:" + a.db.Version("g:version") + ":" + streamOrigin(c) + ":" + rawID
+	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
+	key := "item:" + a.db.Version("g:version") + ":" + rawID
 	if b, ok := a.cache.Get(key); ok {
 		c.Data(200, "application/json", b)
 		return

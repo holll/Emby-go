@@ -109,6 +109,46 @@ func probeTargets(movies []store.Movie) []probeTarget {
 	return out
 }
 
+// probePlan 探测任务的准备结果：已自检的 ffprobe 与展开后的文件级目标。
+type probePlan struct {
+	ffprobe     string
+	targets     []probeTarget
+	movies      int
+	onlyMissing bool
+}
+
+// prepareProbe 做探测前的全部校验与目标展开，不改变任何运行状态。
+// 校验（ffprobe 存在且可执行、并发占用）都在这里完成，保证真正开始跑时不会中途才发现环境不可用。
+func (a *App) prepareProbe(req probeRequest) (probePlan, error) {
+	onlyMissing := true
+	if req.OnlyMissing != nil {
+		onlyMissing = *req.OnlyMissing
+	}
+	if req.Status == "" {
+		req.Status = "success"
+	}
+	if a.probing() {
+		return probePlan{}, errProbeBusy
+	}
+	// ffprobe 在任务启动前就解析并自检：缺 ffprobe 或它无法执行时直接给明确错误，
+	// 而不是让成千上万条目逐个失败一遍（那既浪费时间又难归因）。
+	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
+	if err != nil {
+		return probePlan{}, err
+	}
+	if err := probe.Verify(a.rootCtx, ffprobe); err != nil {
+		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
+		return probePlan{}, err
+	}
+	movies, err := a.db.MoviesForProbe(req.LibraryID, req.Status, req.Limit)
+	if err != nil {
+		return probePlan{}, err
+	}
+	// 展开成文件级任务：分集影片的每个分段 .strm 都要各自探测。
+	targets := probeTargets(movies)
+	return probePlan{ffprobe: ffprobe, targets: targets, movies: len(movies), onlyMissing: onlyMissing}, nil
+}
+
 // adminProbeMedia 启动媒体信息探测任务（异步执行，进度走 /probe/media/progress）。
 func (a *App) adminProbeMedia(c *gin.Context) {
 	var req probeRequest
@@ -128,48 +168,34 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 	if req.Status == "" {
 		req.Status = c.DefaultQuery("status", "success")
 	}
-	onlyMissing := true
-	if req.OnlyMissing != nil {
-		onlyMissing = *req.OnlyMissing
-	} else if value := c.Query("only_missing"); value != "" {
-		onlyMissing = value != "false" && value != "0"
+	if req.OnlyMissing == nil {
+		if value := c.Query("only_missing"); value != "" {
+			onlyMissing := value != "false" && value != "0"
+			req.OnlyMissing = &onlyMissing
+		}
 	}
 
-	if a.probing() {
-		c.JSON(http.StatusConflict, gin.H{"error": errProbeBusy.Error()})
-		return
-	}
-	// ffprobe 在任务启动前就解析并自检：缺 ffprobe 或它无法执行时直接给明确错误，
-	// 而不是让成千上万条目逐个失败一遍（那既浪费时间又难归因）。
-	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
+	plan, err := a.prepareProbe(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, errProbeBusy) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	if err := probe.Verify(a.rootCtx, ffprobe); err != nil {
-		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	movies, err := a.db.MoviesForProbe(req.LibraryID, req.Status, req.Limit)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	// 展开成文件级任务：分集影片的每个分段 .strm 都要各自探测。
-	targets := probeTargets(movies)
-	if len(targets) == 0 {
+	if len(plan.targets) == 0 {
 		c.JSON(http.StatusOK, gin.H{"total": 0, "movies": 0, "message": "没有可探测的影片（探测需要影片已有 NFO）"})
 		return
 	}
-	if !a.beginProbe(len(targets)) {
+	if !a.beginProbe(len(plan.targets)) {
 		c.JSON(http.StatusConflict, gin.H{"error": errProbeBusy.Error()})
 		return
 	}
 	taskID := a.startTask("probe")
-	go a.runProbe(taskID, ffprobe, targets, onlyMissing)
-	slog.Info("媒体信息探测已启动", "task_id", taskID, "movies", len(movies), "files", len(targets), "only_missing", onlyMissing)
-	c.JSON(http.StatusAccepted, gin.H{"task_id": taskID, "total": len(targets), "movies": len(movies)})
+	go func() { _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) }()
+	slog.Info("媒体信息探测已启动", "task_id", taskID, "movies", plan.movies, "files", len(plan.targets), "only_missing", plan.onlyMissing)
+	c.JSON(http.StatusAccepted, gin.H{"task_id": taskID, "total": len(plan.targets), "movies": plan.movies})
 }
 
 func (a *App) adminProbeMediaProgress(c *gin.Context) {
@@ -285,10 +311,14 @@ func (a *App) requestContext(c *gin.Context) (context.Context, context.CancelFun
 var errProbeBusy = errors.New("媒体信息探测正在进行中")
 
 // beginProbe 创建本轮任务的可取消 context（挂在常驻 rootCtx 之下）并置运行态。
+// 探测会写与刮削/扫库相同的 NFO，故一并占用 NFO 写入通道。
 func (a *App) beginProbe(total int) bool {
 	a.probeTaskMu.Lock()
 	defer a.probeTaskMu.Unlock()
 	if a.probeStatus.Running {
+		return false
+	}
+	if !a.claimNFO("probe") {
 		return false
 	}
 	ctx, cancel := context.WithCancel(a.rootCtx)
@@ -306,7 +336,8 @@ func (a *App) probing() bool {
 
 // runProbe 起固定数量的 worker 并行探测。ctx 取自 beginProbe 创建的常驻 context——
 // 不能用发起请求的 context，否则 handler 一返回任务就被取消。
-func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, onlyMissing bool) {
+// 返回非 nil 表示因连续失败过多主动中止（人工取消不算错误）。
+func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, onlyMissing bool) error {
 	a.probeTaskMu.RLock()
 	ctx := a.probeCtx
 	a.probeTaskMu.RUnlock()
@@ -373,12 +404,14 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	success, skipped, failed, done := status.Success, status.Skipped, status.Failed, status.Done
 	a.probeCancel = nil
 	a.probeTaskMu.Unlock()
+	// NFO 通道在 probeTaskMu 之外释放（锁顺序统一为任务锁 → nfoGate）。
+	a.releaseNFO("probe")
 
+	var result error
 	if aborted {
-		a.finishTask(taskID, errors.New("连续失败过多已中止"))
-	} else {
-		a.finishTask(taskID, nil)
+		result = errors.New("连续失败过多已中止")
 	}
+	a.finishTask(taskID, result)
 	slog.Info("媒体信息探测结束", "task_id", taskID, "success", success, "skipped", skipped,
 		"failed", failed, "handled", done, "total", len(targets), "aborted", aborted, "cancelled", cancelled)
 	if failed > 0 {
@@ -386,6 +419,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 		slog.Warn("媒体信息探测失败汇总", "failed", failed, "total", len(targets),
 			"samples", a.probeFailureSamples())
 	}
+	return result
 }
 
 // probeAborted 报告是否已触发熔断（连续失败过多）。
@@ -644,6 +678,15 @@ func streamDetailsFromProbe(info probe.Info) *nfo.StreamDetails {
 			Language: audio.Language, Channels: audio.Channels, SamplingRate: audio.SamplingRate,
 			Default: boolText(audio.Default), Forced: boolText(audio.Forced),
 		}
+	}
+	for _, subtitle := range info.Subtitles {
+		details.Subtitles = append(details.Subtitles, nfo.SubtitleStream{
+			Codec: subtitle.Codec, CodecTag: subtitle.CodecTag,
+			Language: subtitle.Language, Title: subtitle.Title,
+			Default: boolText(subtitle.Default), Forced: boolText(subtitle.Forced),
+			HearingImpaired: boolText(subtitle.HearingImpaired),
+			External:        boolText(!subtitle.Embedded),
+		})
 	}
 	return details
 }

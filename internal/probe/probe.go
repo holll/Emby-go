@@ -25,6 +25,23 @@ type Info struct {
 	FormatName      string
 	Video           *VideoInfo
 	Audio           *AudioInfo
+	// Subtitles 全部字幕轨（可多条：不同语言/内封外挂），不像音视频轨那样只取首条——
+	// 字幕轨的多寡直接决定客户端能否选到想要的语言。
+	Subtitles []SubtitleInfo
+}
+
+// SubtitleInfo 一条字幕轨。Embedded 区分内封与外挂：
+// 外挂字幕的文件不由本服务转发，客户端只能看到「有这条轨」而取不到内容。
+type SubtitleInfo struct {
+	Index           int
+	Codec           string
+	CodecTag        string
+	Language        string
+	Title           string
+	Default         bool
+	Forced          bool
+	HearingImpaired bool
+	Embedded        bool
 }
 
 type VideoInfo struct {
@@ -251,12 +268,30 @@ func Parse(raw []byte) (Info, error) {
 				continue
 			}
 			info.Audio = audioInfo(stream)
+		case "subtitle":
+			info.Subtitles = append(info.Subtitles, subtitleInfo(stream))
 		}
 	}
 	if info.Video == nil && info.Audio == nil {
 		return Info{}, errors.New("ffprobe 未返回音视频轨")
 	}
 	return info, nil
+}
+
+// subtitleInfo 归整一条字幕轨。探测目标是单个文件，ffprobe 只会报出容器内的字幕轨，
+// 故 Embedded 恒为 true（外挂字幕不在本服务的转发范围内）。
+func subtitleInfo(stream ffprobeStream) SubtitleInfo {
+	return SubtitleInfo{
+		Index:           stream.Index,
+		Codec:           stream.CodecName,
+		CodecTag:        stream.CodecTagStr,
+		Language:        stream.Tags["language"],
+		Title:           stream.Tags["title"],
+		Default:         stream.Disposition["default"] == 1,
+		Forced:          stream.Disposition["forced"] == 1,
+		HearingImpaired: stream.Disposition["hearing_impaired"] == 1,
+		Embedded:        true,
+	}
 }
 
 func videoInfo(stream ffprobeStream) *VideoInfo {

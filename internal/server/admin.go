@@ -105,15 +105,34 @@ func (a *App) finishTask(id int64, err error) {
 	}
 }
 
+// finishTaskBusy 把任务记为「跳过」：上一轮尚未结束，本次不执行也不算失败。
+func (a *App) finishTaskBusy(id int64, reason string) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	for i := range a.tasks {
+		if a.tasks[i].ID != id {
+			continue
+		}
+		a.tasks[i].EndedAt = time.Now().UTC().Format(time.RFC3339)
+		a.tasks[i].Status, a.tasks[i].Error = "skipped", reason
+		slog.Info("任务跳过", "task_id", id, "type", a.tasks[i].Type, "reason", reason)
+		return
+	}
+}
+
 // errScanBusy 同一时刻只允许一个扫描任务，避免并发写库与进度互相覆盖。
 var errScanBusy = errors.New("扫描正在进行中")
 
 // beginScan / updateScanProgress / endScan 维护管理端可轮询的扫描进度。
-// beginScan 返回 false 表示已有扫描在跑。
+// beginScan 返回 false 表示已有扫描在跑，或有探测/刮削占用着同一批 NFO。
 func (a *App) beginScan(libraries int) bool {
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
 	if a.scanStatus.Running {
+		return false
+	}
+	// 探测/刮削也在写同一批 NFO，且整库扫描的 DeleteMissingSources 需要独占遍历。
+	if !a.claimNFO("scan") {
 		return false
 	}
 	a.scanStatus = scanStatus{Running: true, Libraries: libraries, StartedAt: time.Now().UTC().Format(time.RFC3339)}
@@ -139,14 +158,17 @@ func (a *App) updateScanProgress(p scanner.Progress) {
 
 func (a *App) endScan(err error) {
 	a.scanMu.Lock()
-	defer a.scanMu.Unlock()
 	a.scanStatus.Running = false
 	a.scanStatus.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	if err != nil {
 		a.scanStatus.Error = err.Error()
-		return
+	} else {
+		a.scanStatus.Done = a.scanStatus.Total
 	}
-	a.scanStatus.Done = a.scanStatus.Total
+	a.scanMu.Unlock()
+	// 释放 NFO 通道放在 scanMu 之外：两把锁的获取顺序统一为
+	// {scanMu|probeTaskMu|scrapeTaskMu} → nfoGate，混进同一临界区会形成反向依赖。
+	a.releaseNFO("scan")
 }
 
 func (a *App) adminScanProgress(c *gin.Context) {
@@ -176,8 +198,11 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 	if !a.beginScan(len(selected)) {
 		return scanner.Result{}, errScanBusy
 	}
+	// 用 defer 释放扫描状态与 NFO 写入通道：中途 panic 时若走不到 endScan，
+	// nfoOwner 会永久停留在 "scan"，此后探测/刮削全部被拒（需要重启才能恢复）。
 	result := scanner.Result{}
 	var scanErr error
+	defer func() { a.endScan(scanErr) }()
 	for index, library := range selected {
 		a.setScanLibrary(index+1, library)
 		slog.Info("正在扫描媒体库", "library_id", library.ID, "name", library.Name, "path", library.Path)
@@ -195,7 +220,7 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 		result.Incompatible += current.Incompatible
 		result.Failed += current.Failed
 	}
-	a.endScan(scanErr)
+	// endScan 由上面的 defer 负责调用（panic 时也必须释放）。
 	a.cache.Clear()
 	return result, scanErr
 }
@@ -267,7 +292,31 @@ func (a *App) adminItems(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
-	ms, total, err := a.db.SearchAdmin(c.Query("search"), c.Query("status"), strings.ToLower(c.Query("source_protocol")), c.DefaultQuery("sort", "title"), strings.EqualFold(c.Query("order"), "desc"), limit, offset)
+	// library_id 为 0/缺省表示「全部媒体库」——媒体墙的库筛选 Tab 走这里。
+	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
+	// 按刮削结果筛选时默认不限状态：刮削失败/待确认的条目多数仍是 pending，
+	// 若沿用「只显示可播放」的默认口径，用户会看到筛选结果是空的。
+	status := c.Query("status")
+	if c.Query("scrape") != "" && status == "" {
+		status = store.StatusAll
+	}
+	// genre/tag/studio/person/collection 来自详情抽屉的实体跳转（点演员/类型/厂商/合集）。
+	ms, total, err := a.db.SearchAdmin(store.AdminQuery{
+		LibraryID:  libraryID,
+		Term:       c.Query("search"),
+		Status:     status,
+		Protocol:   strings.ToLower(c.Query("source_protocol")),
+		Genre:      c.Query("genre"),
+		Tag:        c.Query("tag"),
+		Studio:     c.Query("studio"),
+		Person:     c.Query("person"),
+		Collection: c.Query("collection"),
+		Scrape:     c.Query("scrape"),
+		SortBy:     c.DefaultQuery("sort", "title"),
+		Desc:       strings.EqualFold(c.Query("order"), "desc"),
+		Limit:      limit,
+		Offset:     offset,
+	})
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -398,26 +447,39 @@ func (a *App) adminEdit(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid json"})
 		return
 	}
-	meta, e := nfo.Read(m.NFOPath)
-	if e != nil {
+	if _, e = nfo.Read(m.NFOPath); e != nil {
 		c.JSON(400, gin.H{"error": "nfo not found"})
 		return
 	}
+	// 走标签级更新而不是「读成结构体 → 整体重写」：NFO 里可能有外部工具写的
+	// 扩展标签，整体重写会静默丢掉它们（见 internal/nfo/update.go 的说明）。
+	// 空值表示「本次不修改该字段」，不删除已有内容。
+	fields := nfo.ScrapeFields{Overwrite: true}
 	if req.Title != nil {
-		meta.Title = *req.Title
-		m.Title = *req.Title
+		fields.Title = strings.TrimSpace(*req.Title)
 	}
 	if req.Plot != nil {
-		meta.Plot = *req.Plot
-		m.Plot = *req.Plot
+		fields.Plot = *req.Plot
 	}
 	if req.Year != nil {
-		meta.Year = *req.Year
-		m.Year = *req.Year
+		fields.Year = *req.Year
 	}
-	if e = nfo.SaveAtomic(m.NFOPath, meta); e != nil {
+	if fields.Title == "" && fields.Plot == "" && fields.Year == 0 {
+		c.JSON(400, gin.H{"error": "没有可写入的字段"})
+		return
+	}
+	if e = nfo.UpdateScraped(m.NFOPath, fields); e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
+	}
+	if fields.Title != "" {
+		m.Title = fields.Title
+	}
+	if fields.Plot != "" {
+		m.Plot = fields.Plot
+	}
+	if fields.Year > 0 {
+		m.Year = fields.Year
 	}
 	size, mtime := scanner.SourceStat(m.SourcePath)
 	_, e = a.db.UpsertMovie(m, size, mtime)
@@ -459,7 +521,9 @@ func (a *App) adminReread(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "library not found"})
 		return
 	}
-	if _, err = scanner.Scan(a.db, library); err != nil {
+	// 单文件重扫：整库重扫在「点一条重读源」这种场景下代价过高，
+	// 且会顺带触发 DeleteMissingSources，风险与收益不成比例。
+	if _, err = scanner.RescanOne(a.db, library, movie.SourcePath); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -517,6 +581,8 @@ func (a *App) adminImage(c *gin.Context) {
 	case "landscape":
 		m.LandscapePath = dest
 	}
+	// 同名图片被覆盖，立即失效它的 tag 缓存，否则客户端几分钟内仍拿旧图。
+	a.invalidateImageTag(dest)
 	size, mtime := scanner.SourceStat(m.SourcePath)
 	_, e = a.db.UpsertMovie(m, size, mtime)
 	if e == nil {

@@ -165,15 +165,68 @@ func (a *App) authenticate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"AccessToken": token,
 		"ServerId":    a.serverID,
-		"User": gin.H{
-			"Id": "1", "Name": a.currentAdminName(), "ServerId": a.serverID, "HasPassword": true,
-			"Configuration": gin.H{}, "Policy": gin.H{},
-		},
+		"User":        a.userDto(),
 	})
 }
 
+// userDto 组装 Emby 的 UserDto。
+//
+// Policy 不能给空对象：tsukimi 用 serde 严格反序列化，`Policy { IsAdministrator: bool }`
+// 是**非 Option** 字段——返回 {} 会让整个登录响应解析失败（登录直接不可用）。
+// 这里按真实 Emby 的形状给一份完整策略，本服务是单管理员，故 IsAdministrator 恒为 true。
+func (a *App) userDto() gin.H {
+	return gin.H{
+		"Id": "1", "Name": a.currentAdminName(), "ServerName": a.serverName,
+		"ServerId": a.serverID, "HasPassword": true,
+		"HasConfiguredPassword": true, "HasConfiguredEasyPassword": false,
+		"EnableAutoLogin": false, "LastLoginDate": "", "LastActivityDate": "",
+		"Configuration": gin.H{},
+		"Policy": gin.H{
+			"IsAdministrator": true, "IsHidden": false, "IsDisabled": false,
+			"MaxActiveSessions": 0,
+			// 播放/下载能力：客户端据此决定是否允许直接播放与转码。
+			"EnableMediaPlayback":             true,
+			"EnableAudioPlaybackTranscoding":  true,
+			"EnableVideoPlaybackTranscoding":  true,
+			"EnablePlaybackRemuxing":          true,
+			"EnableContentDownloading":        true,
+			"EnableSubtitleDownloading":       true,
+			"EnableSubtitleManagement":        true,
+			"EnableAllFolders":                true,
+			"EnableAllChannels":               true,
+			"EnableAllDevices":                true,
+			"EnableSyncTranscoding":           true,
+			"EnableRemoteAccess":              true,
+			"EnableRemoteControlOfOtherUsers": false,
+			"EnableSharedDeviceControl":       false,
+			"EnableLiveTvManagement":          false,
+			"EnableLiveTvAccess":              false,
+			"EnableContentDeletion":           false,
+			"EnablePublicSharing":             false,
+			"BlockedChannels":                 []string{},
+			"BlockedMediaFolders":             []string{},
+			"BlockedTags":                     []string{},
+			"AllowedTags":                     []string{},
+			"BlockUnratedItems":               []string{},
+			"EnabledDevices":                  []string{},
+			"EnabledChannels":                 []string{},
+			"EnabledFolders":                  []string{},
+			"AuthenticationProviderId":        "",
+			"PasswordResetProviderId":         "",
+		},
+	}
+}
+
 func (a *App) me(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"Id": "1", "Name": a.currentAdminName(), "ServerId": a.serverID, "HasPassword": true})
+	c.JSON(http.StatusOK, a.userDto())
+}
+
+// userByID 处理 GET /Users/{uid}：tsukimi 登录后立刻调它读 Policy.IsAdministrator。
+func (a *App) userByID(c *gin.Context) {
+	if !a.validUser(c) {
+		return
+	}
+	c.JSON(http.StatusOK, a.userDto())
 }
 
 func (a *App) validUser(c *gin.Context) bool {

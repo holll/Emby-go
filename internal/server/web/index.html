@@ -43,6 +43,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.5 12.5 8-8"/><path d="M16 7l2 2"/><path d="M13 10l2 2"/></svg>
         <span>API 密钥</span>
       </button>
+      <button class="nav-item" data-page="scrape">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3"/><path d="M12 18v3"/><circle cx="12" cy="12" r="4"/><path d="M3 12h3M18 12h3"/></svg>
+        <span>刮削</span>
+      </button>
+      <button class="nav-item" data-page="scheduled">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span>计划任务</span>
+      </button>
       <button class="nav-item" data-page="tasks">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-7 4 14 2-7h4"/></svg>
         <span>任务</span>
@@ -72,6 +80,20 @@
 
     <div id="content" class="content" aria-live="polite"></div>
   </main>
+</div>
+
+<div id="scrape-overlay" class="scrape-overlay" hidden>
+  <div class="scrape-modal" role="dialog" aria-modal="true" aria-label="刮削结果预览">
+    <div class="scrape-head">
+      <strong>刮削预览与确认</strong>
+      <button id="scrape-close" class="icon-btn" title="取消 (Esc)">✕</button>
+    </div>
+    <div id="scrape-body" class="scrape-body"></div>
+  </div>
+</div>
+
+<div id="detail-overlay" class="detail-overlay" hidden>
+  <aside id="detail-drawer" class="detail-drawer" role="dialog" aria-modal="false" aria-label="影片详情"></aside>
 </div>
 
 <div id="player-overlay" class="player-overlay" hidden>

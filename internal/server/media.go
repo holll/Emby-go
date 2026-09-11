@@ -78,6 +78,13 @@ func (a *App) image(c *gin.Context) {
 	}
 	// 虚拟实体封面：任何 ImageType 都回代表性海报，保证 Tag/Genre 网格有图。
 	if kind, name, ok := entityKind(rawID); ok {
+		// 演员优先回本地头像副本；没有头像时保留原占位行为（参演影片海报）。
+		if kind == "Person" {
+			if path, _ := a.personAvatar(name); path != "" {
+				c.File(path)
+				return
+			}
+		}
 		if poster := a.entityPosterPath(kind, name); poster != "" {
 			c.File(poster)
 			return
@@ -131,11 +138,20 @@ func (a *App) imageInfo(c *gin.Context) {
 		c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": p, "Filename": filepath.Base(p), "ImageTag": a.posterTag(p)}})
 		return
 	}
-	// 虚拟实体：仅 Primary（代表性海报）。
+	// 虚拟实体：仅 Primary（演员优先用本地头像副本，否则回代表性海报）。
 	images := []gin.H{}
 	if kind, name, ok := entityKind(rawID); ok {
-		if poster := a.entityPosterPath(kind, name); poster != "" {
-			images = append(images, gin.H{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster), "ImageTag": a.posterTag(poster)})
+		path, tag := "", ""
+		if kind == "Person" {
+			path, tag = a.personAvatar(name)
+		}
+		if path == "" {
+			if poster := a.entityPosterPath(kind, name); poster != "" {
+				path, tag = poster, a.posterTag(poster)
+			}
+		}
+		if path != "" {
+			images = append(images, gin.H{"ImageType": "Primary", "Path": path, "Filename": filepath.Base(path), "ImageTag": tag})
 		}
 	}
 	c.JSON(http.StatusOK, images)
@@ -198,14 +214,14 @@ func (a *App) resolvePlaybackTarget(rawID string) (store.Movie, string, string, 
 }
 
 // mediaSource 构造 Emby 契约下的 MediaSource。
-// Path / DirectStreamUrl 均指向本服务流端点（stream 再 302 直拉真实地址），
-// 保证 iPlay 等客户端无论走「strm http path」还是 DirectStreamUrl 都能拿到可播地址。
+// Path 是 .strm 在服务器上的文件路径，DirectStreamUrl 是指向本服务流端点、
+// 由该端点 302 直拉真实地址的相对路径——两者含义不同，客户端各取所需。
 func (a *App) mediaSource(m store.Movie, c *gin.Context) gin.H {
 	return a.mediaSourceFor(m, strconv.FormatInt(m.ID, 10), m.SourcePath, c)
 }
 
 func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Context) gin.H {
-	stream := streamURL(c, id)
+	stream := streamURL(id)
 	mediaSourceId := "mediasource_" + id
 	// 主文件取 NFO 的 streamdetails，分段取它自己的 mediainfo.json；
 	// 两者都没有时才给通用视频轨。
@@ -245,6 +261,9 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 		"DefaultAudioStreamIndex":    -1,
 		"DefaultSubtitleStreamIndex": -1,
 		// 真实 Emby 恒返回的固定形状字段：本服务无附加容器格式、无需附加请求头。
+		// Chapters 恒给空数组：openemby_tv 等客户端按可选字段读它做跳过片头，
+		// 数组存在但为空比缺字段更省事（部分客户端的 Gson 反序列化对 null 敏感）。
+		"Chapters":              []gin.H{},
 		"Formats":               []string{},
 		"RequiredHttpHeaders":   gin.H{},
 		"ReadAtNativeFramerate": false,
@@ -394,7 +413,7 @@ func buildStreams(details *nfo.StreamDetails) []gin.H {
 	out := make([]gin.H, 0, 2)
 	index := 0
 	if video := details.Video; video != nil {
-		stream := gin.H{"Type": "Video", "Index": index, "IsDefault": isDefaultTrue(video.Default), "IsForced": isDefaultTrue(video.Forced)}
+		stream := gin.H{"Type": "Video", "Index": index, "IsDefault": isDefaultTrue(video.Default), "IsForced": isExplicitTrue(video.Forced)}
 		setIfNonEmpty(stream, "Codec", video.Codec)
 		setIfNonEmpty(stream, "CodecTag", video.CodecTag)
 		setIfNonEmpty(stream, "Profile", video.Profile)
@@ -457,7 +476,7 @@ func buildStreams(details *nfo.StreamDetails) []gin.H {
 		index++
 	}
 	if audio := details.Audio; audio != nil {
-		stream := gin.H{"Type": "Audio", "Index": index, "IsDefault": isDefaultTrue(audio.Default), "IsForced": isDefaultTrue(audio.Forced)}
+		stream := gin.H{"Type": "Audio", "Index": index, "IsDefault": isDefaultTrue(audio.Default), "IsForced": isExplicitTrue(audio.Forced)}
 		setIfNonEmpty(stream, "Codec", audio.Codec)
 		setIfNonEmpty(stream, "CodecTag", audio.CodecTag)
 		setIfNonEmpty(stream, "Profile", audio.Profile)
@@ -488,7 +507,51 @@ func buildStreams(details *nfo.StreamDetails) []gin.H {
 		out = append(out, stream)
 		index++
 	}
+	for _, subtitle := range details.Subtitles {
+		stream := gin.H{
+			"Type": "Subtitle", "Index": index,
+			"IsDefault": isExplicitTrue(subtitle.Default),
+			// 强迫字幕必须显式标注：缺省当「非强迫」，否则客户端会把普通字幕当强迫字幕自动烧进画面。
+			"IsForced": isExplicitTrue(subtitle.Forced),
+			// 外挂字幕的文件不由本服务转发，如实标记，避免客户端去取不存在的地址。
+			"IsExternal":             isExplicitTrue(subtitle.External),
+			"IsHearingImpaired":      isExplicitTrue(subtitle.HearingImpaired),
+			"IsTextSubtitleStream":   isTextSubtitleCodec(subtitle.Codec),
+			"SupportsExternalStream": false,
+			"Protocol":               "Http",
+			"AttachmentSize":         0,
+		}
+		setIfNonEmpty(stream, "Codec", subtitle.Codec)
+		setIfNonEmpty(stream, "CodecTag", subtitle.CodecTag)
+		setIfNonEmpty(stream, "Language", subtitle.Language)
+		setIfNonEmpty(stream, "DisplayTitle", firstNonEmpty(subtitle.Title, subtitle.Language))
+		setIfNonEmpty(stream, "DisplayLanguage", displayLanguage(subtitle.Language))
+		out = append(out, stream)
+		index++
+	}
 	return out
+}
+
+// isTextSubtitleCodec 判断字幕是否为文本格式（相对图形字幕如 PGS/VOBSUB，
+// 文本字幕可转成外挂 srt 由客户端渲染）。未知编码保守判为文本。
+func isTextSubtitleCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "pgs", "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub":
+		return false
+	case "":
+		return true
+	}
+	return true
+}
+
+// firstNonEmpty 返回第一个非空字符串。
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // videoDisplayTitle 生成视频轨展示标题。规则取自真实 Emby 实测：
@@ -662,9 +725,23 @@ func displayLanguage(code string) string {
 	return code
 }
 
+// isDefaultTrue 判断「是否默认轨」。NFO 里 <default> 缺省即视为默认——
+// 若一条轨都不标默认，客户端可能拒绝播放，故缺省取 true。
 func isDefaultTrue(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "true", "1", "yes":
+		return true
+	}
+	return false
+}
+
+// isExplicitTrue 判断「显式标注为真」。用于两类字段：
+//   - IsForced：缺省当强迫会让客户端自动烧字幕/强制选轨，必须显式才算；
+//   - 字幕轨的 IsDefault：缺省当默认会让多条字幕同时声称默认（且客户端会自动开字幕），
+//     与音视频轨相反——音视频轨缺省取 true 见 isDefaultTrue。
+func isExplicitTrue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes":
 		return true
 	}
 	return false
@@ -676,28 +753,18 @@ func setIfNonEmpty(m map[string]any, key, value string) {
 	}
 }
 
-// streamURL 生成指向本服务流端点的绝对地址（尊重反向代理前缀与协议头）。
-// 客户端经 /emby 前缀访问时返回含前缀的 URL，确保反向代理只暴露 /emby 子路径也够用。
-func streamURL(c *gin.Context, id string) string {
-	return streamOrigin(c) + "/Videos/" + id + "/stream"
-}
-
-// streamOrigin 返回本次请求下媒体流地址的来源前缀（协议 + 主机 + 可选的 /emby 前缀）。
-// 含 MediaSources 的响应里带的是绝对流地址，必须用它做缓存分桶：
-// 否则先到的宿主（如内网 IP）会把地址缓存下来，再发给其它宿主的请求。
-func streamOrigin(c *gin.Context) string {
-	scheme := c.Request.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		scheme = "http"
-		if c.Request.TLS != nil {
-			scheme = "https"
-		}
-	}
-	prefix := ""
-	if strings.HasPrefix(c.Request.URL.Path, "/emby") {
-		prefix = "/emby"
-	}
-	return scheme + "://" + c.Request.Host + prefix
+// streamURL 返回指向本服务流端点的**相对路径**（不含主机、不含 /emby 前缀）。
+//
+// 必须相对且不带前缀，这是参考客户端写死的行为：
+//   - openemby_tv 用 `${serverUrl}/emby$path` 拼接（serverUrl 不含 /emby），
+//     返回绝对地址或带前缀的路径都会拼出 `.../embyhttp://...`、`/emby/emby/...`；
+//   - iPlay 的 buildUrl 只在「不以 http 开头」时才把自己的 base 拼上去；
+//   - iPlay 鸿蒙版直接 `server + DirectStreamUrl` 拼接。
+//
+// 相对地址同时避开了反向代理场景下的主机误判（服务看到的 Host 常是内网地址），
+// 也让同一份响应可以被所有宿主共用（缓存不必再按请求来源分桶）。
+func streamURL(id string) string {
+	return "/Videos/" + id + "/stream"
 }
 
 func randomSessionID() string {

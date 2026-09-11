@@ -122,3 +122,127 @@ func TestScanReconcilesAddDeleteMove(t *testing.T) {
 		t.Fatalf("deleted source should be purged, got %d", len(movies))
 	}
 }
+
+// TestRescanOne 单文件重扫：只刷新目标文件，且**不得**触发 DeleteMissingSources
+// （否则一次误传路径就会把整库索引删掉）。
+func TestRescanOne(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.strm", "http://media.test/a.mp4\n")
+	write("a.nfo", "<movie><title>A</title></movie>\n")
+	write("b.strm", "http://media.test/b.mp4\n")
+	write("b.nfo", "<movie><title>B</title></movie>\n")
+
+	s := newStore(t, root)
+	lib, err := s.AddLibrary("t", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Scan(s, lib); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(visible(t, s)); got != 2 {
+		t.Fatalf("初始影片数 = %d，期望 2", got)
+	}
+
+	// 改写 a 的 NFO 后单文件重扫：只有 a 更新，b 仍在库里。
+	write("a.nfo", "<movie><title>A 已更新</title><year>2024</year></movie>\n")
+	if _, err := RescanOne(s, lib, filepath.Join(root, "a.strm")); err != nil {
+		t.Fatalf("RescanOne: %v", err)
+	}
+	movies := visible(t, s)
+	if len(movies) != 2 {
+		t.Fatalf("单文件重扫后影片数 = %d，期望 2（不得删掉其它索引）", len(movies))
+	}
+	titles := map[string]bool{}
+	for _, m := range movies {
+		titles[m.Title] = true
+	}
+	if !titles["A 已更新"] || !titles["B"] {
+		t.Errorf("重扫结果不对: %v", titles)
+	}
+
+	// 磁盘上删掉 b 后单文件重扫 a：b 的索引必须原样保留（RescanOne 不清理失效行）。
+	os.Remove(filepath.Join(root, "b.strm"))
+	if _, err := RescanOne(s, lib, filepath.Join(root, "a.strm")); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(visible(t, s)); got != 2 {
+		t.Errorf("单文件重扫后影片数 = %d，期望 2（不带 DeleteMissingSources）", got)
+	}
+	// 而整库 Scan 才会清掉 b。
+	if _, err := Scan(s, lib); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(visible(t, s)); got != 1 {
+		t.Errorf("整库扫描后影片数 = %d，期望 1", got)
+	}
+}
+
+// TestRescanOneKeepsCDGroup 单文件重扫分集影片时，AdditionalParts 必须按磁盘现状重建。
+func TestRescanOneKeepsCDGroup(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"Movie-CD1.strm", "Movie-CD2.strm", "Movie-CD3.strm"} {
+		write(name, "http://media.test/"+name+".mp4\n")
+	}
+	write("Movie.nfo", "<movie><title>Split</title></movie>\n")
+
+	s := newStore(t, root)
+	lib, err := s.AddLibrary("t", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Scan(s, lib); err != nil {
+		t.Fatal(err)
+	}
+	movies := visible(t, s)
+	if len(movies) != 1 || len(movies[0].AdditionalParts) != 2 {
+		t.Fatalf("初始分集结构不对: %+v", movies)
+	}
+
+	// 删掉 CD3 后重扫 CD2（分组内任一文件都要能重建整组）。
+	if err := os.Remove(filepath.Join(root, "Movie-CD3.strm")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RescanOne(s, lib, filepath.Join(root, "Movie-CD2.strm")); err != nil {
+		t.Fatalf("RescanOne: %v", err)
+	}
+	movies = visible(t, s)
+	if len(movies) != 1 {
+		t.Fatalf("分集影片数 = %d，期望 1", len(movies))
+	}
+	if got := len(movies[0].AdditionalParts); got != 1 {
+		t.Errorf("AdditionalParts 数量 = %d，期望 1: %v", got, movies[0].AdditionalParts)
+	}
+}
+
+// TestRescanOneRejectsBadPath 非 .strm / 不存在的路径直接报错。
+func TestRescanOneRejectsBadPath(t *testing.T) {
+	root := t.TempDir()
+	s := newStore(t, root)
+	lib, err := s.AddLibrary("t", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RescanOne(s, lib, filepath.Join(root, "nope.strm")); err == nil {
+		t.Error("不存在的文件应报错")
+	}
+	if _, err := RescanOne(s, lib, root); err == nil {
+		t.Error("目录应报错")
+	}
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RescanOne(s, lib, filepath.Join(root, "x.txt")); err == nil {
+		t.Error("非 .strm 文件应报错")
+	}
+}

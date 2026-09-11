@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +17,9 @@ import (
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
+	"emby-go/internal/logging"
+	"emby-go/internal/metatube"
+	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
 )
 
@@ -57,6 +60,22 @@ type App struct {
 	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
 	probeMu   sync.Mutex
 	probeSeen map[string]struct{}
+
+	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
+	sched *scheduler.Scheduler
+
+	// nfoGate 是「扫库 / 探测 / 刮削」三者共用的 NFO 写入通道：
+	// 三者都会「读全文 → 改局部 → 原子写」同一批 NFO，并发会互相覆盖；
+	// 刮削与整库扫描并行时 DeleteMissingSources 还可能误删。nfoOwner 记录当前持有者。
+	nfoGate  sync.Mutex
+	nfoOwner string
+
+	// 刮削任务状态。scratchCtx 挂在 rootCtx 之下，与探测任务同样的理由：
+	// 任务在 goroutine 里跑，不能用请求 context（handler 返回即取消）。
+	scrapeTaskMu sync.RWMutex
+	scrapeStatus scrapeStatus
+	scrapeCtx    context.Context
+	scrapeCancel context.CancelFunc
 }
 
 // scanStatus 管理端可轮询的扫描进度快照。
@@ -129,7 +148,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		}
 		// 回写配置文件，方便纳入版本管理/模板；失败不阻断启动（DB 仍是真源）。
 		if err := cfg.PersistServerID(a.serverID); err != nil {
-			fmt.Printf("[warn] 无法回写 server_id 到配置文件: %v\n", err)
+			slog.Warn("无法回写 server_id 到配置文件", "error", err)
 		}
 	}
 	if initialized, err := db.HasAdministrator(); err != nil {
@@ -147,29 +166,50 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
-	middlewares := []gin.HandlerFunc{gin.Logger()}
+	middlewares := []gin.HandlerFunc{requestLogger()}
 	if cfg.Debug {
 		middlewares = append(middlewares, requestContentLogger())
 	}
-	middlewares = append(middlewares, gin.Recovery())
+	// 恢复中间件在 panic 时打印堆栈，写入程序日志出口（同时保留控制台），
+	// 否则崩溃信息只会留在终端、落不进日志文件。
+	middlewares = append(middlewares, gin.RecoveryWithWriter(logging.AppWriter()))
 	r.Use(middlewares...)
 	a.router = r
 	a.routes()
+
+	// 计划任务调度器挂在常驻 rootCtx 之下：Close 取消 ctx 可中止在跑的计划任务。
+	a.sched = scheduler.New(a.rootCtx, db, a.runScheduledTask)
+	if err := a.sched.Reload(); err != nil {
+		slog.Warn("装载计划任务失败", "error", err)
+	}
+	a.sched.Start()
+
+	// 启动自检：MetaTube 不可达只告警不阻断启动（与 ffprobe 探测的做法一致）——
+	// 元数据服务是外部依赖，它挂了不该让整个媒体库服务起不来。
+	go a.checkScrapeBackend()
 	return a, nil
 }
 
-func requestContentLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		request, err := httputil.DumpRequest(c.Request, true)
-		if err == nil {
-			fmt.Printf("[API REQUEST]\n%s\n", string(request))
-		}
-		c.Next()
+// checkScrapeBackend 启动时探一次 MetaTube 连通性。
+func (a *App) checkScrapeBackend() {
+	cfg := a.scrapeConfig()
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(a.rootCtx, 10*time.Second)
+	defer cancel()
+	if err := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout()).Health(ctx); err != nil {
+		slog.Warn("启动自检：MetaTube 不可达（不影响启动，刮削任务会失败）", "url", cfg.BaseURL, "error", err)
+		return
+	}
+	slog.Info("启动自检：MetaTube 可达", "url", cfg.BaseURL)
 }
 
-// Close 先中止在跑的探测任务再关库，避免后台 goroutine 继续写 NFO / 访问已关闭的 DB。
+// Close 先停调度与在跑的探测任务再关库，避免后台 goroutine 继续写 NFO / 访问已关闭的 DB。
 func (a *App) Close() {
+	if a.sched != nil {
+		a.sched.Stop()
+	}
 	a.probeTaskMu.Lock()
 	if a.probeCancel != nil {
 		a.probeCancel()
@@ -195,6 +235,11 @@ func (a *App) routes() {
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/auth/status", a.authStatus)
 	r.POST("/api/auth/initialize", a.initialize)
+	// 刮削预览用的图片代理刻意不挂鉴权：它要能直接放进 <img src>，而浏览器不会给
+	// 图片请求带自定义头（X-Emby-Token），挂鉴权只会让缩略图全部 401。
+	// 上游 MetaTube 的图片端点本身也是公开的（Jellyfin 插件同样直接引用），
+	// 这里只做「限定 kind + 限定目标服务 + 限时限量」的转发，不放大暴露面。
+	r.GET("/api/admin/scrape/image", a.adminScrapeImage)
 
 	admin := r.Group("/api/admin", a.requireAuth)
 	admin.GET("/libraries", a.adminLibraries)
@@ -210,6 +255,7 @@ func (a *App) routes() {
 	admin.POST("/probe/media/cancel", a.adminProbeMediaCancel)
 	admin.POST("/reindex", a.adminReindex)
 	admin.GET("/items", a.adminItems)
+	admin.GET("/items/:id/detail", a.adminItemDetail)
 	admin.DELETE("/items/:id", a.adminDelete)
 	admin.GET("/probe", a.adminProbe)
 	admin.DELETE("/probe", a.adminClearProbes)
@@ -219,10 +265,31 @@ func (a *App) routes() {
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)
+	// 刮削（R4）：配置 + 批量/头像任务 + 单条预览确认 + 图片代理。
+	admin.GET("/scrape/settings", a.adminScrapeSettings)
+	admin.PUT("/scrape/settings", a.adminSaveScrapeSettings)
+	admin.POST("/scrape/test", a.adminScrapeTest)
+	admin.GET("/scrape/candidates", a.adminScrapeCandidates)
+	admin.POST("/scrape/run", a.adminScrapeRun)
+	admin.POST("/scrape/avatars", a.adminScrapeAvatars)
+	admin.GET("/scrape/progress", a.adminScrapeProgress)
+	admin.POST("/scrape/cancel", a.adminScrapeCancel)
+	// 计划任务（cron）：保存/启停后调度器即时重建，无需重启。
+	admin.GET("/scheduled", a.adminScheduledTasks)
+	admin.POST("/scheduled", a.adminCreateScheduledTask)
+	admin.POST("/scheduled/validate", a.adminValidateCron)
+	admin.PUT("/scheduled/:id", a.adminUpdateScheduledTask)
+	admin.DELETE("/scheduled/:id", a.adminDeleteScheduledTask)
+	admin.POST("/scheduled/:id/toggle", a.adminToggleScheduledTask)
+	admin.POST("/scheduled/:id/run", a.adminRunScheduledTask)
 	admin.POST("/items/manual", a.adminManual)
 	admin.PUT("/items/:id", a.adminEdit)
 	admin.POST("/items/:id/reread", a.adminReread)
 	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
+	// 单条手动刮削：预览 → 看 diff → 确认写入（无状态，取消零副作用）。
+	admin.GET("/items/:id/scrape/preview", a.adminScrapePreview)
+	admin.POST("/items/:id/scrape/inspect", a.adminScrapeInspect)
+	admin.POST("/items/:id/scrape", a.adminScrapeConfirm)
 	admin.POST("/items/:id/images/:kind", a.adminImage)
 
 	// Emby 兼容 API：裸前缀与 /emby 前缀共用同一注册表。
@@ -249,6 +316,7 @@ func (a *App) embyRoutes() []embyRoute {
 		{"POST", "/Users/AuthenticateByName", false, a.authenticate},
 		{"GET", "/Users/Public", false, a.publicUsers},
 		{"GET", "/Users/Me", true, a.me},
+		{"GET", "/Users/:uid", true, a.userByID},
 		{"GET", "/Users/:uid/Items/Latest", true, a.latest},
 		{"GET", "/Users/:uid/Suggestions", true, a.suggestions},
 		{"GET", "/System/Info/Public", false, a.publicInfo},
@@ -280,6 +348,10 @@ func (a *App) embyRoutes() []embyRoute {
 		{"GET", "/Items/:id/Similar", true, a.similar},
 		{"GET", "/Items/:id/PlaybackInfo", true, a.playback},
 		{"POST", "/Items/:id/PlaybackInfo", true, a.playback},
+		// 带用户前缀的同一端点：参考客户端（iPlay / openemby_tv / tsukimi）用的是上面那种，
+		// 但真实 Emby 两种都提供，部分客户端（如 Yamby）走这种，补上不增加维护成本。
+		{"GET", "/Users/:uid/Items/:id/PlaybackInfo", true, a.playback},
+		{"POST", "/Users/:uid/Items/:id/PlaybackInfo", true, a.playback},
 		{"GET", "/Videos/:id/AdditionalParts", true, a.additionalParts},
 		{"GET", "/Episode/:id/IntroSkipperSegments", true, a.emptyList},
 		{"GET", "/MediaSegments/:id", true, a.emptyList},

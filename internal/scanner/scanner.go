@@ -124,6 +124,87 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 	return result, s.BumpVersion(lib.ID)
 }
 
+// RescanOne 只重扫一个 .strm，用于单条刮削/编辑后立即刷新索引。
+//
+// 与 Scan 的两点关键差异：
+//   - **不跑 DeleteMissingSources**：单文件重扫不该触发「按磁盘现状删索引」，
+//     否则一次误传路径就能删掉整库索引；
+//   - 只处理该文件所属的分组（CD1/CD2 同组一起重建 AdditionalParts），
+//     批量场景下逐条调用它是 O(n²)，所以批量路径仍走整库 Scan。
+func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, error) {
+	var result Result
+	info, err := os.Stat(strmPath)
+	if err != nil {
+		return result, err
+	}
+	if info.IsDir() || !strings.EqualFold(filepath.Ext(strmPath), ".strm") {
+		return result, errors.New("不是 .strm 文件: " + strmPath)
+	}
+
+	base := strings.TrimSuffix(filepath.Base(strmPath), filepath.Ext(strmPath))
+	candidate := candidate{path: strmPath, info: info, base: base, groupKey: strmPath}
+	if match := cdPartPattern.FindStringSubmatch(base); match != nil {
+		candidate.base = match[1]
+		candidate.part = parsePart(match[2])
+		candidate.groupKey = filepath.Join(filepath.Dir(strmPath), strings.ToLower(match[1]))
+	}
+
+	paths := make(map[string]struct{})
+	group := collectGroup(candidate)
+	if primary, parts, ok := stackedGroup(group); ok {
+		partPaths := make([]string, 0, len(parts))
+		for _, part := range parts {
+			partPaths = append(partPaths, part.path)
+		}
+		fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
+		if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, &result, paths); err != nil {
+			return result, err
+		}
+	} else {
+		for _, item := range group {
+			if err := scanCandidate(s, lib, item, nil, "", &result, paths); err != nil {
+				return result, err
+			}
+		}
+	}
+	return result, s.BumpVersion(lib.ID)
+}
+
+// collectGroup 找到与目标候选同一 CD 分组的所有文件；非分集文件只返回它自己。
+// 分组必须从磁盘现读：AdditionalParts 依赖同目录里实际存在的 CD2..CDn。
+func collectGroup(target candidate) []candidate {
+	if target.part == 0 {
+		return []candidate{target}
+	}
+	entries, err := os.ReadDir(filepath.Dir(target.path))
+	if err != nil {
+		return []candidate{target}
+	}
+	group := []candidate{target}
+	want := strings.ToLower(target.base)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".strm") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		match := cdPartPattern.FindStringSubmatch(name)
+		if match == nil || strings.ToLower(match[1]) != want {
+			continue
+		}
+		path := filepath.Join(filepath.Dir(target.path), entry.Name())
+		if path == target.path {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		group = append(group, candidate{path: path, info: info, base: match[1],
+			part: parsePart(match[2]), groupKey: target.groupKey})
+	}
+	return group
+}
+
 func stackedGroup(group []candidate) (candidate, []candidate, bool) {
 	var primary candidate
 	var found bool
@@ -155,7 +236,7 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		return nil
 	}
 	setSource(&movie, line)
-	var actors []string
+	var actors []store.ActorRef
 	if ValidHTTP(line) {
 		nfoPath := strings.TrimSuffix(item.path, filepath.Ext(item.path)) + ".nfo"
 		meta, nfoErr := nfo.Read(nfoPath)
@@ -165,8 +246,9 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		}
 		if nfoErr == nil {
 			applyMeta(&movie, meta, nfoPath)
+			// NFO 的 <actor><thumb> 是头像真源：一并带进索引，删库重建后仍可恢复。
 			for _, actor := range meta.Actors {
-				actors = append(actors, actor.Name)
+				actors = append(actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
 			}
 			// 图片与元数据同一趟写入，避免成功影片入库两次。
 			movie.PosterPath = imageutil.FindPoster(movie.OutputDir)

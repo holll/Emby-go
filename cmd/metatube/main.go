@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"emby-go/internal/config"
+	"emby-go/internal/logging"
 	"emby-go/internal/server"
 )
 
@@ -43,6 +44,10 @@ func main() {
 		slog.Error("load config", "error", err)
 		os.Exit(1)
 	}
+
+	// 日志落盘：程序日志与请求日志分别按天写入 log/，同时保留控制台输出。
+	logs := logging.Setup(cfg.Debug)
+	defer logs.Close()
 
 	app, err := server.New(cfg)
 	if err != nil {

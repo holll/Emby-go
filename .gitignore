@@ -19,7 +19,10 @@
 # Local config（私人配置不入库，示例见 config.example.yaml）
 /config.yaml
 /config.local.yaml
+
+# 运行日志（log/ 下按天切分的 app-*.log / request-*.log）
 *.log
+/log/
 
 # Editors / OS
 /.idea/

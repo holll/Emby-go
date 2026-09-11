@@ -64,6 +64,10 @@ type Movie struct {
 	// 对应 Emby 的 DateCreated / DateModified；存储为 RFC3339 字符串。
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	// 刮削结果（需求 5f）：LastScrapeError 非空表示上次刮削失败或待人工确认
+	//（待确认带 store.ScrapeConfirmPrefix 前缀）。不新增 status 枚举值。
+	LastScrapeAt    string `json:"last_scrape_at,omitempty"`
+	LastScrapeError string `json:"last_scrape_error,omitempty"`
 }
 
 type UserData struct {
@@ -105,6 +109,11 @@ func Open(path string) (*Store, error) {
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN taglines TEXT")
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN provider_id TEXT")
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN additional_parts TEXT NOT NULL DEFAULT '[]'")
+	// 头像内容标识（Emby PrimaryImageTag）：存量库通过 ALTER 补列，新库见 init 的建表语句。
+	_, _ = db.Exec("ALTER TABLE actors ADD COLUMN avatar_tag TEXT")
+	// 刮削结果可见性（需求 5f）：不新增 status 枚举，失败/待确认都记在这两列上。
+	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_at TEXT")
+	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_error TEXT")
 	// 列表/详情/续播/实体聚合都按 status（+ library_id/collection）过滤，建索引避免全表扫描。
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
@@ -126,12 +135,14 @@ CREATE TABLE IF NOT EXISTS libraries (id INTEGER PRIMARY KEY AUTOINCREMENT, name
 CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER NOT NULL, source_path TEXT UNIQUE NOT NULL, file_size INTEGER DEFAULT 0, file_mtime TEXT, source_protocol TEXT, source_container TEXT, number TEXT, status TEXT NOT NULL, nfo_path TEXT, output_dir TEXT, title TEXT, original_title TEXT, plot TEXT, year INTEGER, premiered TEXT, rating REAL, director TEXT, series TEXT, maker TEXT, label TEXT, collection TEXT, official_rating TEXT, sortname TEXT, taglines TEXT, provider_id TEXT, genres TEXT, tags TEXT, studios TEXT, poster_path TEXT, backdrop_path TEXT, landscape_path TEXT, runtime_seconds INTEGER DEFAULT 0, additional_parts TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(library_id) REFERENCES libraries(id));
 CREATE TABLE IF NOT EXISTS userdata (movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, position_ticks INTEGER DEFAULT 0, play_count INTEGER DEFAULT 0, played INTEGER DEFAULT 0, last_played_at TEXT, last_stopped_ticks INTEGER DEFAULT -1, is_favorite INTEGER NOT NULL DEFAULT 0, likes INTEGER NOT NULL DEFAULT 0, hide_from_resume INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS api_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, method TEXT, path TEXT, query TEXT, body_preview TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS actors (name TEXT PRIMARY KEY, avatar_url TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS actors (name TEXT PRIMARY KEY, avatar_url TEXT, avatar_tag TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS movie_actors (movie_id INTEGER, actor_name TEXT, PRIMARY KEY(movie_id, actor_name), FOREIGN KEY(movie_id) REFERENCES movies(id) ON DELETE CASCADE, FOREIGN KEY(actor_name) REFERENCES actors(name));
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '0');
 CREATE TABLE IF NOT EXISTS administrators (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS access_tokens (token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`)
+CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_status TEXT, last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
 	return err
 }
 
@@ -406,7 +417,7 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 func movieScan(row *sql.Rows) (Movie, error) {
 	var m Movie
 	var genres, tags, studios, taglines, parts, mt string
-	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &m.CreatedAt, &m.UpdatedAt)
+	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &m.CreatedAt, &m.UpdatedAt, &m.LastScrapeAt, &m.LastScrapeError)
 	m.Genres = parseStrings(genres)
 	m.Tags = parseStrings(tags)
 	m.Studios = parseStrings(studios)
@@ -415,7 +426,7 @@ func movieScan(row *sql.Rows) (Movie, error) {
 	return m, err
 }
 
-const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,'')"
+const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
 
 func (s *Store) Movie(id int64) (Movie, error) {
 	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id=?", id)
@@ -429,23 +440,46 @@ func (s *Store) Movie(id int64) (Movie, error) {
 	return movieScan(row)
 }
 func (s *Store) SearchFiltered(libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
 func (s *Store) SearchScoped(libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", "", unplayed, favorite, sortBy, desc, limit, offset)
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, status, "", "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
 }
 
-// SearchAdmin 供管理端列表：在 SearchAll 基础上按 source_protocol 过滤，
-// 过滤与分页同在 SQL 层，避免先分页再过滤导致每页条数与总数失真。
-func (s *Store) SearchAdmin(term, status, protocol, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(0, term, status, "", "", "", "", "", "", protocol, false, false, sortBy, desc, limit, offset)
+// AdminQuery 管理端列表（媒体墙）的查询条件。
+//
+// 用结构体而非长参数表：媒体墙的筛选维度会随详情抽屉的实体跳转继续增加，
+// 位置参数在调用点极易错位。全部过滤与分页都在 SQL 层完成，
+// 避免先分页再过滤导致每页条数与总数失真。
+type AdminQuery struct {
+	LibraryID  int64  // 0 = 全部媒体库
+	Term       string // 标题/番号/原名模糊匹配
+	Status     string // "" = 可播放+手动录入
+	Protocol   string // source_protocol
+	Genre      string
+	Tag        string
+	Studio     string
+	Person     string
+	Collection string // ""=不限；"*"=任一合集成员；其它=具体合集名
+	// Scrape 按刮削结果筛选：""=不限；"failed"=刮削失败；"confirm"=待人工确认。
+	Scrape string
+	SortBy string
+	Desc   bool
+	Limit  int
+	Offset int
+}
+
+// SearchAdmin 供管理端列表使用。
+func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
+	return s.search(q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol, q.Scrape,
+		false, false, q.SortBy, q.Desc, q.Limit, q.Offset)
 }
 
 // MoviesForProbe 返回媒体信息探测的候选影片，只挑有 NFO 的条目：
@@ -489,15 +523,17 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 	return out, rows.Err()
 }
 
-func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol, scrape string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	where := []string{}
-	if status == "" {
-		where = append(where, "status IN ('success','manual')")
-	} else {
-		where = append(where, "status=?")
-	}
 	args := []any{}
-	if status != "" {
+	switch status {
+	case "":
+		// 默认口径：只列「能看的」，pending/incompatible 需要显式筛选。
+		where = append(where, "status IN ('success','manual')")
+	case StatusAll:
+		// 明确要求不限状态（如按刮削失败筛选，那些条目多半还是 pending）。
+	default:
+		where = append(where, "status=?")
 		args = append(args, status)
 	}
 	if libraryID > 0 {
@@ -513,6 +549,15 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	if protocol != "" {
 		where = append(where, "source_protocol=?")
 		args = append(args, protocol)
+	}
+	switch scrape {
+	case ScrapeFilterFailed:
+		// 失败与待确认都记在 last_scrape_error 上，用前缀区分（见 SetScrapeResult 的约定）。
+		where = append(where, "COALESCE(last_scrape_error,'') <> '' AND last_scrape_error NOT LIKE ?")
+		args = append(args, ScrapeConfirmPrefix+"%")
+	case ScrapeFilterConfirm:
+		where = append(where, "last_scrape_error LIKE ?")
+		args = append(args, ScrapeConfirmPrefix+"%")
 	}
 	if term != "" {
 		where = append(where, "(title LIKE ? OR original_title LIKE ? OR number LIKE ?)")
@@ -565,9 +610,15 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	if favorite {
 		where = append(where, "EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.is_favorite=1)")
 	}
+	// status=StatusAll 时可能一条过滤条件都没有（此时 where 为空），
+	// 必须整段省掉 WHERE，否则会拼出 "SELECT ... FROM movies WHERE " 的残缺 SQL。
 	cond := strings.Join(where, " AND ")
+	clause := ""
+	if cond != "" {
+		clause = " WHERE " + cond
+	}
 	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies WHERE "+cond, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies"+clause, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	allowed := map[string]string{
@@ -583,7 +634,7 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 		direction = "DESC"
 	}
 	args = append(args, limit, offset)
-	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE "+cond+" ORDER BY "+column+" "+direction+",id LIMIT ? OFFSET ?", args...)
+	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies"+clause+" ORDER BY "+column+" "+direction+",id LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -646,9 +697,20 @@ func (s *Store) DataFor(ids []int64) (map[int64]UserData, error) {
 	return out, rows.Err()
 }
 
-// ActorsFor 批量读取多部影片的演员列表（一次 IN 查询，替代列表页逐片 Actors() 的 N+1）。
-func (s *Store) ActorsFor(ids []int64) (map[int64][]string, error) {
-	out := make(map[int64][]string, len(ids))
+// ActorRef 演员及其头像索引。
+//
+// AvatarURL 来自 NFO 的 <actor><thumb>（远端地址，真源），AvatarTag 是本地副本
+// avatars/<hash>.webp 的内容标识，二者都为空表示该演员尚无头像。
+type ActorRef struct {
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	AvatarTag string `json:"avatar_tag,omitempty"`
+}
+
+// ActorsFor 批量读取多部影片的演员列表（一次 IN 查询，替代列表页逐片 Actors() 的 N+1），
+// 同时带回头像字段——列表页的 People[] 需要 PrimaryImageTag，逐片回查会退化成 N+1。
+func (s *Store) ActorsFor(ids []int64) (map[int64][]ActorRef, error) {
+	out := make(map[int64][]ActorRef, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
@@ -657,20 +719,48 @@ func (s *Store) ActorsFor(ids []int64) (map[int64][]string, error) {
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := s.db.Query(`SELECT movie_id,actor_name FROM movie_actors WHERE movie_id IN (`+placeholders+`) ORDER BY movie_id,actor_name`, args...)
+	rows, err := s.db.Query(`SELECT ma.movie_id, ma.actor_name, COALESCE(a.avatar_url,''), COALESCE(a.avatar_tag,'')
+		FROM movie_actors ma LEFT JOIN actors a ON a.name=ma.actor_name
+		WHERE ma.movie_id IN (`+placeholders+`) ORDER BY ma.movie_id, ma.actor_name`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var actor ActorRef
+		if err := rows.Scan(&id, &actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
 			return nil, err
 		}
-		out[id] = append(out[id], name)
+		out[id] = append(out[id], actor)
 	}
 	return out, rows.Err()
+}
+
+// ActorAvatar 按演员名查头像索引；查无此人时返回零值（不报错）。
+func (s *Store) ActorAvatar(name string) (ActorRef, error) {
+	var actor ActorRef
+	err := s.db.QueryRow("SELECT name, COALESCE(avatar_url,''), COALESCE(avatar_tag,'') FROM actors WHERE name=?",
+		strings.TrimSpace(name)).Scan(&actor.Name, &actor.AvatarURL, &actor.AvatarTag)
+	if err == sql.ErrNoRows {
+		return ActorRef{}, nil
+	}
+	return actor, err
+}
+
+// SetActorAvatar 只更新头像索引（供头像任务写入，不动影片-演员关系）。
+// tag 为空表示暂无本地副本，此时保留原有标识不变。
+func (s *Store) SetActorAvatar(name, url, tag string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO actors(name,avatar_url,avatar_tag,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET
+			avatar_url=CASE WHEN excluded.avatar_url<>'' THEN excluded.avatar_url ELSE actors.avatar_url END,
+			avatar_tag=CASE WHEN excluded.avatar_tag<>'' THEN excluded.avatar_tag ELSE actors.avatar_tag END`,
+		name, url, tag, time.Now().UTC().Format(time.RFC3339))
+	return err
 }
 
 // b2i 把布尔值转成 SQLite 的 0/1。
@@ -739,7 +829,11 @@ func (s *Store) ClearProbes() error {
 	_, err := s.db.Exec("DELETE FROM api_probe")
 	return err
 }
-func (s *Store) ReplaceActors(movieID int64, names []string) error {
+
+// ReplaceActors 覆盖一部影片的演员关系，并把 NFO 带来的头像地址同步进 actors 表。
+// 传入 avatar 为空时不清空已有头像——扫库多数时候只读到姓名，
+// 不能让一次扫描把头像任务已写入的索引抹掉。
+func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -748,12 +842,17 @@ func (s *Store) ReplaceActors(movieID int64, names []string) error {
 		_ = tx.Rollback()
 		return err
 	}
-	for _, name := range names {
-		name = strings.TrimSpace(name)
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, actor := range actors {
+		name := strings.TrimSpace(actor.Name)
 		if name == "" {
 			continue
 		}
-		if _, err = tx.Exec("INSERT INTO actors(name,updated_at) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET updated_at=excluded.updated_at", name, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		if _, err = tx.Exec(`INSERT INTO actors(name,avatar_url,updated_at) VALUES(?,?,?)
+			ON CONFLICT(name) DO UPDATE SET
+				avatar_url=CASE WHEN excluded.avatar_url<>'' THEN excluded.avatar_url ELSE actors.avatar_url END,
+				updated_at=excluded.updated_at`,
+			name, strings.TrimSpace(actor.AvatarURL), now); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -764,41 +863,48 @@ func (s *Store) ReplaceActors(movieID int64, names []string) error {
 	}
 	return tx.Commit()
 }
-func (s *Store) Actors(movieID int64) ([]string, error) {
-	rows, err := s.db.Query("SELECT actor_name FROM movie_actors WHERE movie_id=? ORDER BY actor_name", movieID)
+
+// Actors 返回一部影片的演员（含头像索引），按姓名排序。
+func (s *Store) Actors(movieID int64) ([]ActorRef, error) {
+	rows, err := s.db.Query(`SELECT ma.actor_name, COALESCE(a.avatar_url,''), COALESCE(a.avatar_tag,'')
+		FROM movie_actors ma LEFT JOIN actors a ON a.name=ma.actor_name
+		WHERE ma.movie_id=? ORDER BY ma.actor_name`, movieID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []ActorRef
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var actor ActorRef
+		if err := rows.Scan(&actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
 			return nil, err
 		}
-		out = append(out, name)
+		out = append(out, actor)
 	}
 	return out, rows.Err()
 }
 
-// AllActors 一次返回全部可见影片的演员映射（movie_id → 演员名），供相似度批量打分。
-func (s *Store) AllActors() (map[int64][]string, error) {
-	rows, err := s.db.Query(`SELECT ma.movie_id, ma.actor_name FROM movie_actors ma
+// AllActors 一次返回全部可见影片的演员映射，供相似度批量打分与相似列表组装
+// 演员清单（带头像索引，避免再查一次）。
+func (s *Store) AllActors() (map[int64][]ActorRef, error) {
+	rows, err := s.db.Query(`SELECT ma.movie_id, ma.actor_name, COALESCE(a.avatar_url,''), COALESCE(a.avatar_tag,'')
+		FROM movie_actors ma
 		JOIN movies ON movies.id=ma.movie_id
+		LEFT JOIN actors a ON a.name=ma.actor_name
 		WHERE movies.status IN ('success','manual')
 		ORDER BY ma.actor_name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[int64][]string)
+	out := make(map[int64][]ActorRef)
 	for rows.Next() {
 		var movieID int64
-		var name string
-		if err := rows.Scan(&movieID, &name); err != nil {
+		var actor ActorRef
+		if err := rows.Scan(&movieID, &actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
 			return nil, err
 		}
-		out[movieID] = append(out[movieID], name)
+		out[movieID] = append(out[movieID], actor)
 	}
 	return out, rows.Err()
 }
@@ -1187,4 +1293,301 @@ func (s *Store) UnplayedInLibrary(libraryID int64) (int, error) {
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM movies WHERE library_id=? AND status IN ('success','manual')
 		AND NOT EXISTS (SELECT 1 FROM userdata u WHERE u.movie_id=movies.id AND u.played=1)`, libraryID).Scan(&count)
 	return count, err
+}
+
+// —— 计划任务（cron）：定义存 DB，执行历史不落库，只保留「上次结果」 ——
+
+// ScheduledTask 一条计划任务定义。
+//
+// Params 为任务参数（JSON 文本，缺省 "{}"），具体字段由任务类型决定；
+// 用单列存 JSON 是为了新增任务类型时不必改表。
+type ScheduledTask struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Cron        string `json:"cron"`
+	Params      string `json:"params"`
+	Enabled     bool   `json:"enabled"`
+	LastRunAt   string `json:"last_run_at,omitempty"`
+	LastStatus  string `json:"last_status,omitempty"`  // success / failed / skipped
+	LastMessage string `json:"last_message,omitempty"` // 失败原因或跳过原因
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+const scheduledColumns = "id,name,type,cron,params,enabled,last_run_at,last_status,last_message,created_at,updated_at"
+
+func scanScheduled(row interface{ Scan(...any) error }) (ScheduledTask, error) {
+	var v ScheduledTask
+	var lastRun, lastStatus, lastMessage sql.NullString
+	err := row.Scan(&v.ID, &v.Name, &v.Type, &v.Cron, &v.Params, &v.Enabled,
+		&lastRun, &lastStatus, &lastMessage, &v.CreatedAt, &v.UpdatedAt)
+	v.LastRunAt, v.LastStatus, v.LastMessage = lastRun.String, lastStatus.String, lastMessage.String
+	return v, err
+}
+
+// ScheduledTasks 返回全部计划任务（含已禁用），按 id 排序。
+func (s *Store) ScheduledTasks() ([]ScheduledTask, error) {
+	rows, err := s.db.Query("SELECT " + scheduledColumns + " FROM scheduled_tasks ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ScheduledTask
+	for rows.Next() {
+		v, err := scanScheduled(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ScheduledTask 按 id 返回单条计划任务。
+func (s *Store) ScheduledTask(id int64) (ScheduledTask, error) {
+	return scanScheduled(s.db.QueryRow("SELECT "+scheduledColumns+" FROM scheduled_tasks WHERE id=?", id))
+}
+
+// CreateScheduledTask 新建计划任务并返回落库后的完整记录。
+func (s *Store) CreateScheduledTask(v ScheduledTask) (ScheduledTask, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if v.Params == "" {
+		v.Params = "{}"
+	}
+	result, err := s.db.Exec(`INSERT INTO scheduled_tasks(name,type,cron,params,enabled,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?)`, v.Name, v.Type, v.Cron, v.Params, v.Enabled, now, now)
+	if err != nil {
+		return ScheduledTask{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return ScheduledTask{}, err
+	}
+	return s.ScheduledTask(id)
+}
+
+// UpdateScheduledTask 覆盖计划任务的可编辑字段（保留上次执行结果）。
+func (s *Store) UpdateScheduledTask(v ScheduledTask) (ScheduledTask, error) {
+	if v.Params == "" {
+		v.Params = "{}"
+	}
+	result, err := s.db.Exec(`UPDATE scheduled_tasks SET name=?,type=?,cron=?,params=?,enabled=?,updated_at=? WHERE id=?`,
+		v.Name, v.Type, v.Cron, v.Params, v.Enabled, time.Now().UTC().Format(time.RFC3339), v.ID)
+	if err != nil {
+		return ScheduledTask{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return ScheduledTask{}, err
+	} else if count == 0 {
+		return ScheduledTask{}, sql.ErrNoRows
+	}
+	return s.ScheduledTask(v.ID)
+}
+
+// SetScheduledTaskEnabled 只切换启用状态（列表页开关用，避免整体覆盖）。
+func (s *Store) SetScheduledTaskEnabled(id int64, enabled bool) error {
+	result, err := s.db.Exec(`UPDATE scheduled_tasks SET enabled=?,updated_at=? WHERE id=?`,
+		enabled, time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) DeleteScheduledTask(id int64) error {
+	result, err := s.db.Exec("DELETE FROM scheduled_tasks WHERE id=?", id)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// RecordScheduledResult 记录一次执行的结束状态（status: success/failed/skipped）。
+func (s *Store) RecordScheduledResult(id int64, status, message string) error {
+	_, err := s.db.Exec(`UPDATE scheduled_tasks SET last_run_at=?,last_status=?,last_message=? WHERE id=?`,
+		time.Now().UTC().Format(time.RFC3339), status, message, id)
+	return err
+}
+
+// —— 设置项（刮削器等运行期配置）：只存已改过的键，缺省值由代码兜底 ——
+
+// Setting 读取一条设置；不存在时返回空串（不报错，便于「缺省走代码默认」）。
+func (s *Store) Setting(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
+}
+
+// SetSetting 写入一条设置。
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
+// Settings 返回全部设置项，供管理端回显。
+func (s *Store) Settings() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT key,value FROM settings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	return out, rows.Err()
+}
+
+// —— 刮削（R4）：目标选取、结果记录、头像任务候选 ——
+
+// StatusAll 是「不限状态」的哨兵值：search 的默认口径只列 success/manual，
+// 需要看到 pending（刮削失败/待确认的条目）时必须显式传它，而不是传空串。
+const StatusAll = "__all__"
+
+// 刮削结果的筛选值（AdminQuery.Scrape）。
+const (
+	ScrapeFilterFailed  = "failed"
+	ScrapeFilterConfirm = "confirm"
+)
+
+// ScrapeConfirmPrefix 批量刮削「非番号精确命中」的待人工确认标记前缀。
+// 与真实失败共用 last_scrape_error 一列（需求 5f：不新增 status 枚举），
+// 靠这个前缀把「需要人工介入」与「任务出错」区分开。
+const ScrapeConfirmPrefix = "[待人工确认] "
+
+// MoviesForScrape 返回刮削候选影片。
+//
+//   - libraryID=0 表示全部媒体库；
+//   - onlyMissing=true 只挑元数据缺失的（无 NFO 或无标题），这是默认范围；
+//   - 永远排除 incompatible——它们的源不是 http(s)，
+//     写 NFO 也改变不了可播放性（判定只看 .strm 内容）。
+//
+// 顺带取出 additional_parts 与 nfo_path：刮削只写主 NFO，分段不单独处理。
+func (s *Store) MoviesForScrape(libraryID int64, onlyMissing bool, limit int) ([]Movie, error) {
+	query := "SELECT " + movieCols + " FROM movies WHERE status <> 'incompatible'"
+	args := []any{}
+	if libraryID > 0 {
+		query += " AND library_id=?"
+		args = append(args, libraryID)
+	}
+	if onlyMissing {
+		query += " AND (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+	}
+	query += " ORDER BY id"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movie
+	for rows.Next() {
+		m, err := movieScan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// CountMoviesForScrape 统计候选数量，供管理端展示「本次会处理多少条」。
+func (s *Store) CountMoviesForScrape(libraryID int64, onlyMissing bool) (int, error) {
+	query := "SELECT COUNT(*) FROM movies WHERE status <> 'incompatible'"
+	args := []any{}
+	if libraryID > 0 {
+		query += " AND library_id=?"
+		args = append(args, libraryID)
+	}
+	if onlyMissing {
+		query += " AND (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+	}
+	var count int
+	err := s.db.QueryRow(query, args...).Scan(&count)
+	return count, err
+}
+
+// SetScrapeResult 记录一次刮削的结束状态。message 为空表示成功（清空上次的错误）。
+func (s *Store) SetScrapeResult(movieID int64, message string) error {
+	_, err := s.db.Exec("UPDATE movies SET last_scrape_at=?, last_scrape_error=? WHERE id=?",
+		time.Now().UTC().Format(time.RFC3339), message, movieID)
+	return err
+}
+
+// ActorsMissingAvatar 返回还没有头像的演员名（供 scrape_avatars 任务）。
+//
+// 只挑至少参演过一部可见影片的演员：演员表里可能有历史遗留的孤立名字，
+// 没有对应影片就没有写 NFO 头像真源的地方，处理了也留不住。
+// libraryID>0 时只统计该库内的演员。
+func (s *Store) ActorsMissingAvatar(libraryID int64, limit int) ([]string, error) {
+	query := `SELECT DISTINCT a.name FROM actors a
+		JOIN movie_actors ma ON ma.actor_name = a.name
+		JOIN movies m ON m.id = ma.movie_id
+		WHERE COALESCE(a.avatar_url,'')='' AND m.status IN ('success','manual')`
+	args := []any{}
+	if libraryID > 0 {
+		query += " AND m.library_id=?"
+		args = append(args, libraryID)
+	}
+	query += " ORDER BY a.name"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// MoviesByActor 返回某演员参演的可见影片（头像任务要逐个改写它们的 NFO）。
+func (s *Store) MoviesByActor(name string) ([]Movie, error) {
+	rows, err := s.db.Query("SELECT "+movieCols+` FROM movies
+		WHERE status IN ('success','manual')
+		  AND EXISTS (SELECT 1 FROM movie_actors ma WHERE ma.movie_id=movies.id AND ma.actor_name=?)
+		ORDER BY id`, strings.TrimSpace(name))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movie
+	for rows.Next() {
+		m, err := movieScan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }

@@ -9,10 +9,15 @@ import (
 	"strings"
 )
 
+// Actor 对应 <actor>：Thumb 是头像的远端地址，头像真源就在这里——
+// 删库重建后靠它重新下载本地副本（见需求 A7 #44）。
 type Actor struct {
-	Name       string `xml:"name"`
-	Type       string `xml:"type"`
-	MetaTubeID string `xml:"metatubeid"`
+	Name string `xml:"name"`
+	// 可选字段带 omitempty：新建 NFO 时不该出现空的 <thumb></thumb>
+	//（空 thumb 与「没有 thumb」在读取侧等价，但空标签会让人误以为刮过而失败）。
+	Type       string `xml:"type,omitempty"`
+	MetaTubeID string `xml:"metatubeid,omitempty"`
+	Thumb      string `xml:"thumb,omitempty"`
 }
 
 // MovieSet 对应 Kodi/Emby 的 <set><name>：合集（BoxSet）归属。
@@ -68,9 +73,22 @@ type AudioStream struct {
 	Forced        string `xml:"forced"`
 }
 
+// SubtitleStream 对应 <subtitle> 字幕轨。
+type SubtitleStream struct {
+	Codec           string `xml:"codec"`
+	CodecTag        string `xml:"micodec"`
+	Language        string `xml:"language"`
+	Title           string `xml:"title"`
+	Default         string `xml:"default"`
+	Forced          string `xml:"forced"`
+	HearingImpaired string `xml:"hearingimpaired"`
+	External        string `xml:"external"`
+}
+
 type StreamDetails struct {
-	Video *VideoStream `xml:"video,omitempty"`
-	Audio *AudioStream `xml:"audio,omitempty"`
+	Video     *VideoStream     `xml:"video,omitempty"`
+	Audio     *AudioStream     `xml:"audio,omitempty"`
+	Subtitles []SubtitleStream `xml:"subtitle,omitempty"`
 }
 
 type FileInfo struct {
@@ -97,35 +115,40 @@ type FileInfoMeta struct {
 	ProbeURL     string
 }
 
+// MovieMeta 既是 NFO 的解析目标，也是整体重写（Save/SaveAtomic）的输出源。
+//
+// 可选字段一律带 omitempty：整体重写新文件时不应写出 `<outline></outline>` 这类空标签——
+// 空 <lockdata>、空 <outline> 会被其它工具当成「显式写了空值」，也让文件难以人工核对。
+// 刮削存量文件走的是 internal/nfo/update.go 的标签级更新器，不受这里影响。
 type MovieMeta struct {
-	Number        string     `xml:"num"`
-	Title         string     `xml:"title"`
-	OriginalTitle string     `xml:"originaltitle"`
-	Plot          string     `xml:"plot"`
-	Outline       string     `xml:"outline"`
-	Year          int        `xml:"year"`
-	Premiered     string     `xml:"premiered"`
-	ReleaseDate   string     `xml:"releasedate"`
-	DateAdded     string     `xml:"dateadded"`
-	Rating        float64    `xml:"rating"`
-	Mpaa          string     `xml:"mpaa"`
-	SortTitle     string     `xml:"sorttitle"`
-	Director      string     `xml:"director"`
-	Series        string     `xml:"series"`
-	Maker         string     `xml:"maker"`
-	Label         string     `xml:"label"`
-	LockData      string     `xml:"lockdata"`
-	MetaTubeID    string     `xml:"metatubeid"`
-	TrailerURLID  string     `xml:"trailerurlid"`
+	Number        string     `xml:"num,omitempty"`
+	Title         string     `xml:"title,omitempty"`
+	OriginalTitle string     `xml:"originaltitle,omitempty"`
+	Plot          string     `xml:"plot,omitempty"`
+	Outline       string     `xml:"outline,omitempty"`
+	Year          int        `xml:"year,omitempty"`
+	Premiered     string     `xml:"premiered,omitempty"`
+	ReleaseDate   string     `xml:"releasedate,omitempty"`
+	DateAdded     string     `xml:"dateadded,omitempty"`
+	Rating        float64    `xml:"rating,omitempty"`
+	Mpaa          string     `xml:"mpaa,omitempty"`
+	SortTitle     string     `xml:"sorttitle,omitempty"`
+	Director      string     `xml:"director,omitempty"`
+	Series        string     `xml:"series,omitempty"`
+	Maker         string     `xml:"maker,omitempty"`
+	Label         string     `xml:"label,omitempty"`
+	LockData      string     `xml:"lockdata,omitempty"`
+	MetaTubeID    string     `xml:"metatubeid,omitempty"`
+	TrailerURLID  string     `xml:"trailerurlid,omitempty"`
 	Set           *MovieSet  `xml:"set,omitempty"`
-	Genres        []string   `xml:"genre"`
-	Tags          []string   `xml:"tag"`
-	Studios       []string   `xml:"studio"`
-	Taglines      []string   `xml:"tagline"`
-	UniqueIDs     []UniqueID `xml:"uniqueid"`
-	Runtime       int64      `xml:"runtime"`
+	Genres        []string   `xml:"genre,omitempty"`
+	Tags          []string   `xml:"tag,omitempty"`
+	Studios       []string   `xml:"studio,omitempty"`
+	Taglines      []string   `xml:"tagline,omitempty"`
+	UniqueIDs     []UniqueID `xml:"uniqueid,omitempty"`
+	Runtime       int64      `xml:"runtime,omitempty"`
 	FileInfo      *FileInfo  `xml:"fileinfo,omitempty"`
-	Actors        []Actor    `xml:"actor"`
+	Actors        []Actor    `xml:"actor,omitempty"`
 }
 
 // Collection 返回 <set><name> 的合集名（去空白），无 set 时为空串。
@@ -303,6 +326,18 @@ func renderFileInfo(meta FileInfoMeta, details *StreamDetails) string {
 		writeValue(&builder, 8, "default", audio.Default)
 		writeValue(&builder, 8, "forced", audio.Forced)
 		builder.WriteString("      </audio>\n")
+	}
+	for _, subtitle := range details.Subtitles {
+		builder.WriteString("      <subtitle>\n")
+		writeValue(&builder, 8, "codec", subtitle.Codec)
+		writeValue(&builder, 8, "micodec", subtitle.CodecTag)
+		writeValue(&builder, 8, "language", subtitle.Language)
+		writeValue(&builder, 8, "title", subtitle.Title)
+		writeValue(&builder, 8, "default", subtitle.Default)
+		writeValue(&builder, 8, "forced", subtitle.Forced)
+		writeValue(&builder, 8, "hearingimpaired", subtitle.HearingImpaired)
+		writeValue(&builder, 8, "external", subtitle.External)
+		builder.WriteString("      </subtitle>\n")
 	}
 	builder.WriteString("    </streamdetails>\n  </fileinfo>")
 	return builder.String()

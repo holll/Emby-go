@@ -214,3 +214,39 @@ func TestRunMissingBinary(t *testing.T) {
 		t.Error("不存在的 ffprobe 应报错")
 	}
 }
+
+// TestParseSubtitles 字幕轨必须全部保留（不像音视频轨只取首条），
+// 并如实带出语言/标题/默认/强迫/听障标记。
+func TestParseSubtitles(t *testing.T) {
+	raw := []byte(`{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2},
+    {"index": 5, "codec_type": "subtitle", "codec_name": "subrip",
+     "disposition": {"default": 1, "forced": 0},
+     "tags": {"language": "chi", "title": "简体中文"}},
+    {"index": 7, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle",
+     "disposition": {"default": 0, "forced": 1, "hearing_impaired": 1},
+     "tags": {"language": "eng"}}
+  ],
+  "format": {"format_name": "matroska", "duration": "3600", "size": "100"}
+}`)
+	info, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(info.Subtitles) != 2 {
+		t.Fatalf("字幕轨数量 = %d，期望 2", len(info.Subtitles))
+	}
+	first := info.Subtitles[0]
+	if first.Index != 5 || first.Codec != "subrip" || first.Language != "chi" || first.Title != "简体中文" {
+		t.Errorf("第 1 条字幕轨不对: %+v", first)
+	}
+	if !first.Default || first.Forced || !first.Embedded {
+		t.Errorf("第 1 条字幕轨的标记不对: %+v", first)
+	}
+	second := info.Subtitles[1]
+	if second.Forced != true || second.HearingImpaired != true || second.Default != false {
+		t.Errorf("第 2 条字幕轨的标记不对: %+v", second)
+	}
+}
