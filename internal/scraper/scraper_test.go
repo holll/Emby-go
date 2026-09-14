@@ -91,8 +91,12 @@ func TestBuildFieldsMapsMetaTubeToNFO(t *testing.T) {
 	}
 	fields := buildFields(info, "中文标题", "中文简介", true)
 
-	if fields.Title != "中文标题" || fields.OriginalTitle != "原文标题" {
-		t.Errorf("标题映射不对: %+v", fields)
+	// <title>/<sorttitle> 一律是「番号 标题」，原文另存 originaltitle。
+	if fields.Title != "ABF-018 中文标题" || fields.SortTitle != "ABF-018 中文标题" {
+		t.Errorf("标题/排序标题应拼番号前缀: %+v", fields)
+	}
+	if fields.OriginalTitle != "原文标题" {
+		t.Errorf("原文标题应保留原文: %+v", fields)
 	}
 	if fields.Plot != "中文简介" || fields.Year != 2024 || fields.Premiered != "2024-03-05" {
 		t.Errorf("简介/日期映射不对: %+v", fields)
@@ -117,6 +121,29 @@ func TestBuildFieldsMapsMetaTubeToNFO(t *testing.T) {
 	}
 	if len(fields.Actors) != 2 {
 		t.Errorf("空演员名应被剔除: %+v", fields.Actors)
+	}
+}
+
+func TestJoinNumberTitle(t *testing.T) {
+	cases := []struct {
+		number, title, want string
+	}{
+		{"ABF-018", "标题", "ABF-018 标题"},
+		{"", "标题", "标题"},
+		{"ABF-018", "", "ABF-018"},
+		{"", "", ""},
+		{"ABF-018", " 标题 ", "ABF-018 标题"},
+		// 上游标题已带番号时不再重复加前缀。
+		{"ABF-018", "ABF-018 标题", "ABF-018 标题"},
+		{"ABF-018", "abf-018（标题）", "abf-018（标题）"},
+		// 番号只是标题的前缀片段时不算已带番号。
+		{"ABF-018", "ABF-0182 标题", "ABF-018 ABF-0182 标题"},
+		{"ABF-018", "ABF-01 标题", "ABF-018 ABF-01 标题"},
+	}
+	for _, tc := range cases {
+		if got := joinNumberTitle(tc.number, tc.title); got != tc.want {
+			t.Errorf("joinNumberTitle(%q, %q) = %q，期望 %q", tc.number, tc.title, got, tc.want)
+		}
 	}
 }
 
@@ -272,7 +299,8 @@ func TestApplyWritesNFOAndImages(t *testing.T) {
 	}
 	nfoText := string(raw)
 	for _, want := range []string{
-		"<title>原文标题</title>", // 未开翻译 → 用原文
+		"<title>ABF-018 原文标题</title>", // 番号前缀 + 未开翻译 → 原文
+		"<sorttitle>ABF-018 原文标题</sorttitle>",
 		"<originaltitle>原文标题</originaltitle>",
 		"<plot>原文简介</plot>",
 		"<mpaa>JP-18+</mpaa>",
@@ -376,7 +404,7 @@ func TestApplyCreatesNFOWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("未生成可解析的 NFO: %v", err)
 	}
-	if meta.Title != "原文标题" || len(meta.Actors) != 2 {
+	if meta.Title != "ABF-018 原文标题" || meta.SortTitle != "ABF-018 原文标题" || len(meta.Actors) != 2 {
 		t.Errorf("新建 NFO 内容不对: %+v", meta)
 	}
 }

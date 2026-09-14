@@ -233,11 +233,15 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nf
 	if runtime <= 0 {
 		runtime = 0
 	}
+	// <title>/<sorttitle> 统一为「番号 标题」：库内条目按番号聚拢、排序也按番号走。
+	// 标题取译文（未开翻译或翻译失败时 translateFields 已回退原文）。
+	number := strings.TrimSpace(info.Number)
+	displayTitle := joinNumberTitle(number, title)
 	return nfo.ScrapeFields{
-		Number:        strings.TrimSpace(info.Number),
-		Title:         title,
+		Number:        number,
+		Title:         displayTitle,
 		OriginalTitle: strings.TrimSpace(info.Title),
-		SortTitle:     strings.TrimSpace(info.Title),
+		SortTitle:     displayTitle,
 		Plot:          plot,
 		Year:          year,
 		Premiered:     premiered,
@@ -255,6 +259,35 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nf
 		Actors:        actors,
 		Overwrite:     overwrite,
 	}
+}
+
+// joinNumberTitle 拼「番号 标题」（单个空格分隔）；番号或标题缺失时只保留非空的一项。
+func joinNumberTitle(number, title string) string {
+	number, title = strings.TrimSpace(number), strings.TrimSpace(title)
+	switch {
+	case number == "":
+		return title
+	case title == "":
+		return number
+	case hasNumberPrefix(title, number):
+		// 部分来源的标题本身就带番号，再加一次会变成「ABF-018 ABF-018 …」。
+		return title
+	}
+	return number + " " + title
+}
+
+// hasNumberPrefix 判断标题是否已以番号开头：番号之后必须紧跟非字母数字字符
+// （空格、分隔符、全角符号等），否则 ABF-018 会把 ABF-0182 误判为已带前缀。
+func hasNumberPrefix(title, number string) bool {
+	if len(title) <= len(number) || !strings.EqualFold(title[:len(number)], number) {
+		return false
+	}
+	next := title[len(number)]
+	switch {
+	case next >= '0' && next <= '9', next >= 'a' && next <= 'z', next >= 'A' && next <= 'Z':
+		return false
+	}
+	return true
 }
 
 // splitReleaseDate 把 YYYY-MM-DD 拆成 premiered 与年份；解析不出来就都留空。

@@ -21,6 +21,18 @@ const icon = name => {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
 };
 
+// 刮削写入的 NFO <title> 是「番号 标题」（见 internal/scraper/apply.go），
+// 标题本身已含番号时，同行里不要再展示一遍番号。
+// 番号后紧跟字母/数字（ABF-0182）不算已带番号，与后端 hasNumberPrefix 判定一致。
+function titleCarriesNumber(title, number) {
+  const t = String(title ?? '').trim();
+  const n = String(number ?? '').trim();
+  if (!n || t.length <= n.length || t.slice(0, n.length).toLowerCase() !== n.toLowerCase()) return false;
+  return !/[0-9a-z]/.test(t[n.length]);
+}
+// numberUnlessInTitle 返回需要单独展示的番号（标题已带则为空串）。
+const numberUnlessInTitle = (title, number) => (titleCarriesNumber(title, number) ? '' : number);
+
 function toast(message, type = 'ok') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
@@ -194,7 +206,7 @@ function wallCard(item, ud) {
   const playable = st === 'success' || st === 'manual';
   const poster = item.PosterPath ? `/Items/${item.id}/Images/Primary`
     : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb` : '');
-  const sub = [item.Number, item.Year, item.OriginalTitle].filter(Boolean).join(' · ')
+  const sub = [numberUnlessInTitle(title, item.Number), item.Year, item.OriginalTitle].filter(Boolean).join(' · ')
     || (item.source_protocol || item.SourceProtocol || '');
   const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
     ? Math.min(100, Math.round(ud.position_ticks / (item.RuntimeSeconds * 10000000) * 100)) : 0;
@@ -573,7 +585,7 @@ async function openDetail(item) {
   const playable = st === 'success' || st === 'manual';
   const poster = m.PosterPath ? `/Items/${m.id}/Images/Primary` : '';
   const backdrop = m.BackdropPath ? `/Items/${m.id}/Images/Backdrop` : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : poster);
-  const head = [m.Number, m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
+  const head = [numberUnlessInTitle(title, m.Number), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
   const actors = data.actors || [];
 
   detailDrawer.innerHTML = `
@@ -1161,7 +1173,7 @@ function renderScrapePreview() {
       ${item.thumb ? `<img src="${esc(item.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}
       <span>
         <strong>${esc(item.title || '—')}</strong>
-        <small>${esc([item.number, item.provider, item.score ? '★ ' + item.score : '', item.exact ? '番号命中' : ''].filter(Boolean).join(' · '))}</small>
+        <small>${esc([numberUnlessInTitle(item.title, item.number), item.provider, item.score ? '★ ' + item.score : '', item.exact ? '番号命中' : ''].filter(Boolean).join(' · '))}</small>
       </span>
     </button>`).join('');
 
