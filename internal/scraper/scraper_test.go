@@ -133,16 +133,67 @@ func TestJoinNumberTitle(t *testing.T) {
 		{"ABF-018", "", "ABF-018"},
 		{"", "", ""},
 		{"ABF-018", " 标题 ", "ABF-018 标题"},
-		// 上游标题已带番号时不再重复加前缀。
+		// 上游标题已带番号时不再重复拼，而是把那段番号改写成归一化形式。
 		{"ABF-018", "ABF-018 标题", "ABF-018 标题"},
-		{"ABF-018", "abf-018（标题）", "abf-018（标题）"},
-		// 番号只是标题的前缀片段时不算已带番号。
+		{"ABF-018", "ABF018 标题", "ABF-018 标题"},
+		{"ABF-018", "abf_018 标题", "ABF-018 标题"},
+		{"ABF-018", "abf-018（标题）", "ABF-018（标题）"},
+		{"ABF-018", "abf-018. 标题", "ABF-018 标题"},
+		{"ABF-018", "abf018 标题", "ABF-018 标题"},
+		// 前缀一律随传入的番号形态（buildFields 传入的已是带破折号的规范番号）。
+		{"ABF018", "ABF-018 标题", "ABF018 标题"},
+		// 番号只是标题的前缀片段时不算已带番号（前端判定须与此一致）。
 		{"ABF-018", "ABF-0182 标题", "ABF-018 ABF-0182 标题"},
+		{"ABF-018", "ABF-018X 标题", "ABF-018 ABF-018X 标题"},
 		{"ABF-018", "ABF-01 标题", "ABF-018 ABF-01 标题"},
+		// 标题本身就是番号、或番号不在开头时。
+		{"ABF-018", "ABF-018", "ABF-018"},
+		{"ABF-018", "   ABF-018 标题  ", "ABF-018 标题"},
+		{"ABF-018", "标题 ABF-018", "ABF-018 标题 ABF-018"},
 	}
 	for _, tc := range cases {
 		if got := joinNumberTitle(tc.number, tc.title); got != tc.want {
 			t.Errorf("joinNumberTitle(%q, %q) = %q，期望 %q", tc.number, tc.title, got, tc.want)
+		}
+	}
+}
+
+// TestBuildFieldsNormalizesNumber 番号归一化（大写、统一分隔符、补破折号）后写入 <num> 与标题前缀。
+func TestBuildFieldsNormalizesNumber(t *testing.T) {
+	cases := []struct {
+		number, want string
+	}{
+		{"abf_018", "ABF-018"},
+		{"abf 018", "ABF-018"},
+		{"ABF-018", "ABF-018"},
+		{"abf--018", "ABF-018"},
+		{"abf018", "ABF-018"},
+		{"SSIS00123", "SSIS-00123"},
+		// 259LUXU 的数字前缀是来源站编号，不属于番号。
+		{"259LUXU1234", "LUXU-1234"},
+		{"259LUXU", "259LUXU"},
+		// T28 系列名自带数字，须补在系列名之后（通用规则会错补成 T-28036）。
+		{"T28036", "T28-036"},
+		{"T28-036", "T28-036"},
+		// 已有分隔符、断点无法判断或纯数字的番号不猜结构，原样保留。
+		{"FC2PPV1234567", "FC2PPV1234567"},
+		{"H4610", "H4610"},
+		{"ABF-018-CD1", "ABF-018-CD1"},
+		{"123456789", "123456789"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		info := metatube.MovieInfo{ID: "abc", Number: tc.number, Title: "原文标题", Provider: "fanza"}
+		fields := buildFields(info, "中文标题", "", true)
+		if fields.Number != tc.want {
+			t.Errorf("buildFields(%q).Number = %q，期望 %q", tc.number, fields.Number, tc.want)
+		}
+		wantTitle := "中文标题"
+		if tc.want != "" {
+			wantTitle = tc.want + " 中文标题"
+		}
+		if fields.Title != wantTitle || fields.SortTitle != wantTitle {
+			t.Errorf("buildFields(%q) 标题 = %q / %q，期望 %q", tc.number, fields.Title, fields.SortTitle, wantTitle)
 		}
 	}
 }

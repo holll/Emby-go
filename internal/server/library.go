@@ -32,7 +32,31 @@ func (a *App) avatarsDir() string {
 // personAvatar 返回演员本地头像副本的路径与内容标识。
 // 只有在「索引里有该演员」且「本地副本确实存在」时才返回；否则返回空串，
 // 调用方回退到既有的「参演影片海报」占位行为。
+//
+// 走进程内短缓存：头像网格是「一个演员一张图」，逐张查库 + stat 在单连接
+// SQLite 下会串行排队。命中的是查库结果而不是文件内容，文件被替换时
+// tag（mtime）随之变化，客户端仍会取到新图。
 func (a *App) personAvatar(name string) (string, string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ""
+	}
+	key := "av:" + name
+	if raw, ok := a.imgMeta.Get(key); ok {
+		path, tag, _ := strings.Cut(string(raw), "\n")
+		return path, tag
+	}
+	path, tag := a.loadPersonAvatar(name)
+	ttl := 5 * time.Minute
+	if path == "" {
+		// 负缓存：头像任务可能刚写入，别把「还没有」记太久。
+		ttl = 30 * time.Second
+	}
+	a.imgMeta.Set(key, []byte(path+"\n"+tag), ttl)
+	return path, tag
+}
+
+func (a *App) loadPersonAvatar(name string) (string, string) {
 	actor, err := a.db.ActorAvatar(name)
 	if err != nil || actor.Name == "" {
 		return "", ""
@@ -50,17 +74,19 @@ func (a *App) personAvatar(name string) (string, string) {
 }
 
 // entityPosterPath 返回某实体（Genre/Tag/Studio/Person）的代表性海报路径（带短缓存）。
+//
+// 缓存走进程内而不是 Redis：实体网格一页就是上百个实体，一个实体一次 Redis GET
+// 意味着一个请求上百次网络往返。结果只依赖库内容，本进程缓存即可。
 func (a *App) entityPosterPath(kind, name string) string {
 	key := "ep:" + kind + ":" + name
-	if b, ok := a.cache.Get(key); ok {
-		return string(b)
+	if raw, ok := a.imgMeta.Get(key); ok {
+		return string(raw)
 	}
 	p, err := a.db.EntityPoster(kind, name, 0, "")
-	if err != nil || p == "" {
-		a.cache.Set(key, []byte{}, 5*time.Minute)
-		return ""
+	if err != nil {
+		p = ""
 	}
-	a.cache.Set(key, []byte(p), 5*time.Minute)
+	a.imgMeta.Set(key, []byte(p), 5*time.Minute)
 	return p
 }
 
@@ -206,11 +232,24 @@ func (a *App) invalidateImageTag(paths ...string) {
 // probe 的整库任务结束后会整体清空；单条写入必须精确失效，否则详情抽屉
 // 与 PlaybackInfo 会继续返回旧参数。
 func (a *App) invalidateNFOStreams(nfoPaths ...string) {
-	a.nfoMu.Lock()
-	defer a.nfoMu.Unlock()
 	for _, path := range nfoPaths {
-		delete(a.nfos, path)
+		a.dropNFOCache(path)
 	}
+}
+
+// dropNFOCache 丢弃某个 NFO 的缓存条目并失效它的 mtime tag。
+// 缓存键是「路径 + tag」，只删键不够：tag 若还在缓存里，下一次请求会拼出同一个键。
+// 两个锁不嵌套获取，避免与 nfoEntry 的取锁顺序相左。
+func (a *App) dropNFOCache(nfoPath string) {
+	prefix := nfoPath + "|"
+	a.nfoMu.Lock()
+	for key := range a.nfos {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.nfos, key)
+		}
+	}
+	a.nfoMu.Unlock()
+	a.invalidateImageTag(nfoPath) // a.tags 是同一张 tag 缓存，图片与 NFO 共用
 }
 
 // libraryCoverPath 返回媒体库封面路径：优先库根目录自带的 poster/folder/cover/default 图片
@@ -246,6 +285,82 @@ func coverRatio(path string) float64 {
 	return artRatio(path)
 }
 
+// cachedCoverRatio 与 coverRatio 相同，但结果按「路径 + 文件 tag」缓存。
+// 真实比例要读图片头解码，而 Views 每次请求都会问一遍每个库的封面比例；
+// tag 进 key 保证图片被替换后比例会重新算。
+func (a *App) cachedCoverRatio(path string) float64 {
+	if path == "" {
+		return 0
+	}
+	key := "ar:" + path + ":" + a.posterTag(path)
+	if raw, ok := a.imgMeta.Get(key); ok {
+		if ratio, err := strconv.ParseFloat(string(raw), 64); err == nil {
+			return ratio
+		}
+	}
+	ratio := coverRatio(path)
+	a.imgMeta.Set(key, []byte(strconv.FormatFloat(ratio, 'f', 6, 64)), 30*time.Minute)
+	return ratio
+}
+
+// cachedUnplayed 未播数量（Views 每次都统计，按库 + 全局版本号缓存）。
+// 版本号一变（扫描/刮削/标记已看）自动失效，TTL 再兜一层。
+func (a *App) cachedUnplayed(libraryID int64) int {
+	key := "unplayed:" + a.db.Version("g:version") + ":" + strconv.FormatInt(libraryID, 10)
+	if raw, ok := a.imgMeta.Get(key); ok {
+		if count, err := strconv.Atoi(string(raw)); err == nil {
+			return count
+		}
+	}
+	count, err := a.db.UnplayedInLibrary(libraryID)
+	if err != nil {
+		return 0
+	}
+	a.imgMeta.Set(key, []byte(strconv.Itoa(count)), 30*time.Second)
+	return count
+}
+
+// 合集最低影片数（设置键 collection.min_movies）：
+// NFO <set> 指向的影片少于这个数量时不算合集——只有一部影片的「合集」
+// 在客户端里只是一个多余的文件夹。默认 2。
+const (
+	settingCollectionMinMovies = "collection.min_movies"
+	defaultCollectionMinMovies = 2
+)
+
+// collectionMinMovies 读取合集最低影片数；设置缺失或写坏了用默认值。
+func (a *App) collectionMinMovies() int {
+	values, err := a.db.Settings()
+	if err != nil {
+		return defaultCollectionMinMovies
+	}
+	minMovies := settingInt(values, settingCollectionMinMovies, defaultCollectionMinMovies)
+	if minMovies < 1 {
+		return defaultCollectionMinMovies
+	}
+	return minMovies
+}
+
+// cachedCollections 合集名清单（Views 与合集列表共用，按全局版本号缓存）。
+func (a *App) cachedCollections() []string {
+	minMovies := a.collectionMinMovies()
+	key := "collections:" + a.db.Version("g:version") + ":" + strconv.Itoa(minMovies)
+	if raw, ok := a.imgMeta.Get(key); ok {
+		var names []string
+		if json.Unmarshal(raw, &names) == nil {
+			return names
+		}
+	}
+	names, err := a.db.Collections(minMovies)
+	if err != nil {
+		return nil
+	}
+	if raw, err := json.Marshal(names); err == nil {
+		a.imgMeta.Set(key, raw, 30*time.Second)
+	}
+	return names
+}
+
 func zeroUserData() gin.H {
 	return gin.H{"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": false, "Played": false}
 }
@@ -253,7 +368,7 @@ func zeroUserData() gin.H {
 // collectionFolderDTO 把内部媒体库渲染为 Emby 的 CollectionFolder（电影库）BaseItemDto。
 // Id 用外部命名空间（libraryIDBase+内部id），与影片 id 全局不冲突。
 func (a *App) collectionFolderDTO(l store.Library) gin.H {
-	unplayed, _ := a.db.UnplayedInLibrary(l.ID)
+	unplayed := a.cachedUnplayed(l.ID)
 	item := gin.H{
 		"Id":                   externalLibraryID(l.ID),
 		"Name":                 l.Name,
@@ -270,7 +385,7 @@ func (a *App) collectionFolderDTO(l store.Library) gin.H {
 	}
 	if cover := a.libraryCoverPath(l); cover != "" {
 		item["ImageTags"] = gin.H{"Primary": a.posterTag(cover)}
-		item["PrimaryImageAspectRatio"] = coverRatio(cover)
+		item["PrimaryImageAspectRatio"] = a.cachedCoverRatio(cover)
 	}
 	return item
 }
@@ -295,8 +410,13 @@ func (a *App) boxsetFolderDTO(collections []string) gin.H {
 }
 
 // boxsetItemDTO 返回单个合集（BoxSet）的 BaseItemDto。
+// 影片数不足最低阈值的合集视为不存在，返回 nil（调用方回 404）——
+// 否则客户端仍能通过旧 id 直接翻开一个列表里已经看不到的合集。
 func (a *App) boxsetItemDTO(name string) gin.H {
 	count, genres, _ := a.db.CollectionSummary(name)
+	if count < a.collectionMinMovies() {
+		return nil
+	}
 	poster, _ := a.db.CollectionPoster(name)
 	return a.boxsetItemFrom(name, store.CollectionStat{Count: count, Poster: poster, Genres: genres})
 }
@@ -327,7 +447,7 @@ func (a *App) counts(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	collections, _ := a.db.Collections()
+	collections := a.cachedCollections()
 	c.JSON(http.StatusOK, gin.H{
 		"MovieCount": total, "SeriesCount": 0, "EpisodeCount": 0, "GameCount": 0,
 		"ArtistCount": 0, "ProgramCount": 0, "GameSystemCount": 0, "TrailerCount": 0,
@@ -397,40 +517,42 @@ func (a *App) similar(c *gin.Context) {
 	if limit < 1 || limit > 50 {
 		limit = 12
 	}
-	// 相似度扫描整库成本较高，按 (版本,影片,limit) 短缓存，重复进入详情页直接命中。
+	// 相似度结果按 (版本,影片,limit) 短缓存，重复进入详情页直接命中。
 	simKey := "similar:" + a.db.Version("g:version") + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(simKey); ok {
 		c.Data(200, "application/json", b)
 		return
 	}
-	movies, _, err := a.db.SearchFiltered(0, "", "", "", false, "title", false, 10000, 0)
+	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列）。
+	candidates, err := a.db.SimilarCandidates(src, similarPoolSize(limit))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// 一次取出全部可见影片的演员映射，避免逐候选打库。
-	actorMap, err := a.db.AllActors()
+	candidateIDs := make([]int64, 0, len(candidates))
+	for _, item := range candidates {
+		candidateIDs = append(candidateIDs, item.ID)
+	}
+	movies, err := a.db.MoviesByIDs(candidateIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	srcActors := actorNames(actorMap[src.ID])
-	// 源影片的集合只构建一次，避免对每个候选重复转换。
-	srcGenres, srcTags := toSet(src.Genres), toSet(src.Tags)
-	srcStudios, srcActorSet := toSet(src.Studios), toSet(srcActors)
 
 	type scored struct {
 		movie store.Movie
 		score int
 	}
-	results := make([]scored, 0, 64)
-	for _, m := range movies {
-		if m.ID == src.ID {
+	results := make([]scored, 0, len(candidates))
+	for _, item := range candidates {
+		movie, ok := movies[item.ID]
+		if !ok {
 			continue
 		}
-		// 与 Emby 3.5.2 口径一致：总分需 > 2 才进入相似候选。
-		if s := similarityScore(src, m, srcGenres, srcTags, srcStudios, srcActorSet, actorNames(actorMap[m.ID])); s > 2 {
-			results = append(results, scored{movie: m, score: s})
+		// 倒排分 + 非精确信号（分级/年份/番号前缀）；与 Emby 口径一致，总分 > 2 才算相似。
+		score := item.Score + similarBonus(src, movie)
+		if score > 2 {
+			results = append(results, scored{movie: movie, score: score})
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -447,9 +569,9 @@ func (a *App) similar(c *gin.Context) {
 		ids = append(ids, r.movie.ID)
 	}
 	dataMap, _ := a.db.DataFor(ids)
+	actorMap, _ := a.db.ActorsFor(ids)
 	out := make([]gin.H, 0, len(results))
 	for _, r := range results {
-		// actorMap 来自 AllActors，已含全部可见影片（无演员的影片缺省 nil，标记 loaded 避免回查）。
 		out = append(out, a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true))
 	}
 	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
@@ -457,25 +579,28 @@ func (a *App) similar(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", body)
 }
 
-// similarityScore 按 Emby 3.5.2 SimilarItemsHelper 权重给两片打分：
-// 同分级 +10；每共同 Genre +10；每共同 Tag +10；每共同 Studio +3；
-// 同导演 +5；每共同演员 +3；年代差 <5 年 +4、<10 年 +2。
-// xGenres/xTags/xStudios/xActors 为源影片预先构建的集合，避免逐候选重复转换。
-func similarityScore(x, y store.Movie, xGenres, xTags, xStudios, xActors map[string]struct{}, yActors []string) int {
+// similarPoolSize 候选池大小：最终只要 limit 条，但年份/番号前缀这类加分只在候选内部
+// 排序，取松一点避免它们把本该入选的片子挤出池子。
+func similarPoolSize(limit int) int {
+	pool := limit * 6
+	if pool < 60 {
+		pool = 60
+	}
+	if pool > 400 {
+		pool = 400
+	}
+	return pool
+}
+
+// similarBonus 非倒排信号的分值，沿用 Emby 3.5.2 的权重：
+// 同分级 +10；年代差 <5 年 +4、<10 年 +2；番号前缀相同（≥2 个字母，如 ABF）+4。
+//
+// 这些信号要么全库恒定（分级），要么过于宽泛（前缀），所以只用来在候选内部微调排序，
+// 不参与倒排候选的召回——否则「只有分级相同」的影片会全部涌进相似列表。
+func similarBonus(x, y store.Movie) int {
 	score := 0
 	if x.OfficialRating != "" && x.OfficialRating == y.OfficialRating {
 		score += 10
-	}
-	score += overlapSet(xGenres, y.Genres, 10)
-	score += overlapSet(xTags, y.Tags, 10)
-	score += overlapSet(xStudios, y.Studios, 3)
-	if x.Director != "" && x.Director == y.Director {
-		score += 5
-	}
-	for _, name := range yActors {
-		if _, ok := xActors[name]; ok {
-			score += 3
-		}
 	}
 	if x.Year > 0 && y.Year > 0 {
 		diff := x.Year - y.Year
@@ -489,28 +614,24 @@ func similarityScore(x, y store.Movie, xGenres, xTags, xStudios, xActors map[str
 			score += 2
 		}
 	}
+	if prefix := numberPrefix(x.Number); prefix != "" && prefix == numberPrefix(y.Number) {
+		score += 4
+	}
 	return score
 }
 
-// overlapSet 统计 y 中命中 set 的项数并乘以权重。
-func overlapSet(set map[string]struct{}, y []string, weight int) int {
-	count := 0
-	for _, v := range y {
-		if _, ok := set[v]; ok {
-			count++
-		}
+// numberPrefix 取番号开头的字母前缀（AFB-018 → ABF）；不足 2 个字母时返回空串
+// （T28-036 这类系列名自带数字的番号，单字母前缀太宽泛，不作为信号）。
+func numberPrefix(number string) string {
+	number = strings.ToUpper(strings.TrimSpace(number))
+	end := 0
+	for end < len(number) && number[end] >= 'A' && number[end] <= 'Z' {
+		end++
 	}
-	return count * weight
-}
-
-func toSet(values []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-	for _, v := range values {
-		if v = strings.TrimSpace(v); v != "" {
-			set[v] = struct{}{}
-		}
+	if end < 2 {
+		return ""
 	}
-	return set
+	return number[:end]
 }
 
 func (a *App) views(c *gin.Context) {
@@ -527,7 +648,7 @@ func (a *App) views(c *gin.Context) {
 		out = append(out, a.collectionFolderDTO(l))
 	}
 	// 有合集（NFO <set>）时追加「合集」媒体库视图（CollectionType=boxsets）。
-	if collections, err := a.db.Collections(); err == nil && len(collections) > 0 {
+	if collections := a.cachedCollections(); len(collections) > 0 {
 		out = append(out, a.boxsetFolderDTO(collections))
 	}
 	c.JSON(200, gin.H{"Items": out, "TotalRecordCount": len(out)})
@@ -542,15 +663,6 @@ func nameObjects(kind string, names []string) []gin.H {
 			continue
 		}
 		out = append(out, gin.H{"Name": name, "Id": entityId(kind, name)})
-	}
-	return out
-}
-
-// actorNames 取演员姓名列表（相似度打分等只关心名字的场景）。
-func actorNames(actors []store.ActorRef) []string {
-	out := make([]string, 0, len(actors))
-	for _, actor := range actors {
-		out = append(out, actor.Name)
 	}
 	return out
 }
@@ -998,7 +1110,7 @@ func movieIDs(ms []store.Movie) []int64 {
 
 // boxsetListResponse 分页返回「合集」媒体库的 BoxSet 列表。
 func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
-	stats, err := a.db.CollectionStats()
+	stats, err := a.db.CollectionStats(a.collectionMinMovies())
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -1142,8 +1254,7 @@ func (a *App) item(c *gin.Context) {
 	rawID := c.Param("id")
 	// 合集媒体库文件夹本身（Id="boxsets"）。
 	if rawID == boxsetViewID {
-		collections, _ := a.db.Collections()
-		c.JSON(http.StatusOK, a.boxsetFolderDTO(collections))
+		c.JSON(http.StatusOK, a.boxsetFolderDTO(a.cachedCollections()))
 		return
 	}
 	id, err := strconv.ParseInt(rawID, 10, 64)
@@ -1159,7 +1270,11 @@ func (a *App) item(c *gin.Context) {
 		}
 		// 单个合集（boxset:<b64>）。
 		if name, ok := parseBoxsetID(rawID); ok {
-			c.JSON(http.StatusOK, a.boxsetItemDTO(name))
+			if item := a.boxsetItemDTO(name); item != nil {
+				c.JSON(http.StatusOK, item)
+				return
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
 		// 虚拟实体（genre:/tag:/studio:/person:）详情：避免 404，返回最小 BaseItemDto。

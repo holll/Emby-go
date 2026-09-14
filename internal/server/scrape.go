@@ -459,17 +459,50 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider 与 id 必填"})
 		return
 	}
+	// 同一张缩略图在一次预览里会被反复要（切候选、重开抽屉），
+	// 结果只依赖 provider/id/kind，进程内短缓存即可，避免重复打上游。
+	cacheKey := "scrapeimg:" + kind + ":" + provider + ":" + id
+	if raw, ok := a.imgThumb.Get(cacheKey); ok {
+		c.Data(http.StatusOK, "image/jpeg", raw)
+		return
+	}
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
+	// 限流：预览页一次十几张图，不加限制就是十几路并发上游请求。
+	select {
+	case a.scrapeSem <- struct{}{}:
+		defer func() { <-a.scrapeSem }()
+	case <-ctx.Done():
+		c.Status(http.StatusBadGateway)
+		return
+	}
+	if raw, ok := a.imgThumb.Get(cacheKey); ok { // 等锁期间可能已被别的请求填上
+		c.Data(http.StatusOK, "image/jpeg", raw)
+		return
+	}
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
-	data, err := client.Download(ctx, client.ImageURL(kind, provider, id, 70, ""), 8<<20)
+	data, err := client.Download(ctx, client.ImageURL(kind, provider, id, 70, ""), maxScrapeImageBytes)
 	if err != nil {
 		c.Status(http.StatusBadGateway)
 		return
 	}
+	if len(data) <= scrapeImageCacheMax {
+		a.imgThumb.Set(cacheKey, data, scrapeImageTTL)
+	}
 	// 上游给的是 JPEG；原样转发，浏览器直接能显示，无需转码。
 	c.Data(http.StatusOK, "image/jpeg", data)
 }
+
+const (
+	// maxScrapeImageBytes 单张预览图的下载上限，避免上游返回异常大文件把内存打满。
+	maxScrapeImageBytes = 8 << 20
+	// scrapeImageCacheMax 超过这个体积就不进缓存（缓存条目按条数计上限）。
+	scrapeImageCacheMax = 256 << 10
+	// scrapeImageTTL 预览缩略图的进程内缓存时长。
+	scrapeImageTTL = 10 * time.Minute
+	// maxScrapeImageConcurrency 同时向上游拉取的预览图数量上限。
+	maxScrapeImageConcurrency = 4
+)
 
 // movieParam 解析并校验路径里的影片 id。
 func (a *App) movieParam(c *gin.Context) (store.Movie, bool) {

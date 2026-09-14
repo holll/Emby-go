@@ -5,12 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/avatar"
-	"emby-go/internal/nfo"
 	"emby-go/internal/store"
 )
 
@@ -85,11 +85,11 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		dir := a.avatarsDir()
 		for _, actor := range list {
 			item := detailActor{Name: actor.Name, AvatarURL: actor.AvatarURL}
-			if path := avatar.Path(dir, actor.Name); fileExists(path) {
-				item.HasImage = true
-				item.ImageTag = actor.AvatarTag
-				if item.ImageTag == "" {
-					item.ImageTag = a.posterTag(path)
+			// 头像任务只在下载成功后才写 avatar_tag，有 tag 即认为本地有副本，
+			// 这里不再逐演员 os.Stat——几十个演员就是几十次磁盘 stat，每次开抽屉都要重来。
+			if tag := strings.TrimSpace(actor.AvatarTag); tag != "" {
+				if path := avatar.Path(dir, actor.Name); path != "" {
+					item.HasImage, item.ImageTag = true, tag
 				}
 			}
 			actors = append(actors, item)
@@ -119,11 +119,6 @@ func fileSize(path string) int64 {
 		return info.Size()
 	}
 	return 0
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 // modifiedAt 返回 .strm 的最后修改时间（RFC3339）；取不到返回空串。
@@ -156,15 +151,8 @@ func (a *App) detailStreams(movie store.Movie, path string, primary bool) ([]gin
 	return streams, a.nfoProbed(movie)
 }
 
-// nfoProbed 判断影片主文件是否已被探测（NFO 里有 <streamdetails>）。
+// nfoProbed 判断影片主文件是否已被探测（NFO 里有可用的 <streamdetails>）。
+// 复用 nfoEntry 的进程内缓存：详情页此前在本文件里再读一遍 NFO（XML 解析 + 读盘）。
 func (a *App) nfoProbed(movie store.Movie) bool {
-	if movie.NFOPath == "" {
-		return false
-	}
-	meta, err := nfo.Read(movie.NFOPath)
-	if err != nil || meta.FileInfo == nil || meta.FileInfo.StreamDetails == nil {
-		return false
-	}
-	details := meta.FileInfo.StreamDetails
-	return details.Video != nil || details.Audio != nil
+	return a.nfoEntry(movie).probed
 }

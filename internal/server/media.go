@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
@@ -48,24 +50,23 @@ func (a *App) image(c *gin.Context) {
 		// 媒体库外部 id：库封面（库根目录自带图优先，否则借库内影片代表图）。
 		if libID, ok := parseLibraryExternal(id); ok {
 			if poster := a.libraryCoverPathByID(libID); poster != "" {
-				c.File(poster)
+				a.serveImage(c, poster)
 				return
 			}
 			c.Status(404)
 			return
 		}
 		// 数值 id 优先命中影片；影片不存在/不可见时回退为该媒体库的封面。
-		m, e := a.db.Movie(id)
-		if e == nil && m.IsVisible() {
+		if m, ok := a.cachedMovie(id); ok && m.IsVisible() {
 			if p := movieImagePath(m, kind); p != "" {
-				c.File(p)
+				a.serveImage(c, p)
 				return
 			}
 			c.Status(404)
 			return
 		}
 		if poster := a.libraryCoverPathByID(id); poster != "" && strings.EqualFold(kind, "Primary") {
-			c.File(poster)
+			a.serveImage(c, poster)
 			return
 		}
 		c.Status(404)
@@ -73,7 +74,7 @@ func (a *App) image(c *gin.Context) {
 	}
 	// 合集：boxsets 媒体库文件夹用任一合集海报；boxset:<b64> 用该合集海报。
 	if p := a.boxsetPoster(rawID); p != "" {
-		c.File(p)
+		a.serveImage(c, p)
 		return
 	}
 	// 虚拟实体封面：任何 ImageType 都回代表性海报，保证 Tag/Genre 网格有图。
@@ -81,24 +82,182 @@ func (a *App) image(c *gin.Context) {
 		// 演员优先回本地头像副本；没有头像时保留原占位行为（参演影片海报）。
 		if kind == "Person" {
 			if path, _ := a.personAvatar(name); path != "" {
-				c.File(path)
+				a.serveImage(c, path)
 				return
 			}
 		}
 		if poster := a.entityPosterPath(kind, name); poster != "" {
-			c.File(poster)
+			a.serveImage(c, poster)
 			return
 		}
 	}
 	c.Status(404)
 }
 
+const (
+	// imageMaxAge 图片响应的客户端缓存时长。图片只在刮削/上传后变化，
+	// 变化时 ETag（文件 mtime）与 URL 上的 tag 都会变，客户端自然会取新图；
+	// 取 5 分钟而非常量级长缓存：管理端海报墙的 URL 不带 tag，
+	// 太长会让重刮后的新海报在浏览器里长时间不更新。到期后靠 ETag 走 304，成本极低。
+	imageMaxAge = 5 * time.Minute
+	// imageMetaTTL 图片元信息（影片图片路径、演员头像路径）的进程内缓存时长。
+	imageMetaTTL = time.Minute
+	// imageThumbTTL 缩略图字节的进程内缓存时长。
+	imageThumbTTL = 30 * time.Minute
+	// imageMetaCacheSize / imageThumbCacheSize 两个 LRU 的条目上限。
+	imageMetaCacheSize  = 8192
+	imageThumbCacheSize = 512
+	// maxThumbConcurrency 同时生成缩略图的数量上限（解码 + 缩放 + 编码都是 CPU 活）。
+	maxThumbConcurrency = 4
+	// maxThumbEdge 目标边长上限：超过就不生成，直接发原图。
+	maxThumbEdge = 4000
+)
+
+// firstCollectionPoster 返回第一个有海报的合集封面（没有则空串）。
+func (a *App) firstCollectionPoster(names []string) string {
+	for _, name := range names {
+		if poster, _ := a.db.CollectionPoster(name); poster != "" {
+			return poster
+		}
+	}
+	return ""
+}
+
+// cachedMovie 取影片（进程内短缓存）。
+// 图片接口每张图都要拿一次图片路径，直接查库会让整页海报串行排队
+// （SQLite 写只有一条连接，读虽已放开并发，但每张图一次查询依然是纯浪费）。
+func (a *App) cachedMovie(id int64) (store.Movie, bool) {
+	key := "m:" + strconv.FormatInt(id, 10)
+	if raw, ok := a.imgMeta.Get(key); ok {
+		var m store.Movie
+		if json.Unmarshal(raw, &m) == nil {
+			return m, true
+		}
+	}
+	m, err := a.db.Movie(id)
+	if err != nil {
+		return store.Movie{}, false
+	}
+	if raw, err := json.Marshal(m); err == nil {
+		a.imgMeta.Set(key, raw, imageMetaTTL)
+	}
+	return m, true
+}
+
+// serveImage 统一的图片响应：带 ETag/Cache-Control，按需缩放，未请求缩放则原图直出。
+// 命中 If-None-Match 时直接 304——连文件都不打开。
+func (a *App) serveImage(c *gin.Context, path string) {
+	tag := a.posterTag(path)
+	c.Header("ETag", `"`+tag+`"`)
+	c.Header("Cache-Control", "public, max-age="+strconv.Itoa(int(imageMaxAge.Seconds()))+", must-revalidate")
+	if ifNoneMatchHit(c.GetHeader("If-None-Match"), tag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	if data, ok := a.thumbnail(c, path, tag); ok {
+		c.Data(http.StatusOK, "image/webp", data)
+		return
+	}
+	c.File(path)
+}
+
+// thumbnail 返回按请求参数生成的缩略图；未请求缩放或生成失败时返回 false（调用方发原图）。
+func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
+	width, height, quality := imageResizeParams(c)
+	if width <= 0 && height <= 0 {
+		return nil, false
+	}
+	key := "t:" + path + ":" + tag + ":" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + ":q" + strconv.Itoa(quality)
+	if data, ok := a.imgThumb.Get(key); ok {
+		return data, true
+	}
+	// 限流：解码/缩放/编码是纯 CPU 活，一次性放开会把 CPU 打满。
+	select {
+	case a.thumbSem <- struct{}{}:
+		defer func() { <-a.thumbSem }()
+	case <-c.Request.Context().Done():
+		return nil, false
+	}
+	if data, ok := a.imgThumb.Get(key); ok { // 等锁期间可能已被别的请求填上
+		return data, true
+	}
+	data, err := imageutil.Thumbnail(path, width, height, quality)
+	if err != nil || len(data) == 0 {
+		// 生成失败（格式不支持、文件坏）不算错误：回退原图，用户仍能看到图。
+		if err != nil {
+			slog.Debug("生成缩略图失败，回退原图", "path", path, "error", err)
+		}
+		return nil, false
+	}
+	a.imgThumb.Set(key, data, imageThumbTTL)
+	return data, true
+}
+
+// imageResizeParams 解析 Emby 客户端的缩放参数。
+// 只认尺寸类参数：只给 quality 时无法判断目标尺寸，按原图处理。
+func imageResizeParams(c *gin.Context) (width, height, quality int) {
+	width = queryInt(c, "maxWidth", "width")
+	height = queryInt(c, "maxHeight", "height")
+	quality = queryInt(c, "quality")
+	if width > maxThumbEdge {
+		width = maxThumbEdge
+	}
+	if height > maxThumbEdge {
+		height = maxThumbEdge
+	}
+	if width < 0 {
+		width = 0
+	}
+	if height < 0 {
+		height = 0
+	}
+	if quality < 1 || quality > 100 {
+		quality = 0 // 0 表示用内置默认画质
+	}
+	return width, height, quality
+}
+
+// queryInt 取第一个能解析为正整数的查询参数，都没有则返回 0。
+func queryInt(c *gin.Context, keys ...string) int {
+	for _, key := range keys {
+		value := strings.TrimSpace(c.Query(key))
+		if value == "" {
+			continue
+		}
+		if number, err := strconv.Atoi(value); err == nil {
+			return number
+		}
+	}
+	return 0
+}
+
+// ifNoneMatchHit 判断 If-None-Match 是否命中当前 tag（支持多值、弱校验与 *）。
+func ifNoneMatchHit(header, tag string) bool {
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		part = strings.TrimPrefix(part, "W/")
+		part = strings.Trim(part, `"`)
+		if part == "*" || (part != "" && part == tag) {
+			return true
+		}
+	}
+	return false
+}
+
 // boxsetPoster 解析合集相关 id（boxsets 媒体库 / boxset:<b64>）并返回代表海报路径。
 func (a *App) boxsetPoster(rawID string) string {
-	names := []string{}
 	if rawID == boxsetViewID {
-		names, _ = a.db.Collections()
-	} else if name, ok := parseBoxsetID(rawID); ok {
+		// 合集文件夹的封面要逐个合集试到第一个有海报的，缓存住避免每张图都扫一遍合集。
+		key := "boxcover:" + a.db.Version("g:version")
+		if raw, ok := a.imgMeta.Get(key); ok {
+			return string(raw)
+		}
+		poster := a.firstCollectionPoster(a.cachedCollections())
+		a.imgMeta.Set(key, []byte(poster), 5*time.Minute)
+		return poster
+	}
+	var names []string
+	if name, ok := parseBoxsetID(rawID); ok {
 		names = append(names, name)
 	}
 	for _, name := range names {
@@ -356,55 +515,60 @@ func (a *App) streamsFor(m store.Movie, strmPath string) ([]gin.H, int64) {
 	return a.nfoFileInfo(m)
 }
 
+// genericVideoStream 未探测（或 NFO 没有可用流信息）时的回退轨。
+// 仅驱动直连播放决策，不伪造具体参数。
+func genericVideoStream() []gin.H {
+	return []gin.H{{"Type": "Video", "Index": 0, "IsDefault": true, "IsForced": false, "IsExternal": false}}
+}
+
 // nfoFileInfo 一次解析出 NFO 的流信息与媒体体积（Size 供 MediaSource.Size 使用）。
-// 读不到流信息时回退一个通用视频轨（仅驱动直连播放决策，不伪造具体参数）。
-// 结果按 NFO 路径做进程内短缓存：列表页 MediaSources 大批量请求时避免反复读盘解析。
 func (a *App) nfoFileInfo(m store.Movie) ([]gin.H, int64) {
-	fallback := []gin.H{{"Type": "Video", "Index": 0, "IsDefault": true, "IsForced": false, "IsExternal": false}}
+	entry := a.nfoEntry(m)
+	return entry.streams, entry.size
+}
+
+// nfoCacheMaxEntries NFO 缓存条目上限。缓存按「路径 + 文件 mtime」存，
+// 文件每次被改写都会留下一条新条目，到上限时整体清空（而不是 LRU：这里只需要防泄漏）。
+const nfoCacheMaxEntries = 20000
+
+// nfoEntry 读取并缓存 NFO 的流信息、体积与「是否已探测」。
+//
+// 缓存键是「NFO 路径 + 文件 tag（mtime）」，不是纯路径 + 固定 TTL：
+// 列表页带上 MediaSources 时一部片就要读一个 NFO，媒体盘慢的时候
+// 「100 部片 2.6 秒」几乎全是这些读盘，而 2 分钟 TTL 一到期就重来一遍。
+// 用 mtime 做键之后，文件没变就一直命中，外部改了 NFO（mtime 变）立刻重读。
+// tag 本身有 5 分钟进程内缓存，命中路径不会每次都 stat 媒体盘。
+func (a *App) nfoEntry(m store.Movie) nfoCacheEntry {
+	fallback := nfoCacheEntry{streams: genericVideoStream()}
 	if m.NFOPath == "" {
-		return fallback, 0
+		return fallback
 	}
-	now := time.Now()
+	key := m.NFOPath + "|" + a.posterTag(m.NFOPath)
 	a.nfoMu.Lock()
-	if a.nfos == nil {
-		a.nfos = make(map[string]nfoCacheEntry)
-	}
-	if e, ok := a.nfos[m.NFOPath]; ok {
-		ttl := 2 * time.Minute
-		if e.neg {
-			ttl = 30 * time.Second
-		}
-		if now.Sub(e.ts) < ttl {
-			cached, size := e.streams, e.size
-			a.nfoMu.Unlock()
-			return cached, size
-		}
+	if e, ok := a.nfos[key]; ok {
+		a.nfoMu.Unlock()
+		return e
 	}
 	a.nfoMu.Unlock()
 
+	entry := fallback
+	entry.ts, entry.neg = time.Now(), true
 	meta, err := nfo.Read(m.NFOPath)
-	if err != nil || meta.FileInfo == nil || meta.FileInfo.StreamDetails == nil {
-		var size int64
-		if err == nil && meta.FileInfo != nil {
-			size = meta.FileInfo.Size
+	if err == nil && meta.FileInfo != nil {
+		entry.size = meta.FileInfo.Size
+		if details := meta.FileInfo.StreamDetails; details != nil {
+			if out := buildStreams(details); len(out) > 0 {
+				entry.streams, entry.probed, entry.neg = out, true, false
+			}
 		}
-		a.nfoMu.Lock()
-		a.nfos[m.NFOPath] = nfoCacheEntry{streams: fallback, size: size, ts: now, neg: true}
-		a.nfoMu.Unlock()
-		return fallback, size
-	}
-	details := meta.FileInfo.StreamDetails
-	out := buildStreams(details)
-	if len(out) == 0 {
-		a.nfoMu.Lock()
-		a.nfos[m.NFOPath] = nfoCacheEntry{streams: fallback, size: meta.FileInfo.Size, ts: now, neg: true}
-		a.nfoMu.Unlock()
-		return fallback, meta.FileInfo.Size
 	}
 	a.nfoMu.Lock()
-	a.nfos[m.NFOPath] = nfoCacheEntry{streams: out, size: meta.FileInfo.Size, ts: now}
+	if len(a.nfos) >= nfoCacheMaxEntries {
+		a.nfos = make(map[string]nfoCacheEntry)
+	}
+	a.nfos[key] = entry
 	a.nfoMu.Unlock()
-	return out, meta.FileInfo.Size
+	return entry
 }
 
 // buildStreams 把 NFO 的 streamdetails 映射为 Emby 的 MediaStream 数组。
@@ -919,12 +1083,19 @@ func (a *App) playing(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	if err := a.db.BumpVersion(movie.LibraryID); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
+	// 进度心跳（Progress）几秒一次，若每次都 BumpVersion，列表/实体/详情/相似缓存
+	// （key 含 g:version）会被反复打掉，等于没有缓存。进度本身只影响进度条，
+	// 落一个 TTL 无所谓（列表 15s），代价远小于全站 cache miss 风暴。
+	// 因此：只有真正改变归属状态的 Stopped 才提升版本号（全站失效，低频）；
+	// 心跳只精确失效该片的详情缓存（它 TTL 1 小时，不失效会长时间显示旧进度）。
+	if strings.HasSuffix(c.Request.URL.Path, "Stopped") {
+		if err := a.db.BumpVersion(movie.LibraryID); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		a.cache.Delete("item:" + a.db.Version("g:version") + ":" + strconv.FormatInt(id, 10))
 	}
-	// 不再 Clear：列表/详情缓存 key 含库版本号，BumpVersion 后自然失效；
-	// 播放进度每秒上报一次，全量 SCAN 会连带清掉 token 缓存。
 	c.Status(http.StatusNoContent)
 }
 

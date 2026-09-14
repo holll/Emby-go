@@ -23,12 +23,14 @@ const icon = name => {
 
 // 刮削写入的 NFO <title> 是「番号 标题」（见 internal/scraper/apply.go），
 // 标题本身已含番号时，同行里不要再展示一遍番号。
-// 番号后紧跟字母/数字（ABF-0182）不算已带番号，与后端 hasNumberPrefix 判定一致。
+// 判定与后端 metatube.SameNumber / leadingNumber 同构：取标题开头的番号样片段，
+// 大写并去掉 - _ . 空白后比较，因此 ABF018 / abf_018 / ABF-018 视为同一个番号，
+// 而 ABF-0182、ABF-018X 这类「番号只是前缀片段」的标题不算已带番号。
+const compactNumber = value => String(value ?? '').toUpperCase().replace(/[-_.\s]/g, '');
 function titleCarriesNumber(title, number) {
-  const t = String(title ?? '').trim();
-  const n = String(number ?? '').trim();
-  if (!n || t.length <= n.length || t.slice(0, n.length).toLowerCase() !== n.toLowerCase()) return false;
-  return !/[0-9a-z]/.test(t[n.length]);
+  const lead = String(title ?? '').trim().match(/^[A-Za-z0-9._-]+/);
+  const normalized = compactNumber(number);
+  return !!normalized && !!lead && compactNumber(lead[0]) === normalized;
 }
 // numberUnlessInTitle 返回需要单独展示的番号（标题已带则为空串）。
 const numberUnlessInTitle = (title, number) => (titleCarriesNumber(title, number) ? '' : number);

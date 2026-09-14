@@ -44,6 +44,11 @@ func TestCoreAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
+	// 本用例只放了一部片进 "Drama Series"，而合集默认要求至少 2 部；
+	// 这里显式把阈值调成 1，专注验证合集相关契约（阈值本身另有用例覆盖）。
+	if err := a.db.SetSetting(settingCollectionMinMovies, "1"); err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(a.Handler())
 	defer ts.Close()
 	post := func(path, body string) (*http.Response, map[string]any) {

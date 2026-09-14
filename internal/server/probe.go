@@ -608,9 +608,7 @@ func (a *App) countProbe(apply func(*probeStatus)) {
 
 // evictNFOStream 让单条影片的流信息缓存立即失效（下次请求重新解析刚写入的 NFO）。
 func (a *App) evictNFOStream(path string) {
-	a.nfoMu.Lock()
-	delete(a.nfos, path)
-	a.nfoMu.Unlock()
+	a.dropNFOCache(path)
 }
 
 func (a *App) evictNFOStreams() {

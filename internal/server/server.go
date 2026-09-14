@@ -43,6 +43,19 @@ type App struct {
 	nfoMu sync.Mutex
 	nfos  map[string]nfoCacheEntry
 
+	// 图片链路的进程内缓存：imgMeta 存「影片 id → 图片路径」「演员名 → 头像路径」
+	// 这类每次请求都要的元信息（原本每张图一次 DB 查询，单连接下会串行排队）；
+	// imgThumb 存按请求尺寸生成的缩略图字节。都只在本进程内有意义，
+	// 走 Redis 每张图一次 RTT 不划算，故用本地 LRU。
+	imgMeta  *cache.Memory
+	imgThumb *cache.Memory
+	// thumbSem 限制同时解码 + 缩放 + 编码的数量：纯 CPU 活，一次海报墙
+	// 几百张不加限制会把 CPU 打满、拖慢其它请求。
+	thumbSem chan struct{}
+	// scrapeSem 限制同时向上游拉取的缩略图数量：刮削预览页一次十几张，
+	// 不加限制就是十几路并发上游请求，慢上游会把 goroutine 堆起来。
+	scrapeSem chan struct{}
+
 	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
 	scanMu     sync.RWMutex
 	scanStatus scanStatus
@@ -105,6 +118,7 @@ type tagEntry struct {
 type nfoCacheEntry struct {
 	streams []gin.H
 	size    int64 // NFO <fileinfo><size>：媒体文件字节数（探测写入）
+	probed  bool  // NFO 里有可用的 <streamdetails>（详情页「是否已探测」）
 	ts      time.Time
 	neg     bool
 }
@@ -127,7 +141,12 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, db: db, cache: cacheStore, tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{})}
+	a := &App{
+		cfg: cfg, db: db, cache: cacheStore,
+		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{}),
+		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
+		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
+	}
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {

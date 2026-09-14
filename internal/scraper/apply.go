@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -233,9 +234,11 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nf
 	if runtime <= 0 {
 		runtime = 0
 	}
-	// <title>/<sorttitle> 统一为「番号 标题」：库内条目按番号聚拢、排序也按番号走。
+	// 番号先归一化：强制大写、统一分隔符，再补上破折号
+	//（abf_018 / ABF 018 / ABF018 → ABF-018，T28036 → T28-036），<num> 与标题前缀都用它。
+	// <title>/<sorttitle> 统一为「番号 标题」：库内条目按番号聚拢、排序也按番号走；
 	// 标题取译文（未开翻译或翻译失败时 translateFields 已回退原文）。
-	number := strings.TrimSpace(info.Number)
+	number := dashedNumber(metatube.Normalize(info.Number))
 	displayTitle := joinNumberTitle(number, title)
 	return nfo.ScrapeFields{
 		Number:        number,
@@ -262,6 +265,11 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nf
 }
 
 // joinNumberTitle 拼「番号 标题」（单个空格分隔）；番号或标题缺失时只保留非空的一项。
+//
+// 标题开头已带该番号时不再重复拼，而是把那段番号改写成传入的规范形态
+// （强制大写、统一分隔符、带破折号），免得同一部片在库里出现 ABF-018 / abf_018 / ABF018 混杂。
+// 判定走 metatube.SameNumber：ABF018 / abf_018 / ABF-018 视为同一个番号；
+// ABF-0182、ABF-018X 这类「番号只是前缀片段」的标题不算已带番号，照常拼前缀。
 func joinNumberTitle(number, title string) string {
 	number, title = strings.TrimSpace(number), strings.TrimSpace(title)
 	switch {
@@ -269,25 +277,75 @@ func joinNumberTitle(number, title string) string {
 		return title
 	case title == "":
 		return number
-	case hasNumberPrefix(title, number):
-		// 部分来源的标题本身就带番号，再加一次会变成「ABF-018 ABF-018 …」。
-		return title
 	}
-	return number + " " + title
+	lead := leadingNumber(title)
+	if !metatube.SameNumber(lead, number) {
+		return number + " " + title
+	}
+	return number + title[len(lead):]
 }
 
-// hasNumberPrefix 判断标题是否已以番号开头：番号之后必须紧跟非字母数字字符
-// （空格、分隔符、全角符号等），否则 ABF-018 会把 ABF-0182 误判为已带前缀。
-func hasNumberPrefix(title, number string) bool {
-	if len(title) <= len(number) || !strings.EqualFold(title[:len(number)], number) {
+// numberWithDash 匹配「2 个以上字母 + 纯数字」这种断点无歧义的番号写法
+// （可选的前导数字：259LUXU1234 → 259LUXU-1234）。
+// 前缀里夹着数字的写法（FC2PPV1234567、H4610）断点在哪无法判断，一律不猜，
+// 留给 dashedSeries 逐系列登记。
+var numberWithDash = regexp.MustCompile(`^(\d*[A-Z]{2,})(\d+)$`)
+
+// seriesNumberRules 系列级番号规则：前缀命中且剩余部分全为数字时，改写成 alias + "-" + 数字。
+// 通用规则覆盖不到的系列逐条登记，新增一条即可；前缀互相包含时长的写在前面。
+var seriesNumberRules = []struct {
+	prefix string
+	alias  string
+}{
+	// 系列名自带数字，断点在系列名之后：通用规则会错补成 T-28036。
+	{"T28", "T28"},
+	// 数字前缀是来源站的编号，不属于番号：259LUXU-1234 应为 LUXU-1234。
+	{"259LUXU", "LUXU"},
+}
+
+// dashedNumber 把番号规范成带破折号的形态：ABF018 → ABF-018、T28036 → T28-036、
+// 259LUXU1234 → LUXU-1234。入参须已过 metatube.Normalize（大写、分隔符统一）。
+// 已有分隔符（ABF-018、123456-789）或断点无法判断（FC2PPV1234567、H4610）的番号原样保留。
+func dashedNumber(number string) string {
+	if number == "" || strings.Contains(number, "-") {
+		return number
+	}
+	for _, rule := range seriesNumberRules {
+		if rest := strings.TrimPrefix(number, rule.prefix); rest != number && digitsOnly(rest) {
+			return rule.alias + "-" + rest
+		}
+	}
+	return numberWithDash.ReplaceAllString(number, "$1-$2")
+}
+
+// digitsOnly 判断字符串是否非空且全为 ASCII 数字。
+func digitsOnly(value string) bool {
+	if value == "" {
 		return false
 	}
-	next := title[len(number)]
-	switch {
-	case next >= '0' && next <= '9', next >= 'a' && next <= 'z', next >= 'A' && next <= 'Z':
-		return false
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
 	}
 	return true
+}
+
+// leadingNumber 取标题开头的番号样片段：字母、数字与 -_. 组成的连续段。
+// 到空白、括号、中文等任意其它字符为止（"ABF-018（标题）" 取到 "ABF-018"）。
+func leadingNumber(title string) string {
+	index := 0
+	for index < len(title) {
+		char := title[index]
+		switch {
+		case char >= '0' && char <= '9', char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z',
+			char == '-', char == '_', char == '.':
+			index++
+			continue
+		}
+		break
+	}
+	return title[:index]
 }
 
 // splitReleaseDate 把 YYYY-MM-DD 拆成 premiered 与年份；解析不出来就都留空。

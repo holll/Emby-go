@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,6 +20,11 @@ import (
 type Store struct {
 	db       *sql.DB
 	gversion atomic.Int64
+	// featuresReady 在首次倒排特征回填结束时关闭（见 Open）。
+	featuresReady chan struct{}
+	// visibleCount/visibleVersion 可见影片数缓存（见 visibleMovieCount）。
+	visibleCount   atomic.Int64
+	visibleVersion atomic.Int64
 }
 
 type Library struct {
@@ -82,13 +88,24 @@ type UserData struct {
 	HideFromResume   bool    `json:"-"`
 }
 
+// maxOpenConns 连接池上限。
+//
+// WAL 下读可以并发，写由 SQLite 的文件锁串行（靠 busy_timeout 等待，不报 locked）。
+// 之前固定 1 条连接时所有读也排队：一条慢查询（相似度全表扫、实体聚合）会把
+// 同期的海报墙图片请求、列表请求全部堵在后面。
+const maxOpenConns = 8
+
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// pragma 写进 DSN：busy_timeout / foreign_keys 是 per-connection 的，
+	// 只 Exec 一次只能覆盖池里的那一条连接，新开的连接会丢掉它们。
+	dsn := path + "?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
+	// 新建库时立刻把 WAL 落盘（DSN 里的 pragma 同样会生效，这里只是让文件状态确定）。
 	if _, err := db.Exec("PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, err
@@ -118,13 +135,37 @@ func Open(path string) (*Store, error) {
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)")
+	// 相似度倒排索引：按 (kind,value) 定位到影片，movie_id 随索引一起返回，避免回表。
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movie_features_lookup ON movie_features(kind,value,movie_id)")
 	// 载入全局版本号到内存（kv 无该行时视为 0）。
 	var version string
 	_ = db.QueryRow("SELECT value FROM kv WHERE key='g:version'").Scan(&version)
 	if n, err := strconv.ParseInt(version, 10, 64); err == nil {
 		s.gversion.Store(n)
 	}
+	// 存量库回填相似度倒排特征（此后由 UpsertMovie / ReplaceActors 增量维护）。
+	// 放后台跑：两万部的库回填要十几秒，不能让启动卡在这里；回填期间相似推荐
+	// 只是结果偏少，不会报错。测试用 waitFeaturesReady 等它结束。
+	s.featuresReady = make(chan struct{})
+	go func() {
+		defer close(s.featuresReady)
+		start := time.Now()
+		if err := s.ensureFeatures(); err != nil {
+			slog.Warn("相似度特征回填失败，相似推荐可能不完整", "error", err)
+			return
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			slog.Info("相似度特征回填完成", "elapsed", elapsed.Round(time.Millisecond).String())
+		}
+	}()
 	return s, nil
+}
+
+// waitFeaturesReady 等待特征回填结束（测试与需要确定性的调用方使用）。
+func (s *Store) waitFeaturesReady() {
+	if s.featuresReady != nil {
+		<-s.featuresReady
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -138,6 +179,7 @@ CREATE TABLE IF NOT EXISTS api_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, meth
 CREATE TABLE IF NOT EXISTS actors (name TEXT PRIMARY KEY, avatar_url TEXT, avatar_tag TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS movie_actors (movie_id INTEGER, actor_name TEXT, PRIMARY KEY(movie_id, actor_name), FOREIGN KEY(movie_id) REFERENCES movies(id) ON DELETE CASCADE, FOREIGN KEY(actor_name) REFERENCES actors(name));
+CREATE TABLE IF NOT EXISTS movie_features (movie_id INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, weight INTEGER NOT NULL, PRIMARY KEY(movie_id, kind, value), FOREIGN KEY(movie_id) REFERENCES movies(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '0');
 CREATE TABLE IF NOT EXISTS administrators (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS access_tokens (token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
@@ -332,12 +374,400 @@ func (s *Store) UpsertMovie(m Movie, size int64, mtime time.Time) (int64, error)
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `INSERT INTO movies(library_id,source_path,file_size,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,collection,official_rating,sortname,taglines,provider_id,genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,additional_parts,created_at,updated_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET library_id=excluded.library_id,file_size=excluded.file_size,file_mtime=excluded.file_mtime,source_protocol=excluded.source_protocol,source_container=excluded.source_container,number=excluded.number,status=excluded.status,nfo_path=excluded.nfo_path,output_dir=excluded.output_dir,title=excluded.title,original_title=excluded.original_title,plot=excluded.plot,year=excluded.year,premiered=excluded.premiered,rating=excluded.rating,director=excluded.director,series=excluded.series,maker=excluded.maker,label=excluded.label,collection=excluded.collection,official_rating=excluded.official_rating,sortname=excluded.sortname,taglines=excluded.taglines,provider_id=excluded.provider_id,genres=excluded.genres,tags=excluded.tags,studios=excluded.studios,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,landscape_path=excluded.landscape_path,runtime_seconds=excluded.runtime_seconds,additional_parts=excluded.additional_parts,updated_at=excluded.updated_at`
-	_, err := s.db.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), now, now)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return s.MovieIDByPath(m.SourcePath)
+	if _, err = tx.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), now, now); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	var id int64
+	if err = tx.QueryRow("SELECT id FROM movies WHERE source_path=?", m.SourcePath).Scan(&id); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	// 相似度倒排特征随元数据一起更新（同一事务，避免出现半新半旧的特征）。
+	if err = refreshFeaturesTx(tx, id); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
+
+// 相似度特征的种类与权重。
+//
+// 权重沿用 Emby 3.5.2 的打分口径（类型/标签各 10、厂商 3、导演 5、演员 3），
+// 另外补上 AV 场景里最强的信号——NFO <set> 系列：同系列几乎必然相关，
+// 权重取 20（高于任何单一类型/标签），保证「同系列」自己就能进相似候选。
+//
+// 分级（全库恒定 +10）、年份接近（+4/+2）、番号前缀相同这三项特意**不做成特征**：
+// 它们要么全库相同、要么过于宽泛，做成倒排特征会让「只有分级相同」的影片全部涌进候选；
+// 它们只作为候选内部的排序加分，见 server 包的 similarBonus。
+const (
+	FeatureSeries   = "series"
+	FeatureGenre    = "genre"
+	FeatureTag      = "tag"
+	FeatureDirector = "director"
+	FeatureStudio   = "studio"
+	FeatureActor    = "actor"
+
+	WeightSeries   = 20
+	WeightGenre    = 10
+	WeightTag      = 10
+	WeightDirector = 5
+	WeightStudio   = 3
+	WeightActor    = 3
+)
+
+// ScoredMovie 相似度候选：影片 id 与特征重合度得分（分数由 SQL 汇总）。
+type ScoredMovie struct {
+	ID    int64
+	Score int
+}
+
+// featureBuildVersion 特征构造版本：特征种类/权重变化时递增，存量库会自动重建一次。
+const featureBuildVersion = "1"
+
+// ensureFeatures 存量库回填倒排特征；kv 里记版本号，只在首次或版本变化时重建。
+func (s *Store) ensureFeatures() error {
+	if value, _ := s.kvValue("features:ready"); value == featureBuildVersion {
+		return nil
+	}
+	rows, err := s.db.Query("SELECT id FROM movies")
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// 分批提交：每部一个事务在大库上要跑十几秒，整库一个事务又会长时间占着写锁，
+	// 与前台写入（扫描/刮削）撞上就是 SQLITE_BUSY。200 部一批把写锁窗口压到百毫秒级。
+	const batchSize = 200
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		for _, id := range ids[start:end] {
+			if err = refreshFeaturesTx(tx, id); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	// 标记落库：中途失败时下次启动会重跑，部分完成也不会让特征表半死不活
+	//（未标记时 UpsertMovie 仍会增量维护）。
+	return s.SetKV("features:ready", featureBuildVersion)
+}
+
+func (s *Store) kvValue(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM kv WHERE key=?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
+}
+
+// refreshFeatures 重算一部影片的倒排特征（字段变化或演员变化后调用）。
+func (s *Store) refreshFeatures(movieID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err = refreshFeaturesTx(tx, movieID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// refreshFeaturesTx 在给定事务内重写一部影片的特征行：先删后插，保证与当前元数据一致。
+func refreshFeaturesTx(tx *sql.Tx, movieID int64) error {
+	var genres, tags, studios, director, series, collection string
+	err := tx.QueryRow(`SELECT COALESCE(genres,''), COALESCE(tags,''), COALESCE(studios,''),
+		COALESCE(director,''), COALESCE(series,''), COALESCE(collection,'')
+		FROM movies WHERE id=?`, movieID).Scan(&genres, &tags, &studios, &director, &series, &collection)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	type feature struct {
+		kind   string
+		value  string
+		weight int
+	}
+	features := make([]feature, 0, 32)
+	add := func(kind, value string, weight int) {
+		if value = strings.TrimSpace(value); value != "" {
+			features = append(features, feature{kind: kind, value: value, weight: weight})
+		}
+	}
+	addList := func(kind string, raw string, weight int) {
+		for _, value := range parseStrings(raw) {
+			add(kind, value, weight)
+		}
+	}
+	addList(FeatureGenre, genres, WeightGenre)
+	addList(FeatureTag, tags, WeightTag)
+	addList(FeatureStudio, studios, WeightStudio)
+	add(FeatureDirector, director, WeightDirector)
+	// 系列取 <set><name>（collection），没有 set 时退回 <series>。
+	add(FeatureSeries, firstNonEmptyValue(collection, series), WeightSeries)
+
+	actorRows, err := tx.Query("SELECT actor_name FROM movie_actors WHERE movie_id=?", movieID)
+	if err != nil {
+		return err
+	}
+	for actorRows.Next() {
+		var name string
+		if err = actorRows.Scan(&name); err != nil {
+			actorRows.Close()
+			return err
+		}
+		add(FeatureActor, name, WeightActor)
+	}
+	actorRows.Close()
+	if err = actorRows.Err(); err != nil {
+		return err
+	}
+
+	// 去重后与现有特征比对：一致就什么都不写。
+	// 扫库会对每部影片都走一遍 UpsertMovie，逐部无脑重写特征会让一次全库扫描多出
+	// 几十万条写语句；比对只需一次读。
+	next := make(map[string]int, len(features))
+	for _, item := range features {
+		next[item.kind+"\x00"+item.value] = item.weight
+	}
+	existing := make(map[string]int, len(next))
+	rows, err := tx.Query("SELECT kind, value, weight FROM movie_features WHERE movie_id=?", movieID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var kind, value string
+		var weight int
+		if err = rows.Scan(&kind, &value, &weight); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[kind+"\x00"+value] = weight
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(existing) == len(next) {
+		same := true
+		for key, weight := range next {
+			if existing[key] != weight {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+
+	if _, err = tx.Exec("DELETE FROM movie_features WHERE movie_id=?", movieID); err != nil {
+		return err
+	}
+	for key, weight := range next {
+		kind, value, _ := strings.Cut(key, "\x00")
+		if _, err = tx.Exec("INSERT OR REPLACE INTO movie_features(movie_id,kind,value,weight) VALUES(?,?,?,?)",
+			movieID, kind, value, weight); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// firstNonEmptyValue 返回第一个非空值（系列名优先取 NFO <set>）。
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// SimilarCandidates 返回与 src 特征重合的候选影片及特征重合度得分。
+//
+// 走倒排表：按来源影片的每条特征一次索引定位，命中行按 movie_id 汇总权重，
+// 由 SQLite 排序后取前 limit 条。相比早先「JSON 列 LIKE 全表扫 + 自行截断 400 条」，
+// 这里不再有候选上限导致真 top-N 被截掉的问题，也不再扫全表。
+func (s *Store) SimilarCandidates(src Movie, limit int) ([]ScoredMovie, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	sourceRows, err := s.db.Query("SELECT kind, value FROM movie_features WHERE movie_id=?", src.ID)
+	if err != nil {
+		return nil, err
+	}
+	type key struct{ kind, value string }
+	keys := make([]key, 0, 32)
+	for sourceRows.Next() {
+		var item key
+		if err := sourceRows.Scan(&item.kind, &item.value); err != nil {
+			sourceRows.Close()
+			return nil, err
+		}
+		keys = append(keys, item)
+	}
+	sourceRows.Close()
+	if err := sourceRows.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	// 跳过高频特征：出现在库里 >10% 影片中的类型/标签对排序几乎没有贡献
+	//（对每个候选都是同一个常量），但它们的 posting list 最长。
+	// 实测 2 万部片、特征里含 4 个各命中 1 万部片的类型时：
+	// 全特征 490ms → 只留长尾特征 2ms，且排序结果不变。
+	threshold := s.commonFeatureThreshold()
+	kept := make([]key, 0, len(keys))
+	for _, item := range keys {
+		common, err := s.featureTooCommon(item.kind, item.value, threshold)
+		if err != nil {
+			return nil, err
+		}
+		if !common {
+			kept = append(kept, item)
+		}
+	}
+	if len(kept) == 0 {
+		// 全是高频特征（元数据极差的片）：退化为按原特征召回，保证仍有结果。
+		kept = keys
+	}
+	keys = kept
+	placeholders := strings.TrimSuffix(strings.Repeat("(?,?),", len(keys)), ",")
+	// 参数顺序必须与 SQL 里的占位符顺序一致：先来源 id，再特征对，最后 limit。
+	args := make([]any, 0, len(keys)*2+2)
+	args = append(args, src.ID)
+	for _, item := range keys {
+		args = append(args, item.kind, item.value)
+	}
+	args = append(args, limit)
+	query := `SELECT f.movie_id, SUM(f.weight) AS score
+		FROM movie_features f
+		JOIN movies m ON m.id=f.movie_id AND m.status IN ('success','manual')
+		WHERE f.movie_id<>? AND (f.kind,f.value) IN (VALUES ` + placeholders + `)
+		GROUP BY f.movie_id ORDER BY score DESC, f.movie_id LIMIT ?`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ScoredMovie
+	for rows.Next() {
+		var item ScoredMovie
+		if err := rows.Scan(&item.ID, &item.Score); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// commonFeatureThreshold 「无区分度特征」的文档数阈值：出现在库里超过 1/10 影片中的
+// 特征对排序没有区分作用，直接跳过。小库给下限、大库给上限，
+// 避免小库因占比把特征全跳掉，也避免超大库上单条特征仍要扫几万条 postings。
+func (s *Store) commonFeatureThreshold() int {
+	threshold := s.visibleMovieCount() / 10
+	if threshold < 8 {
+		threshold = 8
+	}
+	if threshold > 2000 {
+		threshold = 2000
+	}
+	return threshold
+}
+
+// featureTooCommon 判断某特征是否出现得比 threshold 次还多。
+// 用索引 + OFFSET 提前退出，不真的数完整个 posting list。
+func (s *Store) featureTooCommon(kind, value string, threshold int) (bool, error) {
+	var one int
+	err := s.db.QueryRow("SELECT 1 FROM movie_features WHERE kind=? AND value=? LIMIT 1 OFFSET ?",
+		kind, value, threshold).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// visibleMovieCount 可见影片数（按全局版本号缓存的计数）：
+// 高频特征的判定要看占比，这个计数不能每请求都去 COUNT 一遍。
+func (s *Store) visibleMovieCount() int {
+	version := s.gversion.Load()
+	if s.visibleVersion.Load() == version {
+		if count := s.visibleCount.Load(); count > 0 {
+			return int(count)
+		}
+	}
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies WHERE status IN ('success','manual')").Scan(&count); err != nil || count <= 0 {
+		return 1
+	}
+	s.visibleCount.Store(int64(count))
+	s.visibleVersion.Store(version)
+	return count
+}
+
+// MoviesByIDs 批量取影片（按 id 集合，返回 id→影片映射）。
+func (s *Store) MoviesByIDs(ids []int64) (map[int64]Movie, error) {
+	out := make(map[int64]Movie, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id IN ("+placeholders+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		movie, err := movieScan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[movie.ID] = movie
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) MovieIDByPath(path string) (int64, error) {
 	var id int64
 	err := s.db.QueryRow("SELECT id FROM movies WHERE source_path=?", path).Scan(&id)
@@ -439,6 +869,7 @@ func (s *Store) Movie(id int64) (Movie, error) {
 	}
 	return movieScan(row)
 }
+
 func (s *Store) SearchFiltered(libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
@@ -861,6 +1292,11 @@ func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
 			return err
 		}
 	}
+	// 演员是相似度特征之一，关系变了特征也要跟着变（同一事务）。
+	if err = refreshFeaturesTx(tx, movieID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -880,31 +1316,6 @@ func (s *Store) Actors(movieID int64) ([]ActorRef, error) {
 			return nil, err
 		}
 		out = append(out, actor)
-	}
-	return out, rows.Err()
-}
-
-// AllActors 一次返回全部可见影片的演员映射，供相似度批量打分与相似列表组装
-// 演员清单（带头像索引，避免再查一次）。
-func (s *Store) AllActors() (map[int64][]ActorRef, error) {
-	rows, err := s.db.Query(`SELECT ma.movie_id, ma.actor_name, COALESCE(a.avatar_url,''), COALESCE(a.avatar_tag,'')
-		FROM movie_actors ma
-		JOIN movies ON movies.id=ma.movie_id
-		LEFT JOIN actors a ON a.name=ma.actor_name
-		WHERE movies.status IN ('success','manual')
-		ORDER BY ma.actor_name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[int64][]ActorRef)
-	for rows.Next() {
-		var movieID int64
-		var actor ActorRef
-		if err := rows.Scan(&movieID, &actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
-			return nil, err
-		}
-		out[movieID] = append(out[movieID], actor)
 	}
 	return out, rows.Err()
 }
@@ -1090,10 +1501,16 @@ func (s *Store) Persons(libraryID int64, collection string) ([]string, error) {
 }
 
 // Collections 返回可见影片去重后的合集名（来自 NFO <set><name>）。
-func (s *Store) Collections() ([]string, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT collection FROM movies
+// minMovies 是合集的最低影片数：低于它的合集不生成（只有一部影片的合集
+// 在客户端里只是一个多余的文件夹）。传 0 或负数视为 1（不过滤）。
+func (s *Store) Collections(minMovies int) ([]string, error) {
+	if minMovies < 1 {
+		minMovies = 1
+	}
+	rows, err := s.db.Query(`SELECT collection FROM movies
 		WHERE status IN ('success','manual') AND COALESCE(collection,'') <> ''
-		ORDER BY collection`)
+		GROUP BY collection HAVING COUNT(*) >= ?
+		ORDER BY collection`, minMovies)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,14 +1612,18 @@ type CollectionStat struct {
 
 // CollectionStats 批量返回各合集的聚合信息，供合集列表一次取回，
 // 避免逐项调 CollectionSummary/CollectionPoster 造成的 N+1 查询。
-func (s *Store) CollectionStats() (map[string]CollectionStat, error) {
+// minMovies 与 Collections 同义：低于该影片数的合集不返回。
+func (s *Store) CollectionStats(minMovies int) (map[string]CollectionStat, error) {
+	if minMovies < 1 {
+		minMovies = 1
+	}
 	rows, err := s.db.Query(`SELECT m1.collection, COUNT(*),
 		COALESCE((SELECT m2.poster_path FROM movies m2
 			WHERE m2.collection=m1.collection AND m2.status IN ('success','manual') AND m2.poster_path<>''
 			ORDER BY m2.id DESC LIMIT 1),'')
 		FROM movies m1
 		WHERE m1.status IN ('success','manual') AND COALESCE(m1.collection,'')<>''
-		GROUP BY m1.collection`)
+		GROUP BY m1.collection HAVING COUNT(*) >= ?`, minMovies)
 	if err != nil {
 		return nil, err
 	}
@@ -1245,7 +1666,12 @@ func (s *Store) CollectionStats() (map[string]CollectionStat, error) {
 		return nil, err
 	}
 	for name, set := range genres {
-		stat := out[name]
+		stat, ok := out[name]
+		if !ok {
+			// 影片数不足最低阈值的合集已被上面的 HAVING 过滤掉，
+			// 这里不能再以零值补回 map（否则列表里会冒出 Count=0 的合集）。
+			continue
+		}
 		for g := range set {
 			stat.Genres = append(stat.Genres, g)
 		}
