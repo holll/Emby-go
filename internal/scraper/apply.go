@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -76,6 +77,9 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 	title, plot, translated := s.translateFields(ctx, info)
 	result.Title, result.Translated = title, translated
 
+	// 版本标记（-C / -U / -UC）取自文件名：既写进 NFO 标签，也给主海报贴角标。
+	mark, hasMark := detectVersionMark(movie.SourcePath)
+
 	// 图片落盘（只补缺失时不覆盖已有文件）。
 	dir := strings.TrimSpace(movie.OutputDir)
 	if dir == "" {
@@ -83,7 +87,12 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 	}
 	if s.cfg.DownloadImages {
 		for _, target := range imageTargets {
-			path, err := s.downloadImage(ctx, info, target.kind, filepath.Join(dir, target.name), opts.Overwrite)
+			// 角标只贴主海报（primary）：thumb/backdrop 在客户端是宽幅背景图，贴角标会挡画面。
+			badge := ""
+			if hasMark && target.kind == "primary" {
+				badge = mark.Badge
+			}
+			path, err := s.downloadImage(ctx, info, target.kind, filepath.Join(dir, target.name), badge, opts.Overwrite)
 			if err != nil {
 				// 图片尽力而为：元数据成功即算成功（需求 A5 #28）。
 				slog.Warn("刮削下载图片失败", "movie_id", movie.ID, "kind", target.kind, "error", err)
@@ -97,7 +106,7 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 		}
 	}
 
-	fields := buildFields(info, title, plot, opts.Overwrite)
+	fields := buildFields(info, title, plot, opts.Overwrite, mark)
 	if err := writeNFO(movie, fields); err != nil {
 		return result, err
 	}
@@ -162,7 +171,9 @@ func (s *Scraper) translateFields(ctx context.Context, info metatube.MovieInfo) 
 }
 
 // downloadImage 下载一张图并转 webp 落盘；只补缺失模式下已有文件则跳过（返回空路径）。
-func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, kind, dest string, overwrite bool) (string, error) {
+// badge 非空时由后端把角标合成进图里再返回（只对主海报传）。
+func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, kind, dest, badge string,
+	overwrite bool) (string, error) {
 	if !overwrite {
 		if stat, err := os.Stat(dest); err == nil && !stat.IsDir() && stat.Size() > 0 {
 			return "", nil
@@ -170,7 +181,7 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	}
 	// 不传 url 参数：后端按 provider:id 自己取源图并按类型裁到约定比例。
 	// 某些来源没有某类图时后端会返回错误，我们记 warn 跳过（图片尽力而为）。
-	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQualityValue(), "")
+	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQualityValue(), "", badge)
 	data, err := s.client.Download(ctx, url, maxImageBytes)
 	if err != nil {
 		return "", err
@@ -211,7 +222,8 @@ func SplitProviderID(raw string) (provider, id string, ok bool) {
 }
 
 // buildFields 把详情映射为 NFO 字段（映射表见需求 4.4）。
-func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nfo.ScrapeFields {
+// mark 为零值表示文件名没带版本标记。
+func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool, mark versionMark) nfo.ScrapeFields {
 	premiered, year := splitReleaseDate(info.ReleaseDate)
 	// 映射表：genres → Genres（不翻译）、label → Label + Tags。
 	// 刻意不把 genres 也塞进 tags：Emby 里两者是不同维度，重复写入会让客户端
@@ -219,6 +231,11 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nf
 	tags := []string{}
 	if label := strings.TrimSpace(info.Label); label != "" {
 		tags = append(tags, label)
+	}
+	// 版本标记（中文字幕/无码破解/中文无码）是「版本属性」而非「题材」，所以进 tags 不进 genres。
+	// 与 label 撞名时不重复：列表标签是块级替换，重复项会原样写进 NFO。
+	if mark.Tag != "" && !slices.Contains(tags, mark.Tag) {
+		tags = append(tags, mark.Tag)
 	}
 	studios := []string{}
 	if maker := strings.TrimSpace(info.Maker); maker != "" {

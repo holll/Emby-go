@@ -158,13 +158,20 @@ func (c *Client) SearchActors(ctx context.Context, q, provider string, fallback 
 }
 
 // ImageURL 拼出图片地址。图片端点是公开的（不需要鉴权），由后端裁剪到指定比例。
-func (c *Client) ImageURL(kind, provider, id string, quality int, remoteURL string) string {
+//
+// badge 非空时后端会把该角标合成到图上再返回：取值可以是后端内置名
+// （zimu.png 中文字幕 / u.png 无码破解 / uc.png 中文无码），也可以是一个角标图片 URL。
+// 后端把它缩放到源图高度的 1/5 后贴左上角（见 metatube-sdk-go 的 imageutil/badge）。
+func (c *Client) ImageURL(kind, provider, id string, quality int, remoteURL, badge string) string {
 	query := url.Values{}
 	if quality > 0 {
 		query.Set("quality", strconv.Itoa(quality))
 	}
 	if strings.TrimSpace(remoteURL) != "" {
 		query.Set("url", remoteURL)
+	}
+	if strings.TrimSpace(badge) != "" {
+		query.Set("badge", badge)
 	}
 	target := c.baseURL + "/v1/images/" + url.PathEscape(kind) + "/" +
 		url.PathEscape(provider) + "/" + url.PathEscape(id)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestBuildFieldsMapsMetaTubeToNFO(t *testing.T) {
 		Series: "系列", Genres: []string{"剧情"}, Score: 8.5, Runtime: 120,
 		ReleaseDate: "2024-03-05", Actors: []string{"甲", " ", "乙"},
 	}
-	fields := buildFields(info, "中文标题", "中文简介", true)
+	fields := buildFields(info, "中文标题", "中文简介", true, versionMark{})
 
 	// <title>/<sorttitle> 一律是「番号 标题」，原文另存 originaltitle。
 	if fields.Title != "ABF-018 中文标题" || fields.SortTitle != "ABF-018 中文标题" {
@@ -184,7 +185,7 @@ func TestBuildFieldsNormalizesNumber(t *testing.T) {
 	}
 	for _, tc := range cases {
 		info := metatube.MovieInfo{ID: "abc", Number: tc.number, Title: "原文标题", Provider: "fanza"}
-		fields := buildFields(info, "中文标题", "", true)
+		fields := buildFields(info, "中文标题", "", true, versionMark{})
 		if fields.Number != tc.want {
 			t.Errorf("buildFields(%q).Number = %q，期望 %q", tc.number, fields.Number, tc.want)
 		}
@@ -532,6 +533,127 @@ func TestProgressGuard(t *testing.T) {
 	}
 	if DefaultConfig().Timeout() != 30*time.Second {
 		t.Errorf("默认超时 = %v，期望 30s", DefaultConfig().Timeout())
+	}
+}
+
+// TestDetectVersionMark 版本标记只认末尾独占一段的 -C / -U / -UC。
+func TestDetectVersionMark(t *testing.T) {
+	cases := []struct {
+		path string
+		want string // 期望的标记 Code，空串表示无标记
+	}{
+		{"ABF-018-U.strm", "U"},
+		{"ABF-018-UC.strm", "UC"}, // 长标记优先，不能被 U 抢先
+		{"ABF-018-C.strm", "C"},
+		{"ABF-018-uc.strm", "UC"}, // 大小写不敏感
+		{"ABF-018_U.mp4", "U"},    // 下划线分隔
+		{"ABF 018 U.strm", "U"},   // 空格分隔
+		{`D:\lib\ABF-018-U\ABF-018-U.strm`, "U"},
+		// 多分段：-CD1 是分段号不是标记，标记在最后。
+		{"ABF-018-CD1-U.strm", "U"},
+		{"ABF-018-CD1-C.strm", "C"},
+		// 以下都不该判出标记。
+		{"ABF-018-CD1.strm", ""},
+		{"ABF-018.strm", ""},
+		{"LUXU-1234.strm", ""},    // 番号自带字母
+		{"259LUXU-1234.strm", ""}, // 数字前缀
+		{"H4610.strm", ""},        // 番号自带字母数字
+		{"T28-036.strm", ""},      // 系列名自带数字
+		{"ABF018C.strm", ""},      // 末尾字母前无分隔符
+		{"ABF-018-4K.strm", ""},   // 未知标记
+		{"", ""},
+	}
+	for _, tc := range cases {
+		mark, ok := detectVersionMark(tc.path)
+		if tc.want == "" {
+			if ok {
+				t.Errorf("detectVersionMark(%q) = %q，期望无标记", tc.path, mark.Code)
+			}
+			continue
+		}
+		if !ok || mark.Code != tc.want {
+			t.Errorf("detectVersionMark(%q) = %q/%v，期望 %q", tc.path, mark.Code, ok, tc.want)
+		}
+	}
+}
+
+// TestVersionMarkMapsToBadgeAndTag 三个标记分别对应一张角标图与一个标签文本。
+func TestVersionMarkMapsToBadgeAndTag(t *testing.T) {
+	want := map[string][2]string{
+		"C":  {"中文字幕", "zimu.png"},
+		"U":  {"无码破解", "u.png"},
+		"UC": {"中文无码", "uc.png"},
+	}
+	if len(versionMarks) != len(want) {
+		t.Fatalf("标记表有 %d 项，期望 %d 项", len(versionMarks), len(want))
+	}
+	for _, mark := range versionMarks {
+		w, ok := want[mark.Code]
+		if !ok {
+			t.Errorf("出现未预期的标记 %q", mark.Code)
+			continue
+		}
+		if mark.Tag != w[0] || mark.Badge != w[1] {
+			t.Errorf("标记 %s = %q/%q，期望 %q/%q", mark.Code, mark.Tag, mark.Badge, w[0], w[1])
+		}
+	}
+}
+
+// TestApplyAddsVersionMarkTagAndBadge 带 -U 的文件名：标签写进 NFO，
+// 且只有主海报的图片请求带 badge（由后端合成角标），另两张图不带。
+func TestApplyAddsVersionMarkTagAndBadge(t *testing.T) {
+	var mu sync.Mutex
+	badges := map[string]string{} // 图片类型 → 请求里的 badge 参数
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/images/") {
+			kind := strings.TrimPrefix(r.URL.Path, "/v1/images/")
+			if index := strings.Index(kind, "/"); index > 0 {
+				kind = kind[:index]
+			}
+			mu.Lock()
+			badges[kind] = r.URL.Query().Get("badge")
+			mu.Unlock()
+			img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+			w.Header().Set("Content-Type", "image/jpeg")
+			_ = jpeg.Encode(w, img, nil)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":404,"message":"nope"}}`))
+	}))
+	t.Cleanup(backend.Close)
+
+	dir := t.TempDir()
+	movie := store.Movie{
+		ID: 1, LibraryID: 1, SourcePath: filepath.Join(dir, "ABF-018-U.strm"),
+		OutputDir: dir, NFOPath: filepath.Join(dir, "ABF-018-U.nfo"), Number: "ABF-018", Status: "pending",
+	}
+	scraper := newTestScraper(t, backend.URL, DefaultConfig())
+	scraper.cfg.Translate = translate.Config{}
+	info := metatube.MovieInfo{ID: "abc", Provider: "fanza", Number: "ABF-018", Title: "原文标题"}
+
+	if _, err := scraper.Apply(context.Background(), movie, info,
+		ApplyOptions{Provider: "fanza", ID: "abc", Overwrite: true}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if badges["primary"] != "u.png" {
+		t.Errorf("主海报应带 badge=u.png，实际 %q", badges["primary"])
+	}
+	for _, kind := range []string{"thumb", "backdrop"} {
+		if badges[kind] != "" {
+			t.Errorf("%s 不该带 badge，实际 %q", kind, badges[kind])
+		}
+	}
+
+	raw, err := os.ReadFile(movie.NFOPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "<tag>无码破解</tag>") {
+		t.Errorf("NFO 应写入版本标记标签:\n%s", raw)
 	}
 }
 

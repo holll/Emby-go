@@ -481,7 +481,8 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		return
 	}
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
-	data, err := client.Download(ctx, client.ImageURL(kind, provider, id, 70, ""), maxScrapeImageBytes)
+	// 预览缩略图不带 badge：候选列表里贴角标只会干扰挑选。
+	data, err := client.Download(ctx, client.ImageURL(kind, provider, id, 70, "", ""), maxScrapeImageBytes)
 	if err != nil {
 		c.Status(http.StatusBadGateway)
 		return

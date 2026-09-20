@@ -124,14 +124,23 @@ func TestSearchActors(t *testing.T) {
 
 func TestImageURL(t *testing.T) {
 	client := New("https://mt.example.com/", "", 0)
-	got := client.ImageURL("primary", "fanza", "abc", 90, "")
+	got := client.ImageURL("primary", "fanza", "abc", 90, "", "")
 	want := "https://mt.example.com/v1/images/primary/fanza/abc?quality=90"
 	if got != want {
 		t.Errorf("ImageURL = %q，期望 %q", got, want)
 	}
-	got = client.ImageURL("thumb", "p", "i", 0, "https://remote/x.jpg")
+	got = client.ImageURL("thumb", "p", "i", 0, "https://remote/x.jpg", "")
 	if !strings.Contains(got, "url=") || strings.Contains(got, "quality") {
 		t.Errorf("带远端 url 且不指定质量时不应出现 quality: %q", got)
+	}
+	// badge 只在非空时出现：空串不能让上游收到 badge=。
+	got = client.ImageURL("primary", "fanza", "abc", 90, "", "u.png")
+	if !strings.Contains(got, "badge=u.png") {
+		t.Errorf("指定 badge 时应带上参数: %q", got)
+	}
+	got = client.ImageURL("primary", "fanza", "abc", 90, "", "   ")
+	if strings.Contains(got, "badge") {
+		t.Errorf("空白 badge 不应出现参数: %q", got)
 	}
 }
 
