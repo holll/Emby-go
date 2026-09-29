@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"runtime"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -24,11 +25,28 @@ func (a *App) publicInfo(c *gin.Context) {
 	})
 }
 
-func (a *App) info(c *gin.Context) {
-	scheme := "http"
-	if c.Request.TLS != nil {
-		scheme = "https"
+// requestScheme 判定客户端实际使用的协议。服务通常跑在 nginx 之后、由 nginx 终止 TLS，
+// 此时 c.Request.TLS 恒为 nil，只看 TLS 会把 https 站点通告成 http
+// （LocalAddress/WanAddress 错、SupportsHttps=false），而客户端会据此做连接回退。
+// 故优先采信 nginx 传来的 X-Forwarded-Proto，没有才回退到 TLS 探测。
+func requestScheme(c *gin.Context) string {
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+		// 多级代理时可能是 "https, http"，取最外层（第一个）。
+		if i := strings.IndexByte(proto, ','); i >= 0 {
+			proto = proto[:i]
+		}
+		if proto = strings.TrimSpace(strings.ToLower(proto)); proto == "http" || proto == "https" {
+			return proto
+		}
 	}
+	if c.Request.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func (a *App) info(c *gin.Context) {
+	scheme := requestScheme(c)
 	osName := map[string]string{"windows": "Windows", "linux": "Linux", "darwin": "macOS"}[runtime.GOOS]
 	if osName == "" {
 		osName = runtime.GOOS
@@ -43,7 +61,7 @@ func (a *App) info(c *gin.Context) {
 		"HasPendingRestart":          false,
 		"IsShuttingDown":             false,
 		"IsInMaintenanceMode":        false,
-		"SupportsHttps":              c.Request.TLS != nil,
+		"SupportsHttps":              scheme == "https",
 		"SupportsAutoRunAtStartup":   false,
 		"CanSelfRestart":             false,
 		"CanSelfUpdate":              false,

@@ -252,15 +252,15 @@ func (a *App) routes() {
 	r.GET("/web/app.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
-	r.GET("/api/auth/status", a.authStatus)
-	r.POST("/api/auth/initialize", a.initialize)
+	r.GET("/api/auth/status", noStore, a.authStatus)
+	r.POST("/api/auth/initialize", noStore, a.initialize)
 	// 刮削预览用的图片代理刻意不挂鉴权：它要能直接放进 <img src>，而浏览器不会给
 	// 图片请求带自定义头（X-Emby-Token），挂鉴权只会让缩略图全部 401。
 	// 上游 MetaTube 的图片端点本身也是公开的（Jellyfin 插件同样直接引用），
 	// 这里只做「限定 kind + 限定目标服务 + 限时限量」的转发，不放大暴露面。
 	r.GET("/api/admin/scrape/image", a.adminScrapeImage)
 
-	admin := r.Group("/api/admin", a.requireAuth)
+	admin := r.Group("/api/admin", a.requireAuth, noStore)
 	admin.GET("/libraries", a.adminLibraries)
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
@@ -389,10 +389,23 @@ func (a *App) embyRoutes() []embyRoute {
 	}
 }
 
+// noStore 给动态响应加禁止缓存头。Emby 客户端会缓存「无 Cache-Control」的 JSON，
+// PlaybackInfo / Items 这类响应一旦被缓存，媒体源与播放进度就不再刷新；
+// 视频流的 302 与代理字节流同理，必须禁止客户端与中间层缓存。
+func noStore(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+}
+
 // registerEmby 注册全部 Emby 兼容路由，每条同时挂 PascalCase 与全小写变体。
 func (a *App) registerEmby(g *gin.RouterGroup) {
 	for _, route := range a.embyRoutes() {
-		handlers := make([]gin.HandlerFunc, 0, 2)
+		handlers := make([]gin.HandlerFunc, 0, 3)
+		// 图片端点除外：serveImage 自己带 public/max-age 与 ETag，挂 noStore 会把
+		// 海报墙的缓存打掉（每张图全量重下）；其余 API 一律禁止缓存。
+		// imageInfo（/Items/:id/Images 结尾、无斜杠）不在排除之列，走 noStore。
+		if !strings.Contains(route.path, "/Images/") {
+			handlers = append(handlers, noStore)
+		}
 		if route.auth {
 			handlers = append(handlers, a.requireAuth)
 		}
@@ -409,24 +422,27 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 // registerProxyRoutes 网页播放器代理端点（透传 Range），同样注册大小写与可选扩展名。
 func registerProxyRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
 	for _, base := range []string{"/Videos/:id/proxy", "/videos/:id/proxy"} {
-		g.GET(base, h)
-		g.HEAD(base, h)
-		g.GET(base+".:ext", h)
-		g.HEAD(base+".:ext", h)
+		g.GET(base, noStore, h)
+		g.HEAD(base, noStore, h)
+		g.GET(base+".:ext", noStore, h)
+		g.HEAD(base+".:ext", noStore, h)
 	}
 }
 
 // registerStreamRoutes 同时注册 /Videos 与 /videos 大小写，吞掉可选扩展名。
 func registerStreamRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
 	for _, base := range []string{"/Videos/:id/stream", "/videos/:id/stream"} {
-		g.GET(base, h)
-		g.HEAD(base, h)
-		g.GET(base+".:ext", h)
-		g.HEAD(base+".:ext", h)
+		g.GET(base, noStore, h)
+		g.HEAD(base, noStore, h)
+		g.GET(base+".:ext", noStore, h)
+		g.HEAD(base+".:ext", noStore, h)
 	}
 }
 
 func (a *App) noRoute(c *gin.Context) {
+	// 客户端会探测式地反复请求未实现端点；404 一旦被浏览器/中间层缓存，
+	// 后续补上实现客户端也拿不到——明确禁止缓存。
+	c.Header("Cache-Control", "no-store")
 	if !strings.HasPrefix(c.Request.URL.Path, "/api/") {
 		key := c.Request.Method + " " + c.Request.URL.Path
 		a.probeMu.Lock()

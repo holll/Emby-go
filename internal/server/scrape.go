@@ -462,8 +462,14 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 	// 同一张缩略图在一次预览里会被反复要（切候选、重开抽屉），
 	// 结果只依赖 provider/id/kind，进程内短缓存即可，避免重复打上游。
 	cacheKey := "scrapeimg:" + kind + ":" + provider + ":" + id
-	if raw, ok := a.imgThumb.Get(cacheKey); ok {
+	// 图片 URL 是内容寻址的（provider/id/kind 决定内容），浏览器端也可以短缓存：
+	// 切换候选来回对比时不必重复下载。失败响应不加，免得 5 分钟内的 400/502 被缓存。
+	serveThumb := func(raw []byte) {
+		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
 		c.Data(http.StatusOK, "image/jpeg", raw)
+	}
+	if raw, ok := a.imgThumb.Get(cacheKey); ok {
+		serveThumb(raw)
 		return
 	}
 	ctx, cancel := a.requestContext(c)
@@ -477,7 +483,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		return
 	}
 	if raw, ok := a.imgThumb.Get(cacheKey); ok { // 等锁期间可能已被别的请求填上
-		c.Data(http.StatusOK, "image/jpeg", raw)
+		serveThumb(raw)
 		return
 	}
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
@@ -491,7 +497,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		a.imgThumb.Set(cacheKey, data, scrapeImageTTL)
 	}
 	// 上游给的是 JPEG；原样转发，浏览器直接能显示，无需转码。
-	c.Data(http.StatusOK, "image/jpeg", data)
+	serveThumb(data)
 }
 
 const (
