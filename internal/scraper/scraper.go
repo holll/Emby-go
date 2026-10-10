@@ -234,18 +234,29 @@ func pickCandidates(results []metatube.MovieSearchResult, expected string, limit
 	return out
 }
 
-// selectExact 在搜索结果里挑出番号精确命中的那条。
-// 批量/定时路径只能走这个函数：没有精确命中就跳过（需求 A7 #50），不退回首个结果。
+// selectExact 在搜索结果里挑出第一条番号精确命中的结果。
+// 批量/定时路径只能取精确命中：没有就跳过（需求 A7 #50），不退回首个结果。
 func selectExact(results []metatube.MovieSearchResult, expected string) (metatube.MovieSearchResult, bool) {
-	if expected == "" {
+	matches := selectAllExact(results, expected)
+	if len(matches) == 0 {
 		return metatube.MovieSearchResult{}, false
 	}
+	return matches[0], true
+}
+
+// selectAllExact 返回所有番号精确命中的结果（保持原顺序）。
+// 详情抓取失败时可以按序回退到下一个来源，见 scrapeOne 的候选取详情逻辑。
+func selectAllExact(results []metatube.MovieSearchResult, expected string) []metatube.MovieSearchResult {
+	if expected == "" {
+		return nil
+	}
+	var matches []metatube.MovieSearchResult
 	for _, item := range results {
 		if metatube.SameNumber(item.Number, expected) {
-			return item, true
+			matches = append(matches, item)
 		}
 	}
-	return metatube.MovieSearchResult{}, false
+	return matches
 }
 
 // proxyImageURL 生成指向本服务的图片代理地址（前端预览与落盘都不用直连 MetaTube）。

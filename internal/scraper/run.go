@@ -33,6 +33,10 @@ type ItemResult struct {
 	Provider string
 	Number   string
 	Images   []string
+	// Fatal 标记这次失败是否属于环境性故障（MetaTube 不可达/鉴权失败）。
+	// 只有它累加连续失败计数并参与熔断：源站元数据不全这类单条数据问题一批里可能
+	// 连续出现，算进去会把整批任务误判为「MetaTube 挂了」而中止（见 runMovies）。
+	Fatal bool
 }
 
 // 单条结果的三种状态。
@@ -119,7 +123,12 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 				p.Consecutive = 0
 			default:
 				p.Failed++
-				p.Consecutive++
+				if result.Fatal {
+					p.Consecutive++
+				} else {
+					// 服务有响应（只是这条数据有问题），说明 MetaTube 可达，故障计数清零。
+					p.Consecutive = 0
+				}
 			}
 		})
 		if opts.OnItem != nil {
@@ -189,30 +198,33 @@ func (s *Scraper) scrapeOne(ctx context.Context, movie store.Movie, opts RunOpti
 
 	results, err := s.client.SearchMovies(ctx, query, "", true)
 	if err != nil {
-		return s.recordFailure(movie, result, "搜索失败: "+err.Error())
+		return s.recordFailure(movie, result, err, "搜索失败")
 	}
 	if len(results) == 0 {
 		return s.recordSkip(movie, result, confirmMessage("搜索无结果（query="+query+"）"))
 	}
-	chosen, exact := selectExact(results, expected)
-	if !exact {
+	matches := selectAllExact(results, expected)
+	if len(matches) == 0 {
 		// 批量/定时路径不做「退回首个」：那会把错误影片的元数据写进这部片（需求 A7 #50）。
 		return s.recordSkip(movie, result,
 			confirmMessage(fmt.Sprintf("非番号精确命中（query=%s，期望=%s，首条=%s/%s）",
 				query, expected, results[0].Provider, results[0].Number)))
 	}
-	logScrapeChoice(movie, query, expected, chosen, exact)
+
+	// 依次尝试精确命中的候选：某个来源详情抓不全（如 JAV321 改版后封面 XPath 失效）
+	// 或不可用时，还能从下一个来源拿到完整数据（需求 A7 #50 禁的是「退回非精确结果」）。
+	chosen, info, err := s.fetchFirstAvailable(ctx, movie, matches)
+	if err != nil {
+		return s.recordFailure(movie, result, err, "取详情失败")
+	}
+	logScrapeChoice(movie, query, expected, chosen, true)
 	result.Provider, result.Number = chosen.Provider, chosen.Number
 
-	info, err := s.client.MovieInfo(ctx, chosen.Provider, chosen.ID, true)
-	if err != nil {
-		return s.recordFailure(movie, result, "取详情失败: "+err.Error())
-	}
 	applied, err := s.Apply(ctx, movie, info, ApplyOptions{
 		Provider: chosen.Provider, ID: chosen.ID, Overwrite: opts.Overwrite, Refresh: opts.RefreshPerMovie,
 	})
 	if err != nil {
-		return s.recordFailure(movie, result, "写入失败: "+err.Error())
+		return s.recordFailure(movie, result, err, "写入失败")
 	}
 	result.Status = StatusSuccess
 	result.Images = applied.Images
@@ -228,11 +240,52 @@ func (s *Scraper) recordSkip(movie store.Movie, result ItemResult, reason string
 }
 
 // recordFailure 记「失败」：失败原因同样落在 last_scrape_error，供管理端筛出。
-func (s *Scraper) recordFailure(movie store.Movie, result ItemResult, reason string) ItemResult {
-	result.Status, result.Reason = StatusFailed, reason
-	slog.Warn("刮削失败", "movie_id", movie.ID, "title", movie.Title, "reason", reason)
-	s.storeScrapeResult(movie, reason)
+// 同时标记是否环境性故障，供上层熔断判断（见 runMovies）。
+func (s *Scraper) recordFailure(movie store.Movie, result ItemResult, err error, action string) ItemResult {
+	result.Status = StatusFailed
+	result.Reason = action + ": " + err.Error()
+	result.Fatal = metatube.IsFatal(err)
+	slog.Warn("刮削失败", "movie_id", movie.ID, "title", movie.Title,
+		"reason", result.Reason, "fatal", result.Fatal)
+	s.storeScrapeResult(movie, result.Reason)
 	return result
+}
+
+// maxDetailAttempts 单个影片最多尝试的精确命中候选数。
+// 正常情况下精确命中只有一两条；设上限是防止某个来源返回大量同号结果时把请求打爆。
+const maxDetailAttempts = 3
+
+// fetchFirstAvailable 按序尝试精确命中的候选，返回第一个能取到完整详情的。
+//
+// 某个来源「详情抓不全」（如 JAV321 改版后封面 XPath 失效，返回 500 incomplete metadata）
+// 不该让整部片失败——换个来源往往就能拿到完整数据。全部失败时返回最后一个错误，
+// 由 recordFailure 按 IsFatal 决定是否计入熔断。
+func (s *Scraper) fetchFirstAvailable(ctx context.Context, movie store.Movie,
+	candidates []metatube.MovieSearchResult) (metatube.MovieSearchResult, metatube.MovieInfo, error) {
+	var lastErr error
+	for index, candidate := range candidates {
+		if index >= maxDetailAttempts {
+			break
+		}
+		info, err := s.client.MovieInfo(ctx, candidate.Provider, candidate.ID, true)
+		if err == nil {
+			if index > 0 {
+				slog.Info("刮削候选取详情回退成功", "movie_id", movie.ID,
+					"provider", candidate.Provider, "id", candidate.ID, "attempt", index+1)
+			}
+			return candidate, info, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+		slog.Warn("刮削候选取详情失败，尝试下一个来源", "movie_id", movie.ID,
+			"provider", candidate.Provider, "id", candidate.ID, "error", err)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("没有可用的精确命中候选")
+	}
+	return metatube.MovieSearchResult{}, metatube.MovieInfo{}, lastErr
 }
 
 func (s *Scraper) storeScrapeResult(movie store.Movie, message string) {

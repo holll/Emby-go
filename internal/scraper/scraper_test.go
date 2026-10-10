@@ -65,6 +65,29 @@ func TestSelectExactOnlyAcceptsNumberMatch(t *testing.T) {
 	}
 }
 
+// selectAllExact 返回全部番号精确命中的候选（保持原顺序），供详情失败时依次回退。
+// 这里同时覆盖 provider 语义后缀：JAVHD 的搜索侧返回 SCUTE-1279-mosaic，也算精确命中。
+func TestSelectAllExactKeepsOrder(t *testing.T) {
+	results := []metatube.MovieSearchResult{
+		{Provider: "jav321", ID: "1", Number: "SCUTE-1279"},
+		{Provider: "duga", ID: "2", Number: "ABF-079"},
+		{Provider: "javhd", ID: "3", Number: "SCUTE-1279-mosaic"},
+	}
+	matches := selectAllExact(results, "SCUTE-1279")
+	if len(matches) != 2 {
+		t.Fatalf("精确命中数 = %d，期望 2: %+v", len(matches), matches)
+	}
+	if matches[0].Provider != "jav321" || matches[1].Provider != "javhd" {
+		t.Errorf("应保持原顺序: %+v", matches)
+	}
+	if got := selectAllExact(results, "ABF-020"); len(got) != 0 {
+		t.Errorf("无精确命中应返回空: %+v", got)
+	}
+	if got := selectAllExact(results, ""); len(got) != 0 {
+		t.Errorf("预期番号为空应返回空: %+v", got)
+	}
+}
+
 func TestPickCandidatesPrefersExact(t *testing.T) {
 	results := make([]metatube.MovieSearchResult, 0, 8)
 	for i := 0; i < 8; i++ {

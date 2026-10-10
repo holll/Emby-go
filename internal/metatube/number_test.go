@@ -34,6 +34,11 @@ func TestNormalizeAndSameNumber(t *testing.T) {
 		{"ABF018", "ABF-018", true},
 		{"ABF-018-c", "ABF-018", false}, // 未归一化的噪声不参与比较
 		{"ABF-018", "ABF-019", false},
+		// provider 语义后缀（JAVHD 搜索侧的马赛克版标记）应被忽略：
+		// 同一 provider 的详情接口返回的是不带后缀的 NHDTB-944。
+		{"NHDTB-944-mosaic", "NHDTB-944", true},
+		{"NHDTB-944-mosaic", "NHDTB-945", false},
+		{"ABF018-mosaic", "ABF-018", true},
 		{"", "ABF-018", false},
 		{"", "", false},
 	}

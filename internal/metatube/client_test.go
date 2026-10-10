@@ -2,6 +2,8 @@ package metatube
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,4 +195,30 @@ func asAPIError(err error, target **APIError) bool {
 		err = unwrapper.Unwrap()
 	}
 	return false
+}
+
+// IsFatal 决定一条失败是否计入熔断：只有「服务不可达/鉴权失败」才算环境性故障。
+func TestIsFatal(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"404 上游没有这部片", &APIError{StatusCode: 404, Message: "info not found"}, false},
+		{"500 元数据不全", &APIError{StatusCode: 500, Message: "incomplete metadata"}, false},
+		{"400 参数问题", &APIError{StatusCode: 400}, false},
+		{"401 鉴权失败", &APIError{StatusCode: 401, Message: "invalid token"}, true},
+		{"403 鉴权失败", &APIError{StatusCode: 403}, true},
+		{"连接失败", errors.New("dial tcp 127.0.0.1:80: connect: connection refused"), true},
+		{"被 wrap 的鉴权失败", fmt.Errorf("metatube: 请求 /x 失败: %w", &APIError{StatusCode: 401}), true},
+		{"被 wrap 的数据问题", fmt.Errorf("metatube: 请求 /x 失败: %w", &APIError{StatusCode: 500}), false},
+		{"请求取消", context.Canceled, false},
+		{"请求超时", context.DeadlineExceeded, false},
+	}
+	for _, tc := range cases {
+		if got := IsFatal(tc.err); got != tc.want {
+			t.Errorf("%s: IsFatal = %v，期望 %v", tc.name, got, tc.want)
+		}
+	}
 }

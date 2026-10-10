@@ -62,6 +62,27 @@ func Normalize(s string) string {
 	return strings.Trim(s, "-")
 }
 
+// providerSuffixes 某些来源在搜索结果里给番号附加的语义后缀。
+//
+// JAVHD 会把马赛克版返回成 NHDTB-944-mosaic，而它的详情接口返回的仍是 NHDTB-944
+// ——同一个 provider 的两条路径口径不一致。这类后缀只描述版本属性、不影响番号本身，
+// 比对时忽略掉，否则会被当成「非番号精确命中」而整片跳过（需求 A7 #50 的误伤）。
+// 传大写形式（Normalize 之后）。新增后缀在这里加一行即可。
+var providerSuffixes = []string{"MOSAIC"}
+
+// stripProviderSuffix 反复剥掉末尾的 provider 语义后缀（NHDTB-944-MOSAIC → NHDTB-944）。
+func stripProviderSuffix(number string) string {
+	for changed := true; changed; {
+		changed = false
+		for _, suffix := range providerSuffixes {
+			if trimmed := strings.TrimSuffix(number, "-"+suffix); trimmed != number {
+				number, changed = trimmed, true
+			}
+		}
+	}
+	return number
+}
+
 // SameNumber 判断两个番号是否指同一部片。
 // 空串一律不同（避免「都没番号」被判为命中）。
 func SameNumber(a, b string) bool {
@@ -73,7 +94,11 @@ func SameNumber(a, b string) bool {
 		return true
 	}
 	// 去掉分隔符再比一次：ABF018 与 ABF-018 视为同一部。
-	return compact(left) == compact(right)
+	if compact(left) == compact(right) {
+		return true
+	}
+	// 再剥掉 provider 语义后缀比一次：NHDTB-944-mosaic 与 NHDTB-944。
+	return compact(stripProviderSuffix(left)) == compact(stripProviderSuffix(right))
 }
 
 func compact(s string) string {

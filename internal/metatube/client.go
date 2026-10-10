@@ -121,6 +121,30 @@ func IsNotFound(err error) bool {
 	return false
 }
 
+// IsFatal 判断错误是否属于「环境性故障」——MetaTube 服务不可达或鉴权失败。
+//
+// 这类问题会让连续的每一条刮削都失败，是该熔断的信号；而「单条数据问题」
+// （源站元数据不全的 500 incomplete metadata、上游没有这部片的 404）只影响当前这一条，
+// 不该累计到连续失败计数里，否则一批源站数据不全的片会误触发整批中止。
+//
+// 判据：拿不到 HTTP 响应（DNS/连接错误）或 401/403 视为环境性问题；
+// 请求被取消/超时不算（多为单次抖动或上游慢，交给重试与超时各自处理）。
+func IsFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		// 服务有响应：只有鉴权失败属于环境性问题。
+		return apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden
+	}
+	// 没拿到响应 → 服务不可达。
+	return true
+}
+
 // SearchMovies 搜索影片。provider 为空时后端会搜全部来源。
 func (c *Client) SearchMovies(ctx context.Context, q, provider string, fallback bool) ([]MovieSearchResult, error) {
 	var out []MovieSearchResult
