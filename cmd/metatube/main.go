@@ -49,6 +49,9 @@ func main() {
 	logs := logging.Setup(cfg.Debug)
 	defer logs.Close()
 
+	// 运行期版本号转发给 server 包，供管理页外壳（左下角）渲染。
+	server.BuildVersion = version
+
 	app, err := server.New(cfg)
 	if err != nil {
 		slog.Error("create server", "error", err)

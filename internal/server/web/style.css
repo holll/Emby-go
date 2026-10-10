@@ -137,7 +137,11 @@ a { color: var(--info); }
   font: 500 11px var(--font-mono);
   letter-spacing: 0.06em;
 }
-.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); flex: none; }
+.foot-link { color: var(--dim); text-decoration: none; transition: color .15s ease; }
+.foot-link:hover, .foot-link:focus-visible { color: var(--accent); }
+.foot-sep { color: var(--dim); opacity: .6; }
+.foot-ver { color: var(--dim); }
 
 .main { flex: 1; min-width: 0; padding: 30px 38px 60px; }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -73,6 +74,11 @@ func (a *App) dashboard(c *gin.Context) {
 	if err != nil {
 		c.String(http.StatusInternalServerError, "web unavailable")
 		return
+	}
+	// 管理页把运行期版本号与仓库地址渲染进外壳（左下角页脚）。
+	if name == "web/index.html" {
+		data = bytes.ReplaceAll(data, []byte("{{VERSION}}"), []byte(BuildVersion))
+		data = bytes.ReplaceAll(data, []byte("{{REPO_URL}}"), []byte(repoURL))
 	}
 	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
