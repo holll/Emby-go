@@ -439,12 +439,56 @@ func registerStreamRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
 	}
 }
 
+// scannerPathHints 自动化扫描器常用的路径片段。公网上的 .svn/.git、备份包、
+// 配置文件探测会以极高频率命中 NoRoute；不拦下来会把 api_probe 的 1000 条
+// 上限刷满，真正需要补的客户端端点反而在列表里看不见。
+var scannerPathHints = []string{
+	"wp-admin", "wp-login", "wp-content", "wp-includes", "wordpress",
+	"phpmyadmin", "phpinfo", "xmlrpc", "cgi-bin", "vendor/phpunit", "webshell",
+}
+
+// isScannerProbe 判断 NoRoute 命中的路径是否明显来自自动化扫描器。
+//
+// 判据只取「Emby 兼容客户端绝不会发」的形状，宁可漏拦也不误伤真实端点：
+//   - 路径任一段以 '.' 开头（长度 > 1）：隐藏文件/目录，如 /.svn/entries、
+//     /old/.svn/entries、/.git-credentials、/.env；
+//   - 末段含 '.'：带扩展名的文件探测，如 /secrets.yml、/emby-115-cf.7z、
+//     /web.config、/database.yaml；
+//   - 命中常见扫描词。
+//
+// Emby API 的路径都是无扩展名的驼峰段（/Users/1/Views、/Branding/Configuration、
+// /Persons），三条判据都不会命中；而 /Videos/:id/stream.mp4 这类带扩展名的
+// 是已注册路由，根本不走 NoRoute。
+func isScannerProbe(path string) bool {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return false
+	}
+	segments := strings.Split(trimmed, "/")
+	if strings.Contains(segments[len(segments)-1], ".") {
+		return true
+	}
+	for _, seg := range segments {
+		if len(seg) > 1 && seg[0] == '.' {
+			return true
+		}
+	}
+	lower := strings.ToLower(trimmed)
+	for _, hint := range scannerPathHints {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) noRoute(c *gin.Context) {
 	// 客户端会探测式地反复请求未实现端点；404 一旦被浏览器/中间层缓存，
 	// 后续补上实现客户端也拿不到——明确禁止缓存。
 	c.Header("Cache-Control", "no-store")
-	if !strings.HasPrefix(c.Request.URL.Path, "/api/") {
-		key := c.Request.Method + " " + c.Request.URL.Path
+	path := c.Request.URL.Path
+	if !strings.HasPrefix(path, "/api/") && !isScannerProbe(path) {
+		key := c.Request.Method + " " + path
 		a.probeMu.Lock()
 		_, seen := a.probeSeen[key]
 		if !seen {
@@ -454,7 +498,7 @@ func (a *App) noRoute(c *gin.Context) {
 		// 只记首次：客户端探测期同一端点会反复命中，逐次写库会拖慢 404 响应。
 		if !seen {
 			body, _ := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
-			_ = a.db.Probe(c.Request.Method, c.Request.URL.Path, c.Request.URL.RawQuery, string(body))
+			_ = a.db.Probe(c.Request.Method, path, c.Request.URL.RawQuery, string(body))
 		}
 	}
 	c.JSON(404, gin.H{"error": "not found"})
