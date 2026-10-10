@@ -206,8 +206,11 @@ function wallCard(item, ud) {
   const st = item.Status || item.status || '';
   const title = item.Title || '';
   const playable = st === 'success' || st === 'manual';
-  const poster = item.PosterPath ? `/Items/${item.id}/Images/Primary`
-    : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb` : '');
+  // 海报格子最宽约 185px（.wall 的 minmax(148px,1fr)），2x 屏取 360 已经够清晰。
+  // 不带 maxWidth 会拉原图（约 56KB/张 × 每页 100 张），服务端虽支持按需缩略
+  // （带 LRU 缓存 + 并发限流 + 失败回退原图），前端不请求就等于白搭。
+  const poster = item.PosterPath ? `/Items/${item.id}/Images/Primary?maxWidth=360`
+    : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb?maxWidth=360` : '');
   const sub = [numberUnlessInTitle(title, item.Number), item.Year, item.OriginalTitle].filter(Boolean).join(' · ')
     || (item.source_protocol || item.SourceProtocol || '');
   const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
