@@ -35,7 +35,30 @@ func (a *App) adminLibraries(c *gin.Context) {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"items": v, "total": len(v)})
+	counts, e := a.db.LibraryCounts()
+	if e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
+	}
+	// 保留 Library 原本的 Id/Name/Path 键名并额外带 count，
+	// 前端既有代码（lib.Id / lib.Name）不受影响。
+	items := make([]gin.H, 0, len(v))
+	for _, lib := range v {
+		// 封面 URL 由后端拼好：库封面的图片端点按「外部库 id」取图，让前端自己拼
+		// 容易踩内/外部 id 的差别。空串表示该库当前没有可用封面。
+		cover := ""
+		if a.libraryCoverPath(lib) != "" {
+			cover = "/Items/" + externalLibraryID(lib.ID) + "/Images/Primary"
+		}
+		items = append(items, gin.H{
+			"Id":    lib.ID,
+			"Name":  lib.Name,
+			"Path":  lib.Path,
+			"count": counts[lib.ID],
+			"cover": cover,
+		})
+	}
+	c.JSON(200, gin.H{"items": items, "total": len(items)})
 }
 
 // adminDeleteLibrary 删除媒体库及其影片索引（不删磁盘文件），随后清缓存。
@@ -56,6 +79,90 @@ func (a *App) adminDeleteLibrary(c *gin.Context) {
 	_ = a.db.BumpVersion(id)
 	a.cache.Clear()
 	slog.Info("删除媒体库", "library_id", id)
+	c.Status(http.StatusNoContent)
+}
+
+// adminMoveLibrary 调整媒体库显示顺序。这个顺序同时决定管理端列表与
+// Emby 客户端 /Users/{id}/Views 的库顺序，客户端下次刷新即可见。
+func (a *App) adminMoveLibrary(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	var req struct {
+		Direction string `json:"direction"`
+	}
+	if c.ShouldBindJSON(&req) != nil || (req.Direction != "up" && req.Direction != "down") {
+		c.JSON(400, gin.H{"error": "direction must be up or down"})
+		return
+	}
+	if err = a.db.MoveLibrary(id, req.Direction == "up"); err != nil {
+		if store.NotFound(err) {
+			c.JSON(404, gin.H{"error": "library not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	// 顺序变了，库列表与 Views 的缓存都要失效。
+	a.cache.Clear()
+	c.JSON(200, gin.H{"status": "success"})
+}
+
+// adminLibraryCover 上传媒体库封面：统一转 webp 落到库根目录的固定文件名，
+// 优先级高于目录里自带的 poster/cover，也高于借用影片代表图。
+func (a *App) adminLibraryCover(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	lib, err := a.db.Library(id)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "library not found"})
+		return
+	}
+	f, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(400, gin.H{"error": "file required"})
+		return
+	}
+	dest := filepath.Join(lib.Path, libraryCoverFileName)
+	if err = saveUploadedWebP(f, dest); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if err = os.Rename(dest+".tmp", dest); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.invalidateImageTag(dest) // 同名文件被覆盖，立刻失效它的 tag 缓存
+	a.cache.Clear()            // libraryCoverPath 的结果按 g:version 缓存，必须清
+	slog.Info("上传媒体库封面", "library_id", id, "path", dest)
+	c.JSON(200, gin.H{"status": "success", "path": dest})
+}
+
+// adminLibraryCoverDelete 移除上传的封面，回退到目录自带图或影片代表图。
+func (a *App) adminLibraryCoverDelete(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	lib, err := a.db.Library(id)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "library not found"})
+		return
+	}
+	dest := filepath.Join(lib.Path, libraryCoverFileName)
+	if err = os.Remove(dest); err != nil && !os.IsNotExist(err) {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.invalidateImageTag(dest)
+	a.cache.Clear()
+	slog.Info("移除媒体库封面", "library_id", id)
 	c.Status(http.StatusNoContent)
 }
 

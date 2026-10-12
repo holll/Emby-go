@@ -131,6 +131,9 @@ func Open(path string) (*Store, error) {
 	// 刮削结果可见性（需求 5f）：不新增 status 枚举，失败/待确认都记在这两列上。
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_at TEXT")
 	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_error TEXT")
+	// 媒体库显示顺序。存量库补列后全为 0，`ORDER BY sort_order,id` 退化成按 id，
+	// 与加这个字段之前的行为一致，不需要回填。
+	_, _ = db.Exec("ALTER TABLE libraries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 	// 列表/详情/续播/实体聚合都按 status（+ library_id/collection）过滤，建索引避免全表扫描。
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
@@ -323,7 +326,7 @@ func (s *Store) Library(id int64) (Library, error) {
 }
 
 func (s *Store) Libraries() ([]Library, error) {
-	rows, err := s.db.Query("SELECT id,name,path FROM libraries WHERE enabled=1 ORDER BY id")
+	rows, err := s.db.Query("SELECT id,name,path FROM libraries WHERE enabled=1 ORDER BY sort_order,id")
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +338,73 @@ func (s *Store) Libraries() ([]Library, error) {
 			return nil, err
 		}
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// MoveLibrary 把媒体库在显示顺序里上移/下移一位（与相邻库交换位置）。
+// 这个顺序同时决定管理端列表和 Emby 客户端 /Users/{id}/Views 的库顺序。
+func (s *Store) MoveLibrary(id int64, up bool) error {
+	libs, err := s.Libraries()
+	if err != nil {
+		return err
+	}
+	index := -1
+	for i, l := range libs {
+		if l.ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return sql.ErrNoRows
+	}
+	target := index - 1
+	if !up {
+		target = index + 1
+	}
+	if target < 0 || target >= len(libs) {
+		return nil // 已在两端：视为成功，前端按钮本身会置灰
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	// 先把当前顺序整体压实成 0..n-1 再交换相邻两项：存量库的 sort_order 可能
+	// 全是 0（迁移补列）或留有空洞，压实后不必再处理这两种情况。
+	for i, l := range libs {
+		if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", i, l.ID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", target, libs[index].ID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", index, libs[target].ID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// LibraryCounts 返回每个媒体库的影片数量（管理端媒体库页展示用），
+// 一次 GROUP BY 取回全部，避免每库一次查询。
+func (s *Store) LibraryCounts() (map[int64]int, error) {
+	rows, err := s.db.Query("SELECT library_id, COUNT(*) FROM movies WHERE library_id IS NOT NULL GROUP BY library_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		out[id] = count
 	}
 	return out, rows.Err()
 }

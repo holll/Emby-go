@@ -16,7 +16,11 @@ const icon = name => {
     alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
     probe: '<path d="M4 12h2.5l2-5.5 3 11 2.5-7 1.5 1.5H20"/>',
-    play: '<path d="M8 5v14l11-7z"/>'
+    play: '<path d="M8 5v14l11-7z"/>',
+    'arrow-up': '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
+    'arrow-down': '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>'
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
 };
@@ -161,15 +165,35 @@ async function pageLibraries() {
   const total = data.total ?? items.length;
   content.innerHTML = `
     <section class="panel">
-      <div class="panel-head"><h2>媒体库</h2><span class="hint" style="margin:0">共 ${esc(total)} 个 · 扫描/浏览均以库为单位</span></div>
+      <div class="panel-head"><h2>媒体库</h2><span class="hint" style="margin:0">共 ${esc(total)} 个 · 顺序即 Emby 客户端里的库顺序</span></div>
       ${items.length ? `
         <div class="table-wrap"><table>
-          <thead><tr><th>名称</th><th>路径</th><th class="lib-id">ID</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${items.map(item => `<tr>
-            <td><strong class="title">${esc(item.Name)}</strong></td>
+          <thead><tr>
+            <th style="width:56px">顺序</th>
+            <th>媒体库</th>
+            <th>路径</th>
+            <th class="lib-id">ID</th>
+            <th style="text-align:right">操作</th>
+          </tr></thead>
+          <tbody>${items.map((item, index) => `<tr>
+            <td><div class="lib-order">
+              <button class="icon-btn" data-lib-move="up" data-lib="${esc(item.Id)}" title="上移"${index === 0 ? ' disabled' : ''}>${icon('arrow-up')}</button>
+              <button class="icon-btn" data-lib-move="down" data-lib="${esc(item.Id)}" title="下移"${index === items.length - 1 ? ' disabled' : ''}>${icon('arrow-down')}</button>
+            </div></td>
+            <td><div class="lib-cell">
+              ${item.cover
+                ? `<img class="lib-cover" loading="lazy" src="${esc(item.cover)}?maxWidth=120" alt="">`
+                : `<span class="lib-cover-fallback">${icon('film')}</span>`}
+              <div>
+                <strong class="title">${esc(item.Name)}</strong>
+                <span class="sub"><span class="lib-count">${esc(item.count ?? 0)}<small>部影片</small></span></span>
+              </div>
+            </div></td>
             <td class="mono"><span class="lib-path">${esc(item.Path)}</span></td>
             <td class="num lib-id">${esc(item.Id)}</td>
             <td><div class="row-actions">
+              <button class="btn btn-sm" data-lib-cover="${esc(item.Id)}" title="上传封面图片">${icon('image')}<span>封面</span></button>
+              ${item.cover ? `<button class="icon-btn" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}</button>` : ''}
               <button class="btn btn-sm" data-lib-scan="${esc(item.Id)}" title="仅扫描该媒体库">${icon('refresh')}<span>扫描</span></button>
               <button class="icon-btn danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}</button>
             </div></td>
@@ -183,7 +207,8 @@ async function pageLibraries() {
         <div class="field"><label for="lib-path">目录路径</label><input id="lib-path" name="Path" placeholder="服务器上的绝对路径" required></div>
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>添加</span></button></div>
       </form>
-    </section>`;
+    </section>
+    <input type="file" id="lib-cover-file" accept="image/*" hidden>`;
   document.querySelector('#library-form').addEventListener('submit', async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target));
@@ -194,6 +219,37 @@ async function pageLibraries() {
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-lib-scan]').forEach(button => button.addEventListener('click', () => runScan(button.dataset.libScan)));
+  document.querySelectorAll('[data-lib-move]').forEach(button => button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      await api('/libraries/' + button.dataset.lib + '/move', { method: 'POST', body: JSON.stringify({ direction: button.dataset.libMove }) });
+      pageLibraries();
+    } catch (e) { toast(e.message, 'error'); button.disabled = false; }
+  }));
+  // 上传封面：所有「封面」按钮共用同一个隐藏 file input，先记住目标库再打开选择器。
+  const coverInput = document.querySelector('#lib-cover-file');
+  let coverTarget = null;
+  document.querySelectorAll('[data-lib-cover]').forEach(button => button.addEventListener('click', () => {
+    coverTarget = button.dataset.libCover;
+    coverInput.value = '';
+    coverInput.click();
+  }));
+  coverInput.addEventListener('change', async () => {
+    const file = coverInput.files && coverInput.files[0];
+    if (!file || !coverTarget) return;
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      await api('/libraries/' + coverTarget + '/cover', { method: 'POST', body: form });
+      toast('封面已更新', 'ok');
+      pageLibraries();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  document.querySelectorAll('[data-lib-cover-clear]').forEach(button => button.addEventListener('click', async () => {
+    if (!confirm('移除上传的封面？将回退到目录自带图或影片代表图。')) return;
+    try { await api('/libraries/' + button.dataset.libCoverClear + '/cover', { method: 'DELETE' }); toast('封面已移除', 'ok'); pageLibraries(); }
+    catch (e) { toast(e.message, 'error'); }
+  }));
   document.querySelectorAll('[data-lib-delete]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('删除该媒体库及其影片索引？不会删除磁盘文件，但该库影片的播放进度/收藏会一并清除。')) return;
     try { await api('/libraries/' + button.dataset.libDelete, { method: 'DELETE' }); toast('媒体库已删除', 'ok'); pageLibraries(); }

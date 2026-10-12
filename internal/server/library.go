@@ -252,20 +252,38 @@ func (a *App) dropNFOCache(nfoPath string) {
 	a.invalidateImageTag(nfoPath) // a.tags 是同一张 tag 缓存，图片与 NFO 共用
 }
 
-// libraryCoverPath 返回媒体库封面路径：优先库根目录自带的 poster/folder/cover/default 图片
-// （webp/jpg/jpeg/png 均可），没有则借用库内最近入库影片的代表图（宽图优先）。
+// libraryCoverFileName 管理端上传的库封面文件名（固定名，上传时统一转 webp）。
+// 刻意不复用 poster/cover 这些常见名——那些是用户自己往库根目录放的图，
+// 上传件用独立文件名才能让「上传优先、移除后回退自动封面」有确定行为。
+const libraryCoverFileName = "library-cover.webp"
+
+// libraryCoverPath 返回媒体库封面路径，优先级：
+// 管理端上传 → 库根目录自带的 poster/folder/cover/default 图片（webp/jpg/jpeg/png 均可）
+// → 库内最近入库影片的代表图（宽图优先）。
 // 解析要多次 stat 媒体盘并可能回查库，按库版本号缓存（空结果同样缓存）。
 func (a *App) libraryCoverPath(l store.Library) string {
 	key := "libcover:" + a.db.Version("g:version") + ":" + strconv.FormatInt(l.ID, 10)
 	if b, ok := a.cache.Get(key); ok {
 		return string(b)
 	}
-	path := imageutil.FindPoster(l.Path)
+	path := uploadedLibraryCover(l.Path)
+	if path == "" {
+		path = imageutil.FindPoster(l.Path)
+	}
 	if path == "" {
 		path, _ = a.db.RepresentativeArt(l.ID)
 	}
 	a.cache.Set(key, []byte(path), 5*time.Minute)
 	return path
+}
+
+// uploadedLibraryCover 返回管理端上传的库封面路径，没有则空串。
+func uploadedLibraryCover(libraryPath string) string {
+	path := filepath.Join(libraryPath, libraryCoverFileName)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return path
+	}
+	return ""
 }
 
 // libraryCoverPathByID 按库内部 id 解析封面；库不存在返回空串。
