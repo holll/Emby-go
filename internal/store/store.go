@@ -138,6 +138,11 @@ func Open(path string) (*Store, error) {
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)")
+	// 「不兼容」类别已废弃：非 http(s) 源在扫描阶段直接跳过、不再入库。
+	// 存量库里这些行永远不可播放，一次性清掉（在索引之后执行，避免白建索引）。
+	if _, err := db.Exec("DELETE FROM movies WHERE status='incompatible'"); err != nil {
+		slog.Warn("清理历史不兼容记录失败", "error", err)
+	}
 	// 相似度倒排索引：按 (kind,value) 定位到影片，movie_id 随索引一起返回，避免回表。
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movie_features_lookup ON movie_features(kind,value,movie_id)")
 	// 载入全局版本号到内存（kv 无该行时视为 0）。
@@ -941,17 +946,17 @@ func (s *Store) Movie(id int64) (Movie, error) {
 }
 
 func (s *Store) SearchFiltered(libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
 func (s *Store) SearchScoped(libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", "", unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, status, "", "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
 }
 
 // AdminQuery 管理端列表（媒体墙）的查询条件。
@@ -969,17 +974,15 @@ type AdminQuery struct {
 	Studio     string
 	Person     string
 	Collection string // ""=不限；"*"=任一合集成员；其它=具体合集名
-	// Scrape 按刮削结果筛选：""=不限；"failed"=刮削失败；"confirm"=待人工确认。
-	Scrape string
-	SortBy string
-	Desc   bool
-	Limit  int
-	Offset int
+	SortBy     string
+	Desc       bool
+	Limit      int
+	Offset     int
 }
 
 // SearchAdmin 供管理端列表使用。
 func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
-	return s.search(q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol, q.Scrape,
+	return s.search(q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
 		false, false, q.SortBy, q.Desc, q.Limit, q.Offset)
 }
 
@@ -1024,15 +1027,21 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 	return out, rows.Err()
 }
 
-func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol, scrape string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	where := []string{}
 	args := []any{}
 	switch status {
 	case "":
-		// 默认口径：只列「能看的」，pending/incompatible 需要显式筛选。
+		// 默认口径：只列「能看的」，待刮削/未刮削需要显式筛选。
 		where = append(where, "status IN ('success','manual')")
 	case StatusAll:
-		// 明确要求不限状态（如按刮削失败筛选，那些条目多半还是 pending）。
+		// 明确要求不限状态（如按需处理筛选，那些条目多半还是 pending）。
+	case StatusUnscraped:
+		// 未刮削：从没发起过刮削的 pending 条目。
+		where = append(where, "status='pending' AND COALESCE(last_scrape_at,'')=''")
+	case StatusNeedsAttention:
+		// 需处理：试过刮削但没成功——失败与「待人工确认」都记在 last_scrape_error 上。
+		where = append(where, "status='pending' AND COALESCE(last_scrape_error,'')<>''")
 	default:
 		where = append(where, "status=?")
 		args = append(args, status)
@@ -1050,15 +1059,6 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	if protocol != "" {
 		where = append(where, "source_protocol=?")
 		args = append(args, protocol)
-	}
-	switch scrape {
-	case ScrapeFilterFailed:
-		// 失败与待确认都记在 last_scrape_error 上，用前缀区分（见 SetScrapeResult 的约定）。
-		where = append(where, "COALESCE(last_scrape_error,'') <> '' AND last_scrape_error NOT LIKE ?")
-		args = append(args, ScrapeConfirmPrefix+"%")
-	case ScrapeFilterConfirm:
-		where = append(where, "last_scrape_error LIKE ?")
-		args = append(args, ScrapeConfirmPrefix+"%")
 	}
 	if term != "" {
 		where = append(where, "(title LIKE ? OR original_title LIKE ? OR number LIKE ?)")
@@ -1446,6 +1446,36 @@ func (s *Store) CountByStatus(status string) (int, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM movies WHERE status=?", status).Scan(&count)
 	return count, err
+}
+
+// MarkManual 把一条影片标记为人工录入，并记录 NFO 路径。
+//
+// 与 UpsertMovie 的区别：只改这两列，不动其它索引字段——调用方（元数据编辑）
+// 紧接着会用 scanner.RescanOne 从 NFO 重建其余字段，重扫会因这条记录已是 manual 而保留分类。
+func (s *Store) MarkManual(sourcePath, nfoPath string) error {
+	_, err := s.db.Exec("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=?",
+		nfoPath, time.Now().UTC().Format(time.RFC3339), sourcePath)
+	return err
+}
+
+//
+// 扫描器据此在重建索引时保留人工录入分类：一次扫描只查一次，
+// 避免逐文件回查（两万部的库逐条 SELECT 会明显拖慢扫库）。
+func (s *Store) ManualSourcePaths(libraryID int64) (map[string]bool, error) {
+	rows, err := s.db.Query("SELECT source_path FROM movies WHERE library_id=? AND status='manual'", libraryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out[path] = true
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Probes(limit int) ([]map[string]any, error) {
@@ -1958,34 +1988,45 @@ func (s *Store) Settings() (map[string]string, error) {
 // 需要看到 pending（刮削失败/待确认的条目）时必须显式传它，而不是传空串。
 const StatusAll = "__all__"
 
-// 刮削结果的筛选值（AdminQuery.Scrape）。
+// 媒体墙状态筛选的两个合成口径（不是 movies.status 的真实取值，只在查询里翻译成 SQL）：
+//
+//   - StatusUnscraped    未刮削：pending 且从未发起过刮削（没试过）
+//   - StatusNeedsAttention 需处理：pending 且试过但没成功（失败 / 待人工确认）
+//
+// 两者互斥，合起来正好是全部 pending。已刮削的片子重刮失败仍属 success，
+// 不会被算进需处理。
 const (
-	ScrapeFilterFailed  = "failed"
-	ScrapeFilterConfirm = "confirm"
+	StatusUnscraped      = "unscraped"
+	StatusNeedsAttention = "needs_attention"
 )
 
 // ScrapeConfirmPrefix 批量刮削「非番号精确命中」的待人工确认标记前缀。
 // 与真实失败共用 last_scrape_error 一列（需求 5f：不新增 status 枚举），
-// 靠这个前缀把「需要人工介入」与「任务出错」区分开。
+// 管理端据此前缀在「需处理」里把两种子情形用 badge 区分开。
 const ScrapeConfirmPrefix = "[待人工确认] "
 
 // MoviesForScrape 返回刮削候选影片。
 //
 //   - libraryID=0 表示全部媒体库；
-//   - onlyMissing=true 只挑元数据缺失的（无 NFO 或无标题），这是默认范围；
-//   - 永远排除 incompatible——它们的源不是 http(s)，
-//     写 NFO 也改变不了可播放性（判定只看 .strm 内容）。
+//   - onlyMissing=true 只挑元数据缺失的（无 NFO 或无标题），这是默认范围。
+//
+// 非 http(s) 源在扫描阶段就不会入库（见 scanner.scanCandidate），这里无需再排除。
 //
 // 顺带取出 additional_parts 与 nfo_path：刮削只写主 NFO，分段不单独处理。
 func (s *Store) MoviesForScrape(libraryID int64, onlyMissing bool, limit int) ([]Movie, error) {
-	query := "SELECT " + movieCols + " FROM movies WHERE status <> 'incompatible'"
+	query := "SELECT " + movieCols + " FROM movies"
 	args := []any{}
 	if libraryID > 0 {
-		query += " AND library_id=?"
+		query += " WHERE library_id=?"
 		args = append(args, libraryID)
 	}
 	if onlyMissing {
-		query += " AND (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+		if libraryID > 0 {
+			query += " AND"
+		} else {
+			query += " WHERE"
+		}
+		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
 	}
 	query += " ORDER BY id"
 	if limit > 0 {
@@ -2010,14 +2051,19 @@ func (s *Store) MoviesForScrape(libraryID int64, onlyMissing bool, limit int) ([
 
 // CountMoviesForScrape 统计候选数量，供管理端展示「本次会处理多少条」。
 func (s *Store) CountMoviesForScrape(libraryID int64, onlyMissing bool) (int, error) {
-	query := "SELECT COUNT(*) FROM movies WHERE status <> 'incompatible'"
+	query := "SELECT COUNT(*) FROM movies"
 	args := []any{}
 	if libraryID > 0 {
-		query += " AND library_id=?"
+		query += " WHERE library_id=?"
 		args = append(args, libraryID)
 	}
 	if onlyMissing {
-		query += " AND (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+		if libraryID > 0 {
+			query += " AND"
+		} else {
+			query += " WHERE"
+		}
+		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
 	}
 	var count int
 	err := s.db.QueryRow(query, args...).Scan(&count)

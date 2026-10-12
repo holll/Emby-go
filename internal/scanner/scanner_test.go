@@ -79,7 +79,90 @@ func TestScanPurgesStalePartRows(t *testing.T) {
 	}
 }
 
-// 影片新增/删除/移动后重扫应与磁盘一致。
+// TestScanSkipsNonHTTP 非 http(s) 源的 .strm 在扫描时直接跳过：不入库、只计入 Skipped。
+func TestScanSkipsNonHTTP(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.strm", "http://media.test/a.mp4\n")
+	write("a.nfo", "<movie><title>A</title></movie>\n")
+	write("b.strm", "ed2k://|file|b.mp4|1|abc|/\n")
+	write("b.nfo", "<movie><title>B</title></movie>\n")
+
+	s := newStore(t, root)
+	lib, err := s.AddLibrary("t", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Scan(s, lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped != 1 || result.Success != 1 {
+		t.Fatalf("扫描结果 = %+v，期望 success=1 skipped=1", result)
+	}
+	if _, err := s.MovieIDByPath(filepath.Join(root, "b.strm")); err == nil {
+		t.Fatal("ed2k 源不应入库")
+	}
+	// 不兼容类别已废弃：任何状态都不该再有这类行。
+	for _, status := range []string{"incompatible", "pending", "success", "manual"} {
+		if count, _ := s.CountByStatus(status); count != 0 && status == "incompatible" {
+			t.Fatalf("库里不应有不兼容记录: %d", count)
+		}
+	}
+	movies := visible(t, s)
+	if len(movies) != 1 || movies[0].Title != "A" {
+		t.Fatalf("只有 A 应入库: %+v", movies)
+	}
+}
+
+// TestScanKeepsManual 扫库与单文件重扫都不覆盖已有的人工录入分类。
+func TestScanKeepsManual(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.strm", "http://media.test/a.mp4\n")
+	write("a.nfo", "<movie><title>A 手改</title></movie>\n")
+
+	s := newStore(t, root)
+	lib, err := s.AddLibrary("t", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Scan(s, lib); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟「在媒体墙编辑元数据」：标记为 manual。
+	if err := s.MarkManual(filepath.Join(root, "a.strm"), filepath.Join(root, "a.nfo")); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := s.CountByStatus("manual"); count != 1 {
+		t.Fatalf("标记后 manual 计数 = %d，期望 1", count)
+	}
+
+	// 整库扫描不得把它降级成 success。
+	if _, err := Scan(s, lib); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := s.CountByStatus("manual"); count != 1 {
+		t.Fatalf("整库扫描后 manual 计数 = %d，期望 1（扫库不动人工录入）", count)
+	}
+	// 单文件重扫（详情抽屉「重读源」/ 刮削后刷新）同样保留。
+	if _, err := RescanOne(s, lib, filepath.Join(root, "a.strm")); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := s.CountByStatus("manual"); count != 1 {
+		t.Fatalf("单文件重扫后 manual 计数 = %d，期望 1", count)
+	}
+}
+
+// TestScanReconcilesAddDeleteMove 影片新增/删除/移动后重扫应与磁盘一致。
 func TestScanReconcilesAddDeleteMove(t *testing.T) {
 	root := t.TempDir()
 	src := filepath.Join(root, "A")

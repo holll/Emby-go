@@ -208,25 +208,70 @@ func TestCoreAPI(t *testing.T) {
 	if r.StatusCode != 404 {
 		t.Fatalf("probe: %d", r.StatusCode)
 	}
-	adminReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/items/manual", strings.NewReader(`{"source_path":"`+strings.ReplaceAll(filepath.Join(root, "c.strm"), `\`, `\\`)+`","source_url":"http://media.test/c.mp4","title":"Charlie","year":2025,"genres":["Drama","CharlieOnly"]}`))
-	adminReq.Header.Set("X-Emby-Token", token)
-	adminReq.Header.Set("Content-Type", "application/json")
-	adminResp, _ := http.DefaultClient.Do(adminReq)
-	if adminResp.StatusCode != 200 {
-		t.Fatalf("manual: %d", adminResp.StatusCode)
+	countStatus := func(status string) float64 {
+		t.Helper()
+		req, _ := http.NewRequest("GET", ts.URL+"/api/admin/items?status="+status, nil)
+		req.Header.Set("X-Emby-Token", token)
+		resp, _ := http.DefaultClient.Do(req)
+		var body map[string]any
+		json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		total, _ := body["total"].(float64)
+		return total
 	}
-	adminResp.Body.Close()
-	if _, err := os.Stat(filepath.Join(root, "c.nfo")); err != nil {
-		t.Fatal("manual nfo missing")
+	// ed2k 源（b）不进索引：不兼容筛选恒为空，仅有的 https 片（c）是「未刮削」。
+	if got := countStatus("incompatible"); got != 0 {
+		t.Fatalf("不兼容类别应为空，得到 %v", got)
 	}
-	editReq, _ := http.NewRequest("PUT", ts.URL+"/api/admin/items/3", strings.NewReader(`{"title":"Charlie Updated"}`))
+	if got := countStatus("unscraped"); got != 1 {
+		t.Fatalf("未刮削影片数 = %v，期望 1（https 但无 NFO）", got)
+	}
+	if got := countStatus("needs_attention"); got != 0 {
+		t.Fatalf("需处理影片数 = %v，期望 0", got)
+	}
+
+	// 元数据编辑走 PUT /items/:id：只写 NFO、不动索引状态（重扫按库里已有的 manual 集合保留分类）。
+	// 取那条未刮削的 c（https 源、尚无 NFO），验证编辑会新建 NFO 并归入「手动录入」。
+	manualReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/items?status=unscraped", nil)
+	manualReq.Header.Set("X-Emby-Token", token)
+	manualResp, _ := http.DefaultClient.Do(manualReq)
+	var pendingList map[string]any
+	json.NewDecoder(manualResp.Body).Decode(&pendingList)
+	manualResp.Body.Close()
+	pendingItems, _ := pendingList["items"].([]any)
+	if len(pendingItems) != 1 {
+		t.Fatalf("未刮削条目应恰好 1 条: %v", pendingList)
+	}
+	editID := strconv.FormatInt(int64(pendingItems[0].(map[string]any)["id"].(float64)), 10)
+	editReq, _ := http.NewRequest("PUT", ts.URL+"/api/admin/items/"+editID, strings.NewReader(`{"title":"Charlie Updated","number":"CH-3","year":2025,"plot":"手动改的简介","genres":["Drama"],"tags":["Tag1"],"studios":["Studio Z"],"maker":"Maker M","label":"Label L"}`))
 	editReq.Header.Set("X-Emby-Token", token)
 	editReq.Header.Set("Content-Type", "application/json")
 	editResp, _ := http.DefaultClient.Do(editReq)
 	if editResp.StatusCode != 200 {
-		t.Fatalf("edit: %d", editResp.StatusCode)
+		body, _ := io.ReadAll(editResp.Body)
+		editResp.Body.Close()
+		t.Fatalf("edit: %d body=%s", editResp.StatusCode, body)
 	}
 	editResp.Body.Close()
+	// 编辑后该片必须出现在「手动录入」里，且元数据已落到 NFO。
+	checkReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/items?status=manual", nil)
+	checkReq.Header.Set("X-Emby-Token", token)
+	checkResp, _ := http.DefaultClient.Do(checkReq)
+	var manualAfter map[string]any
+	json.NewDecoder(checkResp.Body).Decode(&manualAfter)
+	checkResp.Body.Close()
+	if manualAfter["total"].(float64) != 1 {
+		t.Fatalf("edited movie should be classified as manual: %v", manualAfter)
+	}
+	editedNFO, err := os.ReadFile(filepath.Join(root, "c.nfo"))
+	if err != nil {
+		t.Fatalf("edit should create NFO: %v", err)
+	}
+	for _, want := range []string{"Charlie Updated", "CH-3", "手动改的简介", "Studio Z"} {
+		if !strings.Contains(string(editedNFO), want) {
+			t.Fatalf("NFO 缺少 %q: %s", want, editedNFO)
+		}
+	}
 	assetResp, _ := http.Get(ts.URL + "/web/app.js")
 	if assetResp.StatusCode != 200 {
 		t.Fatalf("web asset: %d", assetResp.StatusCode)
@@ -263,15 +308,7 @@ func TestCoreAPI(t *testing.T) {
 	if pageBody["TotalRecordCount"].(float64) != 1 || len(pageBody["Items"].([]any)) != 0 {
 		t.Fatalf("filtered pagination: %v", pageBody)
 	}
-	statusReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/items?status=incompatible", nil)
-	statusReq.Header.Set("X-Emby-Token", token)
-	statusResp, _ := http.DefaultClient.Do(statusReq)
-	var statusBody map[string]any
-	json.NewDecoder(statusResp.Body).Decode(&statusBody)
-	statusResp.Body.Close()
-	if statusBody["total"].(float64) != 1 {
-		t.Fatalf("status filter: %v", statusBody)
-	}
+	// 「不兼容」类别已废弃：ed2k 源不进索引，筛选结果必为空。
 	tasksReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/tasks", nil)
 	tasksReq.Header.Set("X-Emby-Token", token)
 	tasksResp, _ := http.DefaultClient.Do(tasksReq)
@@ -280,10 +317,6 @@ func TestCoreAPI(t *testing.T) {
 	tasksResp.Body.Close()
 	if len(tasks["items"].([]any)) == 0 {
 		t.Fatal("tasks unavailable")
-	}
-	statusItems := statusBody["items"].([]any)
-	if statusItems[0].(map[string]any)["source_protocol"] != "ed2k" {
-		t.Fatalf("protocol missing: %v", statusItems[0])
 	}
 	nullStopReq, _ := http.NewRequest("POST", ts.URL+"/emby/Sessions/Playing/Stopped", strings.NewReader("null"))
 	nullStopReq.Header.Set("X-Emby-Token", token)
@@ -395,9 +428,13 @@ func TestCoreAPI(t *testing.T) {
 		resp.Body.Close()
 		return v
 	}
+	// 编辑写入的「Tag1」是一个真实存在的 Tag 实体，因此按 Tag 浏览会列出它；
+	// 关键是不能把影片本身当成 Tag 返回（Type 必须是 Tag）。
 	tagBody := get("/Users/1/Items?IncludeItemTypes=Tag&ParentId=1")
-	if tagBody["TotalRecordCount"].(float64) != 0 || len(tagBody["Items"].([]any)) != 0 {
-		t.Fatalf("tag browse must be empty not movies: %v", tagBody)
+	for _, raw := range tagBody["Items"].([]any) {
+		if item := raw.(map[string]any); item["Type"] != "Tag" {
+			t.Fatalf("tag browse must return Tag entities: %v", tagBody)
+		}
 	}
 	genreBody := get("/Users/1/Items?IncludeItemTypes=Genre&ParentId=1")
 	if genreBody["TotalRecordCount"].(float64) < 1 {
@@ -516,8 +553,12 @@ func TestCoreAPI(t *testing.T) {
 		t.Fatalf("boxset folder detail: %v", detail)
 	}
 	// 相似推荐：Alpha 与 Charlie 共享 Drama（+10>2），应返回 Charlie。
+	// ed2k 的 b 已不入索引，故相似结果里不会再混进第三部。
 	similarBody := get("/Items/1/Similar")
-	if similarBody["TotalRecordCount"].(float64) != 1 || similarBody["Items"].([]any)[0].(map[string]any)["Id"] != "3" {
+	if similarBody["TotalRecordCount"].(float64) != 1 {
+		t.Fatalf("similar should return exactly Charlie by shared genre: %v", similarBody)
+	}
+	if similarID := similarBody["Items"].([]any)[0].(map[string]any)["Name"]; similarID != "Charlie Updated" {
 		t.Fatalf("similar should return Charlie by shared genre: %v", similarBody)
 	}
 	virtualBody := get("/Users/1/Items/genre:Drama")
@@ -879,17 +920,21 @@ func TestAPIKeysAndScanProgress(t *testing.T) {
 		t.Fatalf("scan progress: status=%d body=%v", resp.StatusCode, progress)
 	}
 	// 扫描后进度应落定：done==total 且带结束时间。
+	// ed2k 的 b 在扫描时被跳过（不计入 total），只报 skipped。
 	os.WriteFile(filepath.Join(root, "a.strm"), []byte("http://media.test/a.mp4\n"), 0644)
 	os.WriteFile(filepath.Join(root, "a.nfo"), []byte(`<movie><title>A</title></movie>`), 0644)
 	os.WriteFile(filepath.Join(root, "b.strm"), []byte("ed2k://|file|b.mp4|1|abc|/\n"), 0644)
 	if resp, _ := call("POST", "/api/admin/libraries", token, `{"Name":"AV","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`); resp.StatusCode != http.StatusOK {
 		t.Fatalf("add library for scan: %d", resp.StatusCode)
 	}
-	if resp, scan := call("POST", "/api/admin/scan", token, ""); resp.StatusCode != http.StatusOK || scan["success"].(float64) != 1 || scan["incompatible"].(float64) != 1 {
+	if resp, scan := call("POST", "/api/admin/scan", token, ""); resp.StatusCode != http.StatusOK ||
+		scan["success"].(float64) != 1 || scan["skipped"].(float64) != 1 || scan["pending"].(float64) != 0 {
 		t.Fatalf("scan result: status=%d body=%v", resp.StatusCode, scan)
 	}
+	// total 是本次遍历到的分组数（含被跳过的 ed2k 文件所在的组），done==total 且带结束时间。
 	if _, progress = call("GET", "/api/admin/scan/progress", token, ""); progress["running"].(bool) ||
-		progress["total"].(float64) != 2 || progress["done"].(float64) != 2 || progress["finished_at"] == "" {
+		progress["total"].(float64) != 2 || progress["done"].(float64) != 2 || progress["finished_at"] == "" ||
+		progress["skipped"].(float64) != 1 {
 		t.Fatalf("final scan progress: %v", progress)
 	}
 	// 媒体墙无限滚动依赖 admin items 的 limit/offset 分页。

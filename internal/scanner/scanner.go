@@ -18,10 +18,12 @@ import (
 )
 
 type Result struct {
-	Success      int `json:"success"`
-	Pending      int `json:"pending"`
-	Incompatible int `json:"incompatible"`
-	Failed       int `json:"failed"`
+	Success int `json:"success"`
+	Pending int `json:"pending"`
+	// Skipped 本次扫描跳过的文件数（非 http(s) 源的 .strm）。
+	// 这类文件不再进入 movies 表，只在扫描结果里报个数。
+	Skipped int `json:"skipped"`
+	Failed  int `json:"failed"`
 }
 
 type candidate struct {
@@ -30,6 +32,14 @@ type candidate struct {
 	base     string
 	part     int
 	groupKey string
+}
+
+// scanOptions 一次扫描的上下文。
+//
+// manualPaths 是「该库中已标记为人工录入的 source_path」集合：扫库/重扫只负责按磁盘
+// 现状重建索引，不该把人工录入降级成自动刮削结果，所以命中的条目保留 manual。
+type scanOptions struct {
+	manualPaths map[string]bool
 }
 
 // Progress 单次媒体库扫描的进度快照，供管理端轮询展示。
@@ -51,9 +61,17 @@ func Scan(s *store.Store, lib store.Library) (Result, error) {
 
 // ScanWithProgress 与 Scan 相同，但在每个分组处理完后回调进度（可为 nil）。
 func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progress)) (Result, error) {
+	// 扫库只负责「按磁盘现状重建索引」，不动人工录入的分类：
+	// 先一次性取出该库全部 manual 的 source_path，扫描时对上号的条目保留 manual
+	//（否则 applyMeta 会把它们无条件覆盖成 success，这个分类就留不住）。
+	manualPaths, err := s.ManualSourcePaths(lib.ID)
+	if err != nil {
+		return Result{}, err
+	}
+	opts := scanOptions{manualPaths: manualPaths}
 	var result Result
 	groups := make(map[string][]candidate)
-	err := filepath.Walk(lib.Path, func(path string, info os.FileInfo, walkErr error) error {
+	err = filepath.Walk(lib.Path, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			// 单个目录不可读时跳过该目录，不因此中止整库重建（否则失效索引永远清不掉）。
 			if info != nil && info.IsDir() {
@@ -100,7 +118,7 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 		primary, parts, ok := stackedGroup(group)
 		if !ok {
 			for _, item := range group {
-				if err := scanCandidate(s, lib, item, nil, "", &result, paths); err != nil {
+				if err := scanCandidate(s, lib, item, nil, "", opts, &result, paths); err != nil {
 					return result, err
 				}
 			}
@@ -110,7 +128,7 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 				partPaths = append(partPaths, part.path)
 			}
 			fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
-			if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, &result, paths); err != nil {
+			if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, opts, &result, paths); err != nil {
 				return result, err
 			}
 		}
@@ -140,6 +158,12 @@ func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, erro
 	if info.IsDir() || !strings.EqualFold(filepath.Ext(strmPath), ".strm") {
 		return result, errors.New("不是 .strm 文件: " + strmPath)
 	}
+	// 与整库扫描同口径：重扫不覆盖已有的 manual（详情抽屉的「重读源」也走这里）。
+	manualPaths, err := s.ManualSourcePaths(lib.ID)
+	if err != nil {
+		return result, err
+	}
+	opts := scanOptions{manualPaths: manualPaths}
 
 	base := strings.TrimSuffix(filepath.Base(strmPath), filepath.Ext(strmPath))
 	candidate := candidate{path: strmPath, info: info, base: base, groupKey: strmPath}
@@ -157,12 +181,12 @@ func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, erro
 			partPaths = append(partPaths, part.path)
 		}
 		fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
-		if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, &result, paths); err != nil {
+		if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, opts, &result, paths); err != nil {
 			return result, err
 		}
 	} else {
 		for _, item := range group {
-			if err := scanCandidate(s, lib, item, nil, "", &result, paths); err != nil {
+			if err := scanCandidate(s, lib, item, nil, "", opts, &result, paths); err != nil {
 				return result, err
 			}
 		}
@@ -227,7 +251,7 @@ func stackedGroup(group []candidate) (candidate, []candidate, bool) {
 	return primary, parts, true
 }
 
-func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, fallbackNFO string, result *Result, paths map[string]struct{}) error {
+func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, fallbackNFO string, opts scanOptions, result *Result, paths map[string]struct{}) error {
 	paths[item.path] = struct{}{}
 	movie := store.Movie{LibraryID: lib.ID, SourcePath: item.path, OutputDir: filepath.Dir(item.path), Status: "pending", AdditionalParts: additionalParts}
 	line, err := ReadSource(item.path)
@@ -236,31 +260,37 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		return nil
 	}
 	setSource(&movie, line)
+	// 非 http(s) 源（ed2k 等）直接跳过：它们永远无法通过 Emby 播放，
+	// 写进 movies 表只会污染列表与统计。只在扫描结果里报个数。
+	if !ValidHTTP(line) {
+		result.Skipped++
+		return nil
+	}
 	var actors []store.ActorRef
-	if ValidHTTP(line) {
-		nfoPath := strings.TrimSuffix(item.path, filepath.Ext(item.path)) + ".nfo"
-		meta, nfoErr := nfo.Read(nfoPath)
-		if nfoErr != nil && fallbackNFO != "" {
-			nfoPath = fallbackNFO
-			meta, nfoErr = nfo.Read(fallbackNFO)
+	nfoPath := strings.TrimSuffix(item.path, filepath.Ext(item.path)) + ".nfo"
+	meta, nfoErr := nfo.Read(nfoPath)
+	if nfoErr != nil && fallbackNFO != "" {
+		nfoPath = fallbackNFO
+		meta, nfoErr = nfo.Read(fallbackNFO)
+	}
+	if nfoErr == nil {
+		applyMeta(&movie, meta, nfoPath)
+		// NFO 的 <actor><thumb> 是头像真源：一并带进索引，删库重建后仍可恢复。
+		for _, actor := range meta.Actors {
+			actors = append(actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
 		}
-		if nfoErr == nil {
-			applyMeta(&movie, meta, nfoPath)
-			// NFO 的 <actor><thumb> 是头像真源：一并带进索引，删库重建后仍可恢复。
-			for _, actor := range meta.Actors {
-				actors = append(actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
-			}
-			// 图片与元数据同一趟写入，避免成功影片入库两次。
-			movie.PosterPath = imageutil.FindPoster(movie.OutputDir)
-			movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
-			movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
-			result.Success++
-		} else {
-			result.Pending++
+		// 图片与元数据同一趟写入，避免成功影片入库两次。
+		movie.PosterPath = imageutil.FindPoster(movie.OutputDir)
+		movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
+		movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
+		// 人工录入的分类要留住：扫库/重扫不覆盖已有的 manual，
+		// 只有自动刮削成功（Apply 写入后由调用方显式改状态）才会变成已刮削。
+		if opts.manualPaths[item.path] {
+			movie.Status = "manual"
 		}
+		result.Success++
 	} else {
-		movie.Status = "incompatible"
-		result.Incompatible++
+		result.Pending++
 	}
 	id, err := s.UpsertMovie(movie, item.info.Size(), item.info.ModTime())
 	if err != nil {

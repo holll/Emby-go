@@ -285,6 +285,9 @@ a { color: var(--info); }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
   gap: 16px;
+  /* 统计卡组后面紧跟 .panel，而 .panel 的上边距只由 `.panel + .panel` 提供，
+     不在这里显式留白两块就会贴在一起。取值与 .panel + .panel 一致。 */
+  margin-bottom: 20px;
 }
 .card {
   position: relative;
@@ -339,7 +342,7 @@ a { color: var(--info); }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
 .badge.success   { color: var(--ok);      background: var(--ok-soft);      border-color: rgba(48, 209, 88, 0.28); }
 .badge.pending   { color: var(--warn);    background: var(--accent-soft);   border-color: rgba(255, 159, 10, 0.30); }
-.badge.incompatible, .badge.failed { color: var(--danger); background: var(--danger-soft); border-color: rgba(255, 69, 58, 0.30); }
+.badge.needs_attention, .badge.failed { color: var(--danger); background: var(--danger-soft); border-color: rgba(255, 69, 58, 0.30); }
 .badge.manual    { color: var(--info);    background: var(--info-soft);    border-color: rgba(100, 210, 255, 0.30); }
 .badge.skipped   { color: var(--dim);     background: rgba(255, 255, 255, 0.04); border-color: var(--line-strong); }
 .badge.running   { color: var(--accent);  background: var(--accent-soft);   border-color: rgba(10, 132, 255, 0.30); }
@@ -355,7 +358,6 @@ a { color: var(--info); }
   background: rgba(255, 255, 255, 0.02);
 }
 .protocol.http, .protocol.https { color: var(--ok); border-color: rgba(48, 209, 88, 0.35); }
-.protocol.ed2k { color: var(--danger); border-color: rgba(255, 69, 58, 0.30); }
 
 /* 表格 */
 .table-wrap { overflow-x: auto; margin: 0 -24px; }
@@ -444,8 +446,8 @@ td .sub { display: block; color: var(--dim); font-size: 12px; }
 }
 .pill:hover { color: var(--text); border-color: var(--accent); }
 .pill.is-active { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; box-shadow: 0 6px 16px var(--blue-glow); }
-.pill.is-active[data-status="incompatible"] { background: var(--danger); border-color: var(--danger); color: #2a0608; box-shadow: none; }
-.pill.is-active[data-status="pending"] { background: var(--warn); border-color: var(--warn); color: #1f1603; box-shadow: none; }
+.pill.is-active[data-status="needs_attention"] { background: var(--danger); border-color: var(--danger); color: #2a0608; box-shadow: none; }
+.pill.is-active[data-status="unscraped"] { background: var(--warn); border-color: var(--warn); color: #1f1603; box-shadow: none; }
 
 /* 表单 */
 .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px 16px; }
@@ -632,7 +634,7 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
   }
   .brand { padding-bottom: 10px; margin-bottom: 10px; }
   .brand-mark { width: 32px; height: 32px; font-size: 16px; }
-  /* 导航改横向滚动单行，避免 10 个入口堆成 4 行占满首屏 */
+  /* 导航改横向滚动单行，避免 7 个入口在窄屏堆成多行占满首屏 */
   .nav { display: flex; overflow-x: auto; gap: 6px; padding-bottom: 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .nav::-webkit-scrollbar { display: none; }
   .nav-item { flex: 0 0 auto; width: auto; white-space: nowrap; }
@@ -677,7 +679,7 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
 .wall-path { position: absolute; inset: 0; padding: 10px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); word-break: break-all; overflow: hidden; }
 .wall-badges { position: absolute; top: 6px; left: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
 .wall-badge { font-size: 10.5px; padding: 2px 6px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); border: 1px solid var(--line-strong); color: var(--muted); backdrop-filter: blur(6px); }
-.wall-badge.pending, .wall-badge.incompatible, .wall-badge.failed { color: #ffb4b4; }
+.wall-badge.pending, .wall-badge.failed { color: #ffb4b4; }
 .wall-badge.played { color: #8fe0ad; }
 .wall-badge.fav { color: #ff9db0; }
 .wall-badge.multi { color: var(--accent); }

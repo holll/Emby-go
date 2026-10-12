@@ -78,7 +78,7 @@ func (a *App) runScheduledScan(task scheduler.Task) error {
 	}
 	slog.Info("计划任务扫描完成", "task", task.Name, "library_id", libraryID,
 		"success", result.Success, "pending", result.Pending,
-		"incompatible", result.Incompatible, "failed", result.Failed)
+		"skipped", result.Skipped, "failed", result.Failed)
 	return nil
 }
 

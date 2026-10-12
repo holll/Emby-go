@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -260,7 +259,7 @@ func (a *App) updateScanProgress(p scanner.Progress) {
 	a.scanStatus.LibraryName = p.LibraryName
 	a.scanStatus.Total, a.scanStatus.Done, a.scanStatus.Current = p.Total, p.Done, p.Current
 	a.scanStatus.Success, a.scanStatus.Pending = p.Result.Success, p.Result.Pending
-	a.scanStatus.Incompatible, a.scanStatus.Failed = p.Result.Incompatible, p.Result.Failed
+	a.scanStatus.Skipped, a.scanStatus.Failed = p.Result.Skipped, p.Result.Failed
 }
 
 func (a *App) endScan(err error) {
@@ -321,10 +320,10 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 		}
 		slog.Info("媒体库扫描完成", "library", library.Name,
 			"success", current.Success, "pending", current.Pending,
-			"incompatible", current.Incompatible, "failed", current.Failed)
+			"skipped", current.Skipped, "failed", current.Failed)
 		result.Success += current.Success
 		result.Pending += current.Pending
-		result.Incompatible += current.Incompatible
+		result.Skipped += current.Skipped
 		result.Failed += current.Failed
 	}
 	// endScan 由上面的 defer 负责调用（panic 时也必须释放）。
@@ -386,7 +385,7 @@ func (a *App) adminReindex(c *gin.Context) {
 		return
 	}
 	slog.Info("重建索引完成", "success", result.Success, "pending", result.Pending,
-		"incompatible", result.Incompatible, "failed", result.Failed)
+		"skipped", result.Skipped, "failed", result.Failed)
 	c.JSON(200, result)
 }
 
@@ -401,24 +400,19 @@ func (a *App) adminItems(c *gin.Context) {
 	}
 	// library_id 为 0/缺省表示「全部媒体库」——媒体墙的库筛选 Tab 走这里。
 	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
-	// 按刮削结果筛选时默认不限状态：刮削失败/待确认的条目多数仍是 pending，
-	// 若沿用「只显示可播放」的默认口径，用户会看到筛选结果是空的。
-	status := c.Query("status")
-	if c.Query("scrape") != "" && status == "" {
-		status = store.StatusAll
-	}
+	// 状态筛选直接透传：status=needs_attention 由 store 翻译成「pending 且刮削出错」，
+	// 与 scrape=failed 时代不同，这里不再需要先把 status 提升为「不限状态」。
 	// genre/tag/studio/person/collection 来自详情抽屉的实体跳转（点演员/类型/厂商/合集）。
 	ms, total, err := a.db.SearchAdmin(store.AdminQuery{
 		LibraryID:  libraryID,
 		Term:       c.Query("search"),
-		Status:     status,
+		Status:     c.Query("status"),
 		Protocol:   strings.ToLower(c.Query("source_protocol")),
 		Genre:      c.Query("genre"),
 		Tag:        c.Query("tag"),
 		Studio:     c.Query("studio"),
 		Person:     c.Query("person"),
 		Collection: c.Query("collection"),
-		Scrape:     c.Query("scrape"),
 		SortBy:     c.DefaultQuery("sort", "title"),
 		Desc:       strings.EqualFold(c.Query("order"), "desc"),
 		Limit:      limit,
@@ -464,76 +458,28 @@ func (a *App) adminDelete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func (a *App) adminManual(c *gin.Context) {
-	var req struct {
-		LibraryID     int64    `json:"library_id"`
-		SourcePath    string   `json:"source_path"`
-		SourceURL     string   `json:"source_url"`
-		Title         string   `json:"title"`
-		Year          int      `json:"year"`
-		Plot          string   `json:"plot"`
-		Number        string   `json:"number"`
-		OriginalTitle string   `json:"original_title"`
-		Director      string   `json:"director"`
-		Series        string   `json:"series"`
-		Maker         string   `json:"maker"`
-		Label         string   `json:"label"`
-		PosterPath    string   `json:"poster_path"`
-		BackdropPath  string   `json:"backdrop_path"`
-		Genres        []string `json:"genres"`
-		Tags          []string `json:"tags"`
-		Studios       []string `json:"studios"`
-	}
-	if c.ShouldBindJSON(&req) != nil || req.SourcePath == "" || req.Title == "" || !scanner.ValidHTTP(req.SourceURL) {
-		c.JSON(400, gin.H{"error": "source_path、title 和 http(s) source_url required"})
-		return
-	}
-	if req.LibraryID == 0 {
-		libs, _ := a.db.Libraries()
-		if len(libs) > 0 {
-			req.LibraryID = libs[0].ID
-		}
-	}
-	if req.LibraryID == 0 {
-		c.JSON(400, gin.H{"error": "library required"})
-		return
-	}
-	if err := os.WriteFile(req.SourcePath, []byte(req.SourceURL+"\n"), 0644); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-	nfoPath := strings.TrimSuffix(req.SourcePath, filepath.Ext(req.SourcePath)) + ".nfo"
-	meta := nfo.FromFields(req.Title, req.Year)
-	meta.Number = req.Number
-	meta.OriginalTitle = req.OriginalTitle
-	meta.Plot = req.Plot
-	meta.Director = req.Director
-	meta.Series = req.Series
-	meta.Maker = req.Maker
-	meta.Label = req.Label
-	meta.Genres = req.Genres
-	meta.Tags = req.Tags
-	meta.Studios = req.Studios
-	if err := nfo.SaveAtomic(nfoPath, meta); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	size, mtime := scanner.SourceStat(req.SourcePath)
-	u, _ := url.Parse(req.SourceURL)
-	m := store.Movie{LibraryID: req.LibraryID, SourcePath: req.SourcePath, SourceProtocol: strings.ToLower(u.Scheme), SourceContainer: strings.TrimPrefix(strings.ToLower(filepath.Ext(u.Path)), "."), Status: "manual", NFOPath: nfoPath, OutputDir: filepath.Dir(req.SourcePath), Number: req.Number, Title: req.Title, OriginalTitle: req.OriginalTitle, Year: req.Year, Plot: req.Plot, Director: req.Director, Series: req.Series, Maker: req.Maker, Label: req.Label, Genres: req.Genres, Tags: req.Tags, Studios: req.Studios, PosterPath: req.PosterPath, BackdropPath: req.BackdropPath}
-	id, err := a.db.UpsertMovie(m, size, mtime)
-	if err == nil {
-		err = a.db.BumpVersion(req.LibraryID)
-	}
-	a.cache.Clear()
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	slog.Info("手动补录入库", "movie_id", id, "title", req.Title, "path", req.SourcePath)
-	c.JSON(200, gin.H{"id": id, "status": "success"})
+// editRequest 元数据编辑请求体。指针字段为空表示「本次不修改该字段」。
+//
+// 只保留可编辑的元数据项：源地址（.strm 路径与媒体直链）不在这里——
+// 换源继续走「重读源」链路，避免两条改源路径互相打架。
+type editRequest struct {
+	Title         *string   `json:"title"`
+	Number        *string   `json:"number"`
+	OriginalTitle *string   `json:"original_title"`
+	Plot          *string   `json:"plot"`
+	Year          *int      `json:"year"`
+	Genres        *[]string `json:"genres"`
+	Tags          *[]string `json:"tags"`
+	Studios       *[]string `json:"studios"`
+	Maker         *string   `json:"maker"`
+	Label         *string   `json:"label"`
 }
 
+// adminEdit 编辑影片元数据。
+//
+// 只写 NFO，不写 movies 表：元数据真源是 NFO，索引由 `RescanOne` 重建——
+// 直接 UpsertMovie 会把状态写回 success，人工录入的分类就留不住了
+//（重扫时 scanner 会按库里已有的 manual 集合保留它）。
 func (a *App) adminEdit(c *gin.Context) {
 	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
 	if e != nil {
@@ -545,60 +491,86 @@ func (a *App) adminEdit(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	var req struct {
-		Title *string `json:"title"`
-		Plot  *string `json:"plot"`
-		Year  *int    `json:"year"`
-	}
+	var req editRequest
 	if c.ShouldBindJSON(&req) != nil {
 		c.JSON(400, gin.H{"error": "invalid json"})
 		return
 	}
-	if _, e = nfo.Read(m.NFOPath); e != nil {
-		c.JSON(400, gin.H{"error": "nfo not found"})
+	nfoPath := strings.TrimSpace(m.NFOPath)
+	if nfoPath == "" {
+		// 没有 NFO 的条目（未刮削）以 .strm 同名路径为落点，UpdateScraped 会新建。
+		nfoPath = strings.TrimSuffix(m.SourcePath, filepath.Ext(m.SourcePath)) + ".nfo"
+	}
+	if _, e = nfo.Read(nfoPath); e != nil && !errors.Is(e, os.ErrNotExist) {
+		c.JSON(400, gin.H{"error": "nfo 不可读: " + e.Error()})
 		return
 	}
 	// 走标签级更新而不是「读成结构体 → 整体重写」：NFO 里可能有外部工具写的
 	// 扩展标签，整体重写会静默丢掉它们（见 internal/nfo/update.go 的说明）。
-	// 空值表示「本次不修改该字段」，不删除已有内容。
+	// Overwrite=true：编辑是人工显式覆盖，空值仍表示「本次不修改该字段」。
 	fields := nfo.ScrapeFields{Overwrite: true}
 	if req.Title != nil {
 		fields.Title = strings.TrimSpace(*req.Title)
 	}
+	if req.Number != nil {
+		fields.Number = strings.TrimSpace(*req.Number)
+	}
+	if req.OriginalTitle != nil {
+		fields.OriginalTitle = strings.TrimSpace(*req.OriginalTitle)
+	}
 	if req.Plot != nil {
-		fields.Plot = *req.Plot
+		fields.Plot = strings.TrimSpace(*req.Plot)
 	}
 	if req.Year != nil {
 		fields.Year = *req.Year
 	}
-	if fields.Title == "" && fields.Plot == "" && fields.Year == 0 {
-		c.JSON(400, gin.H{"error": "没有可写入的字段"})
-		return
+	if req.Genres != nil {
+		fields.Genres = trimList(*req.Genres)
 	}
-	if e = nfo.UpdateScraped(m.NFOPath, fields); e != nil {
+	if req.Tags != nil {
+		fields.Tags = trimList(*req.Tags)
+	}
+	if req.Studios != nil {
+		fields.Studios = trimList(*req.Studios)
+	}
+	if req.Maker != nil {
+		fields.Maker = strings.TrimSpace(*req.Maker)
+	}
+	if req.Label != nil {
+		fields.Label = strings.TrimSpace(*req.Label)
+	}
+	if e = nfo.UpdateScraped(nfoPath, fields); e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	if fields.Title != "" {
-		m.Title = fields.Title
+	// 先标记为人工录入，再重扫：重扫会读 DB 里已有的 manual 集合，从而保留这个分类
+	//（顺序不能反——反过来重扫会先把状态写成 pending，分类就丢了）。
+	if e = a.db.MarkManual(m.SourcePath, nfoPath); e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
 	}
-	if fields.Plot != "" {
-		m.Plot = fields.Plot
-	}
-	if fields.Year > 0 {
-		m.Year = fields.Year
-	}
-	size, mtime := scanner.SourceStat(m.SourcePath)
-	_, e = a.db.UpsertMovie(m, size, mtime)
+	// 索引交给重扫重建：它会按 NFO 现状刷新元数据，并把该片保留在「手动录入」。
+	library, e := a.db.Library(m.LibraryID)
 	if e == nil {
-		e = a.db.BumpVersion(m.LibraryID)
+		if _, e = scanner.RescanOne(a.db, library, m.SourcePath); e != nil {
+			slog.Warn("元数据编辑后重扫失败", "movie_id", m.ID, "error", e)
+			e = nil // NFO 已落盘，下次扫库会带上；不算保存失败
+		}
 	}
 	a.cache.Clear()
-	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
-		return
-	}
+	slog.Info("元数据已编辑", "movie_id", m.ID, "title", fields.Title, "nfo", nfoPath)
 	c.JSON(200, gin.H{"status": "success"})
+}
+
+// trimList 去掉列表项首尾空白并丢弃空项；返回非 nil 空切片表示「清空该列表」。
+func trimList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (a *App) adminReread(c *gin.Context) {
@@ -731,7 +703,7 @@ func (a *App) adminTasks(c *gin.Context) {
 
 func (a *App) adminStatus(c *gin.Context) {
 	result := gin.H{}
-	for _, status := range []string{"success", "manual", "pending", "incompatible"} {
+	for _, status := range []string{"success", "manual", "pending"} {
 		count, err := a.db.CountByStatus(status)
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})

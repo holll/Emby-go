@@ -20,6 +20,7 @@ const icon = name => {
     'arrow-up': '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
     'arrow-down': '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     x: '<path d="M18 6 6 18M6 6l12 12"/>'
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
@@ -73,7 +74,24 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-const STATUS_TEXT = { success: '可播放', manual: '手动录入', pending: '待补录', incompatible: '不兼容', failed: '失败' };
+const STATUS_TEXT = {
+  success: '已刮削',
+  manual: '手动录入',
+  pending: '未刮削',
+  needs_attention: '需处理',
+  failed: '失败',
+  skipped: '跳过'
+};
+// 「需处理」内部再按 last_scrape_error 前缀区分两种子情形：
+// 带 store.ScrapeConfirmPrefix（[待人工确认] ）的是自动刮削主动跳过，
+// 其余非空错误才是真失败。判定与后端 store.ScrapeConfirmPrefix 保持一致。
+const SCRAPE_CONFIRM_PREFIX = '[待人工确认] ';
+const needsAttentionBadge = error => {
+  const text = String(error || '');
+  return text.startsWith(SCRAPE_CONFIRM_PREFIX)
+    ? '<span class="wall-badge confirm">待人工确认</span>'
+    : '<span class="wall-badge failed">刮削失败</span>';
+};
 const statusBadge = status => {
   const key = Object.prototype.hasOwnProperty.call(STATUS_TEXT, status) ? status : 'manual';
   return `<span class="badge ${esc(key)}">${esc(STATUS_TEXT[key] || status)}</span>`;
@@ -93,12 +111,9 @@ const META = {
   overview: { title: '总览', crumb: 'Archive / Overview' },
   libraries: { title: '媒体库', crumb: 'Archive / Libraries' },
   items: { title: '媒体墙', crumb: 'Archive / Wall' },
-  manual: { title: '手动补录', crumb: 'Archive / Manual Ingest' },
   settings: { title: '设置', crumb: 'Archive / Settings' },
-  apikeys: { title: 'API 密钥', crumb: 'Archive / API Keys' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
-  tasks: { title: '任务', crumb: 'Archive / Tasks' },
   probe: { title: '接口探针', crumb: 'Archive / Probe' }
 };
 
@@ -119,20 +134,17 @@ async function pageOverview() {
     api('/status')
   ]);
   const pendingCount = status.pending || 0;
-  const incompatibleCount = status.incompatible || 0;
   const rows = [
     ['success', status.success || 0],
     ['manual', status.manual || 0],
-    ['pending', pendingCount],
-    ['incompatible', incompatibleCount]
+    ['pending', pendingCount]
   ].filter(([, n]) => n > 0);
   content.innerHTML = `
     <div class="cards">
       ${[
         ['媒体库', libraries.total ?? libraries.items?.length ?? 0, 'Collection Folder'],
-        ['已入库影片', success.total || 0, 'NFO 真源 · 可见于 Emby'],
-        ['待补录', pendingCount, 'http(s) 但缺 NFO'],
-        ['不兼容源', incompatibleCount, 'ed2k / 其它 scheme']
+        ['已刮削影片', success.total || 0, 'NFO 真源 · 可见于 Emby'],
+        ['未刮削 / 需处理', pendingCount, '尚无 NFO 或刮削未成功']
       ].map(([label, value, sub]) => `<div class="card"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(sub)}</span></div>`).join('')}
     </div>
     <section class="panel">
@@ -146,12 +158,15 @@ async function pageOverview() {
           <thead><tr><th>状态</th><th style="width:80px">数量</th></tr></thead>
           <tbody>${rows.map(([status, n]) => `<tr><td>${statusBadge(status)}</td><td class="num">${n}</td></tr>`).join('')}</tbody>
         </table></div>` : empty('档案为空', '添加媒体库并开始扫描。')}
-      <p class="hint">NFO 是元数据真源；仅 http/https .strm 进入 Emby。不兼容源需更换为 http(s) 后重读源。</p>
+      <p class="hint">NFO 是元数据真源；仅 http/https .strm 进入 Emby，其它协议的源在扫描时直接跳过。</p>
     </section>`;
   document.querySelector('#reindex').addEventListener('click', async () => {
     const btn = document.querySelector('#reindex');
     btn.disabled = true;
-    try { const r = await api('/reindex', { method: 'POST' }); toast(`重建完成：${r.success} 成功 / ${r.pending} 待补录 / ${r.incompatible} 不兼容`); }
+    try {
+      const r = await api('/reindex', { method: 'POST' });
+      toast(`重建完成：${r.success} 已刮削 / ${r.pending} 未刮削${r.skipped ? ` / 跳过 ${r.skipped} 个不兼容` : ''}`);
+    }
     catch (e) { toast(e.message, 'error'); }
     btn.disabled = false;
     pageOverview();
@@ -271,8 +286,13 @@ function wallCard(item, ud) {
     || (item.source_protocol || item.SourceProtocol || '');
   const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
     ? Math.min(100, Math.round(ud.position_ticks / (item.RuntimeSeconds * 10000000) * 100)) : 0;
+  // 需处理的两种子情形（刮削失败 / 待人工确认）用 badge 区分，其余状态直接用状态名。
+  const attention = st === 'pending' && item.last_scrape_error;
+  const stateBadge = attention
+    ? needsAttentionBadge(item.last_scrape_error)
+    : (st !== 'success' ? `<span class="wall-badge ${esc(st)}">${esc(STATUS_TEXT[st] || st)}</span>` : '');
   const badges = [
-    st !== 'success' ? `<span class="wall-badge ${esc(st)}">${esc(STATUS_TEXT[st] || st)}</span>` : '',
+    stateBadge,
     ud && ud.played ? '<span class="wall-badge played">已看</span>' : '',
     ud && ud.favorite ? '<span class="wall-badge fav">♥</span>' : '',
     (item.AdditionalParts || []).length ? `<span class="wall-badge multi">CD×${(item.AdditionalParts || []).length + 1}</span>` : ''
@@ -308,6 +328,11 @@ let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索
 
 async function pageItems() {
   const params = new URLSearchParams(location.search);
+  // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
+  if (!params.get('status') && params.get('scrape') === 'failed') {
+    params.set('status', 'needs_attention');
+    history.replaceState({}, '', location.pathname + '?' + params.toString() + location.hash);
+  }
   const status = params.get('status') || '';
   const search = params.get('search') || '';
   const sort = params.get('sort') || 'datecreated';
@@ -323,15 +348,22 @@ async function pageItems() {
   }
   const activeLib = libraries.find(lib => String(lib.Id) === libraryID);
   // 实体筛选（详情抽屉里点演员/类型/厂商/合集跳过来的），单值，URL 可见且可一键清除。
-  const scrape = params.get('scrape') || '';
   const entity = ENTITY_PARAMS.map(([key, label]) => [key, label, params.get(key) || '']).find(item => item[2]) || null;
   wallState = {
     status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
-    scrape, entity, offset: 0, total: 0, loading: false, done: false, items: [], userdata: {}
+    entity, offset: 0, total: 0, loading: false, done: false, items: [], userdata: {}
   };
   wallGen += 1;
 
-  const pills = [['', '全部'], ['success', '可播放'], ['manual', '手动'], ['pending', '待补录'], ['incompatible', '不兼容']];
+  // 一排互斥的状态筛选：未刮削 / 需处理 互斥（合起来是全部 pending）；
+  // 已刮削的片子重刮失败仍属「已刮削」，不会掉进需处理。
+  const pills = [
+    ['', '全部'],
+    ['unscraped', '未刮削'],
+    ['success', '已刮削'],
+    ['manual', '手动录入'],
+    ['needs_attention', '需处理']
+  ];
   const sorts = [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
   // 库少时平铺成 Tab，库多（>8）转下拉，避免筛选行被撑爆。
   const libFilter = libraries.length <= 8
@@ -353,8 +385,6 @@ async function pageItems() {
         <button class="chip-x" id="entity-clear" title="清除该筛选">✕</button></span></div>` : ''}
       <div class="filters">
         ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}">${esc(label)}</button>`).join('')}
-        <button class="pill ${scrape === 'failed' ? 'is-active' : ''}" data-scrape="failed">刮削失败</button>
-        <button class="pill ${scrape === 'confirm' ? 'is-active' : ''}" data-scrape="confirm">待人工确认</button>
         <input id="item-search" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}" style="min-width:200px">
         <select id="item-sort">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
       </div>
@@ -366,7 +396,7 @@ async function pageItems() {
       <div class="wall" id="wall"></div>
       <div id="wall-empty"></div>
       <div id="wall-more" class="wall-more"></div>
-      <p class="hint">点击海报打开详情抽屉（抽屉内可播放、刮削、探测）；海报上的播放图标为快捷播放。不兼容源不会进入 Emby，更换为 http(s) .strm 后「重读源」可重新判定。</p>
+      <p class="hint">点击海报打开详情抽屉（抽屉内可播放、刮削、探测、编辑元数据）；海报上的播放图标为快捷播放。非 http(s) 源的 .strm 在扫描时直接跳过，不会出现在这里。</p>
     </section>`;
 
   // 离散筛选（状态/库/排序）压入历史，浏览器前进/后退可逐步回退到上一个筛选组合。
@@ -374,19 +404,14 @@ async function pageItems() {
   const queryURL = qs => location.pathname + (qs.toString() ? '?' + qs.toString() : '') + location.hash;
   const pushQuery = qs => history.pushState({}, '', queryURL(qs));
   const replaceQuery = qs => history.replaceState({}, '', queryURL(qs));
+  // 状态筛选：一排互斥，点第二次取消回「全部」（与库筛选同款 toggle 语义）。
   document.querySelectorAll('.pill[data-status]').forEach(button => button.addEventListener('click', () => {
     const qs = new URLSearchParams(location.search);
     const value = button.dataset.status;
-    if (value) qs.set('status', value); else qs.delete('status');
+    if (!value || qs.get('status') === value) qs.delete('status'); else qs.set('status', value);
     qs.delete('search');
-    pushQuery(qs);
-    pageItems();
-  }));
-  // 刮削结果筛选：与其它条件叠加，点第二次取消。
-  document.querySelectorAll('.pill[data-scrape]').forEach(button => button.addEventListener('click', () => {
-    const qs = new URLSearchParams(location.search);
-    const value = button.dataset.scrape;
-    if (qs.get('scrape') === value) qs.delete('scrape'); else qs.set('scrape', value);
+    // 选中状态时清掉旧的 scrape 参数（早期书签可能两个都在）。
+    qs.delete('scrape');
     pushQuery(qs);
     pageItems();
   }));
@@ -519,7 +544,6 @@ async function loadWallPage() {
     if (wallState.search) query.set('search', wallState.search);
     if (wallState.libraryID) query.set('library_id', wallState.libraryID);
     if (wallState.entity) query.set(wallState.entity[0], wallState.entity[2]);
-    if (wallState.scrape) query.set('scrape', wallState.scrape);
     const data = await api('/items?' + query.toString());
     if (!wallState || wallGen !== gen) return; // 已被新的搜索/筛选作废，丢弃过期响应
     wallState.total = data.total;
@@ -545,7 +569,7 @@ async function loadWallPage() {
         : (wallState.libraryName ? `「${wallState.libraryName}」的影片` : '影片');
       emptyBox.innerHTML = data.total === 0
         ? empty(wallState.status ? `没有 ${STATUS_TEXT[wallState.status] || wallState.status} 的${what}` : `没有符合条件的${what}`,
-            wallState.search ? '试试其它关键词。' : '开始扫描或手动补录后再来看看。')
+            wallState.search ? '试试其它关键词。' : '添加媒体库并扫描后再来看看。')
         : '';
     }
     if (more) more.textContent = wallState.done && data.total > 0 ? `已全部加载（共 ${data.total} 条）` : '';
@@ -666,11 +690,35 @@ async function openDetail(item) {
       <div class="detail-actions">
         ${playable
           ? `<button id="detail-play" class="btn btn-accent">${icon('play')}<span>播放</span></button>`
-          : `<span class="hint" style="margin:0">该影片不可播放（待补录 / 协议不兼容）</span>`}
+          : `<span class="hint" style="margin:0">该影片暂无可用源</span>`}
         <button id="detail-probe" class="btn">${icon('probe')}<span>探测媒体信息</span></button>
         <button id="detail-scrape" class="btn">${icon('search')}<span>刮削</span></button>
         <button id="detail-reread" class="btn">${icon('refresh')}<span>重读源</span></button>
+        <button id="detail-edit-toggle" class="btn">${icon('edit')}<span>编辑元数据</span></button>
       </div>
+
+      <section class="detail-section" id="detail-edit" hidden>
+        <h3>编辑元数据 <small>写入 NFO，保存后归入「手动录入」</small></h3>
+        <form id="detail-edit-form" class="field-grid">
+          <div class="field"><label for="e-title">标题</label><input id="e-title" value="${esc(m.Title || '')}"></div>
+          <div class="field"><label for="e-number">番号</label><input id="e-number" value="${esc(m.Number || '')}"></div>
+          <div class="field"><label for="e-year">年份</label><input id="e-year" type="number" min="1900" max="2100" value="${esc(m.Year || '')}"></div>
+          <div class="field"><label for="e-original">原名</label><input id="e-original" value="${esc(m.OriginalTitle || '')}"></div>
+          <div class="field full"><label for="e-plot">简介</label><textarea id="e-plot">${esc(m.Plot || '')}</textarea></div>
+          <div class="field"><label for="e-genres">类型（逗号分隔）</label><input id="e-genres" value="${esc((m.Genres || []).join(', '))}"></div>
+          <div class="field"><label for="e-tags">标签（逗号分隔）</label><input id="e-tags" value="${esc((m.Tags || []).join(', '))}"></div>
+          <div class="field"><label for="e-studios">制作商（逗号分隔）</label><input id="e-studios" value="${esc((m.Studios || []).join(', '))}"></div>
+          <div class="field"><label for="e-maker">厂商</label><input id="e-maker" value="${esc(m.Maker || '')}"></div>
+          <div class="field"><label for="e-label">厂牌</label><input id="e-label" value="${esc(m.Label || '')}"></div>
+          <div class="field full"><label>源地址（只读，换源请用「重读源」）</label>
+            <input value="${esc(m.source_path || '')}" readonly></div>
+          <div class="form-foot" style="grid-column:1/-1">
+            <button id="detail-edit-save" class="btn btn-accent" type="submit">${icon('plus')}<span>保存</span></button>
+            <button id="detail-edit-cancel" class="btn" type="button">取消</button>
+            <span class="hint" style="margin:0">走标签级更新，NFO 里未建模的标签不会被丢弃。</span>
+          </div>
+        </form>
+      </section>
 
       ${m.Plot ? `<section class="detail-section"><h3>简介</h3><p class="detail-plot">${esc(m.Plot)}</p></section>` : ''}
 
@@ -744,6 +792,44 @@ async function openDetail(item) {
       pageItems();
     } catch (e) { toast(e.message, 'error'); }
   });
+  // 元数据编辑：默认收起，点「编辑元数据」展开（表单已随抽屉渲染，取值即可）。
+  const editSection = document.querySelector('#detail-edit');
+  const editToggle = document.querySelector('#detail-edit-toggle');
+  if (editToggle && editSection) {
+    editToggle.addEventListener('click', () => { editSection.hidden = !editSection.hidden; });
+  }
+  const editCancel = document.querySelector('#detail-edit-cancel');
+  if (editCancel) editCancel.addEventListener('click', () => { editSection.hidden = true; });
+  const editForm = document.querySelector('#detail-edit-form');
+  if (editForm) editForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const split = id => document.querySelector(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    const year = Number(document.querySelector('#e-year').value) || 0;
+    // 全部字段显式提交：编辑是覆盖式人工写入，空串表示清空该字段。
+    const body = {
+      title: document.querySelector('#e-title').value.trim(),
+      number: document.querySelector('#e-number').value.trim(),
+      original_title: document.querySelector('#e-original').value.trim(),
+      plot: document.querySelector('#e-plot').value,
+      year,
+      genres: split('#e-genres'),
+      tags: split('#e-tags'),
+      studios: split('#e-studios'),
+      maker: document.querySelector('#e-maker').value.trim(),
+      label: document.querySelector('#e-label').value.trim()
+    };
+    const saveBtn = document.querySelector('#detail-edit-save');
+    saveBtn.disabled = true;
+    try {
+      await api(`/items/${m.id}`, { method: 'PUT', body: JSON.stringify(body) });
+      toast('元数据已保存（归类为手动录入）');
+      closeDetail();
+      pageItems();
+    } catch (e) {
+      toast(e.message, 'error');
+      saveBtn.disabled = false;
+    }
+  });
   // 实体跳转：统一委托，演员卡片与元数据里的类型/标签/厂商/合集共用一条路径。
   detailDrawer.querySelectorAll('[data-entity-key]').forEach(el => el.addEventListener('click', () => {
     gotoEntity(el.dataset.entityKey, el.dataset.entityValue);
@@ -807,67 +893,17 @@ function openPlayer(item) {
   });
 }
 
-/* ---------------------------------------------------------------- 手动补录 */
-async function pageManual() {
-  const libs = (await api('/libraries')).items || [];
-  content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>手动补录</h2><span class="hint" style="margin:0">写入 .strm + 生成 NFO，即时进入 Emby</span></div>
-      <p>为一条 <code>http(s)</code> 直链登记影片：系统会在此服务器上写入源文件、同目录 NFO，并把记录标记为「可播放」。源地址必须为 http/https。</p>
-      <form id="manual-form" class="field-grid">
-        <div class="field"><label for="m-title">标题 *</label><input id="m-title" name="title" placeholder="展示标题" required></div>
-        <div class="field"><label for="m-number">番号</label><input id="m-number" name="number" placeholder="如 ABF-018"></div>
-        <div class="field"><label for="m-year">年份</label><input id="m-year" name="year" type="number" min="1900" max="2100" placeholder="2024"></div>
-        <div class="field full"><label for="m-original">原名</label><input id="m-original" name="original_title" placeholder="日文原名（可选）"></div>
-        <div class="field full"><label for="m-path">.strm 目标路径 *</label><input id="m-path" name="source_path" placeholder="服务器上源文件绝对路径，如 /data/media/AV/A/ABF-018/ABF-018.strm" required></div>
-        <div class="field full"><label for="m-url">媒体直链（http/https）*</label><input id="m-url" name="source_url" type="url" placeholder="https://…/ABF-018.mp4" required></div>
-        <div class="field full"><label for="m-plot">简介</label><textarea id="m-plot" name="plot" placeholder="影片简介 / 剧情（可选）"></textarea></div>
-        <div class="field"><label for="m-genres">类型（逗号分隔）</label><input id="m-genres" name="genres" placeholder="剧情, 偶像"></div>
-        <div class="field"><label for="m-tags">标签</label><input id="m-tags" name="tags" placeholder="标签1, 标签2"></div>
-        <div class="field"><label for="m-studios">制作商</label><input id="m-studios" name="studios" placeholder="制作商"></div>
-        <div class="form-foot" style="grid-column:1/-1">
-          <button id="manual-submit" class="btn btn-accent">${icon('film')}<span>写入并入库</span></button>
-          ${libs.length ? `<span class="hint" style="margin:0">将归入媒体库：${esc(libs[0].Name)}</span>` : ''}
-        </div>
-      </form>
-    </section>`;
-  document.querySelector('#manual-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const form = event.target;
-    const fd = new FormData(form);
-    const split = key => String(fd.get(key) || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
-    const body = {
-      source_path: fd.get('source_path'),
-      source_url: fd.get('source_url'),
-      title: fd.get('title'),
-      number: fd.get('number'),
-      original_title: fd.get('original_title'),
-      plot: fd.get('plot'),
-      genres: split('genres'),
-      tags: split('tags'),
-      studios: split('studios'),
-      year: Number(fd.get('year')) || 0
-    };
-    const submitBtn = document.querySelector('#manual-submit');
-    submitBtn.disabled = true;
-    try {
-      await api('/items/manual', { method: 'POST', body: JSON.stringify(body) });
-      toast(`「${body.title}」已入库`);
-      form.reset();
-    } catch (e) { toast(e.message, 'error'); }
-    submitBtn.disabled = false;
-  });
-}
-
 /* ---------------------------------------------------------------- 设置 */
+// 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
 async function pageSettings() {
-  const s = await api('/settings');
+  const [s, keyData] = await Promise.all([api('/settings'), api('/apikeys')]);
   const fields = [
     ['监听地址', s.listen],
     ['数据库', s.db_path],
     ['缓存后端', s.cache + (s.redis_addr ? ` · ${s.redis_addr}/${s.redis_db}` : '')],
     ['Redis 在线', s.redis_online ? '是' : '否']
   ];
+  const keys = keyData.items || [];
   content.innerHTML = `
     <section class="panel">
       <div class="panel-head"><h2>服务设置</h2></div>
@@ -875,20 +911,14 @@ async function pageSettings() {
         <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
       </table></div>
       <p class="hint">配置修改后需重启服务生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
-    </section>`;
-}
+    </section>
 
-/* ---------------------------------------------------------------- API 密钥 */
-async function pageAPIKeys() {
-  const data = await api('/apikeys');
-  const items = data.items || [];
-  content.innerHTML = `
     <section class="panel">
-      <div class="panel-head"><h2>API 密钥</h2><span class="hint" style="margin:0">共 ${esc(data.total ?? items.length)} 个 · 供脚本/第三方客户端直接调用 Emby API</span></div>
-      ${items.length ? `
+      <div class="panel-head"><h2>API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 供脚本/第三方客户端直接调用 Emby API</span></div>
+      ${keys.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${items.map(item => `<tr>
+          <tbody>${keys.map(item => `<tr>
             <td><strong class="title">${esc(item.name || '—')}</strong></td>
             <td class="mono">${esc(item.key)}</td>
             <td class="mono">${esc(item.created_at || '—')}</td>
@@ -898,11 +928,8 @@ async function pageAPIKeys() {
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有 API 密钥', '在下方创建后即可用 X-Emby-Token 调用接口。')}
-    </section>
-    <section class="panel">
-      <h2>创建密钥</h2>
-      <form id="apikey-form" class="field-grid">
-        <div class="field"><label for="key-name">名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
+      <form id="apikey-form" class="field-grid" style="margin-top:18px">
+        <div class="field"><label for="key-name">新建密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建</span></button></div>
       </form>
       <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即凭据，请勿外泄。</p>
@@ -910,7 +937,7 @@ async function pageAPIKeys() {
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();
-    try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); pageAPIKeys(); }
+    try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); pageSettings(); }
     catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
@@ -919,41 +946,36 @@ async function pageAPIKeys() {
   }));
   document.querySelectorAll('[data-key-delete]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('删除该 API 密钥？使用它的客户端将立即失效。')) return;
-    try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); pageAPIKeys(); }
+    try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); pageSettings(); }
     catch (e) { toast(e.message, 'error'); }
   }));
 }
 
-/* ---------------------------------------------------------------- 任务 */
-async function pageTasks() {
-  const data = await api('/tasks');
+/* ---------------------------------------------------------------- 任务日志 */
+// 原独立的「任务」页已并入计划任务页下半部分：这里只负责渲染日志区块 + 绑定刷新/立即扫描。
+async function renderTaskLog() {
+  const box = document.querySelector('#task-log');
+  if (!box) return;
+  let data;
+  try { data = await api('/tasks'); }
+  catch (e) { box.innerHTML = `<p class="hint" style="color:var(--danger)">${esc(e.message)}</p>`; return; }
   const running = data.running;
   const items = data.items || [];
   const runLabel = s => RUN_STATUS_TEXT[s] || s;
-  content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>任务日志</h2>
-        <div class="panel-actions">
-          <button id="task-refresh" class="btn btn-sm">刷新</button>
-          <button id="task-scan" class="btn btn-accent btn-sm">${icon('film')}<span>立即扫描</span></button>
-        </div>
-      </div>
-      ${running ? '<p class="hint" style="color:var(--accent)">有任务正在进行…</p>' : ''}
-      ${items.length ? `
-        <div class="table-wrap"><table>
-          <thead><tr><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>错误</th></tr></thead>
-          <tbody>${items.map(item => `
-            <tr>
-              <td>${esc(TASK_TYPE_TEXT[item.type] || item.type)}</td>
-              <td><span class="badge ${esc(item.status)}">${esc(runLabel(item.status))}</span></td>
-              <td class="mono">${esc(fmtTime(item.started_at))}</td>
-              <td class="mono">${esc(fmtTime(item.ended_at))}</td>
-              <td class="mono">${esc(item.error || '—')}</td>
-            </tr>`).join('')}</tbody>
-        </table></div>` : empty('暂无任务', '点击「立即扫描」开始索引。')}
-    </section>`;
-  document.querySelector('#task-scan').addEventListener('click', () => runScan());
-  document.querySelector('#task-refresh').addEventListener('click', pageTasks);
+  box.innerHTML = `
+    ${running ? '<p class="hint" style="color:var(--accent)">有任务正在进行…</p>' : ''}
+    ${items.length ? `
+      <div class="table-wrap"><table>
+        <thead><tr><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>错误</th></tr></thead>
+        <tbody>${items.map(item => `
+          <tr>
+            <td>${esc(TASK_TYPE_TEXT[item.type] || item.type)}</td>
+            <td><span class="badge ${esc(item.status)}">${esc(runLabel(item.status))}</span></td>
+            <td class="mono">${esc(fmtTime(item.started_at))}</td>
+            <td class="mono">${esc(fmtTime(item.ended_at))}</td>
+            <td class="mono">${esc(item.error || '—')}</td>
+          </tr>`).join('')}</tbody>
+      </table></div>` : empty('暂无任务', '点击「立即扫描」开始索引。')}`;
 }
 
 /* ---------------------------------------------------------------- 探针 */
@@ -1399,6 +1421,16 @@ async function pageScheduled() {
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有计划任务', '在上方填写名称、类型与 cron 表达式后新建。')}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>任务日志</h2>
+        <div class="panel-actions">
+          <button id="task-refresh" class="btn btn-sm">刷新</button>
+          <button id="task-scan" class="btn btn-accent btn-sm">${icon('film')}<span>立即扫描</span></button>
+        </div>
+      </div>
+      <div id="task-log"><p class="hint">加载中…</p></div>
     </section>`;
 
   const typeEl = document.querySelector('#s-type');
@@ -1445,6 +1477,10 @@ async function pageScheduled() {
     document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledEditId = null; pageScheduled(); });
   }
   document.querySelector('#sched-refresh').addEventListener('click', pageScheduled);
+  // 任务日志区块（原「任务」页并入这里）：立即扫描用顶部的全局扫描链路，刷新只重绘日志。
+  document.querySelector('#task-scan').addEventListener('click', () => runScan());
+  document.querySelector('#task-refresh').addEventListener('click', renderTaskLog);
+  renderTaskLog();
 
   document.querySelector('#sched-form').addEventListener('submit', async event => {
     event.preventDefault();
@@ -1486,7 +1522,7 @@ async function pageScheduled() {
       });
     } else if (role === 'run') {
       el.addEventListener('click', async () => {
-        try { await api(`/scheduled/${id}/run`, { method: 'POST' }); toast('已触发执行，可在「任务」页查看结果'); }
+        try { await api(`/scheduled/${id}/run`, { method: 'POST' }); toast('已触发执行，结果见下方任务日志'); }
         catch (e) { toast(e.message, 'error'); }
       });
     } else if (role === 'edit') {
@@ -1510,12 +1546,9 @@ const pages = {
   overview: pageOverview,
   libraries: pageLibraries,
   items: pageItems,
-  manual: pageManual,
   settings: pageSettings,
-  apikeys: pageAPIKeys,
   scrape: pageScrape,
   scheduled: pageScheduled,
-  tasks: pageTasks,
   probe: pageProbe
 };
 
@@ -1666,9 +1699,9 @@ function renderScanProgress(p) {
   scanFill.classList.toggle('is-indeterminate', !total && p.running);
   scanFill.style.width = total ? `${Math.min(100, Math.round(done / total * 100))}%` : '100%';
   const parts = [];
-  if (p.success) parts.push(`可播放 ${p.success}`);
-  if (p.pending) parts.push(`待补录 ${p.pending}`);
-  if (p.incompatible) parts.push(`不兼容 ${p.incompatible}`);
+  if (p.success) parts.push(`已刮削 ${p.success}`);
+  if (p.pending) parts.push(`未刮削 ${p.pending}`);
+  if (p.skipped) parts.push(`跳过 ${p.skipped}`);
   if (p.failed) parts.push(`失败 ${p.failed}`);
   if (p.running && p.current) parts.push(`当前 ${baseName(p.current)}`);
   if (p.error) parts.push(`错误：${p.error}`);
@@ -1704,7 +1737,7 @@ async function runScan(libraryId) {
   try {
     const url = libraryId ? `/scan?library_id=${encodeURIComponent(libraryId)}` : '/scan';
     const r = await api(url, { method: 'POST' });
-    toast(`扫描完成：${r.success} 可播放 / ${r.pending} 待补录 / ${r.incompatible} 不兼容`);
+    toast(`扫描完成：${r.success} 已刮削 / ${r.pending} 未刮削${r.skipped ? ` / 跳过 ${r.skipped} 个不兼容` : ''}`);
   } catch (e) { toast(e.message, 'error'); }
   try { renderScanProgress(await api('/scan/progress')); } catch { /* ignore */ }
   startScanPolling();

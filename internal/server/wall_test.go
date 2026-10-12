@@ -26,7 +26,7 @@ func TestWallLibraryFilter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A 库：两条可播放；B 库：一条可播放 + 一条 ed2k（不可播放），用于验证与状态叠加。
+	// A 库：两条可播放；B 库：一条可播放 + 一条 ed2k（扫描时直接跳过、不入库）。
 	writeFile(t, filepath.Join(dirA, "a1.strm"), "http://media.test/a1.mp4\n")
 	writeFile(t, filepath.Join(dirA, "a1.nfo"), "<movie><title>A1</title><genre>剧情</genre><studio>Studio X</studio><actor><name>Actor One</name></actor></movie>\n")
 	writeFile(t, filepath.Join(dirA, "a2.strm"), "http://media.test/a2.mp4\n")
@@ -108,11 +108,19 @@ func TestWallLibraryFilter(t *testing.T) {
 	if got := count("&library_id=" + idB + "&status=success"); got != 1 {
 		t.Errorf("B 库可播放影片数 = %d，期望 1", got)
 	}
-	if got := count("&library_id=" + idB + "&status=incompatible"); got != 1 {
-		t.Errorf("B 库不兼容影片数 = %d，期望 1", got)
+	// 不兼容类别已废弃，恒为空。
+	if got := count("&library_id=" + idB + "&status=incompatible"); got != 0 {
+		t.Errorf("B 库不兼容影片数 = %d，期望 0（ed2k 不入库）", got)
 	}
 	if got := count("&library_id=" + idA + "&status=incompatible"); got != 0 {
 		t.Errorf("A 库不兼容影片数 = %d，期望 0", got)
+	}
+	// 合成口径：B 库那条可播放的片有 NFO 且从未刮削过，属「未刮削」。
+	if got := count("&library_id=" + idB + "&status=unscraped"); got != 0 {
+		t.Errorf("B 库未刮削影片数 = %d，期望 0（b1 有 NFO 属 success）", got)
+	}
+	if got := count("&library_id=" + idB + "&status=needs_attention"); got != 0 {
+		t.Errorf("B 库需处理影片数 = %d，期望 0", got)
 	}
 	// 与搜索叠加。
 	if got := count("&library_id=" + idA + "&search=A1"); got != 1 {

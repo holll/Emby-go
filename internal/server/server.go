@@ -100,11 +100,11 @@ type scanStatus struct {
 	Total        int    `json:"total"`
 	Done         int    `json:"done"`
 	Current      string `json:"current"`
-	Success      int    `json:"success"`
-	Pending      int    `json:"pending"`
-	Incompatible int    `json:"incompatible"`
-	Failed       int    `json:"failed"`
-	StartedAt    string `json:"started_at,omitempty"`
+	Success   int    `json:"success"`
+	Pending   int    `json:"pending"`
+	Skipped   int    `json:"skipped"`
+	Failed    int    `json:"failed"`
+	StartedAt string `json:"started_at,omitempty"`
 	FinishedAt   string `json:"finished_at,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
@@ -304,7 +304,6 @@ func (a *App) routes() {
 	admin.DELETE("/scheduled/:id", a.adminDeleteScheduledTask)
 	admin.POST("/scheduled/:id/toggle", a.adminToggleScheduledTask)
 	admin.POST("/scheduled/:id/run", a.adminRunScheduledTask)
-	admin.POST("/items/manual", a.adminManual)
 	admin.PUT("/items/:id", a.adminEdit)
 	admin.POST("/items/:id/reread", a.adminReread)
 	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
