@@ -373,10 +373,16 @@ func writeDecimal(builder *strings.Builder, indent int, name string, value float
 }
 
 // writeFileAtomic 先写临时文件再改名，避免中途失败留下半截 NFO。
+// rename 失败时要把临时文件删掉：媒体盘跨设备/权限异常会走到这条路径，
+// 不清就会在媒体目录里持续堆积 *.nfo.tmp。
 func writeFileAtomic(path string, content string) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

@@ -240,10 +240,23 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 	}
 	// NFO 通道只在这段刮削期间持有：收尾的整库扫描会自己重新申请，
 	// 若仍持锁会被 claimNFO 判为「他人占用」而拒绝（互斥是按占用者类型判定的）。
+	// claim/release 必须成对出现在同一函数体内：占用放在 goroutine 内部，
+	// 而不是放在 handler 的 startScrapeTask 里——那样一旦 goroutine 起不来
+	// （panic），nfoOwner 会永久停留在 "scrape"，扫库/探测全部被拒。
 	progress, err := func() (scraper.Progress, error) {
+		if !a.claimNFO("scrape") {
+			return scraper.Progress{}, errScrapeBusy
+		}
 		defer a.releaseNFO("scrape")
 		return scraper.New(cfg, a.db).Run(a.scrapeContext(), opts)
 	}()
+	if err != nil {
+		a.finishTask(taskID, err)
+		a.endScrape(err)
+		a.cache.Clear()
+		slog.Warn("刮削任务提前结束", "error", err)
+		return err
+	}
 	a.finishTask(taskID, err)
 	a.endScrape(err)
 
@@ -304,7 +317,12 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 // executeScrapeAvatars 同步跑完头像任务并收尾（与影片刮削同样的同步形态）。
 func (a *App) executeScrapeAvatars(cfg scraper.Config, libraryID int64, limit int) error {
 	taskID := a.startTask("scrape_avatars")
+	// claim/release 成对放在本函数内（与 executeScrape 同一理由）：goroutine
+	// 起不来时不会把 nfoOwner 永久留在 "scrape_avatars"。
 	progress, err := func() (scraper.Progress, error) {
+		if !a.claimNFO("scrape_avatars") {
+			return scraper.Progress{}, errScrapeBusy
+		}
 		defer a.releaseNFO("scrape_avatars")
 		return scraper.New(cfg, a.db).RunAvatars(a.scrapeContext(), libraryID, limit,
 			a.updateScrapeProgress, func(result scraper.AvatarResult) {
@@ -313,6 +331,13 @@ func (a *App) executeScrapeAvatars(cfg scraper.Config, libraryID int64, limit in
 				}
 			})
 	}()
+	if err != nil {
+		a.finishTask(taskID, err)
+		a.endScrape(err)
+		a.cache.Clear()
+		slog.Warn("演员头像任务提前结束", "error", err)
+		return err
+	}
 	a.finishTask(taskID, err)
 	a.endScrape(err)
 	a.cache.Clear()
@@ -583,18 +608,13 @@ func (a *App) scraperFor(cfg scraper.Config) *scraper.Scraper {
 
 // startScrapeTask 申请启动一类刮削任务（互斥 + 状态置位）。
 // 返回 false 时已写入 HTTP 错误响应。
+//
+// 这里只做并发门（beginScrape），不再 claimNFO：NFO 通道的占用改由
+// executeScrape / executeScrapeAvatars 在自己的 goroutine 里 claim+defer release，
+// 保证「占用与释放」在同一个栈上，goroutine 起不来也不会把通道永久锁死。
 func (a *App) startScrapeTask(c *gin.Context, kind string, total int) bool {
-	if owner := a.nfoBusyOwner(); owner != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": owner + "正在进行中，请稍后再试"})
-		return false
-	}
 	if !a.beginScrape(kind, total) {
 		c.JSON(http.StatusConflict, gin.H{"error": errScrapeBusy.Error()})
-		return false
-	}
-	if !a.claimNFO(kind) {
-		a.endScrape(nil)
-		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
 		return false
 	}
 	return true

@@ -1553,6 +1553,9 @@ const pages = {
 };
 
 async function page(name) {
+  // 切页即换 DOM：旧页面挂着的延时句柄（探测面板自动收起）必须作废，
+  // 否则它会在新页面上命中同名元素，把不该关的面板关掉。
+  cancelProbeHide();
   setMeta(name);
   content.innerHTML = skeletonPanel();
   const fn = pages[name];
@@ -1567,6 +1570,9 @@ async function page(name) {
 /* ------------------------------------------------------------ 媒体信息探测 */
 // 与扫库相互独立：探测只读 .strm 直链、跑 ffprobe、把结果写回 NFO，不写索引库。
 let probeTimer = null;
+// 探测完成后自动收面板的延时句柄。切页会重建 DOM，旧句柄若不取消，
+// 8 秒后会隐藏新页面上的同名面板（表现为「进媒体场面板自己弹出来又消失」）。
+let probeHideTimer = null;
 
 function probeEls() {
   return {
@@ -1576,6 +1582,22 @@ function probeEls() {
     fill: document.querySelector('#probe-progress-fill'),
     detail: document.querySelector('#probe-progress-detail')
   };
+}
+
+function cancelProbeHide() {
+  if (probeHideTimer) { clearTimeout(probeHideTimer); probeHideTimer = null; }
+}
+
+// hideProbePanelLater 8 秒后收起探测面板（有失败时保留，方便对照失败条数）。
+// 只隐藏当前这一次渲染持有的元素，且在探测重新开始或切页时作废。
+function hideProbePanelLater() {
+  cancelProbeHide();
+  probeHideTimer = setTimeout(() => {
+    probeHideTimer = null;
+    if (probeTimer) return; // 又开始了新的一轮，交给它自己收
+    const el = probeEls();
+    if (el.panel) el.panel.hidden = true;
+  }, 8000);
 }
 
 function renderProbeProgress(p) {
@@ -1598,7 +1620,10 @@ function renderProbeProgress(p) {
   el.detail.textContent = parts.join(' · ') || (p.running ? '正在读取源信息…' : '');
 }
 
-function stopProbePolling() { if (probeTimer) { clearInterval(probeTimer); probeTimer = null; } }
+function stopProbePolling() {
+  if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+  cancelProbeHide();
+}
 
 function setProbeButton(busy) {
   const btn = document.querySelector('#probe-media');
@@ -1622,10 +1647,7 @@ function startProbePolling() {
         else toast(`探测完成：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`, p.failed ? 'error' : 'ok');
         if (p.failures && p.failures.length) toast(`失败示例：${p.failures[0]}`, 'error');
         // 自动收起，避免长期占位；有失败时保留，方便对照失败条数。
-        if (!p.failed) {
-          const el = probeEls();
-          setTimeout(() => { if (el.panel && !probeTimer) el.panel.hidden = true; }, 8000);
-        }
+        if (!p.failed) hideProbePanelLater();
       }
     }
   }, 1000);
@@ -1743,8 +1765,10 @@ async function runScan(libraryId) {
   startScanPolling();
   scanBtn.disabled = false;
   scanBtn.querySelector('span').textContent = '开始扫描';
+  // 只在当前页是媒体墙时增量刷新：无条件整页重渲染会把已加载的分页缓冲、
+  // 滚动位置和搜索焦点一起丢掉（reloadWall 才会保留筛选与焦点）。
   const name = location.hash.replace('#', '');
-  if (pages[name]) page(name);
+  if (pages[name] === pageItems) reloadWall(); else if (pages[name]) page(name);
 }
 
 async function boot() {

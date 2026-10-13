@@ -428,12 +428,9 @@ func (a *App) runScheduledScrape(task scheduler.Task) error {
 	if !a.beginScrape("scrape", total) {
 		return scheduler.ErrBusy
 	}
-	if !a.claimNFO("scrape") {
-		a.endScrape(nil)
-		return scheduler.ErrBusy
-	}
 	slog.Info("计划任务刮削启动", "task", task.Name, "total", total,
 		"library_id", libraryID, "only_missing", onlyMissing, "overwrite", overwrite)
+	// NFO 通道由 executeScrape 在自己的栈里 claim + defer release。
 	return a.executeScrape(cfg, scraper.RunOptions{
 		LibraryID: libraryID, OnlyMissing: onlyMissing, Limit: limit, Overwrite: overwrite,
 	})
@@ -462,10 +459,7 @@ func (a *App) runScheduledScrapeAvatars(task scheduler.Task) error {
 	if !a.beginScrape("scrape_avatars", len(names)) {
 		return scheduler.ErrBusy
 	}
-	if !a.claimNFO("scrape_avatars") {
-		a.endScrape(nil)
-		return scheduler.ErrBusy
-	}
 	slog.Info("计划任务头像补全启动", "task", task.Name, "actors", len(names), "library_id", libraryID)
+	// NFO 通道由 executeScrapeAvatars 在自己的栈里 claim + defer release。
 	return a.executeScrapeAvatars(cfg, libraryID, limit)
 }

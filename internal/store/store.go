@@ -415,20 +415,53 @@ func (s *Store) LibraryCounts() (map[int64]int, error) {
 }
 
 func jsonText(v []string) string { b, _ := json.Marshal(v); return string(b) }
+
+// escapeLike 转义 LIKE 模式串里的通配符（% _ 与转义符本身），
+// 配合查询里的 ESCAPE '\' 使用。否则用户输入 "%" 会匹配任意内容，
+// "a_b" 里的 _ 也会被当单字符通配，筛选结果失真。
+func escapeLike(s string) string {
+	if !strings.ContainsAny(s, `%_\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch r {
+		case '%', '_', '\\':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 func parseStrings(v string) []string {
 	var out []string
 	_ = json.Unmarshal([]byte(v), &out)
 	return out
 }
 
+// BumpVersion 提升全局版本号与指定媒体库的版本号（列表/详情/实体缓存键的前缀）。
+//
+// 两条 kv 必须包在同一个事务里：分两次 Exec 时前一条成功、后一条失败会留下
+// 「全局变了、库没变」的不一致状态，重试又会多跳一次。内存里的 gversion 也要
+// 等事务提交成功后才自增——否则 DB 写失败后内存已经变了，重启后从 kv 重载会回退。
 func (s *Store) BumpVersion(libraryID int64) error {
-	_, err := s.db.Exec(`INSERT INTO kv(key,value) VALUES('g:version','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`)
+	libKey := "lib:" + strconv.FormatInt(libraryID, 10) + ":version"
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
+	defer func() { _ = tx.Rollback() }()
+	for _, key := range []string{"g:version", libKey} {
+		if _, err := tx.Exec(`INSERT INTO kv(key,value) VALUES(?,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`, key); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	s.gversion.Add(1)
-	_, err = s.db.Exec(`INSERT INTO kv(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`, "lib:"+strconv.FormatInt(libraryID, 10)+":version")
-	return err
+	return nil
 }
 func (s *Store) Version(key string) string {
 	if key == "g:version" {
@@ -897,11 +930,11 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	var missing []string
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if _, ok := paths[path]; !ok {
@@ -909,10 +942,34 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
 	}
-	for _, path := range missing {
-		if _, err := s.db.Exec("DELETE FROM movies WHERE library_id=? AND source_path=?", libraryID, path); err != nil {
+	// 先关掉结果集再开事务：SQLite 同一连接上挂着只读游标时开写事务会互相阻塞，
+	// 而连接池只有几条连接，可能直接凑成死锁。
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	// 整批一个事务：逐条 Exec 时中途失败会留下「只删了一半」的索引，
+	// 与磁盘不一致；批量 IN 也省掉几百次往返。
+	const chunk = 500
+	for start := 0; start < len(missing); start += chunk {
+		end := start + chunk
+		if end > len(missing) {
+			end = len(missing)
+		}
+		batch := missing[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, libraryID)
+		for _, path := range batch {
+			args = append(args, path)
+		}
+		query := "DELETE FROM movies WHERE library_id=? AND source_path IN (" + placeholders + ")"
+		if _, err := s.db.Exec(query, args...); err != nil {
 			return err
 		}
 	}
@@ -1061,8 +1118,8 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 		args = append(args, protocol)
 	}
 	if term != "" {
-		where = append(where, "(title LIKE ? OR original_title LIKE ? OR number LIKE ?)")
-		q := "%" + term + "%"
+		where = append(where, "(title LIKE ? ESCAPE '\\' OR original_title LIKE ? ESCAPE '\\' OR number LIKE ? ESCAPE '\\')")
+		q := "%" + escapeLike(term) + "%"
 		args = append(args, q, q, q)
 	}
 	if years != "" {
@@ -1089,8 +1146,8 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 		}
 		clauses := make([]string, 0, len(terms))
 		for _, t := range terms {
-			clauses = append(clauses, field+" LIKE ?")
-			args = append(args, "%\""+strings.ReplaceAll(t, `"`, "")+"\"%")
+			clauses = append(clauses, field+" LIKE ? ESCAPE '\\'")
+			args = append(args, "%\""+escapeLike(strings.ReplaceAll(t, `"`, ""))+"\"%")
 		}
 		where = append(where, "("+strings.Join(clauses, " OR ")+")")
 	}
@@ -1099,8 +1156,8 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 		if len(terms) > 0 {
 			clauses := make([]string, 0, len(terms))
 			for _, t := range terms {
-				clauses = append(clauses, "EXISTS (SELECT 1 FROM movie_actors ma WHERE ma.movie_id=movies.id AND ma.actor_name LIKE ?)")
-				args = append(args, t)
+				clauses = append(clauses, "EXISTS (SELECT 1 FROM movie_actors ma WHERE ma.movie_id=movies.id AND ma.actor_name LIKE ? ESCAPE '\\')")
+				args = append(args, "%"+escapeLike(t)+"%")
 			}
 			where = append(where, "("+strings.Join(clauses, " OR ")+")")
 		}
@@ -1657,8 +1714,8 @@ func (s *Store) EntityPoster(kind, name string, libraryID int64, collection stri
 		if !ok {
 			return "", nil
 		}
-		query += " AND " + column + " LIKE ?"
-		args = append(args, "%\""+strings.ReplaceAll(name, `"`, "")+"\"%")
+		query += " AND " + column + " LIKE ? ESCAPE '\\'"
+		args = append(args, "%\""+escapeLike(strings.ReplaceAll(name, `"`, ""))+"\"%")
 	}
 	query += " ORDER BY id DESC LIMIT 1"
 	var path string
