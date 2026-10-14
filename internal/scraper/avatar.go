@@ -37,6 +37,9 @@ type AvatarResult struct {
 	Movies    int
 	Status    string // success / skipped / failed
 	Reason    string
+	// Fatal 标记这次失败是否属于环境性故障（MetaTube 不可达/鉴权失败）。
+	// 与影片刮削 ItemResult.Fatal 同义，决定要不要计入熔断计数。
+	Fatal bool
 }
 
 // RunAvatars 批量补全头像：只处理「头像为空」的演员，已存在的不重复下载（幂等）。
@@ -90,7 +93,14 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 			progress.Consecutive = 0
 		default:
 			progress.Failed++
-			progress.Consecutive++
+			// 与影片刮削（run.go 的 emit）同一口径：只有环境性故障才累加
+			// 连续失败。图片 404、下载不到这类内容性问题说明 MetaTube 有响应，
+			// 应当清零——否则「一大批演员都缺图」会把整批任务误熔断掉。
+			if result.Fatal {
+				progress.Consecutive++
+			} else {
+				progress.Consecutive = 0
+			}
 		}
 		snapshot := progress
 		mu.Unlock()
@@ -146,7 +156,7 @@ func (s *Scraper) scrapeAvatar(ctx context.Context, name string) AvatarResult {
 	result := AvatarResult{Actor: name}
 	results, err := s.client.SearchActors(ctx, name, "", true)
 	if err != nil {
-		return s.avatarFailure(result, "演员搜索失败: "+err.Error())
+		return s.avatarFailure(result, "演员搜索失败: "+err.Error(), err)
 	}
 	match, ok := matchActor(results, name)
 	if !ok {
@@ -166,22 +176,22 @@ func (s *Scraper) scrapeAvatar(ctx context.Context, name string) AvatarResult {
 
 	data, err := s.client.Download(ctx, result.AvatarURL, maxImageBytes)
 	if err != nil {
-		return s.avatarFailure(result, "下载头像失败: "+err.Error())
+		return s.avatarFailure(result, "下载头像失败: "+err.Error(), err)
 	}
 	dir := s.avatarsDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return s.avatarFailure(result, "创建头像目录失败: "+err.Error())
+		return s.avatarFailure(result, "创建头像目录失败: "+err.Error(), nil)
 	}
 	dest := avatar.Path(dir, name)
 	if err := writeWebP(data, dest); err != nil {
-		return s.avatarFailure(result, "写入头像失败: "+err.Error())
+		return s.avatarFailure(result, "写入头像失败: "+err.Error(), nil)
 	}
 	result.Image = dest
 
 	// 写 NFO 真源 + 刷新索引（每部参演影片各一份 NFO）。
 	movies, err := s.store.MoviesByActor(name)
 	if err != nil {
-		return s.avatarFailure(result, "查询参演影片失败: "+err.Error())
+		return s.avatarFailure(result, "查询参演影片失败: "+err.Error(), nil)
 	}
 	for _, movie := range movies {
 		if strings.TrimSpace(movie.NFOPath) == "" {
@@ -204,7 +214,7 @@ func (s *Scraper) scrapeAvatar(ctx context.Context, name string) AvatarResult {
 	// 索引里的头像标识与远端地址最后写：重扫会把 <thumb> 带进 actors.avatar_url，
 	// 但重扫不认识本地副本，avatar_tag 只能由这里补。
 	if err := s.store.SetActorAvatar(name, result.AvatarURL, avatar.Tag(data)); err != nil {
-		return s.avatarFailure(result, "写入头像索引失败: "+err.Error())
+		return s.avatarFailure(result, "写入头像索引失败: "+err.Error(), nil)
 	}
 	result.Status = StatusSuccess
 	slog.Info("演员头像已更新", "actor", name, "provider", match.Provider, "movies", result.Movies)
@@ -221,9 +231,13 @@ func (s *Scraper) rescan(movie store.Movie) error {
 	return err
 }
 
-func (s *Scraper) avatarFailure(result AvatarResult, reason string) AvatarResult {
+// avatarFailure 记录一次演员处理失败。
+// upstreamErr 只用于判定是否环境性故障（是否计入熔断）：本地错误（建目录、
+// 写文件、写库）传 nil，别让它们被当成 MetaTube 不可达。
+func (s *Scraper) avatarFailure(result AvatarResult, reason string, upstreamErr error) AvatarResult {
 	result.Status, result.Reason = StatusFailed, reason
-	slog.Warn("演员头像处理失败", "actor", result.Actor, "reason", reason)
+	result.Fatal = metatube.IsFatal(upstreamErr)
+	slog.Warn("演员头像处理失败", "actor", result.Actor, "reason", reason, "fatal", result.Fatal)
 	return result
 }
 

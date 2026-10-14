@@ -64,9 +64,12 @@ var listTags = []string{"genre", "tag", "studio", "tagline"}
 
 // UpdateScraped 把刮削结果写入 NFO。文件不存在时按新建处理（整体生成）。
 func UpdateScraped(path string, f ScrapeFields) error {
+	// 与 SetActorThumb / SaveFileInfo 共用同一把路径锁：整段读-改-写期间独占，
+	// 新建分支走 saveAtomicLocked（本函数已持锁，不能再进 SaveAtomic）。
+	defer lockNFOPath(path)()
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return SaveAtomic(path, metaFromScrape(f))
+		return saveAtomicLocked(path, metaFromScrape(f))
 	}
 	if err != nil {
 		return err
@@ -231,6 +234,19 @@ func escape(value string) string {
 	return buf.String()
 }
 
+// escapeTemplate 把替换模板里的字面量 $ 转成 $$。
+//
+// regexp.ReplaceAllString 的第二个参数是「模板」而非字面量：$1、${1} 会被当成
+// 捕获组引用。元数据里含 $ 的值（标题 "Price $100"、简介里的 "$5 OFF"）会被
+// 当成组引用解析，组号越界时展开为空串，内容被静默吞掉且不报错。
+// 需要保留 $1 语义（沿用原文缩进）的调用点，对变量部分过一遍这个函数即可。
+func escapeTemplate(s string) string {
+	if !strings.Contains(s, "$") {
+		return s
+	}
+	return strings.ReplaceAll(s, "$", "$$")
+}
+
 // scalarPattern 匹配 <tag>…</tag>（含带属性）与自闭合 <tag/>。
 // 标签名后必须紧跟 >、空白或 /，避免 <title> 误匹配 <titles>。
 func scalarPattern(tag string) *regexp.Regexp {
@@ -266,12 +282,14 @@ func upsertScalar(text, tag, value, indent string) string {
 func upsertScalarIn(text, tag, value, indent, beforeClose string) string {
 	replacement := "<" + tag + ">" + escape(value) + "</" + tag + ">"
 	if pattern := scalarLinePattern(tag); pattern.MatchString(text) {
-		// $1 是原文该行的缩进，沿用原文风格而不是统一改成 2 空格。
-		return pattern.ReplaceAllString(text, "$1"+replacement)
+		// $1 是原文该行的缩进，沿用原文风格而不是统一改成 2 空格；
+		// replacement 里的 $ 要转义，否则会被当成捕获组引用吞掉内容。
+		return pattern.ReplaceAllString(text, "$1"+escapeTemplate(replacement))
 	}
 	// 标签与其它内容同行（压缩过的 NFO）时上面的行首匹配失效，退回不带缩进的整词替换。
+	// 无 $1 需求，用字面量替换，value 里的 $ 原样写入。
 	if pattern := scalarPattern(tag); pattern.MatchString(text) {
-		return pattern.ReplaceAllString(text, replacement)
+		return pattern.ReplaceAllLiteralString(text, replacement)
 	}
 	return insertBeforeTag(text, beforeClose, indent+replacement)
 }
@@ -350,6 +368,8 @@ func renderActors(actors []Actor, indent string) []string {
 // 演员不存在或已是同值时不做任何写入，返回 false。
 // 之所以不做「读出全部演员 → 整体重写 actor 块」：那会丢掉我们没建模的 actor 子元素。
 func SetActorThumb(path, name, thumb string) (bool, error) {
+	// 头像任务按演员并发，多个演员共演同一部片时会对同一 NFO 撞写，必须串行化。
+	defer lockNFOPath(path)()
 	name = strings.TrimSpace(name)
 	thumb = strings.TrimSpace(thumb)
 	if name == "" || thumb == "" {
@@ -434,7 +454,8 @@ func uniqueIDPattern(kind string) *regexp.Regexp {
 func upsertUniqueID(text, kind, value, indent string) string {
 	replacement := indent + `<uniqueid type="` + kind + `">` + escape(value) + "</uniqueid>"
 	if pattern := uniqueIDPattern(kind); pattern.MatchString(text) {
-		return pattern.ReplaceAllString(text, replacement)
+		// 字面量替换：value（如 TMDB id）虽多为数字，但同样不能让它走模板解析。
+		return pattern.ReplaceAllLiteralString(text, replacement)
 	}
 	return insertBeforeClosingMovie(text, replacement, indent)
 }

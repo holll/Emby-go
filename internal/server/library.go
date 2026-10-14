@@ -1005,7 +1005,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 	// 缓存键不需要带请求来源：响应里的流地址是相对路径，与宿主无关。
 	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
-		c.Data(200, "application/json", b)
+		respondMediaJSON(c, b)
 		return
 	}
 	ms, total, e := a.db.SearchScoped(lib, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
@@ -1106,7 +1106,8 @@ func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, c
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
 		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
-		a.applyItemFields(item, m, fields, c)
+		// 缓存共享 DTO 时不放入会话凭据，响应时再补。
+		a.applyItemFields(item, m, fields, nil)
 		out = append(out, item)
 	}
 	v := gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start}
@@ -1114,7 +1115,7 @@ func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, c
 	if cacheKey != "" {
 		a.cache.Set("items:"+cacheKey, b, 15*time.Second)
 	}
-	c.Data(200, "application/json", b)
+	respondMediaJSON(c, b)
 }
 
 // movieIDs 提取影片列表的 id 切片（供批量查询）。
@@ -1323,7 +1324,7 @@ func (a *App) item(c *gin.Context) {
 	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
 	key := "item:" + a.db.Version("g:version") + ":" + rawID
 	if b, ok := a.cache.Get(key); ok {
-		c.Data(200, "application/json", b)
+		respondMediaJSON(c, b)
 		return
 	}
 	m, e := a.db.Movie(id)
@@ -1332,9 +1333,9 @@ func (a *App) item(c *gin.Context) {
 		return
 	}
 	d, _ := a.db.Data(id)
-	b, _ := json.Marshal(a.embyItemDetail(m, d, c))
+	b, _ := json.Marshal(a.embyItemDetail(m, d, nil))
 	a.cache.Set(key, b, time.Hour)
-	c.Data(200, "application/json", b)
+	respondMediaJSON(c, b)
 }
 
 // embyItemDetail 在列表 DTO 之上补齐详情接口恒返回的字段。

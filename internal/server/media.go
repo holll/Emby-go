@@ -382,6 +382,7 @@ func (a *App) mediaSource(m store.Movie, c *gin.Context) gin.H {
 func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Context) gin.H {
 	stream := streamURL(id)
 	mediaSourceId := "mediasource_" + id
+	directStream := authenticatedStreamURL(stream+"?MediaSourceId="+mediaSourceId+"&Static=true", requestToken(c))
 	// 主文件取 NFO 的 streamdetails，分段取它自己的 mediainfo.json；
 	// 两者都没有时才给通用视频轨。
 	streams, size := a.streamsFor(m, sourcePath)
@@ -393,13 +394,13 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 	// sourcePath 缺失时回退到流地址，避免给出空值。
 	mediaPath := sourcePath
 	if strings.TrimSpace(mediaPath) == "" {
-		mediaPath = stream
+		mediaPath = directStream
 	}
 	source := gin.H{
 		"Id":                         mediaSourceId,
 		"Name":                       mediaSourceName(m, sourcePath),
 		"Path":                       mediaPath,
-		"DirectStreamUrl":            stream + "?MediaSourceId=" + mediaSourceId + "&Static=true",
+		"DirectStreamUrl":            directStream,
 		"Protocol":                   "Http",
 		"Container":                  m.SourceContainer,
 		"IsRemote":                   true,
@@ -444,6 +445,63 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 		}
 	}
 	return source
+}
+
+// authenticatedStreamURL 让不发送自定义鉴权头的播放器也能直接使用返回地址。
+func authenticatedStreamURL(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := u.Query()
+	query.Set("api_key", token)
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+// respondMediaJSON 的输入是共享缓存中的无凭据 DTO；只在发给当前会话时补凭据。
+// 不把 token 写回缓存，否则详情及 Fields=MediaSources 列表会泄露其它会话的凭据。
+func respondMediaJSON(c *gin.Context, body []byte) {
+	if !bytes.Contains(body, []byte(`"MediaSources"`)) {
+		c.Data(http.StatusOK, "application/json", body)
+		return
+	}
+	var payload gin.H
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid media response"})
+		return
+	}
+	token := requestToken(c)
+	attach := func(item map[string]any) {
+		sources, _ := item["MediaSources"].([]any)
+		for _, entry := range sources {
+			source, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			rawURL, _ := source["DirectStreamUrl"].(string)
+			if rawURL == "" {
+				continue
+			}
+			source["DirectStreamUrl"] = authenticatedStreamURL(rawURL, token)
+			if path, _ := source["Path"].(string); path == rawURL {
+				source["Path"] = source["DirectStreamUrl"]
+			}
+		}
+	}
+	attach(payload)
+	items, _ := payload["Items"].([]any)
+	for _, entry := range items {
+		if item, ok := entry.(map[string]any); ok {
+			attach(item)
+		}
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // mediaSourceName 返回 MediaSource 的展示名。真实 Emby 用媒体文件名（去扩展名），

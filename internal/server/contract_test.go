@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -224,6 +225,116 @@ func TestContractPlaybackInfo(t *testing.T) {
 	// 兼容入口：POST /Items/{id}/PlaybackInfo 同样返回该形状。
 	if resp, raw := embyRaw(t, ts, "POST", "/Items/1/PlaybackInfo", token, `{}`); resp.StatusCode != http.StatusOK {
 		t.Errorf("POST PlaybackInfo: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// 模拟播放器：只访问返回的 URL，不附加登录请求中的鉴权头。
+func TestPlaybackURLAuthentication(t *testing.T) {
+	app, ts, token := contractEnv(t)
+	escapedToken := "playback+token&with=special?chars"
+	if err := app.db.SaveAccessToken(escapedToken); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, header, query, value string
+	}{
+		{"EmbyToken", "X-Emby-Token", "", token},
+		{"MediaBrowserToken", "X-MediaBrowser-Token", "", token},
+		{"api_key", "", "api_key", escapedToken},
+		{"ApiKey", "", "ApiKey", token},
+		{"queryEmbyToken", "", "X-Emby-Token", token},
+		{"EmbyAuthorization", "X-Emby-Authorization", "", `MediaBrowser Client="test", Token="` + token + `"`},
+		{"Authorization", "Authorization", "", `MediaBrowser Client="test", Token="` + token + `"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ts.URL + "/Users/1/Items/1/PlaybackInfo"
+			if tt.query != "" {
+				path += "?" + url.Values{tt.query: {tt.value}}.Encode()
+			}
+			req, err := http.NewRequest(http.MethodGet, path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.header != "" {
+				req.Header.Set(tt.header, tt.value)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var playback tsukimiPlayback
+			if err := json.NewDecoder(resp.Body).Decode(&playback); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || len(playback.MediaSources) == 0 {
+				t.Fatalf("PlaybackInfo: status=%d sources=%v", resp.StatusCode, playback.MediaSources)
+			}
+			assertPlayableURL(t, ts, playback.MediaSources[0].DirectStream)
+		})
+	}
+}
+
+func assertPlayableURL(t *testing.T, ts *httptest.Server, path string) {
+	t.Helper()
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, prefix := range []string{"", "/emby"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			req, err := http.NewRequest(method, ts.URL+prefix+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "http://media.test/ABF-018.mp4" {
+				t.Fatalf("%s %s: status=%d location=%q", method, prefix+path, resp.StatusCode, resp.Header.Get("Location"))
+			}
+		}
+	}
+}
+
+func TestCachedMediaURLsUseCurrentToken(t *testing.T) {
+	app, ts, token := contractEnv(t)
+	otherToken := "second+session&token"
+	if err := app.db.SaveAccessToken(otherToken); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/Users/1/Items/1", "/Users/1/Items?Fields=MediaSources"} {
+		t.Run(path, func(t *testing.T) {
+			// 同一缓存键连续使用不同会话，再回到第一个会话。
+			for _, current := range []string{token, otherToken, token} {
+				resp, raw := embyRaw(t, ts, http.MethodGet, path, current, "")
+				var payload struct {
+					MediaSources []tsukimiMediaSource
+					Items        []struct{ MediaSources []tsukimiMediaSource }
+				}
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+				}
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					t.Fatal(err)
+				}
+				sources := payload.MediaSources
+				if len(payload.Items) > 0 {
+					sources = payload.Items[0].MediaSources
+				}
+				if len(sources) == 0 {
+					t.Fatal("missing MediaSources")
+				}
+				u, err := url.Parse(sources[0].DirectStream)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := u.Query().Get("api_key"); got != current {
+					t.Fatalf("播放 URL 未使用当前会话凭据: got=%q want=%q", got, current)
+				}
+				assertPlayableURL(t, ts, sources[0].DirectStream)
+			}
+		})
 	}
 }
 

@@ -235,6 +235,14 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "该影片没有 NFO，探测结果无处写入；请先完成元数据刮削"})
 		return
 	}
+	// 本端点同样会「读全文 → 改局部 → 原子写」该片的 NFO，必须走与批量探测
+	// 同一道 nfoGate：否则与刮削/扫库/批量探测并行时会互相覆盖。
+	// 用 "probe" 身份（与批量探测同名，靠 nfoRefs 计数保证释放正确）。
+	if !a.claimNFO("probe") {
+		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		return
+	}
+	defer a.releaseNFO("probe")
 	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -338,6 +346,11 @@ func (a *App) probing() bool {
 // 不能用发起请求的 context，否则 handler 一返回任务就被取消。
 // 返回非 nil 表示因连续失败过多主动中止（人工取消不算错误）。
 func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, onlyMissing bool) error {
+	// 与本任务 claim 配对，且必须用 defer：这条 goroutine 没有 recover，
+	// 中途 panic 或将来新增的提前 return 都会让 nfoOwner 永久停在 "probe"，
+	// 此后扫库/刮削/探测全部被拒，只能重启进程。
+	// 位置在 probeTaskMu 之外，锁顺序仍是「任务锁 → nfoGate」。
+	defer a.releaseNFO("probe")
 	a.probeTaskMu.RLock()
 	ctx := a.probeCtx
 	a.probeTaskMu.RUnlock()
@@ -404,8 +417,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	success, skipped, failed, done := status.Success, status.Skipped, status.Failed, status.Done
 	a.probeCancel = nil
 	a.probeTaskMu.Unlock()
-	// NFO 通道在 probeTaskMu 之外释放（锁顺序统一为任务锁 → nfoGate）。
-	a.releaseNFO("probe")
+	// NFO 通道由函数开头的 defer 释放（锁顺序统一为任务锁 → nfoGate）。
 
 	var result error
 	if aborted {

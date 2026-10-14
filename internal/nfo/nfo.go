@@ -7,7 +7,27 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// pathLocks 按 NFO 路径串行化「读全文 → 改局部 → 原子写」这一整段。
+//
+// 头像任务按演员并发（scraper 起 Workers 个 goroutine），两个演员共演同一部片时
+// 会同时改写同一份 NFO；单条探测/手动刮削也可能与批量刮削撞上。没有这把锁，
+// 后写的会盖掉先写的（丢更新），而两者共用的 *.nfo.tmp 还会互相截断。
+//
+// 锁的粒度是「每个路径一把」，条目数与本库影片数同量级（数千），不值得为
+// 清理做引用计数；进程退出即随 map 释放。
+var pathLocks sync.Map // map[string]*sync.Mutex
+
+// lockNFOPath 取得某路径的独占权，返回的函数的调用即释放。
+// 用法：defer lockNFOPath(path)()
+func lockNFOPath(path string) func() {
+	value, _ := pathLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // Actor 对应 <actor>：Thumb 是头像的远端地址，头像真源就在这里——
 // 删库重建后靠它重新下载本地副本（见需求 A7 #44）。
@@ -236,11 +256,23 @@ func Save(path string, m MovieMeta) error {
 }
 func FromFields(title string, year int) MovieMeta { return MovieMeta{Title: title, Year: year} }
 func SaveAtomic(path string, m MovieMeta) error {
+	defer lockNFOPath(path)()
+	return saveAtomicLocked(path, m)
+}
+
+// saveAtomicLocked 是不持锁的原子写内核，供已持锁的调用方复用
+// （UpdateScraped 新建 NFO 时会走到这里，重复加锁会死锁）。
+func saveAtomicLocked(path string, m MovieMeta) error {
 	tmp := path + ".tmp"
 	if err := Save(tmp, m); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // SaveFileInfo 写入 NFO 的 <fileinfo> 块（含媒体体积、探测版本与 <streamdetails>）；
@@ -250,6 +282,8 @@ func SaveAtomic(path string, m MovieMeta) error {
 // 结构体未建模的元素（刮削器写入的扩展标签、属性等）静默丢掉。
 // 因此只做块级替换，其余内容字节级保留（含文件头 BOM 与原有缩进风格）。
 func SaveFileInfo(path string, meta FileInfoMeta, details *StreamDetails) error {
+	// 读-改-写整体持锁：探测写 <fileinfo> 与刮削改写标签可能并发命中同一文件。
+	defer lockNFOPath(path)()
 	if details == nil {
 		return errors.New("nfo: 流信息为空")
 	}

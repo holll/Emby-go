@@ -1007,8 +1007,10 @@ func TestProxyStreamRange(t *testing.T) {
 		t.Fatalf("scan: %d", resp.StatusCode)
 	}
 
+	// proxy/stream 与其余 Emby 端点一样要求鉴权（会回传上游直链或代拉全量字节）。
 	req, _ := http.NewRequest("GET", ts.URL+"/Videos/1/proxy", nil)
 	req.Header.Set("Range", "bytes=2-5")
+	req.Header.Set("X-Emby-Token", token)
 	resp, e := http.DefaultClient.Do(req)
 	if e != nil {
 		t.Fatal(e)
@@ -1020,17 +1022,17 @@ func TestProxyStreamRange(t *testing.T) {
 	}
 
 	// 无 Range 时返回完整内容。
-	resp, data = func() (*http.Response, []byte) {
-		r, e := http.Get(ts.URL + "/Videos/1/proxy")
-		if e != nil {
-			t.Fatal(e)
-		}
-		d, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		return r, d
-	}()
+	resp, data = authed("GET", "/Videos/1/proxy")
 	if resp.StatusCode != http.StatusOK || string(data) != string(body) {
 		t.Fatalf("full proxy: status=%d body=%q", resp.StatusCode, data)
+	}
+
+	// 匿名访问必须被拒：直链凭据不能外泄给未授权者。
+	if anon, _ := http.Get(ts.URL + "/Videos/1/proxy"); anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("proxy 未鉴权放行: status=%d", anon.StatusCode)
+	}
+	if anon, _ := http.Get(ts.URL + "/Videos/1/stream"); anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("stream 未鉴权放行: status=%d", anon.StatusCode)
 	}
 }
 

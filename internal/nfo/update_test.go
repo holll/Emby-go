@@ -3,7 +3,9 @@ package nfo
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -434,5 +436,75 @@ func TestUpdateScrapedTagNameIsolation(t *testing.T) {
 		len(meta.Taglines) != 1 || meta.Taglines[0] != "新标语" ||
 		len(meta.Studios) != 1 || meta.Studios[0] != "新厂商" {
 		t.Errorf("解析结果不对: tags=%v taglines=%v studios=%v", meta.Tags, meta.Taglines, meta.Studios)
+	}
+}
+
+// TestUpdateScrapedDollarValueIsLiteral 含 $ 的元数据必须原样写入。
+// 回归：regexp 的替换模板里未转义的 $ 会被当成捕获组引用，组号越界展开为空串——
+// "Price $100" 会被静默写成 "Price "，内容丢失且不报任何错。
+func TestUpdateScrapedDollarValueIsLiteral(t *testing.T) {
+	path := writeTempNFO(t, `<movie>
+  <title>旧</title>
+  <plot>旧简介</plot>
+</movie>
+`)
+	err := UpdateScraped(path, ScrapeFields{
+		Title: "Price $100", Plot: "立减 $5 OFF", Overwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateScraped: %v", err)
+	}
+	got := readTempNFO(t, path)
+	if !strings.Contains(got, "<title>Price $100</title>") {
+		t.Errorf("标题里的 $ 被吞:\n%s", got)
+	}
+	if !strings.Contains(got, "<plot>立减 $5 OFF</plot>") {
+		t.Errorf("简介里的 $ 被吞:\n%s", got)
+	}
+	// ${1} 形式同样不能被当成组引用。
+	if err := UpdateScraped(path, ScrapeFields{Title: "A ${1} B", Overwrite: true}); err != nil {
+		t.Fatalf("UpdateScraped: %v", err)
+	}
+	if got = readTempNFO(t, path); !strings.Contains(got, "<title>A ${1} B</title>") {
+		t.Errorf("${1} 被当成组引用:\n%s", got)
+	}
+}
+
+// TestSetActorThumbConcurrent 同一份 NFO 的并发「读-改-写」必须串行化。
+// 回归：头像任务按演员并发，多个演员共演同一部片时各自读全文、改自己那处、再原子写，
+// 无锁时后写的整份快照会盖掉先写的（丢更新），共用的 *.nfo.tmp 还会互相截断。
+func TestSetActorThumbConcurrent(t *testing.T) {
+	const n = 8
+	var body strings.Builder
+	body.WriteString("<movie>\n")
+	for i := 0; i < n; i++ {
+		body.WriteString("  <actor>\n    <name>演员" + strconv.Itoa(i) + "</name>\n  </actor>\n")
+	}
+	body.WriteString("</movie>\n")
+	path := writeTempNFO(t, body.String())
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "演员" + strconv.Itoa(i)
+			thumb := "https://cdn/" + strconv.Itoa(i) + ".jpg"
+			if _, err := SetActorThumb(path, name, thumb); err != nil {
+				t.Errorf("SetActorThumb(%s): %v", name, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	got := readTempNFO(t, path)
+	for i := 0; i < n; i++ {
+		want := "<thumb>https://cdn/" + strconv.Itoa(i) + ".jpg</thumb>"
+		if !strings.Contains(got, want) {
+			t.Errorf("并发写丢了第 %d 个演员的 thumb:\n%s", i, got)
+		}
+	}
+	if _, err := Read(path); err != nil {
+		t.Fatalf("并发改写后 NFO 无法解析: %v", err)
 	}
 }

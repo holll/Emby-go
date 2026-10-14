@@ -128,11 +128,13 @@ function setMeta(name) {
 
 /* ---------------------------------------------------------------- 总览 */
 async function pageOverview() {
+  const gen = pageGen;
   const [libraries, success, status] = await Promise.all([
     api('/libraries'),
     api('/items?status=success'),
     api('/status')
   ]);
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const pendingCount = status.pending || 0;
   const rows = [
     ['success', status.success || 0],
@@ -175,7 +177,9 @@ async function pageOverview() {
 
 /* ---------------------------------------------------------------- 媒体库 */
 async function pageLibraries() {
+  const gen = pageGen;
   const data = await api('/libraries');
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const items = data.items || [];
   const total = data.total ?? items.length;
   content.innerHTML = `
@@ -327,6 +331,7 @@ let wallState = null;
 let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索/筛选作废的过期响应
 
 async function pageItems() {
+  const gen = pageGen;
   const params = new URLSearchParams(location.search);
   // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
   if (!params.get('status') && params.get('scrape') === 'failed') {
@@ -340,6 +345,7 @@ async function pageItems() {
   // 库筛选：URL 里的 library_id 若指向已删除的库，回退「全部」并同步清洗 URL，
   // 避免刷新后一直停在空列表（旧书签/前进后退同样适用）。
   const libraries = ((await api('/libraries')).items || []);
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const requestedLib = params.get('library_id') || '';
   const libraryID = libraries.some(lib => String(lib.Id) === requestedLib) ? requestedLib : '';
   if (requestedLib && !libraryID) {
@@ -586,8 +592,11 @@ async function loadWallPage() {
 }
 
 /* ------------------------------------------------------------ 详情抽屉 */
-// 实体筛选参数：抽屉里点演员/类型/厂商/合集会带着其中一个参数回到媒体墙。
-const ENTITY_PARAMS = [['person', '演员'], ['genre', '类型'], ['studio', '厂商'], ['collection', '合集']];
+// 实体筛选参数：抽屉里点演员/类型/厂商/合集/标签会带着其中一个参数回到媒体墙。
+// 必须与后端 SearchAdmin 认识的查询参数逐一对应（admin.go 解析
+// tag/genre/studio/person/collection）；少一个，那类链接点了就等于没筛，
+// URL 里还会留下一个清不掉的参数。
+const ENTITY_PARAMS = [['person', '演员'], ['genre', '类型'], ['studio', '厂商'], ['collection', '合集'], ['tag', '标签']];
 
 const detailOverlay = document.querySelector('#detail-overlay');
 const detailDrawer = document.querySelector('#detail-drawer');
@@ -854,6 +863,13 @@ function closePlayer() {
   document.body.classList.remove('player-open');
 }
 
+// streamURL 构造播放地址。播放器是 <video>/artplayer，浏览器不会给它带
+// X-Emby-Token 这类自定义头，只能把凭据放进 query —— 后端 authOK 支持
+// ?api_key=（与 Emby 客户端一致）。stream/proxy 两个端点都要求鉴权。
+function streamURL(id, kind) {
+  return '/Videos/' + id + '/' + kind + '?api_key=' + encodeURIComponent(token || '');
+}
+
 function openPlayer(item) {
   const overlay = document.querySelector('#player-overlay');
   const title = item.Title || String(item.source_path || '').split(/[\\/]/).pop() || '播放';
@@ -867,7 +883,7 @@ function openPlayer(item) {
   let usedProxy = false;
   artInstance = new Artplayer({
     container: stage,
-    url: '/Videos/' + item.id + '/stream',
+    url: streamURL(item.id, 'stream'),
     type,
     title,
     autoplay: true,
@@ -886,7 +902,7 @@ function openPlayer(item) {
   artInstance.on('error', () => {
     if (usedProxy) { toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error'); return; }
     usedProxy = true;
-    artInstance.url = '/Videos/' + item.id + '/proxy';
+    artInstance.url = streamURL(item.id, 'proxy');
     // 回退发生在 error 回调里（非用户手势），移动端需静音才允许自动播放。
     artInstance.muted = true;
     artInstance.play().catch(() => { /* 用户可手动点播放 */ });
@@ -896,7 +912,9 @@ function openPlayer(item) {
 /* ---------------------------------------------------------------- 设置 */
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
 async function pageSettings() {
+  const gen = pageGen;
   const [s, keyData] = await Promise.all([api('/settings'), api('/apikeys')]);
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
     ['监听地址', s.listen],
     ['数据库', s.db_path],
@@ -980,7 +998,9 @@ async function renderTaskLog() {
 
 /* ---------------------------------------------------------------- 探针 */
 async function pageProbe() {
+  const gen = pageGen;
   const data = await api('/probe');
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const items = data.items || [];
   content.innerHTML = `
     <section class="panel">
@@ -1003,10 +1023,12 @@ async function pageProbe() {
 /* ---------------------------------------------------------------- 刮削 */
 // 配置存 DB（config.yaml 不设 scrape 段）；密钥只写不回显，读取时返回掩码。
 async function pageScrape() {
+  const gen = pageGen;
   const [settings, libs] = await Promise.all([api('/scrape/settings'), api('/libraries')]);
   const libraries = libs.items || [];
   const tr = settings.translate || {};
   const progress = await api('/scrape/progress').catch(() => ({}));
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
 
   content.innerHTML = `
@@ -1216,10 +1238,14 @@ async function openScrapePreview(item) {
   const body = document.querySelector('#scrape-body');
   overlay.hidden = false;
   body.innerHTML = '<p class="hint">正在搜索候选…</p>';
-  scrapeState = { movieId: item.id, preview: null, inspect: null, provider: '', id: '' };
+  // 捕获本次会话的状态对象：await 期间浮层可能被关掉（scrapeState 置 null）
+  // 或换成另一条影片，回写时必须认这个对象、而不是认全局变量。
+  const state = { movieId: item.id, preview: null, inspect: null, provider: '', id: '' };
+  scrapeState = state;
   try {
     const preview = await api(`/items/${item.id}/scrape/preview`);
-    scrapeState.preview = preview;
+    if (scrapeState !== state) return; // 已关闭或已切到另一条
+    state.preview = preview;
     if (!preview.candidates || !preview.candidates.length) {
       body.innerHTML = `<p class="hint">没有搜到候选（搜索词：${esc(preview.query || '—')}）。可先在详情里补番号，或在 NFO 里填好番号后重试。</p>`;
       return;
@@ -1227,19 +1253,23 @@ async function openScrapePreview(item) {
     const pick = preview.candidates[preview.recommended >= 0 ? preview.recommended : 0];
     await loadScrapeInspect(pick.provider, pick.id);
   } catch (e) {
+    if (scrapeState !== state) return;
     body.innerHTML = `<p class="hint" style="color:var(--danger)">${esc(e.message)}</p>`;
   }
 }
 
 async function loadScrapeInspect(provider, id) {
+  const state = scrapeState;
+  if (!state) return; // 浮层已关闭，不必也无法渲染
   const body = document.querySelector('#scrape-body');
   body.innerHTML = '<p class="hint">正在读取详情…</p>';
-  const inspect = await api(`/items/${scrapeState.movieId}/scrape/inspect`, {
+  const inspect = await api(`/items/${state.movieId}/scrape/inspect`, {
     method: 'POST', body: JSON.stringify({ provider, id })
   });
-  scrapeState.inspect = inspect;
-  scrapeState.provider = provider;
-  scrapeState.id = id;
+  if (scrapeState !== state) return; // 等待期间被关闭或切到了另一条
+  state.inspect = inspect;
+  state.provider = provider;
+  state.id = id;
   renderScrapePreview();
 }
 
@@ -1352,7 +1382,9 @@ function runBadge(status) {
 }
 
 async function pageScheduled() {
+  const gen = pageGen;
   const [data, libs] = await Promise.all([api('/scheduled'), api('/libraries')]);
+  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const items = data.items || [];
   const types = data.types || TASK_TYPE_TEXT;
   const libraries = libs.items || [];
@@ -1552,10 +1584,16 @@ const pages = {
   probe: pageProbe
 };
 
+// pageGen 是本轮导航的代号。页面函数在 await 之后拿它比对：快速连点导航时，
+// 先发出的慢请求可能后返回，把已经渲染好的新页面整页覆盖掉（导航高亮还停在新的那个）。
+let pageGen = 0;
+
 async function page(name) {
-  // 切页即换 DOM：旧页面挂着的延时句柄（探测面板自动收起）必须作废，
+  // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
   // 否则它会在新页面上命中同名元素，把不该关的面板关掉。
   cancelProbeHide();
+  cancelScanHide();
+  const gen = ++pageGen;
   setMeta(name);
   content.innerHTML = skeletonPanel();
   const fn = pages[name];
@@ -1563,6 +1601,8 @@ async function page(name) {
   try {
     await fn();
   } catch (error) {
+    // 已经切到别的页面了，这个错误属于上一次导航，别把新页面替换成错误页。
+    if (gen !== pageGen) return;
     content.innerHTML = `<div class="panel error" style="border-color:#a64952">${icon('alert')} ${esc(error.message || error)}</div>`;
   }
 }
@@ -1705,6 +1745,14 @@ const scanCount = document.querySelector('#scan-progress-count');
 const scanFill = document.querySelector('#scan-progress-fill');
 const scanDetail = document.querySelector('#scan-progress-detail');
 let scanTimer = null;
+// 扫描完成后面板自动收起的延时句柄。与 probeHideTimer 同理：
+// 句柄不托管时，上一轮排下的 4 秒定时器会关掉下一轮刚显示出来的面板
+//（而那时轮询已停，面板再也不会被显示回来）。
+let scanHideTimer = null;
+
+function cancelScanHide() {
+  if (scanHideTimer) { clearTimeout(scanHideTimer); scanHideTimer = null; }
+}
 
 function baseName(path) {
   return String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
@@ -1734,6 +1782,7 @@ function stopScanPolling() { if (scanTimer) { clearInterval(scanTimer); scanTime
 
 function startScanPolling() {
   if (scanTimer) return;
+  cancelScanHide(); // 新一轮开始：作废上一轮排下的收起定时器
   scanTimer = setInterval(async () => {
     let p = null;
     try { p = await api('/scan/progress'); } catch { /* ignore */ }
@@ -1742,7 +1791,10 @@ function startScanPolling() {
       stopScanPolling();
       const btn = document.querySelector('#scan');
       if (btn) { btn.disabled = false; btn.querySelector('span').textContent = '开始扫描'; }
-      if (p) setTimeout(() => { scanPanel.hidden = true; }, 4000);
+      if (p) {
+        cancelScanHide();
+        scanHideTimer = setTimeout(() => { scanHideTimer = null; scanPanel.hidden = true; }, 4000);
+      }
     }
   }, 600);
 }
@@ -1751,6 +1803,7 @@ async function runScan(libraryId) {
   const scanBtn = document.querySelector('#scan');
   scanBtn.disabled = true;
   scanBtn.querySelector('span').textContent = '扫描中…';
+  cancelScanHide(); // 面板要重新显示，上一轮排下的收起必须作废
   scanPanel.hidden = false;
   scanTitle.textContent = '正在扫描…';
   scanCount.textContent = '';

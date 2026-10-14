@@ -27,7 +27,11 @@ func (a *App) currentAdminName() string {
 	return a.adminName
 }
 
-func (a *App) authOK(c *gin.Context) bool {
+// requestToken 与鉴权及播放 URL 共用同一套凭据提取规则。
+func requestToken(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
 	token := c.GetHeader("X-Emby-Token")
 	if token == "" {
 		token = c.GetHeader("X-MediaBrowser-Token")
@@ -54,6 +58,11 @@ func (a *App) authOK(c *gin.Context) bool {
 			}
 		}
 	}
+	return token
+}
+
+func (a *App) authOK(c *gin.Context) bool {
+	token := requestToken(c)
 	if token == "" {
 		return false
 	}

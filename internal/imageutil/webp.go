@@ -2,6 +2,8 @@ package imageutil
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"image"
 	"image/draw"
 	"io"
@@ -18,10 +20,42 @@ import (
 // defaultQuality 未指定画质时的 webp 编码质量（与上传转码保持一致）。
 const defaultQuality = 82
 
+// maxDecodePixels 单张图解码后的像素上限（宽×高）。
+//
+// 体积上限拦不住「解压炸弹」：几百 KB 的 PNG 就能声明到数十亿像素，而
+// image.Decode 会按 宽×高×4 一次性分配内存，几 MB 的下载瞬间撑成几十 GB。
+// 所以必须先用只读头部的 DecodeConfig 拿到真实尺寸，超限直接拒绝。
+const maxDecodePixels = 50_000_000 // 5000 万像素，约 8200×6100
+
+// errImageTooLarge 表示图片声明的像素数超出 maxDecodePixels。
+var errImageTooLarge = errors.New("imageutil: 图片尺寸超出上限")
+
+// decodeLimited 先按图片头校验尺寸，再回到流开头做真正的解码。
+// 调用方的上限只管字节数，这一层才是防解压炸弹的那道闸。
+func decodeLimited(rs io.ReadSeeker) (image.Image, error) {
+	config, _, err := image.DecodeConfig(rs)
+	if err != nil {
+		return nil, err
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return nil, fmt.Errorf("imageutil: 图片尺寸非法 (%dx%d)", config.Width, config.Height)
+	}
+	if int64(config.Width)*int64(config.Height) > maxDecodePixels {
+		return nil, fmt.Errorf("%w: %dx%d", errImageTooLarge, config.Width, config.Height)
+	}
+	// DecodeConfig 已消费掉文件头，解码前必须复位，否则会从头解析失败。
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(rs)
+	return img, err
+}
+
 // EncodeWebP 把读取到的图片编码为 webp 写入 destination（destination 为最终路径）。
 // 仅用于管理端“上传即转 webp”这类显式操作；扫描不再做格式转换。
-func EncodeWebP(src io.Reader, destination string) error {
-	img, _, err := image.Decode(src)
+// src 需可定位：解码前要先读头校验尺寸，再复位到流开头。
+func EncodeWebP(src io.ReadSeeker, destination string) error {
+	img, err := decodeLimited(src)
 	if err != nil {
 		return err
 	}
@@ -58,7 +92,7 @@ func Thumbnail(srcPath string, maxWidth, maxHeight, quality int) ([]byte, error)
 	}
 	defer file.Close()
 	// webp 由本包引入的 github.com/deepteams/webp 注册进 image 包，jpeg/png 见上面的空白导入。
-	img, _, err := image.Decode(file)
+	img, err := decodeLimited(file)
 	if err != nil {
 		return nil, err
 	}

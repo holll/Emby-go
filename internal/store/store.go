@@ -953,8 +953,14 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 	if len(missing) == 0 {
 		return nil
 	}
-	// 整批一个事务：逐条 Exec 时中途失败会留下「只删了一半」的索引，
-	// 与磁盘不一致；批量 IN 也省掉几百次往返。
+	// 整批一个事务：中途失败会留下「只删了一半」的索引，与磁盘不一致
+	//（下次扫描又会把剩下的删掉，但期间索引与真实文件对不上，列表会显示已消失的片子）。
+	// 批量 IN 同时省掉几百次往返。
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	const chunk = 500
 	for start := 0; start < len(missing); start += chunk {
 		end := start + chunk
@@ -969,11 +975,11 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 			args = append(args, path)
 		}
 		query := "DELETE FROM movies WHERE library_id=? AND source_path IN (" + placeholders + ")"
-		if _, err := s.db.Exec(query, args...); err != nil {
+		if _, err := tx.Exec(query, args...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func movieScan(row *sql.Rows) (Movie, error) {
@@ -988,7 +994,7 @@ func movieScan(row *sql.Rows) (Movie, error) {
 	return m, err
 }
 
-const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
+const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,COALESCE(landscape_path,''),runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
 
 func (s *Store) Movie(id int64) (Movie, error) {
 	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id=?", id)

@@ -59,13 +59,23 @@ func (a *App) claimNFO(kind string) bool {
 		return false
 	}
 	a.nfoOwner = kind
+	a.nfoRefs++
 	return true
 }
 
 func (a *App) releaseNFO(kind string) {
 	a.nfoGate.Lock()
 	defer a.nfoGate.Unlock()
-	if a.nfoOwner == kind {
+	if a.nfoOwner != kind {
+		return
+	}
+	// 同一持有者允许多层占用（批量探测与单条探测都算 "probe"）：
+	// 逐层递减，最后一层退出才真正让出通道；否则先结束的那个会把 owner
+	// 清空，另一个仍在写 NFO 的任务就失去保护了。
+	if a.nfoRefs > 0 {
+		a.nfoRefs--
+	}
+	if a.nfoRefs == 0 {
 		a.nfoOwner = ""
 	}
 }
@@ -126,11 +136,21 @@ func (a *App) endScrape(err error) {
 	status.Current = ""
 	status.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	ctx := a.scrapeCtx
-	status.Cancelled = ctx != nil && ctx.Err() != nil && err == nil
-	if err != nil {
+	// 人工取消时 scraper 返回的是 ctx.Err()（context.Canceled），err 恒非 nil，
+	// 所以不能只认 err==nil：那样取消会被记成失败、Cancelled 永远为 false。
+	status.Cancelled = ctx != nil && ctx.Err() != nil &&
+		(err == nil || errors.Is(err, context.Canceled))
+	if err != nil && !status.Cancelled {
 		status.Error = err.Error()
 	}
+	// 必须调用 cancel 回收 context：否则每次任务结束都会在 rootCtx 上
+	// 留一个永不释放的 child；同时清空 scrapeCtx，让后续 scrapeContext()
+	// 回退到 rootCtx，而不是继续返回已结束任务的陈旧 ctx。
+	if a.scrapeCancel != nil {
+		a.scrapeCancel()
+	}
 	a.scrapeCancel = nil
+	a.scrapeCtx = nil
 	a.scrapeTaskMu.Unlock()
 }
 

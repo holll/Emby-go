@@ -80,8 +80,12 @@ type App struct {
 	// nfoGate 是「扫库 / 探测 / 刮削」三者共用的 NFO 写入通道：
 	// 三者都会「读全文 → 改局部 → 原子写」同一批 NFO，并发会互相覆盖；
 	// 刮削与整库扫描并行时 DeleteMissingSources 还可能误删。nfoOwner 记录当前持有者。
+	//
+	// nfoRefs 是同一持有者内的重入计数：批量探测与「单条探测」都用 "probe" 身份，
+	// 没有计数时先结束的那个会把 owner 清空，另一个的保护就没了。
 	nfoGate  sync.Mutex
 	nfoOwner string
+	nfoRefs  int
 
 	// 刮削任务状态。scratchCtx 挂在 rootCtx 之下，与探测任务同样的理由：
 	// 任务在 goroutine 里跑，不能用请求 context（handler 返回即取消）。
@@ -417,27 +421,30 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 			g.Handle(route.method, lower, handlers...)
 		}
 	}
-	registerStreamRoutes(g, a.stream)
-	registerProxyRoutes(g, a.proxyStream)
+	a.registerStreamRoutes(g)
+	a.registerProxyRoutes(g)
 }
 
 // registerProxyRoutes 网页播放器代理端点（透传 Range），同样注册大小写与可选扩展名。
-func registerProxyRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
+// 与其余 Emby 端点一致挂 requireAuth：这两个端点会把上游直链（常带时效签名）
+// 直接回给调用方，或由服务端代拉全量字节流，不能匿名开放。
+func (a *App) registerProxyRoutes(g *gin.RouterGroup) {
 	for _, base := range []string{"/Videos/:id/proxy", "/videos/:id/proxy"} {
-		g.GET(base, noStore, h)
-		g.HEAD(base, noStore, h)
-		g.GET(base+".:ext", noStore, h)
-		g.HEAD(base+".:ext", noStore, h)
+		g.GET(base, noStore, a.requireAuth, a.proxyStream)
+		g.HEAD(base, noStore, a.requireAuth, a.proxyStream)
+		g.GET(base+".:ext", noStore, a.requireAuth, a.proxyStream)
+		g.HEAD(base+".:ext", noStore, a.requireAuth, a.proxyStream)
 	}
 }
 
 // registerStreamRoutes 同时注册 /Videos 与 /videos 大小写，吞掉可选扩展名。
-func registerStreamRoutes(g *gin.RouterGroup, h gin.HandlerFunc) {
+// 鉴权同 registerProxyRoutes：302 的 Location 就是上游直链，匿名可访问等于凭据外泄。
+func (a *App) registerStreamRoutes(g *gin.RouterGroup) {
 	for _, base := range []string{"/Videos/:id/stream", "/videos/:id/stream"} {
-		g.GET(base, noStore, h)
-		g.HEAD(base, noStore, h)
-		g.GET(base+".:ext", noStore, h)
-		g.HEAD(base+".:ext", noStore, h)
+		g.GET(base, noStore, a.requireAuth, a.stream)
+		g.HEAD(base, noStore, a.requireAuth, a.stream)
+		g.GET(base+".:ext", noStore, a.requireAuth, a.stream)
+		g.HEAD(base+".:ext", noStore, a.requireAuth, a.stream)
 	}
 }
 
