@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/avatar"
+	"emby-go/internal/nfo"
 	"emby-go/internal/store"
 )
 
@@ -102,15 +103,31 @@ func (a *App) adminItemDetail(c *gin.Context) {
 	}
 	data, _ := a.db.DataFor([]int64{movie.ID})
 	userData, hasUserData := data[movie.ID]
+	lockedFields := make([]string, 0)
+	lockData := false
+	nfoPath := movie.NFOPath
+	if nfoPath == "" {
+		nfoPath = strings.TrimSuffix(movie.SourcePath, filepath.Ext(movie.SourcePath)) + ".nfo"
+	}
+	if meta, err := nfo.Read(nfoPath); err == nil {
+		for _, field := range strings.Split(meta.LockedFields, "|") {
+			if field = strings.TrimSpace(field); field != "" {
+				lockedFields = append(lockedFields, field)
+			}
+		}
+		lockData = strings.EqualFold(strings.TrimSpace(meta.LockData), "true")
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"movie":        movie,
-		"library_name": libraryName,
-		"userdata":     userData,
-		"has_userdata": hasUserData,
-		"files":        files,
-		"actors":       actors,
-		"modified_at":  modifiedAt(movie.SourcePath),
+		"movie":         movie,
+		"library_name":  libraryName,
+		"userdata":      userData,
+		"has_userdata":  hasUserData,
+		"files":         files,
+		"actors":        actors,
+		"modified_at":   modifiedAt(movie.SourcePath),
+		"locked_fields": lockedFields,
+		"lock_data":     lockData,
 	})
 }
 

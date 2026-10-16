@@ -158,6 +158,7 @@ type MovieMeta struct {
 	Maker         string     `xml:"maker,omitempty"`
 	Label         string     `xml:"label,omitempty"`
 	LockData      string     `xml:"lockdata,omitempty"`
+	LockedFields  string     `xml:"lockedfields,omitempty"`
 	MetaTubeID    string     `xml:"metatubeid,omitempty"`
 	TrailerURLID  string     `xml:"trailerurlid,omitempty"`
 	Set           *MovieSet  `xml:"set,omitempty"`

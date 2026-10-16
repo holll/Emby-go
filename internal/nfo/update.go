@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -51,6 +52,14 @@ type ScrapeFields struct {
 	// Overwrite=false 为「只补缺失」：某个字段在原文里已有非空值就整块跳过。
 	// 列表字段同理——列表非空即视为已有，不做并集（避免中英类型混杂）。
 	Overwrite bool
+
+	// ManualEdit 仅由人工编辑入口设置：绕过已有字段锁（仍遵守 Overwrite），
+	// 并允许修改以下锁配置。自动刮削即使 Overwrite=true 也必须遵守现有锁。
+	ManualEdit bool
+	// nil 保持原配置；非 nil 空列表解除字段锁。未知锁名原样保留。
+	LockedFields *[]string
+	// nil 保持原配置；非 nil 显式写入 true/false。
+	LockData *bool
 }
 
 // scalarTags 单值标签：找到第一个同名标签替换内容，缺失则插到 </movie> 前。
@@ -79,11 +88,13 @@ func UpdateScraped(path string, f ScrapeFields) error {
 		return err
 	}
 	indent := childIndent(text)
+	// 已持有路径锁，读取本次最新原文的锁；禁止用调用方缓存的元数据判定。
+	locked := lockedTags(text, f.ManualEdit)
 
 	// 单值标签
 	for _, tag := range scalarTags {
 		value := scalarValue(f, tag)
-		if value == "" || (hasScalar(text, tag) && !f.Overwrite) {
+		if locked[tag] || value == "" || (hasScalar(text, tag) && !f.Overwrite) {
 			continue
 		}
 		text = upsertScalar(text, tag, value, indent)
@@ -92,31 +103,81 @@ func UpdateScraped(path string, f ScrapeFields) error {
 	// 列表标签
 	for _, tag := range listTags {
 		values := listValue(f, tag)
-		if len(values) == 0 || (hasAnyBlock(text, tag) && !f.Overwrite) {
+		if locked[tag] || len(values) == 0 || (hasAnyBlock(text, tag) && !f.Overwrite) {
 			continue
 		}
 		text = replaceBlocks(text, tag, renderList(tag, values, indent), indent)
 	}
 
 	// 演员（带子元素，单独渲染）
-	if len(f.Actors) > 0 && (f.Overwrite || !hasAnyBlock(text, "actor")) {
+	if !locked["actor"] && len(f.Actors) > 0 && (f.Overwrite || !hasAnyBlock(text, "actor")) {
 		text = replaceBlocks(text, "actor", renderActors(f.Actors, indent), indent)
 	}
 
 	// 合集 <set><name>：非空才动，避免把别的工具写的 <set> 拆掉。
-	if series := strings.TrimSpace(f.Series); series != "" && (f.Overwrite || !hasAnyBlock(text, "set")) {
+	if series := strings.TrimSpace(f.Series); !locked["set"] && series != "" && (f.Overwrite || !hasAnyBlock(text, "set")) {
 		text = replaceBlocks(text, "set", []string{renderSet(series, indent)}, indent)
 	}
 
 	// uniqueid 按 type 定位，不动其它 type（trailerurl 等由别的来源维护时不能误删）。
-	if id := strings.TrimSpace(f.ProviderID); id != "" && (f.Overwrite || !hasUniqueID(text, "metatube")) {
+	if id := strings.TrimSpace(f.ProviderID); !locked["uniqueid"] && id != "" && (f.Overwrite || !hasUniqueID(text, "metatube")) {
 		text = upsertUniqueID(text, "metatube", id, indent)
 	}
-	if url := strings.TrimSpace(f.TrailerURL); url != "" && (f.Overwrite || !hasUniqueID(text, "trailerurl")) {
+	if url := strings.TrimSpace(f.TrailerURL); !locked["uniqueid"] && url != "" && (f.Overwrite || !hasUniqueID(text, "trailerurl")) {
 		text = upsertUniqueID(text, "trailerurl", url, indent)
 	}
 
+	if f.ManualEdit {
+		if f.LockedFields != nil {
+			text = replaceBlocks(text, "lockedfields", nil, indent)
+			if names := trimAll(*f.LockedFields); len(names) > 0 {
+				text = upsertScalar(text, "lockedfields", strings.Join(names, "|"), indent)
+			}
+		}
+		if f.LockData != nil {
+			text = upsertScalar(text, "lockdata", strconv.FormatBool(*f.LockData), indent)
+		}
+	}
+	if text == string(raw) {
+		return nil
+	}
 	return writeFileAtomic(path, text)
+}
+
+// lockedTags 将 Emby canonical 字段锁映射到可更新的 movie 直系标签。
+// 未识别的锁不影响其它字段，且自动更新永不改写锁原文。
+func lockedTags(text string, manual bool) map[string]bool {
+	out := make(map[string]bool)
+	if manual {
+		return out
+	}
+	mapping := map[string][]string{
+		"Name": {"title"}, "Number": {"num"}, "OriginalTitle": {"originaltitle"},
+		"Overview": {"plot"}, "ProductionYear": {"year"}, "Genres": {"genre"},
+		"Tags": {"tag"}, "Studios": {"studio"}, "Maker": {"maker"}, "Label": {"label"},
+		"SortName": {"sorttitle"}, "PremiereDate": {"premiered"},
+		"CommunityRating": {"rating"}, "OfficialRating": {"mpaa"},
+		"People": {"actor", "director"}, "Runtime": {"runtime"},
+		"Collections": {"set"}, "ProviderIds": {"uniqueid"}, "Taglines": {"tagline"},
+	}
+	all := strings.EqualFold(ScrapedTagValue(text, "lockdata"), "true")
+	for _, name := range strings.Split(ScrapedTagValue(text, "lockedfields"), "|") {
+		for field, tags := range mapping {
+			if strings.EqualFold(strings.TrimSpace(name), field) {
+				for _, tag := range tags {
+					out[tag] = true
+				}
+			}
+		}
+	}
+	if all {
+		for _, tags := range mapping {
+			for _, tag := range tags {
+				out[tag] = true
+			}
+		}
+	}
+	return out
 }
 
 // metaFromScrape 在 NFO 不存在时把刮削结果转成完整元数据（仅用于新建文件）。
@@ -127,6 +188,14 @@ func metaFromScrape(f ScrapeFields) MovieMeta {
 		Director: f.Director, Maker: f.Maker, Label: f.Label, Runtime: int64(f.Runtime),
 		Genres: f.Genres, Tags: f.Tags, Studios: f.Studios, Taglines: f.Taglines,
 		Actors: f.Actors,
+	}
+	if f.ManualEdit {
+		if f.LockedFields != nil {
+			meta.LockedFields = strings.Join(trimAll(*f.LockedFields), "|")
+		}
+		if f.LockData != nil {
+			meta.LockData = strconv.FormatBool(*f.LockData)
+		}
 	}
 	if strings.TrimSpace(f.Series) != "" {
 		meta.Set = &MovieSet{Name: f.Series}
@@ -202,13 +271,82 @@ func trimAll(values []string) []string {
 	return out
 }
 
-// findClosingMovie 返回 </movie> 的位置；没有闭合标签说明文件不完整，拒绝改写。
+// directElement 的偏移来自 XML decoder，切片替换保留未修改内容的全部原始字节。
+// 只选择无命名空间的直系元素；注释、CDATA、嵌套同名元素与扩展命名空间不参与匹配。
+type directElement struct {
+	start, end int
+	name       xml.Name
+	attrs      []xml.Attr
+}
+
+func directElements(text string) ([]directElement, int, xml.Name, error) {
+	decoder := xml.NewDecoder(strings.NewReader(text))
+	depth, closing := 0, -1
+	var root xml.Name
+	var elements []directElement
+	var current directElement
+	for {
+		start := int(decoder.InputOffset())
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, -1, root, err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if root.Local != "" {
+					return nil, -1, root, errors.New("nfo: 多个根元素")
+				}
+				root = token.Name
+			}
+			if depth == 1 {
+				current = directElement{start: start, name: token.Name, attrs: token.Attr}
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+			if depth == 1 {
+				current.end = int(decoder.InputOffset())
+				elements = append(elements, current)
+			}
+			if depth == 0 {
+				closing = start
+			}
+		}
+	}
+	if closing < 0 {
+		return nil, -1, root, errors.New("nfo: 缺少闭合根元素")
+	}
+	return elements, closing, root, nil
+}
+
+func elementsNamed(text, tag string) []directElement {
+	elements, _, _, err := directElements(text)
+	if err != nil {
+		return nil
+	}
+	out := make([]directElement, 0)
+	for _, element := range elements {
+		if element.name.Space == "" && element.name.Local == tag {
+			out = append(out, element)
+		}
+	}
+	return out
+}
+
+// findClosingMovie 同时验证全文 XML，避免将注释中的 </movie> 误认成根闭合标签。
 func findClosingMovie(text string) (int, error) {
-	index := strings.LastIndex(text, "</movie>")
-	if index < 0 {
+	_, closing, root, err := directElements(text)
+	if err != nil {
+		return 0, err
+	}
+	if root.Space != "" || root.Local != "movie" || !strings.HasPrefix(text[closing:], "</movie") {
 		return 0, errors.New("nfo: 未找到 </movie>，拒绝改写")
 	}
-	return index, nil
+	return closing, nil
 }
 
 // childIndent 取原文顶层子标签的缩进，新插入的标签沿用同一风格（默认 2 空格）。
@@ -234,41 +372,9 @@ func escape(value string) string {
 	return buf.String()
 }
 
-// escapeTemplate 把替换模板里的字面量 $ 转成 $$。
-//
-// regexp.ReplaceAllString 的第二个参数是「模板」而非字面量：$1、${1} 会被当成
-// 捕获组引用。元数据里含 $ 的值（标题 "Price $100"、简介里的 "$5 OFF"）会被
-// 当成组引用解析，组号越界时展开为空串，内容被静默吞掉且不报错。
-// 需要保留 $1 语义（沿用原文缩进）的调用点，对变量部分过一遍这个函数即可。
-func escapeTemplate(s string) string {
-	if !strings.Contains(s, "$") {
-		return s
-	}
-	return strings.ReplaceAll(s, "$", "$$")
-}
-
-// scalarPattern 匹配 <tag>…</tag>（含带属性）与自闭合 <tag/>。
-// 标签名后必须紧跟 >、空白或 /，避免 <title> 误匹配 <titles>。
-func scalarPattern(tag string) *regexp.Regexp {
-	name := regexp.QuoteMeta(tag)
-	return regexp.MustCompile(`(?s)<` + name + `(?:\s[^>]*)?>.*?</` + name + `\s*>|<` + name + `(?:\s[^>]*)?/>`)
-}
-
 // hasScalar 判断原文里是否已有该标签且内容非空。
 func hasScalar(text, tag string) bool {
-	match := scalarPattern(tag).FindString(text)
-	if match == "" {
-		return false
-	}
-	if strings.HasSuffix(match, "/>") {
-		return false
-	}
-	open := strings.IndexByte(match, '>')
-	close := strings.LastIndex(match, "</")
-	if open < 0 || close < 0 || close <= open {
-		return false
-	}
-	return strings.TrimSpace(match[open+1:close]) != ""
+	return ScrapedTagValue(text, tag) != ""
 }
 
 // upsertScalar 替换首个同名标签的内容；不存在则插到 </movie> 前。
@@ -281,15 +387,13 @@ func upsertScalar(text, tag, value, indent string) string {
 // 替换时连同行首缩进一起吃掉再重写，否则旧缩进会与新缩进叠加。
 func upsertScalarIn(text, tag, value, indent, beforeClose string) string {
 	replacement := "<" + tag + ">" + escape(value) + "</" + tag + ">"
-	if pattern := scalarLinePattern(tag); pattern.MatchString(text) {
-		// $1 是原文该行的缩进，沿用原文风格而不是统一改成 2 空格；
-		// replacement 里的 $ 要转义，否则会被当成捕获组引用吞掉内容。
-		return pattern.ReplaceAllString(text, "$1"+escapeTemplate(replacement))
+	elements := elementsNamed(text, tag)
+	for i := len(elements) - 1; i >= 0; i-- {
+		element := elements[i]
+		text = text[:element.start] + replacement + text[element.end:]
 	}
-	// 标签与其它内容同行（压缩过的 NFO）时上面的行首匹配失效，退回不带缩进的整词替换。
-	// 无 $1 需求，用字面量替换，value 里的 $ 原样写入。
-	if pattern := scalarPattern(tag); pattern.MatchString(text) {
-		return pattern.ReplaceAllLiteralString(text, replacement)
+	if len(elements) > 0 {
+		return text
 	}
 	return insertBeforeTag(text, beforeClose, indent+replacement)
 }
@@ -302,7 +406,7 @@ func scalarLinePattern(tag string) *regexp.Regexp {
 
 // hasAnyBlock 判断原文里是否至少有一个该标签块。
 func hasAnyBlock(text, tag string) bool {
-	return blockPattern(tag).MatchString(text)
+	return len(elementsNamed(text, tag)) > 0
 }
 
 // blockPattern 匹配成对标签块（不匹配自闭合，标签块都带子元素）。
@@ -311,14 +415,24 @@ func blockPattern(tag string) *regexp.Regexp {
 	return regexp.MustCompile(`(?s)<` + name + `(?:\s[^>]*)?>.*?</` + name + `\s*>`)
 }
 
-// replaceBlocks 清空该标签的全部块（连同其所在行），再插入新块。
-// rendered 的元素应已含缩进与换行。
+// replaceBlocks 删除根元素的同名直系块（包括紧凑 XML 与自闭合标签）。
+// 仅当标签独占一行时清除该行空白，不吞相邻标签、注释或扩展内容。
 func replaceBlocks(text, tag string, rendered []string, indent string) string {
-	// 连同行首缩进一起吃掉，避免残留缩进把新块顶偏。
-	pattern := regexp.MustCompile(`(?m)^[ \t]*(?s:<` + regexp.QuoteMeta(tag) + `(?:\s[^>]*)?>.*?</` + regexp.QuoteMeta(tag) + `\s*>)[ \t]*\r?\n?`)
-	text = pattern.ReplaceAllString(text, "")
-	block := strings.Join(rendered, "")
-	return insertBeforeClosingMovie(text, strings.TrimRight(block, "\n"), indent)
+	elements := elementsNamed(text, tag)
+	for i := len(elements) - 1; i >= 0; i-- {
+		start, end := elements[i].start, elements[i].end
+		lineStart := strings.LastIndexByte(text[:start], '\n') + 1
+		lineEnd := strings.IndexByte(text[end:], '\n')
+		if lineEnd >= 0 && strings.TrimSpace(text[lineStart:start]) == "" && strings.TrimSpace(text[end:end+lineEnd]) == "" {
+			start, end = lineStart, end+lineEnd+1
+		}
+		text = text[:start] + text[end:]
+	}
+	block := strings.TrimRight(strings.Join(rendered, ""), "\n")
+	if block == "" {
+		return text
+	}
+	return insertBeforeClosingMovie(text, block, indent)
 }
 
 // insertBeforeClosingMovie 把内容插到 </movie> 之前（内容自带缩进）。
@@ -331,8 +445,8 @@ func insertBeforeClosingMovie(text, content, indent string) string {
 
 // insertBeforeTag 把内容插到指定闭合标签所在行的行首之前，避免新块被塞在闭合标签的缩进之后。
 func insertBeforeTag(text, closing, content string) string {
-	index := strings.LastIndex(text, closing)
-	if index < 0 {
+	_, index, root, err := directElements(text)
+	if err != nil || closing != "</"+root.Local+">" {
 		return text
 	}
 	insertAt := strings.LastIndexByte(text[:index], '\n') + 1
@@ -383,10 +497,12 @@ func SetActorThumb(path, name, thumb string) (bool, error) {
 		return false, err
 	}
 	text := string(raw)
-	pattern := blockPattern("actor")
+	if lockedTags(text, false)["actor"] {
+		return false, nil
+	}
 	changed := false
-	for _, loc := range pattern.FindAllStringIndex(text, -1) {
-		block := text[loc[0]:loc[1]]
+	for _, element := range elementsNamed(text, "actor") {
+		block := text[element.start:element.end]
 		if ScrapedTagValue(block, "name") != name {
 			continue
 		}
@@ -394,7 +510,7 @@ func SetActorThumb(path, name, thumb string) (bool, error) {
 			return false, nil
 		}
 		replaced := upsertScalarIn(block, "thumb", thumb, actorChildIndent(block), "</actor>")
-		text = text[:loc[0]] + replaced + text[loc[1]:]
+		text = text[:element.start] + replaced + text[element.end:]
 		changed = true
 		break
 	}
@@ -443,7 +559,7 @@ func renderSet(name, indent string) string {
 }
 
 func hasUniqueID(text, kind string) bool {
-	return uniqueIDPattern(kind).MatchString(text)
+	return len(uniqueIDElements(text, kind)) > 0
 }
 
 func uniqueIDPattern(kind string) *regexp.Regexp {
@@ -452,26 +568,40 @@ func uniqueIDPattern(kind string) *regexp.Regexp {
 
 // upsertUniqueID 按 type 替换 <uniqueid>；同名 type 不存在则新增。
 func upsertUniqueID(text, kind, value, indent string) string {
-	replacement := indent + `<uniqueid type="` + kind + `">` + escape(value) + "</uniqueid>"
-	if pattern := uniqueIDPattern(kind); pattern.MatchString(text) {
-		// 字面量替换：value（如 TMDB id）虽多为数字，但同样不能让它走模板解析。
-		return pattern.ReplaceAllLiteralString(text, replacement)
+	replacement := `<uniqueid type="` + kind + `">` + escape(value) + "</uniqueid>"
+	elements := uniqueIDElements(text, kind)
+	for i := len(elements) - 1; i >= 0; i-- {
+		element := elements[i]
+		text = text[:element.start] + replacement + text[element.end:]
 	}
-	return insertBeforeClosingMovie(text, replacement, indent)
+	if len(elements) > 0 {
+		return text
+	}
+	return insertBeforeClosingMovie(text, indent+replacement, indent)
+}
+
+func uniqueIDElements(text, kind string) []directElement {
+	var out []directElement
+	for _, element := range elementsNamed(text, "uniqueid") {
+		for _, attr := range element.attrs {
+			if attr.Name.Space == "" && attr.Name.Local == "type" && strings.EqualFold(attr.Value, kind) {
+				out = append(out, element)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ScrapedTagValue 读取 NFO 里某个单值标签的当前内容（供「只补缺失」预览与 diff）。
 func ScrapedTagValue(text, tag string) string {
-	match := scalarPattern(tag).FindString(text)
-	if match == "" || strings.HasSuffix(match, "/>") {
-		return ""
+	for _, element := range elementsNamed(text, tag) {
+		var value string
+		if err := xml.Unmarshal([]byte(text[element.start:element.end]), &value); err == nil {
+			return strings.TrimSpace(value)
+		}
 	}
-	open := strings.IndexByte(match, '>')
-	close := strings.LastIndex(match, "</")
-	if open < 0 || close < 0 || close <= open {
-		return ""
-	}
-	return strings.TrimSpace(match[open+1 : close])
+	return ""
 }
 
 // TagPreview 返回 NFO 原文里若干单值标签的当前值（缺失为空串），
@@ -504,15 +634,10 @@ func ListPreview(path string) (map[string][]string, []Actor, error) {
 	text := string(raw)
 	out := make(map[string][]string, len(listTags))
 	for _, tag := range listTags {
-		pattern := blockPattern(tag)
-		for _, match := range pattern.FindAllString(text, -1) {
-			open := strings.IndexByte(match, '>')
-			close := strings.LastIndex(match, "</")
-			if open < 0 || close < 0 || close <= open {
-				continue
-			}
-			if value := strings.TrimSpace(match[open+1 : close]); value != "" {
-				out[tag] = append(out[tag], value)
+		for _, element := range elementsNamed(text, tag) {
+			var value string
+			if err := xml.Unmarshal([]byte(text[element.start:element.end]), &value); err == nil && strings.TrimSpace(value) != "" {
+				out[tag] = append(out[tag], strings.TrimSpace(value))
 			}
 		}
 	}
@@ -526,9 +651,9 @@ func ListPreview(path string) (map[string][]string, []Actor, error) {
 // LoadActors 解析原文里的 <actor> 块（含 <thumb>），用于头像真源的回读。
 func LoadActors(text string) ([]Actor, error) {
 	var out []Actor
-	for _, match := range blockPattern("actor").FindAllString(text, -1) {
+	for _, element := range elementsNamed(text, "actor") {
 		var actor Actor
-		if err := xml.Unmarshal([]byte(match), &actor); err != nil {
+		if err := xml.Unmarshal([]byte(text[element.start:element.end]), &actor); err != nil {
 			// 单个 actor 块解析失败不该让整次读取失败，跳过即可。
 			continue
 		}

@@ -104,11 +104,11 @@ type scanStatus struct {
 	Total        int    `json:"total"`
 	Done         int    `json:"done"`
 	Current      string `json:"current"`
-	Success   int    `json:"success"`
-	Pending   int    `json:"pending"`
-	Skipped   int    `json:"skipped"`
-	Failed    int    `json:"failed"`
-	StartedAt string `json:"started_at,omitempty"`
+	Success      int    `json:"success"`
+	Pending      int    `json:"pending"`
+	Skipped      int    `json:"skipped"`
+	Failed       int    `json:"failed"`
+	StartedAt    string `json:"started_at,omitempty"`
 	FinishedAt   string `json:"finished_at,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
@@ -132,11 +132,7 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.RedisAddr == "" {
 		return nil, errors.New("缺少 redis_addr：Redis 为必选缓存后端")
 	}
-	redisCache := cache.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
-	if err := redisCache.Ping(); err != nil {
-		return nil, fmt.Errorf("redis 连接失败(%s): %w", cfg.RedisAddr, err)
-	}
-	return newApp(cfg, redisCache)
+	return newApp(cfg, nil)
 }
 
 // newApp 供测试注入任意 cache 实现（如内存版），生产路径不走这里。
@@ -144,6 +140,19 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return nil, err
+	}
+	if cacheStore == nil {
+		namespace, err := db.CacheNamespace()
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		redisCache := cache.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, namespace)
+		if err := redisCache.Ping(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("redis 连接失败(%s): %w", cfg.RedisAddr, err)
+		}
+		cacheStore = redisCache
 	}
 	a := &App{
 		cfg: cfg, db: db, cache: cacheStore,

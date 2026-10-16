@@ -306,19 +306,10 @@ func (s *Store) HasAPIKey(key string) (bool, error) {
 }
 
 func (s *Store) AddLibrary(name, path string) (Library, error) {
-	res, err := s.db.Exec("INSERT INTO libraries(name,path) VALUES(?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name", name, path)
+	var id int64
+	err := s.db.QueryRow("INSERT INTO libraries(name,path) VALUES(?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name RETURNING id", name, path).Scan(&id)
 	if err != nil {
 		return Library{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Library{}, err
-	}
-	if id == 0 {
-		err = s.db.QueryRow("SELECT id FROM libraries WHERE path=?", path).Scan(&id)
-		if err != nil {
-			return Library{}, err
-		}
 	}
 	return Library{ID: id, Name: name, Path: path}, nil
 }
@@ -470,6 +461,18 @@ func (s *Store) Version(key string) string {
 	var value string
 	_ = s.db.QueryRow("SELECT value FROM kv WHERE key=?", key).Scan(&value)
 	return value
+}
+
+// CacheNamespace 与数据库一起持久化，不受相同容器路径或手工 server_id 配置影响。
+func (s *Store) CacheNamespace() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	var value string
+	err := s.db.QueryRow(`INSERT INTO kv(key,value) VALUES('cache:namespace',?)
+		ON CONFLICT(key) DO UPDATE SET value=kv.value RETURNING value`, hex.EncodeToString(buf)).Scan(&value)
+	return value, err
 }
 
 // SetKV 写一条 kv（服务身份等长期配置用）。
@@ -1100,11 +1103,11 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	case StatusAll:
 		// 明确要求不限状态（如按需处理筛选，那些条目多半还是 pending）。
 	case StatusUnscraped:
-		// 未刮削：从没发起过刮削的 pending 条目。
-		where = append(where, "status='pending' AND COALESCE(last_scrape_at,'')=''")
+		// 未刮削：没有刮削历史或错误的 pending 条目。
+		where = append(where, "status='pending' AND COALESCE(last_scrape_at,'')='' AND COALESCE(last_scrape_error,'')=''")
 	case StatusNeedsAttention:
-		// 需处理：试过刮削但没成功——失败与「待人工确认」都记在 last_scrape_error 上。
-		where = append(where, "status='pending' AND COALESCE(last_scrape_error,'')<>''")
+		// 成功刮削后丢失 NFO 也需要补救；与未刮削互斥且覆盖全部 pending。
+		where = append(where, "status='pending' AND (COALESCE(last_scrape_at,'')<>'' OR COALESCE(last_scrape_error,'')<>'')")
 	default:
 		where = append(where, "status=?")
 		args = append(args, status)
@@ -1521,7 +1524,6 @@ func (s *Store) MarkManual(sourcePath, nfoPath string) error {
 	return err
 }
 
-//
 // 扫描器据此在重建索引时保留人工录入分类：一次扫描只查一次，
 // 避免逐文件回查（两万部的库逐条 SELECT 会明显拖慢扫库）。
 func (s *Store) ManualSourcePaths(libraryID int64) (map[string]bool, error) {

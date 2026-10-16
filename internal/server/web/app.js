@@ -126,6 +126,12 @@ function setMeta(name) {
   });
 }
 
+// 异步保存只刷新提交所属的导航，不能把用户拉回已经离开的页面。
+function refreshPage(render, gen) {
+  if (gen !== pageGen) return;
+  return render();
+}
+
 /* ---------------------------------------------------------------- 总览 */
 async function pageOverview() {
   const gen = pageGen;
@@ -171,7 +177,7 @@ async function pageOverview() {
     }
     catch (e) { toast(e.message, 'error'); }
     btn.disabled = false;
-    pageOverview();
+    refreshPage(pageOverview, gen);
   });
 }
 
@@ -234,7 +240,7 @@ async function pageLibraries() {
     try {
       const lib = await api('/libraries', { method: 'POST', body: JSON.stringify(body) });
       toast(`已添加媒体库「${lib.Name}」`);
-      pageLibraries();
+      refreshPage(pageLibraries, gen);
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-lib-scan]').forEach(button => button.addEventListener('click', () => runScan(button.dataset.libScan)));
@@ -242,7 +248,7 @@ async function pageLibraries() {
     button.disabled = true;
     try {
       await api('/libraries/' + button.dataset.lib + '/move', { method: 'POST', body: JSON.stringify({ direction: button.dataset.libMove }) });
-      pageLibraries();
+      refreshPage(pageLibraries, gen);
     } catch (e) { toast(e.message, 'error'); button.disabled = false; }
   }));
   // 上传封面：所有「封面」按钮共用同一个隐藏 file input，先记住目标库再打开选择器。
@@ -261,17 +267,17 @@ async function pageLibraries() {
     try {
       await api('/libraries/' + coverTarget + '/cover', { method: 'POST', body: form });
       toast('封面已更新', 'ok');
-      pageLibraries();
+      refreshPage(pageLibraries, gen);
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-lib-cover-clear]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('移除上传的封面？将回退到目录自带图或影片代表图。')) return;
-    try { await api('/libraries/' + button.dataset.libCoverClear + '/cover', { method: 'DELETE' }); toast('封面已移除', 'ok'); pageLibraries(); }
+    try { await api('/libraries/' + button.dataset.libCoverClear + '/cover', { method: 'DELETE' }); toast('封面已移除', 'ok'); refreshPage(pageLibraries, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
   document.querySelectorAll('[data-lib-delete]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('删除该媒体库及其影片索引？不会删除磁盘文件，但该库影片的播放进度/收藏会一并清除。')) return;
-    try { await api('/libraries/' + button.dataset.libDelete, { method: 'DELETE' }); toast('媒体库已删除', 'ok'); pageLibraries(); }
+    try { await api('/libraries/' + button.dataset.libDelete, { method: 'DELETE' }); toast('媒体库已删除', 'ok'); refreshPage(pageLibraries, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
 }
@@ -332,6 +338,8 @@ let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索
 
 async function pageItems() {
   const gen = pageGen;
+  const requestGen = ++wallGen; // 必须在 /libraries 之前作废同导航内的旧筛选请求
+  wallState = null;
   const params = new URLSearchParams(location.search);
   // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
   if (!params.get('status') && params.get('scrape') === 'failed') {
@@ -345,7 +353,7 @@ async function pageItems() {
   // 库筛选：URL 里的 library_id 若指向已删除的库，回退「全部」并同步清洗 URL，
   // 避免刷新后一直停在空列表（旧书签/前进后退同样适用）。
   const libraries = ((await api('/libraries')).items || []);
-  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
+  if (gen !== pageGen || requestGen !== wallGen) return;
   const requestedLib = params.get('library_id') || '';
   const libraryID = libraries.some(lib => String(lib.Id) === requestedLib) ? requestedLib : '';
   if (requestedLib && !libraryID) {
@@ -357,9 +365,8 @@ async function pageItems() {
   const entity = ENTITY_PARAMS.map(([key, label]) => [key, label, params.get(key) || '']).find(item => item[2]) || null;
   wallState = {
     status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
-    entity, offset: 0, total: 0, loading: false, done: false, items: [], userdata: {}
+    entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: [], userdata: {}
   };
-  wallGen += 1;
 
   // 一排互斥的状态筛选：未刮削 / 需处理 互斥（合起来是全部 pending）；
   // 已刮削的片子重刮失败仍属「已刮削」，不会掉进需处理。
@@ -419,7 +426,7 @@ async function pageItems() {
     // 选中状态时清掉旧的 scrape 参数（早期书签可能两个都在）。
     qs.delete('scrape');
     pushQuery(qs);
-    pageItems();
+    refreshPage(pageItems, gen);
   }));
   // 库筛选 Tab：与状态/搜索/排序叠加，只动 library_id 一个参数。
   document.querySelectorAll('.pill[data-lib]').forEach(button => button.addEventListener('click', () => {
@@ -427,14 +434,14 @@ async function pageItems() {
     const value = button.dataset.lib;
     if (value) qs.set('library_id', value); else qs.delete('library_id');
     pushQuery(qs);
-    pageItems();
+    refreshPage(pageItems, gen);
   }));
   const libSelect = document.querySelector('#item-lib');
   if (libSelect) libSelect.addEventListener('change', () => {
     const qs = new URLSearchParams(location.search);
     if (libSelect.value) qs.set('library_id', libSelect.value); else qs.delete('library_id');
     pushQuery(qs);
-    pageItems();
+    refreshPage(pageItems, gen);
   });
   const searchInput = document.querySelector('#item-search');
   searchInput.addEventListener('input', debounce(() => {
@@ -452,14 +459,14 @@ async function pageItems() {
     q.set('sort', sortSelect.value);
     q.delete('order');
     pushQuery(q);
-    pageItems();
+    refreshPage(pageItems, gen);
   });
   const entityClear = document.querySelector('#entity-clear');
   if (entityClear) entityClear.addEventListener('click', () => {
     const qs = new URLSearchParams(location.search);
     ENTITY_PARAMS.forEach(([key]) => qs.delete(key));
     pushQuery(qs);
-    pageItems();
+    refreshPage(pageItems, gen);
   });
   const probeButton = document.querySelector('#probe-media');
   if (probeButton) probeButton.addEventListener('click', runProbeAll);
@@ -474,7 +481,7 @@ async function pageItems() {
     const reread = event.target.closest('[data-reread]');
     if (reread) {
       event.stopPropagation();
-      try { const r = await api('/items/' + reread.dataset.reread + '/reread', { method: 'POST' }); toast(`状态已更新：${STATUS_TEXT[r.status] || r.status}`); pageItems(); }
+      try { const r = await api('/items/' + reread.dataset.reread + '/reread', { method: 'POST' }); toast(`状态已更新：${STATUS_TEXT[r.status] || r.status}`); refreshPage(pageItems, gen); }
       catch (e) { toast(e.message, 'error'); }
       return;
     }
@@ -482,7 +489,7 @@ async function pageItems() {
     if (remove) {
       event.stopPropagation();
       if (!confirm('仅删除数据库索引，不删除源文件。继续？')) return;
-      try { await api('/items/' + remove.dataset.delete, { method: 'DELETE' }); toast('已删除索引', 'ok'); pageItems(); }
+      try { await api('/items/' + remove.dataset.delete, { method: 'DELETE' }); toast('已删除索引', 'ok'); refreshPage(pageItems, gen); }
       catch (e) { toast(e.message, 'error'); }
       return;
     }
@@ -521,6 +528,7 @@ function reloadWall() {
   wallState.userdata = {};
   wallState.done = false;
   wallState.loading = false;
+  wallState.failed = false;
   const wall = document.querySelector('#wall');
   if (wall) wall.innerHTML = '';
   const emptyBox = document.querySelector('#wall-empty');
@@ -532,14 +540,14 @@ function reloadWall() {
 
 // wallMaybeLoadMore 在哨兵接近视口时加载下一页（无限滚动）。
 function wallMaybeLoadMore() {
-  if (!wallState || wallState.loading || wallState.done) return;
+  if (!wallState || wallState.loading || wallState.failed || wallState.done) return;
   const more = document.querySelector('#wall-more');
   if (!more) return;
   if (more.getBoundingClientRect().top <= window.innerHeight + 600) loadWallPage();
 }
 
 async function loadWallPage() {
-  if (!wallState || wallState.loading || wallState.done) return;
+  if (!wallState || wallState.loading || wallState.failed || wallState.done) return;
   wallState.loading = true;
   const gen = wallGen;
   const more = document.querySelector('#wall-more');
@@ -581,7 +589,15 @@ async function loadWallPage() {
     if (more) more.textContent = wallState.done && data.total > 0 ? `已全部加载（共 ${data.total} 条）` : '';
   } catch (error) {
     if (!wallState || wallGen !== gen) return;
-    if (more) more.textContent = '加载失败：' + (error.message || error);
+    wallState.failed = true;
+    if (more) {
+      more.innerHTML = `<span role="alert">加载失败：${esc(error.message || error)}</span> <button class="btn btn-sm" type="button" id="wall-retry">重试</button>`;
+      more.querySelector('#wall-retry').addEventListener('click', () => {
+        if (!wallState || wallGen !== gen) return;
+        wallState.failed = false;
+        loadWallPage();
+      });
+    }
   } finally {
     if (wallState && wallGen === gen) {
       wallState.loading = false;
@@ -601,7 +617,10 @@ const ENTITY_PARAMS = [['person', '演员'], ['genre', '类型'], ['studio', '�
 const detailOverlay = document.querySelector('#detail-overlay');
 const detailDrawer = document.querySelector('#detail-drawer');
 
+let detailGen = 0;
+
 function closeDetail() {
+  detailGen += 1;
   detailOverlay.hidden = true;
   detailDrawer.innerHTML = '';
 }
@@ -660,16 +679,31 @@ function detailMetaRow(label, value, key) {
   return `<div class="detail-meta-row"><dt>${esc(label)}</dt><dd>${body}</dd></div>`;
 }
 
+const EDIT_LOCK_FIELDS = [['Name', '标题'], ['Number', '番号'], ['OriginalTitle', '原名'], ['Overview', '简介'], ['ProductionYear', '年份'], ['Genres', '类型'], ['Tags', '标签'], ['Studios', '制作商'], ['Maker', '厂商'], ['Label', '厂牌']];
+
+function editLockFields(original, inputs) {
+  const known = new Set(EDIT_LOCK_FIELDS.map(([name]) => name.toLowerCase()));
+  return [...new Set([
+    ...(original || []).filter(name => !known.has(name.toLowerCase())),
+    ...Array.from(inputs).filter(input => input.checked).map(input => input.dataset.lockField)
+  ])];
+}
+
 async function openDetail(item) {
+  const gen = pageGen;
+  const session = ++detailGen;
+  const isCurrent = () => gen === pageGen && session === detailGen;
   detailDrawer.innerHTML = '<div class="detail-body"><p class="hint">加载中…</p></div>';
   detailOverlay.hidden = false;
   let data;
   try {
     data = await api(`/items/${item.id}/detail`);
   } catch (error) {
+    if (!isCurrent()) return;
     detailDrawer.innerHTML = `<div class="detail-body"><p class="hint">${esc(error.message || error)}</p></div>`;
     return;
   }
+  if (!isCurrent()) return;
   // 注意：store.Movie 的 JSON 字段名大小写并不统一——只有少数几个字段带小写下划线 tag
   // （id / collection / official_rating / source_path / source_protocol / created_at …），
   // 其余保持 Go 字段名。取值时按接口实际返回的键来写。
@@ -681,6 +715,8 @@ async function openDetail(item) {
   const backdrop = m.BackdropPath ? `/Items/${m.id}/Images/Backdrop` : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : poster);
   const head = [numberUnlessInTitle(title, m.Number), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
   const actors = data.actors || [];
+  const lockedFields = data.locked_fields || [];
+  const lockedNames = new Set(lockedFields.map(name => name.toLowerCase()));
 
   detailDrawer.innerHTML = `
     <div class="detail-hero">
@@ -721,6 +757,11 @@ async function openDetail(item) {
           <div class="field"><label for="e-label">厂牌</label><input id="e-label" value="${esc(m.Label || '')}"></div>
           <div class="field full"><label>源地址（只读，换源请用「重读源」）</label>
             <input value="${esc(m.source_path || '')}" readonly></div>
+          <div class="field full">
+            <label class="check"><input id="e-lock-data" type="checkbox"${data.lock_data ? ' checked' : ''}> 锁定全部元数据</label>
+            <p class="hint">锁定阻止自动刮削覆盖（包括强制覆盖），仍允许人工编辑。全锁优先于以下单字段设置。</p>
+            <div class="field-grid">${EDIT_LOCK_FIELDS.map(([name, label]) => `<label class="check"><input type="checkbox" data-lock-field="${esc(name)}"${lockedNames.has(name.toLowerCase()) ? ' checked' : ''}> 锁定${esc(label)}</label>`).join('')}</div>
+          </div>
           <div class="form-foot" style="grid-column:1/-1">
             <button id="detail-edit-save" class="btn btn-accent" type="submit">${icon('plus')}<span>保存</span></button>
             <button id="detail-edit-cancel" class="btn" type="button">取消</button>
@@ -789,7 +830,7 @@ async function openDetail(item) {
   if (playBtn) playBtn.addEventListener('click', () => { closeDetail(); openPlayer(item); });
   document.querySelector('#detail-probe').addEventListener('click', async () => {
     await probeItem(m.id);
-    openDetail(item);
+    if (isCurrent()) openDetail(item);
   });
   // 单条刮削走「预览 → 人工确认」，取消则零写入零请求（需求 5j）。
   document.querySelector('#detail-scrape').addEventListener('click', () => openScrapePreview(item));
@@ -797,8 +838,9 @@ async function openDetail(item) {
     try {
       const r = await api(`/items/${m.id}/reread`, { method: 'POST' });
       toast(`状态已更新：${STATUS_TEXT[r.status] || r.status}`);
+      if (!isCurrent()) return;
       closeDetail();
-      pageItems();
+      refreshPage(pageItems, gen);
     } catch (e) { toast(e.message, 'error'); }
   });
   // 元数据编辑：默认收起，点「编辑元数据」展开（表单已随抽屉渲染，取值即可）。
@@ -814,7 +856,7 @@ async function openDetail(item) {
     event.preventDefault();
     const split = id => document.querySelector(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
     const year = Number(document.querySelector('#e-year').value) || 0;
-    // 全部字段显式提交：编辑是覆盖式人工写入，空串表示清空该字段。
+    // 人工编辑允许修改已锁定字段；空值仍按后端约定表示不修改。
     const body = {
       title: document.querySelector('#e-title').value.trim(),
       number: document.querySelector('#e-number').value.trim(),
@@ -825,15 +867,18 @@ async function openDetail(item) {
       tags: split('#e-tags'),
       studios: split('#e-studios'),
       maker: document.querySelector('#e-maker').value.trim(),
-      label: document.querySelector('#e-label').value.trim()
+      label: document.querySelector('#e-label').value.trim(),
+      locked_fields: editLockFields(lockedFields, editForm.querySelectorAll('[data-lock-field]')),
+      lock_data: document.querySelector('#e-lock-data').checked
     };
     const saveBtn = document.querySelector('#detail-edit-save');
     saveBtn.disabled = true;
     try {
       await api(`/items/${m.id}`, { method: 'PUT', body: JSON.stringify(body) });
       toast('元数据已保存（归类为手动录入）');
+      if (!isCurrent()) return;
       closeDetail();
-      pageItems();
+      refreshPage(pageItems, gen);
     } catch (e) {
       toast(e.message, 'error');
       saveBtn.disabled = false;
@@ -955,7 +1000,7 @@ async function pageSettings() {
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();
-    try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); pageSettings(); }
+    try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
@@ -964,7 +1009,7 @@ async function pageSettings() {
   }));
   document.querySelectorAll('[data-key-delete]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('删除该 API 密钥？使用它的客户端将立即失效。')) return;
-    try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); pageSettings(); }
+    try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
 }
@@ -1015,7 +1060,7 @@ async function pageProbe() {
         </table></div>` : empty('暂无探针记录', '当客户端请求了未注册的 Emby 接口后会显示在这里。')}
     </section>`;
   document.querySelector('#clear-probes').addEventListener('click', async () => {
-    try { await api('/probe', { method: 'DELETE' }); toast('探针记录已清空'); pageProbe(); }
+    try { await api('/probe', { method: 'DELETE' }); toast('探针记录已清空'); refreshPage(pageProbe, gen); }
     catch (e) { toast(e.message, 'error'); }
   });
 }
@@ -1119,7 +1164,7 @@ async function pageScrape() {
         timeout_seconds: num('#tr-timeout')
       }
     };
-    try { await api('/scrape/settings', { method: 'PUT', body: JSON.stringify(body) }); toast('配置已保存并即时生效'); pageScrape(); }
+    try { await api('/scrape/settings', { method: 'PUT', body: JSON.stringify(body) }); toast('配置已保存并即时生效'); refreshPage(pageScrape, gen); }
     catch (e) { toast(e.message, 'error'); }
   });
 
@@ -1274,6 +1319,8 @@ async function loadScrapeInspect(provider, id) {
 }
 
 function renderScrapePreview() {
+  const gen = pageGen;
+  const detailSession = detailGen;
   const body = document.querySelector('#scrape-body');
   const state = scrapeState;
   if (!state || !state.preview || !state.inspect) return;
@@ -1348,9 +1395,10 @@ function renderScrapePreview() {
         body: JSON.stringify({ provider: state.provider, id: state.id, overwrite: body.querySelector('#scrape-force').checked })
       });
       toast(`已写入「${result.title}」（图片 ${result.images} 张）`);
+      if (gen !== pageGen || scrapeState !== state) return;
       closeScrapePreview();
-      closeDetail();
-      pageItems();
+      if (detailSession === detailGen) closeDetail();
+      refreshPage(pageItems, gen);
     } catch (e) { toast(e.message, 'error'); confirmBtn.disabled = false; }
   });
 }
@@ -1506,7 +1554,7 @@ async function pageScheduled() {
     checkCron();
   }));
   if (document.querySelector('#sched-cancel')) {
-    document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledEditId = null; pageScheduled(); });
+    document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledEditId = null; refreshPage(pageScheduled, gen); });
   }
   document.querySelector('#sched-refresh').addEventListener('click', pageScheduled);
   // 任务日志区块（原「任务」页并入这里）：立即扫描用顶部的全局扫描链路，刷新只重绘日志。
@@ -1540,7 +1588,7 @@ async function pageScheduled() {
         await api('/scheduled', { method: 'POST', body: JSON.stringify(body) });
         toast(`计划任务「${body.name}」已创建`);
       }
-      pageScheduled();
+      refreshPage(pageScheduled, gen);
     } catch (e) { toast(e.message, 'error'); submit.disabled = false; }
   });
 
@@ -1549,8 +1597,8 @@ async function pageScheduled() {
     const role = el.dataset.role;
     if (role === 'toggle') {
       el.addEventListener('change', async () => {
-        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); toast('状态已更新'); pageScheduled(); }
-        catch (e) { toast(e.message, 'error'); pageScheduled(); }
+        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); toast('状态已更新'); refreshPage(pageScheduled, gen); }
+        catch (e) { toast(e.message, 'error'); refreshPage(pageScheduled, gen); }
       });
     } else if (role === 'run') {
       el.addEventListener('click', async () => {
@@ -1558,7 +1606,7 @@ async function pageScheduled() {
         catch (e) { toast(e.message, 'error'); }
       });
     } else if (role === 'edit') {
-      el.addEventListener('click', () => { scheduledEditId = Number(id); pageScheduled(); });
+      el.addEventListener('click', () => { scheduledEditId = Number(id); refreshPage(pageScheduled, gen); });
     } else if (role === 'del') {
       el.addEventListener('click', async () => {
         if (!confirm('删除该计划任务？已产生的影片数据不受影响。')) return;
@@ -1566,7 +1614,7 @@ async function pageScheduled() {
           await api('/scheduled/' + id, { method: 'DELETE' });
           if (scheduledEditId === Number(id)) scheduledEditId = null;
           toast('计划任务已删除');
-          pageScheduled();
+          refreshPage(pageScheduled, gen);
         } catch (e) { toast(e.message, 'error'); }
       });
     }

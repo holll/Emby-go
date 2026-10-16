@@ -23,7 +23,7 @@ func TestMemoryLRUAndTTL(t *testing.T) {
 }
 
 func TestRedisBehavior(t *testing.T) {
-	c := NewRedis("127.0.0.1:6379", "", 15)
+	c := NewRedis("127.0.0.1:6379", "", 15, t.TempDir()+"/cache-test.db")
 	if err := c.Ping(); err != nil {
 		t.Skipf("local Redis unavailable: %v", err)
 	}

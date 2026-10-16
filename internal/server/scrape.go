@@ -46,7 +46,7 @@ var errScrapeBusy = errors.New("刮削任务正在进行中")
 
 // claimNFO 独占 NFO 写入通道。kind 为 scan / probe / scrape / scrape_avatars。
 //
-// 已持有同一 kind 时视为可重入（例如探测内部再调扫描），返回 true 不重复占用。
+// 同类型任务通过引用计数共用通道；人工编辑/重读源必须独占，避免索引旧快照互相覆盖。
 //
 // 注意 scrape 与 scrape_avatars 用的是**不同 kind**，因此二者互斥而不是可并行——
 // 需求原计划写的是「可并行（写不同表）」，但头像任务要往每部参演影片的 NFO 里写
@@ -55,7 +55,7 @@ var errScrapeBusy = errors.New("刮削任务正在进行中")
 func (a *App) claimNFO(kind string) bool {
 	a.nfoGate.Lock()
 	defer a.nfoGate.Unlock()
-	if a.nfoOwner != "" && a.nfoOwner != kind {
+	if a.nfoOwner != "" && (a.nfoOwner != kind || kind == "edit") {
 		return false
 	}
 	a.nfoOwner = kind
@@ -93,6 +93,8 @@ func (a *App) nfoBusyOwner() string {
 		return "刮削"
 	case "scrape_avatars":
 		return "演员头像任务"
+	case "edit":
+		return "元数据编辑或重读源"
 	}
 	return ""
 }
@@ -270,19 +272,12 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 		defer a.releaseNFO("scrape")
 		return scraper.New(cfg, a.db).Run(a.scrapeContext(), opts)
 	}()
-	if err != nil {
-		a.finishTask(taskID, err)
-		a.endScrape(err)
-		a.cache.Clear()
-		slog.Warn("刮削任务提前结束", "error", err)
-		return err
-	}
 	a.finishTask(taskID, err)
 	a.endScrape(err)
 
-	// 批量路径逐部写盘时没有刷新索引，这里统一整库扫一次
-	//（图片/NFO 可能落在多个库，整库扫描本身很快）。
-	if err == nil && progress.Success > 0 {
+	// 取消或熔断不撤销此前已落盘的成功项，仍须导入这些 NFO。
+	// 扫描不使用已取消的刮削 context。
+	if progress.Success > 0 {
 		if _, scanErr := a.scanLibraries(0); scanErr != nil {
 			slog.Warn("刮削后整库扫描失败", "error", scanErr)
 		}

@@ -1113,16 +1113,13 @@ func (a *App) playing(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback payload"})
 		return
 	}
-	id, err := strconv.ParseInt(req.ItemId, 10, 64)
-	if err != nil {
+	movie, _, _, ok := a.resolvePlaybackTarget(req.ItemId)
+	if !ok || !movie.IsVisible() {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
+	// 当前用户状态以主影片为单位；合法分段共享主影片记录，进度保持分段内相对位置。
+	id := movie.ID
 	d, err := a.db.Data(id)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
@@ -1131,7 +1128,8 @@ func (a *App) playing(c *gin.Context) {
 	positionTicks := req.PositionTicks
 	stoppedTicks := int64(-1)
 	playCount := d.PlayCount
-	if strings.HasSuffix(c.Request.URL.Path, "Stopped") {
+	isStopped := strings.EqualFold(filepath.Base(c.Request.URL.Path), "Stopped")
+	if isStopped {
 		stoppedTicks = req.PositionTicks
 		if d.StoppedTicks != req.PositionTicks {
 			playCount++
@@ -1146,7 +1144,7 @@ func (a *App) playing(c *gin.Context) {
 	// 落一个 TTL 无所谓（列表 15s），代价远小于全站 cache miss 风暴。
 	// 因此：只有真正改变归属状态的 Stopped 才提升版本号（全站失效，低频）；
 	// 心跳只精确失效该片的详情缓存（它 TTL 1 小时，不失效会长时间显示旧进度）。
-	if strings.HasSuffix(c.Request.URL.Path, "Stopped") {
+	if isStopped {
 		if err := a.db.BumpVersion(movie.LibraryID); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return

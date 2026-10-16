@@ -473,13 +473,15 @@ type editRequest struct {
 	Studios       *[]string `json:"studios"`
 	Maker         *string   `json:"maker"`
 	Label         *string   `json:"label"`
+	LockedFields  *[]string `json:"locked_fields"`
+	LockData      *bool     `json:"lock_data"`
 }
 
 // adminEdit 编辑影片元数据。
 //
 // 只写 NFO，不写 movies 表：元数据真源是 NFO，索引由 `RescanOne` 重建——
 // 直接 UpsertMovie 会把状态写回 success，人工录入的分类就留不住了
-//（重扫时 scanner 会按库里已有的 manual 集合保留它）。
+// （重扫时 scanner 会按库里已有的 manual 集合保留它）。
 func (a *App) adminEdit(c *gin.Context) {
 	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
 	if e != nil {
@@ -496,6 +498,20 @@ func (a *App) adminEdit(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid json"})
 		return
 	}
+	if req.LockedFields != nil {
+		for _, field := range *req.LockedFields {
+			if strings.ContainsAny(field, "|\r\n") {
+				c.JSON(400, gin.H{"error": "字段锁名称不能包含分隔符或换行"})
+				return
+			}
+		}
+	}
+	// 覆盖 NFO、manual 标记和索引刷新必须处于同一通道内，阻止旧扫描结果回写。
+	if !a.claimNFO("edit") {
+		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		return
+	}
+	defer a.releaseNFO("edit")
 	nfoPath := strings.TrimSpace(m.NFOPath)
 	if nfoPath == "" {
 		// 没有 NFO 的条目（未刮削）以 .strm 同名路径为落点，UpdateScraped 会新建。
@@ -508,7 +524,7 @@ func (a *App) adminEdit(c *gin.Context) {
 	// 走标签级更新而不是「读成结构体 → 整体重写」：NFO 里可能有外部工具写的
 	// 扩展标签，整体重写会静默丢掉它们（见 internal/nfo/update.go 的说明）。
 	// Overwrite=true：编辑是人工显式覆盖，空值仍表示「本次不修改该字段」。
-	fields := nfo.ScrapeFields{Overwrite: true}
+	fields := nfo.ScrapeFields{Overwrite: true, ManualEdit: true, LockedFields: req.LockedFields, LockData: req.LockData}
 	if req.Title != nil {
 		fields.Title = strings.TrimSpace(*req.Title)
 	}
@@ -579,6 +595,11 @@ func (a *App) adminReread(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
+	if !a.claimNFO("edit") {
+		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		return
+	}
+	defer a.releaseNFO("edit")
 	movie, err := a.db.Movie(id)
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})

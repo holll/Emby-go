@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"emby-go/internal/imageutil"
@@ -73,8 +74,14 @@ func (s *Scraper) MovieInfo(ctx context.Context, provider, id string) (metatube.
 func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.MovieInfo, opts ApplyOptions) (ApplyResult, error) {
 	result := ApplyResult{MovieID: movie.ID, Provider: info.Provider, ProviderID: providerID(info.Provider, info.ID)}
 	result.Number = info.Number
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 
 	title, plot, translated := s.translateFields(ctx, info)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	result.Title, result.Translated = title, translated
 
 	// 版本标记（-C / -U / -UC）取自文件名：既写进 NFO 标签，也给主海报贴角标。
@@ -87,6 +94,9 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 	}
 	if s.cfg.DownloadImages {
 		for _, target := range imageTargets {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
 			// 角标只贴主海报（primary）：thumb/backdrop 在客户端是宽幅背景图，贴角标会挡画面。
 			badge := ""
 			if hasMark && target.kind == "primary" {
@@ -94,6 +104,9 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 			}
 			path, err := s.downloadImage(ctx, info, target.kind, filepath.Join(dir, target.name), badge, opts.Overwrite)
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, ctxErr
+				}
 				// 图片尽力而为：元数据成功即算成功（需求 A5 #28）。
 				slog.Warn("刮削下载图片失败", "movie_id", movie.ID, "kind", target.kind, "error", err)
 				result.ImageWarn = append(result.ImageWarn, target.kind+": "+err.Error())
@@ -107,7 +120,14 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 	}
 
 	fields := buildFields(info, title, plot, opts.Overwrite, mark)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if err := writeNFO(movie, fields); err != nil {
+		return result, err
+	}
+	// 已提交的文件不回滚，但取消后不再更新刮削状态或触发重扫。
+	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	if s.store != nil {
@@ -151,6 +171,10 @@ func (s *Scraper) translateFields(ctx context.Context, info metatube.MovieInfo) 
 	}
 	response, err := s.tr.Translate(ctx, texts)
 	if err != nil {
+		// 取消交给 Apply 返回，不能作为普通失败继续用原文覆盖 NFO。
+		if ctx.Err() != nil {
+			return title, plot, false
+		}
 		slog.Warn("刮削翻译失败，已回退原文", "provider", info.Provider, "id", info.ID, "error", err)
 		return title, plot, false
 	}
@@ -170,10 +194,16 @@ func (s *Scraper) translateFields(ctx context.Context, info metatube.MovieInfo) 
 	return title, plot, true
 }
 
+// 唯一临时文件隔离编码，目标路径锁串行提交，兼容 Windows 的并发替换限制。
+var imageCommitLocks sync.Map
+
 // downloadImage 下载一张图并转 webp 落盘；只补缺失模式下已有文件则跳过（返回空路径）。
 // badge 非空时由后端把角标合成进图里再返回（只对主海报传）。
 func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, kind, dest, badge string,
 	overwrite bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !overwrite {
 		if stat, err := os.Stat(dest); err == nil && !stat.IsDir() && stat.Size() > 0 {
 			return "", nil
@@ -183,6 +213,9 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	// 某些来源没有某类图时后端会返回错误，我们记 warn 跳过（图片尽力而为）。
 	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQualityValue(), "", badge)
 	data, err := s.client.Download(ctx, url, maxImageBytes)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
 	if err != nil {
 		return "", err
 	}
@@ -192,13 +225,43 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", err
 	}
-	tmp := dest + ".tmp"
+	// 同目录唯一临时文件：独立刮削请求可并发写同一目标，清理只涉及本次文件。
+	file, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+"-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	// EncodeWebP 按路径打开文件；先关闭 CreateTemp 的句柄以兼容 Windows。
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := imageutil.EncodeWebP(bytes.NewReader(data), tmp); err != nil {
-		_ = os.Remove(tmp)
 		return "", fmt.Errorf("转 webp 失败: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	key, err := filepath.Abs(dest)
+	if err != nil {
+		return "", err
+	}
+	value, _ := imageCommitLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !overwrite {
+		if stat, err := os.Stat(dest); err == nil && !stat.IsDir() && stat.Size() > 0 {
+			return "", nil
+		}
+	}
 	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.Remove(tmp)
 		return "", err
 	}
 	return dest, nil

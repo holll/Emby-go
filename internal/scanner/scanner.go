@@ -73,11 +73,11 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 	groups := make(map[string][]candidate)
 	err = filepath.Walk(lib.Path, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
-			// 单个目录不可读时跳过该目录，不因此中止整库重建（否则失效索引永远清不掉）。
-			if info != nil && info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+			// 遍历不完整不能据此判定文件已删除，否则会级联清除观看记录。
+			return walkErr
+		}
+		if path == lib.Path && !info.IsDir() {
+			return errors.New("媒体库路径不是目录: " + lib.Path)
 		}
 		if info.IsDir() || !strings.EqualFold(filepath.Ext(path), ".strm") {
 			return nil
@@ -263,6 +263,14 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	// 非 http(s) 源（ed2k 等）直接跳过：它们永远无法通过 Emby 播放，
 	// 写进 movies 表只会污染列表与统计。只在扫描结果里报个数。
 	if !ValidHTTP(line) {
+		// 同一路径可能曾经是有效源，单文件重扫也必须剔除旧的可播放索引。
+		if id, err := s.MovieIDByPath(item.path); err == nil {
+			if err := s.DeleteMovie(id); err != nil && !store.NotFound(err) {
+				return err
+			}
+		} else if !store.NotFound(err) {
+			return err
+		}
 		result.Skipped++
 		return nil
 	}
