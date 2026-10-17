@@ -112,7 +112,7 @@
 
 ## 3. 验收 A01–A15
 
-**全部未执行**（自动子集也尚无真实实例结果）。验收定义与断言见 `docs/architecture-database-frontend-review-2026-10-16.md` §9；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
+**生产验收全部未执行**；自动子集已于 2026-10-17 用真实二进制+假 Redis+合成媒体本地跑通（见 §3.1），不等于部署验收。验收定义与断言见 `docs/architecture-database-frontend-review-2026-10-16.md` §9；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
 
 自动子集（批次 52 新增，`internal/server/acceptance_test.go`）：
 
@@ -127,21 +127,34 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 |---|---|---|---|
 | A01 认证 | 自动（待补：可控时钟/撤销） | 迁移 3 会话期限（D01） | 测试名 + 输出 |
 | A02 旧缓存 | 自动（待补：缓存故障注入） | Redis 双实例/断连注入 | 测试名 + 输出 |
-| A03 迁移/UI/权限 | 自动子集（401/登录）+ 人工（旧库升级、key UI） | 旧版本 DB fixture、浏览器 | acceptance 输出 + 截图 |
+| A03 迁移/UI/权限 | 自动子集（401/登录）**本地通过**；人工（旧库升级、key UI）待做 | 旧版本 DB fixture、浏览器 | acceptance 输出 + 截图 |
 | A04 原子/版本 | 自动（现有 store 用例）+ 人工（提交后杀进程） | 可注入失败的 commit 屏障 | 测试名 + 日志 |
-| A05 播放 | 自动（acceptance + 单测） | 已初始化实例、≥1 部影片 | acceptance 输出 |
+| A05 播放 | 自动（acceptance + 单测）**本地真实二进制通过**（双会话/重放/迟到心跳） | 已初始化实例、≥1 部影片 | acceptance 输出 |
 | A06 文件/索引 | 人工（NFO 失败/部分成功） | 可写失败目录（只读卷） | 日志 + 文件快照 |
 | A07 扫描 | 自动（scanner 回归）+ 人工（断源/删除前取消） | 可断源目录、SIGTERM 时机 | 测试名 + 日志 |
 | A08 迁移 | 自动（migrations_test 篡改/漂移）+ 人工（只读卷） | 每个支持版本 fixture | 测试名 + 输出 |
 | A09 恢复/回退 | 人工 | T0 备份 + 旧二进制 + Redis | 演练记录（D11 批准后） |
 | A10 任务 | 自动（scan_tasks 单测）+ 人工（崩溃/取消） | 真实进程 kill -9 | 测试名 + 日志 |
-| A11 退出 | 自动（health/shutdown 单测）+ 人工（SIGTERM 演练） | 部署侧 30s 宽限 | 测试名 + 演练记录 |
+| A11 退出 | 单测 + 自动（health）；**本地 SIGTERM 实跑通过**；503 窗口/长流/超时路径待演练 | 部署侧 30s 宽限 | 测试名 + 演练记录 |
 | A12 跨层兼容 | 自动（现有契约测试）+ 人工（旧客户端） | 旧版 Emby 客户端 | 测试名 + 抓包/截图 |
 | A13 浏览器/a11y | 人工（浏览器矩阵） | D12 批准矩阵、Playwright | 录屏/截图 + 用例 ID |
-| A14 入口/资源 | 自动子集（413/401/健康）+ 人工（暴力/慢头/canary） | 压测工具、代理拓扑 | acceptance + 报告 |
+| A14 入口/资源 | 自动子集（413/401/健康）**本地通过**；暴力/慢头/canary 待做 | 压测工具、代理拓扑 | acceptance + 报告 |
 | A15 性能/语义 | 人工（固定硬件基线） | D12 阈值、同参数前后采样 | p95/p99 报告 |
 
-> 自动化只证明协议/计数层；D12 未批前 A13/A15 不得标通过。真实实例验收需要可登录的部署（本机无 Redis，无法本地起生产二进制）。
+> 自动化只证明协议/计数层；D12 未批前 A13/A15 不得标通过。生产验收仍需可登录部署。
+
+### 3.1 本地真实二进制冒烟（2026-10-17，批次 53）
+
+环境：本机 Go 1.27.2；`cmd/metatube` 编译后以临时 `config.yaml`（端口 18099、临时 SQLite）启动；Redis 由**仅验收用**的 RESP 假服务替代（支持 HELLO3/CLIENT/PING/GET/SET/DEL/SCAN，未入库）；媒体库放合成 `.strm`+`.nfo`。
+
+结果：
+
+- `ACCEPTANCE_BASE_URL=http://127.0.0.1:18099 … go test ./internal/server -run TestAcceptanceLive -v` → **PASS**（0.09s）；服务端日志可见 401/413/登录/两次 Playing+Stopped/迟到 Progress 的实际请求序列。
+- A03 未认证 401、A14 1 MiB+ → 413、A11 `/api/health` 200 均在真实 HTTP 栈上验证。
+- A05：两个 PlaySessionId 同位置各计一次 → `PlayCount=2`；重放 Stopped 与迟到 Progress 后仍为 2（真实二进制+SQLite，非 httptest）。
+- A11 退出：`kill -TERM` 后日志「收到退出信号：开始有界关闭 budget=15s」→「已退出」，进程正常退出（未触发 15s 强制路径）；readiness 503 窗口需并发压测复核。
+
+未覆盖：生产 Redis 语义/网络、真实 Emby 客户端、TLS/反代、真实媒体文件、并发与压测、Go 1.25 工具链。以上仍属「未执行」。
 
 ## 4. 阶段 R0–R4
 
@@ -196,6 +209,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 50 | BE-07 扫描异步化：202+task_id、1h 幂等、容量 200、状态查询；旧 /scan 保留 |
 | 51 | DB-02 播放会话/事件表（迁移 2）：序列号、重复停止幂等、停止后迟到心跳忽略、原子计数 |
 | 52 | 验收集骨架：验收矩阵回填格式、D04/D01/D06 提案、env 门控的实时实例自动验收（A03/A05/A11/A14） |
+| 53 | 本地真实二进制冒烟：假 Redis+合成媒体跑通 TestAcceptanceLive（A03/A05/A11/A14）与 SIGTERM 退出 |
 
 ## 7. 文档漂移修复记录
 
