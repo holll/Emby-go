@@ -1272,7 +1272,7 @@ async function pageScrape() {
         <div class="panel-actions"><span class="hint" id="scrape-count" style="margin:0"></span></div>
       </div>
       <div class="filters">
-        <select id="sc-lib"><option value="0">全部媒体库</option>${libOptions}</select>
+        <select id="sc-lib" aria-label="媒体库"><option value="0">全部媒体库</option>${libOptions}</select>
         <label class="check"><input id="sc-only-missing" type="checkbox" checked> 仅处理缺失元数据的影片</label>
         <label class="check"><input id="sc-force" type="checkbox"> 本次强制覆盖</label>
         <button id="scrape-start" class="btn btn-accent btn-sm">${icon('film')}<span>开始刮削</span></button>
