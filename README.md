@@ -124,6 +124,7 @@ server_id: ""             # 留空自动生成稳定 UUID
 redis_addr: "127.0.0.1:6379"   # Redis 必选缓存后端
 redis_password: ""
 redis_db: 0
+session_ttl_days: 30      # 登录会话有效期（天），0=不过期；使用中自动续期
 server_domains: []        # 前端“服务器域名切换”候选
 ```
 

@@ -119,6 +119,12 @@ func baselineChecksum() string {
 // Validate against an isolated canonical schema instead of maintaining a second
 // hand-written list of expected columns. Column order may differ in legacy DBs.
 // Unknown/malformed structures fail closed rather than earning a migration stamp.
+// migrationAddedColumns 是后续迁移在 baseline 表上新增的列：校验只放行这些已知定义，
+// 其它未备案列仍然按漂移失败处理。
+var migrationAddedColumns = map[string]map[string]string{
+	"access_tokens": {"expires_at": "INTEGER"},
+}
+
 func validateBaseline(db schemaDB) error {
 	reference, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -141,6 +147,13 @@ func validateBaseline(db schemaDB) error {
 		got, err := tableColumns(db, table)
 		if err != nil {
 			return err
+		}
+		for name, wantType := range migrationAddedColumns[table] {
+			column, ok := got[name]
+			if !ok || column.Type != wantType {
+				return fmt.Errorf("schema drift in table %s (expected migrated column %s %s)", table, name, wantType)
+			}
+			delete(got, name)
 		}
 		if !reflect.DeepEqual(got, want) {
 			return fmt.Errorf("schema drift in table %s (columns, types, defaults or constraints)", table)
@@ -476,6 +489,29 @@ func applyMigration2(tx *sql.Tx) error {
 	return nil
 }
 
+const sessionExpiryMigrationVersion = 3
+
+// migration3Statements 给登录会话加过期时间（unix 秒，NULL=不过期）。
+// 旧行按 created_at + 30 天回填；created_at 无法解析时保持 NULL（不过期），
+// 避免把未知历史数据误判为已过期。
+var migration3Statements = []string{
+	`ALTER TABLE access_tokens ADD COLUMN expires_at INTEGER`,
+	`UPDATE access_tokens SET expires_at = CAST(strftime('%s', created_at) AS INTEGER) + 2592000 WHERE expires_at IS NULL`,
+}
+
+func migration3Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration3Statements, "\n"))))
+}
+
+func applyMigration3(tx *sql.Tx) error {
+	for _, statement := range migration3Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration 3: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -508,6 +544,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case sessionExpiryMigrationVersion:
+			if checksum != migration3Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -529,6 +570,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[sessionExpiryMigrationVersion] {
+		if err := applyMigration3(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -541,6 +587,11 @@ func (s *Store) migrate() error {
 	if !applied[playbackMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", playbackMigrationVersion, migration2Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", playbackMigrationVersion, err)
+		}
+	}
+	if !applied[sessionExpiryMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", sessionExpiryMigrationVersion, migration3Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", sessionExpiryMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

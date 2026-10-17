@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -66,7 +67,8 @@ func (a *App) authOK(c *gin.Context) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
-	valid, err := a.db.HasAccessToken(token)
+	// D01：登录会话带过期时间与滑动续期；API key 走独立表、不参与过期。
+	valid, err := a.db.ValidateAccessToken(token, time.Now(), a.sessionTTL)
 	if err != nil || valid {
 		return valid, err
 	}
@@ -100,6 +102,27 @@ func (a *App) logout(c *gin.Context) {
 	}
 	// Exec returns only after the autocommit delete completes successfully.
 	c.Status(http.StatusNoContent)
+}
+
+// sessionExpiry 计算新会话的过期时间；TTL=0 返回零值（存 NULL，永不过期）。
+func (a *App) sessionExpiry(now time.Time) time.Time {
+	if a.sessionTTL <= 0 {
+		return time.Time{}
+	}
+	return now.Add(a.sessionTTL)
+}
+
+// adminRevokeAllSessions 撤销全部登录会话；调用方当前会话也会失效。
+// API 密钥不受影响（D02 已确认其为独立的全权凭据）。
+func (a *App) adminRevokeAllSessions(c *gin.Context) {
+	revoked, err := a.db.RevokeAllAccessTokens()
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "session revocation unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"revoked": revoked})
 }
 
 // authRateLimited 在 IP 或账号超出失败预算时写 429 并返回 true。
@@ -206,7 +229,7 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	a.setAdminName(username)
 	token := hex.EncodeToString(b)
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := a.db.SaveAccessTokenExpiring(token, a.sessionExpiry(time.Now())); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存访问令牌失败"})
 		return
 	}

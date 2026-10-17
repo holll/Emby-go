@@ -692,6 +692,8 @@ func (a *App) adminSettings(c *gin.Context) {
 		"redis_addr":   a.cfg.RedisAddr,
 		"redis_db":     a.cfg.RedisDB,
 		"redis_online": true,
+		// D01：0 表示登录会话永不过期。
+		"session_ttl_days": a.cfg.SessionTTLDays,
 	})
 }
 

@@ -445,3 +445,55 @@ func TestAcceptanceManualEdit(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// TestAcceptanceSessionRevoke 覆盖 A01 中可远端验证的部分：注销当前会话与撤销全部会话。
+// 撤销全部会话会影响该实例上的其它登录（包括正在操作的会话），因此必须显式开启：
+//
+//	ACCEPTANCE_BASE_URL=... ACCEPTANCE_PASS=... ACCEPTANCE_ALLOW_REVOKE=1 \
+//	go test ./internal/server -run TestAcceptanceSessionRevoke -v
+//
+// 过期边界本身由 store 层的可控时钟单测覆盖（A01 的可控时钟人工项仍未闭环）。
+func TestAcceptanceSessionRevoke(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("ACCEPTANCE_BASE_URL"), "/")
+	if base == "" {
+		t.Skip("未设置 ACCEPTANCE_BASE_URL，跳过真实实例验收")
+	}
+	if os.Getenv("ACCEPTANCE_ALLOW_REVOKE") != "1" {
+		t.Skip("未设置 ACCEPTANCE_ALLOW_REVOKE=1，跳过撤销全部会话（会影响实例上的其它登录）")
+	}
+	pass := os.Getenv("ACCEPTANCE_PASS")
+	if pass == "" {
+		t.Fatal("ACCEPTANCE_PASS 必填")
+	}
+	user := os.Getenv("ACCEPTANCE_USER")
+	if user == "" {
+		user = "admin"
+	}
+	client := &acceptanceClient{base: base, http: &http.Client{Timeout: 15 * time.Second}}
+
+	token := client.login(t, user, pass)
+	if status, body := client.do(t, http.MethodGet, "/api/admin/settings", nil, token); status != http.StatusOK {
+		t.Fatalf("A01 新会话应可用 status=%d body=%s", status, body)
+	}
+	if status, body := client.do(t, http.MethodPost, "/Sessions/Logout", nil, token); status != http.StatusNoContent {
+		t.Fatalf("A01 注销当前会话 status=%d body=%s", status, body)
+	}
+	if status, body := client.do(t, http.MethodGet, "/api/admin/settings", nil, token); status != http.StatusUnauthorized {
+		t.Fatalf("A01 注销后仍可用 status=%d body=%s", status, body)
+	}
+
+	token = client.login(t, user, pass)
+	status, body := client.do(t, http.MethodDelete, "/api/admin/access-tokens", nil, token)
+	if status != http.StatusOK {
+		t.Fatalf("A01 撤销全部会话 status=%d body=%s", status, body)
+	}
+	var revoked struct{ Revoked int }
+	if err := json.Unmarshal(body, &revoked); err != nil || revoked.Revoked < 1 {
+		t.Fatalf("A01 撤销全部会话 body=%s err=%v", body, err)
+	}
+	if status, body := client.do(t, http.MethodGet, "/api/admin/settings", nil, token); status != http.StatusUnauthorized {
+		t.Fatalf("A01 撤销全部后仍可用 status=%d body=%s", status, body)
+	}
+	// 重新登录必须仍然可用（撤销不影响凭据本身）。
+	_ = client.login(t, user, pass)
+}

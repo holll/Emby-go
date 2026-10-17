@@ -28,6 +28,9 @@ type Config struct {
 	RedisDB       int            `yaml:"redis_db"`
 	ServerDomains []ServerDomain `yaml:"server_domains"`
 
+	// 登录会话有效期（天）。滑动续期；0 表示永不过期（兼容旧部署）。
+	SessionTTLDays int `yaml:"session_ttl_days"`
+
 	// 媒体信息探测（独立于扫库）：调用系统 ffprobe 读取真实技术参数并写回 NFO。
 	FFProbePath      string `yaml:"ffprobe_path"`          // ffprobe 可执行文件路径；留空则从 PATH 查找
 	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测超时（秒），默认 90
@@ -40,6 +43,7 @@ type Config struct {
 const (
 	defaultProbeTimeoutSec  = 90
 	defaultProbeConcurrency = 2
+	defaultSessionTTLDays   = 30
 )
 
 // ProbeTimeout 返回单条探测超时。
@@ -63,6 +67,14 @@ func (c Config) ProbeWorkers() int {
 	return workers
 }
 
+// SessionTTL 返回登录会话有效期；0 表示不过期。
+func (c Config) SessionTTL() time.Duration {
+	if c.SessionTTLDays <= 0 {
+		return 0
+	}
+	return time.Duration(c.SessionTTLDays) * 24 * time.Hour
+}
+
 // Addr 返回 http 监听地址（":"+port；默认 18080）。
 func (c Config) Addr() string {
 	if c.Port <= 0 {
@@ -73,7 +85,7 @@ func (c Config) Addr() string {
 
 // Redis 为必选缓存后端：服务启动时即连接并 Ping，连不上直接拒绝启动。
 func Load(path string) (Config, error) {
-	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", path: path}
+	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", SessionTTLDays: defaultSessionTTLDays, path: path}
 	if path == "" {
 		return cfg, nil
 	}

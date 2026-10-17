@@ -1108,7 +1108,8 @@ async function pageSettings() {
     ['监听地址', s.listen],
     ['数据库', s.db_path],
     ['缓存后端', s.cache + (s.redis_addr ? ` · ${s.redis_addr}/${s.redis_db}` : '')],
-    ['Redis 在线', s.redis_online ? '是' : '否']
+    ['Redis 在线', s.redis_online ? '是' : '否'],
+    ['登录会话有效期', s.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : '永不过期']
   ];
   const keys = keyData.items || [];
   content.innerHTML = `
@@ -1118,6 +1119,12 @@ async function pageSettings() {
         <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
       </table></div>
       <p class="hint">配置修改后需重启服务生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>登录会话</h2></div>
+      <p class="hint" style="margin:0 0 12px">退出全部会话会让本机与其它设备上的登录令牌立即失效（API 密钥不受影响）；当前页面也会回到登录页。</p>
+      <button id="logout-all" class="btn btn-danger">${icon('trash')}<span>退出全部会话</span></button>
     </section>
 
     <section class="panel">
@@ -1147,6 +1154,16 @@ async function pageSettings() {
     const name = String(new FormData(event.target).get('name') || '').trim();
     try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
+  });
+  const logoutAll = document.querySelector('#logout-all');
+  if (logoutAll) logoutAll.addEventListener('click', async () => {
+    if (!confirm('退出全部登录会话？其它设备需要重新登录，API 密钥不受影响。')) return;
+    try {
+      const result = await api('/access-tokens', { method: 'DELETE' });
+      toast(`已退出 ${result.revoked} 个会话`, 'ok');
+      localStorage.removeItem('emby_token');
+      setTimeout(() => window.location.replace('/'), 800);
+    } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(button.dataset.copy); toast('已复制密钥', 'ok'); }

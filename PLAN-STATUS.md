@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 15 包全绿；373 个 Test 函数（server 29.2s / store 11.6s）；真实实例验收 1 个（env 未设时跳过） |
+| `go test ./...` | 15 包全绿；383 个 Test 函数（server 29.9s / store 11.9s；3 个实时验收用例未设 env 时跳过）；实时验收 3 个（A01/A05/A06 等子集，env 未设时跳过） |
 | `node --test internal/server/web_test.cjs` | 79/79 通过 |
 | 测试形态 | httptest + 内存库为主；无真实 Emby 客户端、真实浏览器、生产库、备份恢复演练 |
 | CI | 首次实跑 run 39049816235（`f5f860f`）：**go ✅（4m50s）/ web ✅ / vuln ❌**——vuln 失败原因是 CI 用 Go 1.26.0，标准库 `net/http` 调用链命中漏洞；随后 go.mod 上调 1.27.0 并重跑 |
@@ -24,7 +24,7 @@
 
 | 编号 | 问题 | 状态 | 批次 | 剩余边界（摘要） |
 |---|---|---|---|---|
-| BE-01 | 会话无有效期、Logout 不撤销 | ◐ | 2,3 | 无 expires_at/revoked_at；只撤当前会话；不追撤在途请求/长流/已发直链；无强杀/掉电演练 |
+| BE-01 | 会话无有效期、Logout 不撤销 | ◐ | 2,3,64 | 已实现 expires_at（迁移 3，旧行回填 created_at+30 天）、30 天滑动续期、撤销当前会话与撤销全部会话（管理 API+设置页）；剩余：无 revoked_at 撤销清单、在途请求/长流/已发直链不追撤、无强杀/掉电演练 |
 | BE-02 | 播放 key 与管理会话无权限隔离 | ✅ | 48 | D02 具名接受：API key 即管理员凭据，UI/README 明确标注；无 scope 执行本身；多用户版本需重开 |
 | BE-03 | 日志脱敏不完整 | ◐ | 16,28,32 | 仅请求诊断/debug/NoRoute/密钥事件、认证入口、启动自检；上游 URL/错误、媒体 path、子进程输出、历史日志未审计 |
 | BE-04 | 退出未等后台任务闭环 | ◐ | 3, 49 | 已实现 SIGTERM/SIGINT → readiness 立即失败、scheduler.Stop、探测/刮削取消、workerWG 有界 join、HTTP Shutdown 与后台 drain 共享 15s 预算、超时强制退出且不先关 DB；剩余：长流不撤销（D09 设计）、部署侧 systemd/存活探针/30s 宽限与真实客户端 drain 未演练 |
@@ -68,7 +68,7 @@
 
 | ID | 待定项 | 卡住 |
 |---|---|---|
-| D01 | ✅ 已批（2026-10-18）：会话 TTL 30 天滑动（迁移 3 增 `expires_at`）；logout 撤销当前 token；管理页可撤销全部会话；API key 不设过期但可撤销；升级时旧 token 统一补 30 天期限，不追溯吊销 | BE-01 完整化（批次 64 待实现） |
+| D01 | ✅ 已批（2026-10-18）：会话 TTL 30 天滑动（迁移 3 增 `expires_at`）；logout 撤销当前 token；管理页可撤销全部会话；API key 不设过期但可撤销；升级时旧 token 统一补 30 天期限，不追溯吊销 | BE-01 完整化（批次 64 已落地） |
 | D02 | ✅ 已批（2026-10-17）：API 密钥=管理员全权凭据，具名接受风险；未来多用户时非管理员不得建 key；图片保持匿名。不实现 scope 隔离 | BE-02 以风险接受关闭 |
 | D03 | ✅ 已批（2026-10-18）：按 §2.4 默认值——密钥摘要使用 HMAC-SHA256 + 服务端 secret（迁移 3 保留旧明文列一个版本，双读窗口后可删）；管理面只展示前缀；旧 fixture 同步更新 | DB-01 放行、key 摘要迁移 |
 | D04 | ✅ 已批（2026-10-18）：按 §2.3 默认值——单实例单写、Redis 必选、反代终止 TLS、默认不信任 XFF、初始化仅回环/显式 CIDR、预算沿用批次 41/42；公网仍需 A03/A14 + D01 落地 | BE-05、BE-09、公网启用（★） |
@@ -133,7 +133,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 | 项 | 方式 | 前置/环境 | 证据 |
 |---|---|---|---|
-| A01 认证 | 自动（待补：可控时钟/撤销） | 迁移 3 会话期限（D01） | 测试名 + 输出 |
+| A01 认证 | 自动（撤销：`TestAcceptanceSessionRevoke`，需 `ACCEPTANCE_ALLOW_REVOKE=1`）；过期边界由 store 可控时钟单测覆盖，HTTP 级可控时钟待补 | 迁移 3 会话期限（D01）**已落地**（批次 64） | 测试名 + 输出 |
 | A02 旧缓存 | 自动（待补：缓存故障注入） | Redis 双实例/断连注入 | 测试名 + 输出 |
 | A03 迁移/UI/权限 | 自动子集（401/登录）**本地通过**；人工（旧库升级、key UI）待做 | 旧版本 DB fixture、浏览器 | acceptance 输出 + 截图 |
 | A04 原子/版本 | 自动（现有 store 用例）+ 人工（提交后杀进程） | 可注入失败的 commit 屏障 | 测试名 + 日志 |
@@ -181,7 +181,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 阶段 | 判断 | 说明 |
 |---|---|---|
 | R0 基线 | ◐ | 测试/vet/race 基线与 CI 工作流已建；本机已按 `ci.yml` 全量镜像（build/vet/test、server+outbound race 233s、前端 79/79 全绿）；真实 fixture、拓扑、观测、备份演练、RPO/RTO 未批；GitHub 首次实跑仍未做 |
-| R1 认证 | ◐ | BE-01/03/06 局部；BE-02、key 迁移未做；A01–A03/A08–A09/A14 未执行 |
+| R1 认证 | ◐ | BE-01 会话期限/撤销全部已落地（批次 64），BE-01/03/06 局部；BE-02、key 迁移未做；A01–A03/A08–A09/A14 未执行 |
 | R1-D 部署门禁 | ◐ | BE-05 批次 41、BE-09 批次 42 已建默认收紧（读超时/413/429/代理头、出站协议与地址策略）；TLS、初始化引导、历史泄露处置、D04 批准未完成；未过则不得公网暴露 |
 | R1-N 正确性 | ◐（最大进展） | DB-09、DB-03 多写路径、DB-02 播放会话/事件（批次 51）、FE-01/02/13 阶段 1/14 子项 |
 | R2 生命周期 | ◐ | BE-08 批次 47 主体、BE-04 批次 49、FE-03/05/06 局部、FE-09 批次 44、FE-10 批次 45、FE-04 批次 46；FE-07/15 未做 |
@@ -197,9 +197,9 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 5. ~~**DB-02**~~ 已完成（批次 51）：D07 会话/序号协议落地，重复/迟到停止不会再改计数。
 6. **验收集**：自动子集已建（`TestAcceptanceLive`，A03/A05/A11/A14）；真实 Emby 客户端冒烟 + Playwright 覆盖 FE-03/04/07/08/09/10；先回填 A04–A07、A11–A14。
 7. ~~**CI**：新增 build/vet/test/node-test 工作流。~~ 已建（2026-10-17），已在本机按工作流命令全量镜像通过（test 全套、`-race ./internal/server ./internal/outbound` 233s、web 79/79）；尚未 push，GitHub 首次实跑未确认。
-8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。
+8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。D01 会话期限与撤销全部会话已落地（批次 64，含迁移 3、设置页与 API）。
 
-## 6. 批次映射（1–48）
+## 6. 批次映射（1–64）
 
 | 批次 | 主题 |
 |---|---|
@@ -233,6 +233,14 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 54 | CI 增 gofmt 门禁与 store race（播放并发）；补 D03/D05/D08/D11/D12 建议默认值 |
 | 55 | 验收集扩 A06 并发计数（8 并发精确 +8）与 A10 扫描任务 202/轮询/幂等重放 |
 | 56 | A07 人工编辑 NFO 往返（严格 PATCH→重扫不回写）与 A09 本机恢复演练 |
+| 57 | A15 固定机器性能基线：5000 部扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 48MB |
+| 58 | A02 升级会话不失效：旧版本创建 token，新版删除后旧二进制仍可用、新二进制拒绝 |
+| 59 | A12/A13 无障碍修复：媒体卡嵌套交互与名称不匹配，axe 复跑 0 violations |
+| 60 | A12 跨浏览器 3×7 页巡检 + 纯键盘流程；A13 修复刮削页 select 可访问名 |
+| 61 | A12 功能级断言：API key 创建/使用/删除、计划任务、元数据编辑、播放器开合 |
+| 62 | A15 扫描中混合负载：5930 请求 0 错误、p95 55ms、扫描 success=5000 |
+| 63 | 依赖安全升级（x/net/x/text/x/crypto/x/sys、go 1.26）+ CI govulncheck 门禁 |
+| 64 | D01 会话期限：迁移 3 `expires_at`（旧行回填 30 天）、滑动续期、撤销全部会话 API/设置页；`session_ttl_days` 配置 |
 | 57 | A15 性能冒烟：5000 部合成库扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 47MB |
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |

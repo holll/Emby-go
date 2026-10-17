@@ -32,6 +32,8 @@ type App struct {
 	adminName  string
 	serverID   string
 	serverName string
+	// sessionTTL 是登录会话有效期（0=不过期），来自配置 session_ttl_days。
+	sessionTTL time.Duration
 	taskMu     sync.Mutex
 	tasks      []task
 	nextTaskID int64
@@ -193,6 +195,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if a.serverName == "" {
 		a.serverName = "Emby-go"
 	}
+	a.sessionTTL = cfg.SessionTTL()
 	a.serverID = cfg.ServerID
 	if a.serverID == "" {
 		// 未显式配置则在本库生成稳定 UUID，避免重启漂移（客户端以 ServerId 识别实例）。
@@ -386,6 +389,8 @@ func (a *App) routes() {
 	admin.GET("/apikeys", a.adminAPIKeys)
 	admin.POST("/apikeys", a.adminCreateAPIKey)
 	admin.DELETE("/apikeys/:key", a.adminDeleteAPIKey)
+	// D01：撤销全部登录会话（API 密钥不受影响）。
+	admin.DELETE("/access-tokens", a.adminRevokeAllSessions)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)

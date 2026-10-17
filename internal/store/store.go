@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -212,6 +213,60 @@ func (s *Store) AdministratorName() (string, error) {
 func (s *Store) SaveAccessToken(token string) error {
 	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at) VALUES(?,?)", token, time.Now().UTC().Format(time.RFC3339))
 	return err
+}
+
+// SaveAccessTokenExpiring 保存登录会话并写入过期时间；expiresAt 为零值时不过期。
+// 与 SaveAccessToken 共存：后者服务于历史/测试夹具（NULL=不过期）。
+func (s *Store) SaveAccessTokenExpiring(token string, expiresAt time.Time) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if expiresAt.IsZero() {
+		_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at) VALUES(?,?,NULL)", token, now)
+		return err
+	}
+	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at) VALUES(?,?,?)", token, now, expiresAt.Unix())
+	return err
+}
+
+// ValidateAccessToken 校验会话是否有效：无行=false；过期=删除并 false；
+// 剩余不足 ttl-24h 时滑动续期（写失败不影响本次认证，避免把续期故障放大成 401）。
+// expires_at 为 NULL（TTL=0 或无法回填的旧行）时视为不过期。
+func (s *Store) ValidateAccessToken(token string, now time.Time, ttl time.Duration) (bool, error) {
+	var expires sql.NullInt64
+	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token=?", token).Scan(&expires); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !expires.Valid {
+		return true, nil
+	}
+	expiry := time.Unix(expires.Int64, 0)
+	if !now.Before(expiry) {
+		if _, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", token); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if ttl > 0 {
+		threshold := ttl - 24*time.Hour
+		if threshold < 0 {
+			threshold = 0
+		}
+		if expiry.Sub(now) < threshold {
+			_, _ = s.db.Exec("UPDATE access_tokens SET expires_at=? WHERE token=?", now.Add(ttl).Unix(), token)
+		}
+	}
+	return true, nil
+}
+
+// RevokeAllAccessTokens 让所有登录会话立即失效；API 密钥不在删除范围内。
+func (s *Store) RevokeAllAccessTokens() (int64, error) {
+	result, err := s.db.Exec("DELETE FROM access_tokens")
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // DeleteAccessToken revokes only the supplied login session. It is idempotent

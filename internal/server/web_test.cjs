@@ -237,6 +237,16 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
+test('设置页提供会话期限说明与退出全部会话', () => {
+  for (const snippet of [
+    '登录会话有效期',
+    's.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : \'永不过期\'',
+    'id="logout-all" class="btn btn-danger"',
+    "api('/access-tokens', { method: 'DELETE' })",
+    '已退出 ${result.revoked} 个会话'
+  ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
+});
+
 test('遮罩层级决定 Esc 目标，Tab 在顶层遮罩循环并恢复触发焦点', () => {
   const log = [];
   const focusable = name => ({ name, hidden: false, disabled: false, focus() { log.push(name); } });
