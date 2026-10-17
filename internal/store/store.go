@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -284,15 +285,24 @@ func (s *Store) HasAccessToken(token string) (bool, error) {
 	return count == 1, nil
 }
 
+// apiKeyHash 是 API 密钥的摘要（密钥本身为 192 位随机值，SHA-256 足够）。
+func apiKeyHash(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
 // APIKey 长期凭据：与登录令牌一样可作 X-Emby-Token / api_key 调用 Emby API。
+// D03：库里只存 SHA-256 摘要与前缀；Key 仅创建响应返回一次，列表为空。
 type APIKey struct {
-	Key       string `json:"key"`
+	ID        string `json:"id"`
+	Key       string `json:"key,omitempty"`
+	KeyPrefix string `json:"key_prefix"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
 }
 
 func (s *Store) APIKeys() ([]APIKey, error) {
-	rows, err := s.db.Query("SELECT key,name,created_at FROM api_keys ORDER BY created_at DESC, key")
+	rows, err := s.db.Query("SELECT COALESCE(key_hash,''),COALESCE(key_prefix,''),name,created_at FROM api_keys ORDER BY created_at DESC, key")
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +310,7 @@ func (s *Store) APIKeys() ([]APIKey, error) {
 	out := make([]APIKey, 0)
 	for rows.Next() {
 		var v APIKey
-		if err := rows.Scan(&v.Key, &v.Name, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.KeyPrefix, &v.Name, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -313,13 +323,16 @@ func (s *Store) CreateAPIKey(name string) (APIKey, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return APIKey{}, err
 	}
-	v := APIKey{Key: hex.EncodeToString(buf), Name: strings.TrimSpace(name), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	_, err := s.db.Exec("INSERT INTO api_keys(key,name,created_at) VALUES(?,?,?)", v.Key, v.Name, v.CreatedAt)
+	key := hex.EncodeToString(buf)
+	hash := apiKeyHash(key)
+	v := APIKey{ID: hash, Key: key, KeyPrefix: key[:12], Name: strings.TrimSpace(name), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	_, err := s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at) VALUES(?,?,?,?,?)", hash, hash, v.KeyPrefix, v.Name, v.CreatedAt)
 	return v, err
 }
 
-func (s *Store) DeleteAPIKey(key string) error {
-	result, err := s.db.Exec("DELETE FROM api_keys WHERE key=?", key)
+func (s *Store) DeleteAPIKey(id string) error {
+	// 同时接受摘要 ID 与旧明文（后者按摘要匹配），便于升级前已打开的页面继续工作。
+	result, err := s.db.Exec("DELETE FROM api_keys WHERE key_hash=? OR key=?", apiKeyHash(id), id)
 	if err != nil {
 		return err
 	}
@@ -335,7 +348,7 @@ func (s *Store) DeleteAPIKey(key string) error {
 
 func (s *Store) HasAPIKey(key string) (bool, error) {
 	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM api_keys WHERE key=?", key).Scan(&count); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM api_keys WHERE key_hash=? OR key=?", apiKeyHash(key), key).Scan(&count); err != nil {
 		return false, err
 	}
 	return count == 1, nil

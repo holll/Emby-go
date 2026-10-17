@@ -249,6 +249,17 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
+test('API 密钥只显示前缀，新密钥原文仅展示一次', () => {
+  for (const snippet of [
+    'let createdAPIKey = null;',
+    '${esc(item.key_prefix || \'—\')}…',
+    'data-key-delete="${esc(item.id)}"',
+    'data-copy-created',
+    'createdAPIKey = created.key || null;',
+    '新密钥只显示这一次'
+  ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
+});
+
 test('设置页提供会话期限说明与退出全部会话', () => {
   for (const snippet of [
     '登录会话有效期',

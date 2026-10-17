@@ -123,6 +123,7 @@ func baselineChecksum() string {
 // 其它未备案列仍然按漂移失败处理。
 var migrationAddedColumns = map[string]map[string]string{
 	"access_tokens": {"expires_at": "INTEGER"},
+	"api_keys":      {"key_hash": "TEXT", "key_prefix": "TEXT"},
 }
 
 func validateBaseline(db schemaDB) error {
@@ -512,6 +513,59 @@ func applyMigration3(tx *sql.Tx) error {
 	return nil
 }
 
+const apiKeyHashMigrationVersion = 4
+
+// migration4Statements 把 API 密钥改为 SHA-256 摘要存储：保留 key 列作为非敏感标识，
+// 列表只回显前缀。旧明文行由 applyMigration4 逐行改写，原文不保留。
+var migration4Statements = []string{
+	`ALTER TABLE api_keys ADD COLUMN key_hash TEXT`,
+	`ALTER TABLE api_keys ADD COLUMN key_prefix TEXT`,
+	`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`,
+}
+
+func migration4Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration4Statements, "\n"))))
+}
+
+func applyMigration4(tx *sql.Tx) error {
+	for _, statement := range migration4Statements[:2] {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration 4: %w", err)
+		}
+	}
+	rows, err := tx.Query("SELECT key FROM api_keys WHERE key_hash IS NULL")
+	if err != nil {
+		return fmt.Errorf("schema migration 4: %w", err)
+	}
+	var legacy []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return fmt.Errorf("schema migration 4: %w", err)
+		}
+		legacy = append(legacy, key)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("schema migration 4: %w", err)
+	}
+	for _, key := range legacy {
+		hash := apiKeyHash(key)
+		prefix := key
+		if len(prefix) > 12 {
+			prefix = prefix[:12]
+		}
+		if _, err := tx.Exec("UPDATE api_keys SET key_hash=?, key_prefix=?, key=? WHERE key=?", hash, prefix, hash, key); err != nil {
+			return fmt.Errorf("schema migration 4: %w", err)
+		}
+	}
+	if _, err := tx.Exec(migration4Statements[2]); err != nil {
+		return fmt.Errorf("schema migration 4: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -549,6 +603,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case apiKeyHashMigrationVersion:
+			if checksum != migration4Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -575,6 +634,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[apiKeyHashMigrationVersion] {
+		if err := applyMigration4(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -592,6 +656,11 @@ func (s *Store) migrate() error {
 	if !applied[sessionExpiryMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", sessionExpiryMigrationVersion, migration3Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", sessionExpiryMigrationVersion, err)
+		}
+	}
+	if !applied[apiKeyHashMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", apiKeyHashMigrationVersion, migration4Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", apiKeyHashMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

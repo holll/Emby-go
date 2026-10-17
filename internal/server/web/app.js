@@ -1,5 +1,7 @@
 /* Emby-go 管理控制台前端 —— 单文件，无依赖 */
 let token = localStorage.getItem('emby_token');
+// D03：新建密钥的原文只在创建后显示一次，刷新/离开页面即丢弃。
+let createdAPIKey = null;
 const content = document.querySelector('#content');
 const titleEl = document.querySelector('#page-title');
 const crumbEl = document.querySelector('#page-eyebrow');
@@ -1130,16 +1132,21 @@ async function pageSettings() {
     <section class="panel">
       <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
       <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>
+      ${createdAPIKey ? `<div class="warning-block" role="note">新密钥只显示这一次，请立即复制并妥善保存：
+        <code id="created-key" class="mono">${esc(createdAPIKey)}</code>
+        <div class="row-actions" style="margin-top:8px">
+          <button class="btn btn-sm" data-copy-created="${esc(createdAPIKey)}">复制新密钥</button>
+          <button class="btn btn-sm" id="dismiss-created-key">我已保存</button>
+        </div></div>` : ''}
       ${keys.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${keys.map(item => `<tr>
             <td><strong class="title">${esc(item.name || '—')}</strong></td>
-            <td class="mono">${esc(item.key)}</td>
+            <td class="mono">${esc(item.key_prefix || '—')}…</td>
             <td class="mono">${esc(item.created_at || '—')}</td>
             <td><div class="row-actions">
-              <button class="btn btn-sm" data-copy="${esc(item.key)}">复制</button>
-              <button class="icon-btn danger" data-key-delete="${esc(item.key)}" title="删除密钥">${icon('trash')}</button>
+              <button class="icon-btn danger" data-key-delete="${esc(item.id)}" title="删除密钥">${icon('trash')}</button>
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有管理员 API 密钥', '在下方创建后即可用 X-Emby-Token 调用全部接口。')}
@@ -1152,7 +1159,12 @@ async function pageSettings() {
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();
-    try { await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) }); toast('密钥已创建'); refreshPage(pageSettings, gen); }
+    try {
+      const created = await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) });
+      createdAPIKey = created.key || null;
+      toast('密钥已创建');
+      refreshPage(pageSettings, gen);
+    }
     catch (e) { toast(e.message, 'error'); }
   });
   const logoutAll = document.querySelector('#logout-all');
@@ -1165,6 +1177,12 @@ async function pageSettings() {
       setTimeout(() => window.location.replace('/'), 800);
     } catch (e) { toast(e.message, 'error'); }
   });
+  document.querySelectorAll('[data-copy-created]').forEach(button => button.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(button.dataset.copyCreated); toast('新密钥已复制', 'ok'); }
+    catch { toast('复制失败，请手动选择', 'error'); }
+  }));
+  const dismissKey = document.querySelector('#dismiss-created-key');
+  if (dismissKey) dismissKey.addEventListener('click', () => { createdAPIKey = null; refreshPage(pageSettings, gen); });
   document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(button.dataset.copy); toast('已复制密钥', 'ok'); }
     catch { toast('复制失败，请手动选择', 'error'); }

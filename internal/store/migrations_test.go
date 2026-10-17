@@ -74,7 +74,7 @@ INSERT INTO scheduled_tasks(name,type,cron,params,created_at,updated_at) VALUES(
 			"SELECT title FROM movies WHERE id=1":                         "legacy title",
 			"SELECT additional_parts FROM movies WHERE id=1":              "[]",
 			"SELECT password_hash FROM administrators WHERE id=1":         "fixture-hash",
-			"SELECT name FROM api_keys WHERE key='fixture-key'":           "legacy key",
+			"SELECT name FROM api_keys WHERE key_prefix='fixture-key'":    "legacy key",
 			"SELECT actor_name FROM movie_actors WHERE movie_id=1":        "legacy actor",
 			"SELECT avatar_url FROM actors WHERE name='legacy actor'":     "https://example.invalid/a.jpg",
 			"SELECT value FROM settings WHERE key='fixture-setting'":      "retained",
@@ -135,7 +135,8 @@ func TestMigrationRejectsUnknownOrModifiedLedger(t *testing.T) {
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=1",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=2",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=3",
-		"INSERT INTO schema_migrations VALUES(4,'future','t0')",
+		"UPDATE schema_migrations SET checksum='tampered' WHERE version=4",
+		"INSERT INTO schema_migrations VALUES(5,'future','t0')",
 	} {
 		t.Run(statement, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "check.db")

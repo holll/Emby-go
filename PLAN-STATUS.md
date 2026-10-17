@@ -12,8 +12,8 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 15 包全绿；386 个 Test 函数（server 29.9s / store 12.4s；3 个实时验收用例未设 env 时跳过）；实时验收 3 个（A01/A05/A06 等子集，env 未设时跳过） |
-| `node --test internal/server/web_test.cjs` | 80/80 通过 |
+| `go test ./...` | 15 包全绿；389 个 Test 函数（server 30.6s / store 12.4s；3 个实时验收用例未设 env 时跳过）；实时验收 3 个（A01/A05/A06 等子集，env 未设时跳过） |
+| `node --test internal/server/web_test.cjs` | 81/81 通过 |
 | 测试形态 | httptest + 内存库为主；无真实 Emby 客户端、真实浏览器、生产库、备份恢复演练 |
 | CI | 首次实跑 run 39049816235（`f5f860f`）：**go ✅（4m50s）/ web ✅ / vuln ❌**——vuln 失败原因是 CI 用 Go 1.26.0，标准库 `net/http` 调用链命中漏洞；随后 go.mod 上调 1.27.0 并重跑 |
 | 生产放行 | **否**。A01–A15 未全执行（A01 等 D01 落地）；D01–D12 已全部批准，公网门禁另需 A03/A14 + D01 会话期限实现 |
@@ -199,7 +199,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 7. ~~**CI**：新增 build/vet/test/node-test 工作流。~~ 已建（2026-10-17），已在本机按工作流命令全量镜像通过（test 全套、`-race ./internal/server ./internal/outbound` 233s、web 79/79）；尚未 push，GitHub 首次实跑未确认。
 8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。D01 会话期限与撤销全部会话已落地（批次 64，含迁移 3、设置页与 API）。
 
-## 6. 批次映射（1–65）
+## 6. 批次映射（1–66）
 
 | 批次 | 主题 |
 |---|---|
@@ -242,6 +242,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 63 | 依赖安全升级（x/net/x/text/x/crypto/x/sys、go 1.26）+ CI govulncheck 门禁 |
 | 64 | D01 会话期限：迁移 3 `expires_at`（旧行回填 30 天）、滑动续期、撤销全部会话 API/设置页；`session_ttl_days` 配置 |
 | 65 | D04 公网初始化门禁：`setup_code`（初始化验证码）、`initialize_allow_from`（来源 CIDR）、`trusted_proxies`（代理头信任）、启动警告与公网部署文档 |
+| 66 | D03 API 密钥摘要化：迁移 4 `key_hash`/`key_prefix`，旧明文行改写；列表仅前缀，原文只在创建时返回一次 |
 | 57 | A15 性能冒烟：5000 部合成库扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 47MB |
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |
