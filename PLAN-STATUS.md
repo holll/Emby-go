@@ -161,8 +161,10 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A03 未认证 401、A14 1 MiB+ → 413、A11 `/api/health` 200 均在真实 HTTP 栈上验证。
 - A05：两个 PlaySessionId 同位置各计一次 → `PlayCount=2`；重放 Stopped 与迟到 Progress 后仍为 2（真实二进制+SQLite，非 httptest）。
 - A11 退出：`kill -TERM` 后日志「收到退出信号：开始有界关闭 budget=15s」→「已退出」，进程正常退出（未触发 15s 强制路径）；readiness 503 窗口需并发压测复核。
+- A06 子集（批次 55）：8 个会话对同一影片并发 `Stopped`（各自 PlaySessionId）→ 全部 204，`PlayCount` 精确 +8；真实 SQLite 写事务无丢更新/500。
+- A10 子集（批次 55）：`POST /api/admin/tasks/scan?library_id=1` + `Idempotency-Key` → 202+`task_id=3`；轮询状态到 `succeeded`；同 key 重放 → 202、`replayed=true`、同一 `task_id`。
 
-未覆盖：生产 Redis 语义/网络、真实 Emby 客户端、TLS/反代、真实媒体文件、并发与压测、Go 1.25 工具链。以上仍属「未执行」。
+未覆盖：生产 Redis 语义/网络、真实 Emby 客户端、TLS/反代、真实媒体文件、更大并发与压测（8 并发只覆盖计数写链）、Go 1.25 工具链、任务表重启丢失语义的演练。以上仍属「未执行」。
 
 ## 4. 阶段 R0–R4
 
@@ -219,6 +221,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 52 | 验收集骨架：验收矩阵回填格式、D04/D01/D06 提案、env 门控的实时实例自动验收（A03/A05/A11/A14） |
 | 53 | 本地真实二进制冒烟：假 Redis+合成媒体跑通 TestAcceptanceLive（A03/A05/A11/A14）与 SIGTERM 退出 |
 | 54 | CI 增 gofmt 门禁与 store race（播放并发）；补 D03/D05/D08/D11/D12 建议默认值 |
+| 55 | 验收集扩 A06 并发计数（8 并发精确 +8）与 A10 扫描任务 202/轮询/幂等重放 |
 
 ## 7. 文档漂移修复记录
 

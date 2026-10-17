@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -167,4 +169,175 @@ func (c *acceptanceClient) playCount(t *testing.T, token, itemID string) int64 {
 		t.Fatalf("详情 JSON: %v (%s)", err, out)
 	}
 	return parsed.UserData.PlayCount
+}
+
+// TestAcceptanceConcurrentPlayback（A06 子集）：同一影片、多个会话并发停止时，
+// play_count 必须精确加 N，不得丢更新或 500。验证真实实例上的 SQLite 写事务。
+//
+//	ACCEPTANCE_BASE_URL=... ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
+//	ACCEPTANCE_CONCURRENCY=8 go test ./internal/server -run TestAcceptanceConcurrentPlayback -v
+func TestAcceptanceConcurrentPlayback(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("ACCEPTANCE_BASE_URL"), "/")
+	if base == "" {
+		t.Skip("未设置 ACCEPTANCE_BASE_URL，跳过真实实例验收")
+	}
+	pass := os.Getenv("ACCEPTANCE_PASS")
+	if pass == "" {
+		t.Fatal("ACCEPTANCE_PASS 必填")
+	}
+	concurrency := 8
+	if v := os.Getenv("ACCEPTANCE_CONCURRENCY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 2 || n > 32 {
+			t.Fatalf("ACCEPTANCE_CONCURRENCY 需为 2-32 的整数，得到 %q", v)
+		}
+		concurrency = n
+	}
+	client := &acceptanceClient{base: base, http: &http.Client{Timeout: 30 * time.Second}}
+	token := client.login(t, userOrDefault(), pass)
+	itemID, baseCount, ok := client.pickItem(t, token)
+	if !ok {
+		t.Skip("实例媒体库为空，并发播放计数验收需先入库至少一部影片")
+	}
+
+	// 并发停止：每个会话一个独立 PlaySessionId，停在同一位点。
+	// 用 error channel 而不是 t.Fatalf，避免在非测试 goroutine 里终止。
+	var wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]any{
+				"ItemId":        itemID,
+				"PositionTicks": 300_000_000,
+				"PlaySessionId": fmt.Sprintf("acceptance-conc-%d-%d", time.Now().UnixNano(), i),
+			})
+			req, err := http.NewRequest(http.MethodPost, base+"/Sessions/Playing/Stopped", bytes.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Emby-Token", token)
+			resp, err := client.http.Do(req)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if resp.StatusCode != http.StatusNoContent {
+				errs <- fmt.Errorf("并发停止 status=%d", resp.StatusCode)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("A06 并发停止失败: %v", err)
+		}
+	}
+	if got := client.playCount(t, token, itemID); got != baseCount+int64(concurrency) {
+		t.Fatalf("A06 并发后 PlayCount=%d，期望 %d", got, baseCount+int64(concurrency))
+	}
+}
+
+func userOrDefault() string {
+	if v := os.Getenv("ACCEPTANCE_USER"); v != "" {
+		return v
+	}
+	return "admin"
+}
+
+// TestAcceptanceScanTaskAPI（A10 子集）：异步扫描的 202+task_id、状态轮询、
+// Idempotency-Key 重放返回同一任务。会触发一次真实媒体库扫描，默认跳过。
+//
+//	ACCEPTANCE_BASE_URL=... ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
+//	ACCEPTANCE_ALLOW_SCAN=1 go test ./internal/server -run TestAcceptanceScanTaskAPI -v
+func TestAcceptanceScanTaskAPI(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("ACCEPTANCE_BASE_URL"), "/")
+	if base == "" {
+		t.Skip("未设置 ACCEPTANCE_BASE_URL，跳过真实实例验收")
+	}
+	if os.Getenv("ACCEPTANCE_ALLOW_SCAN") != "1" {
+		t.Skip("未设置 ACCEPTANCE_ALLOW_SCAN=1，跳过会触发扫描的验收")
+	}
+	pass := os.Getenv("ACCEPTANCE_PASS")
+	if pass == "" {
+		t.Fatal("ACCEPTANCE_PASS 必填")
+	}
+	client := &acceptanceClient{base: base, http: &http.Client{Timeout: 30 * time.Second}}
+	token := client.login(t, userOrDefault(), pass)
+
+	status, out := client.do(t, http.MethodGet, "/api/admin/libraries", nil, token)
+	if status != http.StatusOK {
+		t.Fatalf("A10 媒体库列表 status=%d body=%s", status, out)
+	}
+	var libs struct {
+		Items []struct{ Id int64 }
+	}
+	if err := json.Unmarshal(out, &libs); err != nil || len(libs.Items) == 0 {
+		t.Skipf("实例没有媒体库，跳过扫描任务验收 (%v)", err)
+	}
+	libraryID := libs.Items[0].Id
+	key := fmt.Sprintf("acceptance-scan-%d", time.Now().UnixNano())
+
+	submit := func() (int, int64, bool) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost,
+			fmt.Sprintf("%s/api/admin/tasks/scan?library_id=%d", base, libraryID), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Emby-Token", token)
+		req.Header.Set("Idempotency-Key", key)
+		resp, err := client.http.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		var parsed struct {
+			TaskID   int64 `json:"task_id"`
+			Replayed bool  `json:"replayed"`
+		}
+		if err := json.Unmarshal(raw, &parsed); err != nil || parsed.TaskID == 0 {
+			t.Fatalf("A10 提交扫描 status=%d body=%s (%v)", resp.StatusCode, raw, err)
+		}
+		return resp.StatusCode, parsed.TaskID, parsed.Replayed
+	}
+
+	code, taskID, replayed := submit()
+	if code != http.StatusAccepted || replayed {
+		t.Fatalf("A10 首次提交 code=%d replayed=%v，期望 202/false", code, replayed)
+	}
+	// 轮询到终态（真实扫描可能较慢，上限 60s）。
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		code, out = client.do(t, http.MethodGet, fmt.Sprintf("/api/admin/tasks/%d", taskID), nil, token)
+		if code != http.StatusOK {
+			t.Fatalf("A10 状态查询 code=%d body=%s", code, out)
+		}
+		var task struct {
+			TaskID int64  `json:"task_id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(out, &task); err != nil {
+			t.Fatalf("A10 状态 JSON: %v (%s)", err, out)
+		}
+		if task.Status == "succeeded" || task.Status == "failed" || task.Status == "skipped" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A10 任务 %d 60s 未到终态，最后状态 %s", taskID, task.Status)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// 幂等重放：同一 key 返回同一 task_id，且标记 replayed。
+	code, replayID, replayed := submit()
+	if code != http.StatusAccepted || !replayed || replayID != taskID {
+		t.Fatalf("A10 重放 code=%d replayed=%v id=%d，期望 202/true/%d", code, replayed, replayID, taskID)
+	}
 }
