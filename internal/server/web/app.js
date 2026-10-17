@@ -1104,7 +1104,7 @@ function openPlayer(item) {
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
 async function pageSettings() {
   const gen = pageGen;
-  const [s, keyData] = await Promise.all([api('/settings'), api('/apikeys')]);
+  const [s, keyData, recovery] = await Promise.all([api('/settings'), api('/apikeys'), api('/recovery')]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
     ['监听地址', s.listen],
@@ -1129,6 +1129,20 @@ async function pageSettings() {
       <button id="logout-all" class="btn btn-danger">${icon('trash')}<span>退出全部会话</span></button>
     </section>
 
+    <section class="panel">
+      <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
+      ${recovery.stale_over_7d > 0 ? `<p class="warning-block" role="alert">有 ${esc(String(recovery.stale_over_7d))} 个条目索引未完成已超过 7 天，请尽快打开对应条目处理恢复提示。</p>` : ''}
+      ${(recovery.items || []).length ? `
+        <div class="table-wrap"><table>
+          <thead><tr><th>条目</th><th>首次失败</th><th>已持续</th><th>原因</th></tr></thead>
+          <tbody>${recovery.items.map(item => `<tr>
+            <td><strong class="title">${esc(item.title || '#' + item.movie_id)}</strong></td>
+            <td class="mono">${esc(item.first_failed_at)}</td>
+            <td class="mono">${esc(String(item.age_days))} 天</td>
+            <td class="mono">${esc(item.code)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : empty('没有待恢复条目', '索引失败时会在这里显示；成功重新索引后自动清除。')}
+    </section>
     <section class="panel">
       <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
       <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>

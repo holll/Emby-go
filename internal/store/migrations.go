@@ -566,6 +566,34 @@ func applyMigration4(tx *sql.Tx) error {
 	return nil
 }
 
+const editFailureMigrationVersion = 5
+
+// migration5Statements 记录「NFO 已保存但索引未完成」的条目，供恢复入口与
+// 超过 7 天的提示使用。表只由失败/成功路径写入，不参与基线 schema 比对。
+var migration5Statements = []string{
+	`CREATE TABLE IF NOT EXISTS edit_failures(
+		movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE,
+		code TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 1,
+		first_failed_at TEXT NOT NULL,
+		last_failed_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_edit_failures_last ON edit_failures(last_failed_at)`,
+}
+
+func migration5Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration5Statements, "\n"))))
+}
+
+func applyMigration5(tx *sql.Tx) error {
+	for _, statement := range migration5Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration 5: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -608,6 +636,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case editFailureMigrationVersion:
+			if checksum != migration5Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -639,6 +672,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[editFailureMigrationVersion] {
+		if err := applyMigration5(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -661,6 +699,11 @@ func (s *Store) migrate() error {
 	if !applied[apiKeyHashMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", apiKeyHashMigrationVersion, migration4Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", apiKeyHashMigrationVersion, err)
+		}
+	}
+	if !applied[editFailureMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", editFailureMigrationVersion, migration5Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", editFailureMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

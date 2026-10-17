@@ -441,6 +441,7 @@ func (a *App) routes() {
 	admin.PUT("/items/:id", a.adminEdit)
 	admin.PATCH("/items/:id", a.adminPatch)
 	admin.POST("/items/:id/recover-edit", a.adminRecoverEdit)
+	admin.GET("/recovery", a.adminEditRecoveryList)
 	admin.POST("/items/:id/reread", a.adminReread)
 	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
 	// 单条手动刮削：预览 → 看 diff → 确认写入（无状态，取消零副作用）。

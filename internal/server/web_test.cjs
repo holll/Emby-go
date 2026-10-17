@@ -249,6 +249,16 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
+test('设置页展示索引恢复列表与超过 7 天提示', () => {
+  for (const snippet of [
+    "api('/recovery')",
+    '索引恢复',
+    '已超过 7 天',
+    '待恢复条目',
+    'recovery.stale_over_7d'
+  ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
+});
+
 test('API 密钥只显示前缀，新密钥原文仅展示一次', () => {
   for (const snippet of [
     'let createdAPIKey = null;',

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"emby-go/internal/nfo"
 	"emby-go/internal/scanner"
@@ -50,6 +51,9 @@ func (a *App) finishEditedNFO(c *gin.Context, m store.Movie, path, expectedDiges
 	}
 	a.cache.Clear()
 	if err != nil {
+		if markErr := a.db.MarkEditFailure(m.ID, code, time.Now()); markErr != nil {
+			slog.Warn("记录索引失败待恢复项失败", "movie_id", m.ID, "error", markErr)
+		}
 		slog.Warn("元数据文件已保存但索引未完成", "movie_id", m.ID, "stage", code, "error", err)
 		body := gin.H{"status": "partial_success", "saved": true, "indexed": false, "manual_status": manual,
 			"warnings": []gin.H{{"code": code, "retryable": true}}}
@@ -58,6 +62,9 @@ func (a *App) finishEditedNFO(c *gin.Context, m store.Movie, path, expectedDiges
 		}
 		c.JSON(http.StatusOK, body)
 		return
+	}
+	if err := a.db.ClearEditFailure(m.ID); err != nil {
+		slog.Warn("清除索引失败待恢复项失败", "movie_id", m.ID, "error", err)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "success", "saved": true, "indexed": true,
 		"manual_status": "saved", "warnings": []gin.H{}})
@@ -154,4 +161,20 @@ func (a *App) adminRecoverEdit(c *gin.Context) {
 		return
 	}
 	a.finishEditedNFO(c, m, path, current)
+}
+
+// adminEditRecoveryList 返回待恢复的索引失败条目，并标出超过 7 天的数量。
+func (a *App) adminEditRecoveryList(c *gin.Context) {
+	failures, err := a.db.EditFailures(time.Now())
+	if err != nil {
+		c.JSON(503, gin.H{"error": "索引恢复列表暂不可用，请稍后重试"})
+		return
+	}
+	stale := 0
+	for _, f := range failures {
+		if f.AgeDays > 7 {
+			stale++
+		}
+	}
+	c.JSON(200, gin.H{"items": failures, "total": len(failures), "stale_over_7d": stale})
 }
