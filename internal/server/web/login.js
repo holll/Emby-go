@@ -77,17 +77,27 @@ async function submit(event, initializing) {
   }
 }
 
-(async () => {
+async function bootLogin() {
   if (token) {
     try {
       const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': token } });
       if (response.ok) { window.location.replace('/admin'); return; }
-    } catch { /* fall through to login */ }
-    localStorage.removeItem('emby_token');
+      if (response.status !== 401) throw new Error('authentication unavailable');
+      localStorage.removeItem('emby_token');
+      token = '';
+    } catch {
+      root.innerHTML = `<section class="auth-card"><h1>暂时无法验证登录状态</h1><p class="auth-error" role="alert">请检查服务或网络后重试。已保留登录凭据。</p><button id="auth-retry" class="btn btn-accent" type="button">重试验证</button></section>`;
+      document.querySelector('#auth-retry').addEventListener('click', event => {
+        event.currentTarget.disabled = true;
+        bootLogin();
+      });
+      return;
+    }
   }
   try {
     render((await status()).initialized ? 'login' : 'initialize');
   } catch (error) {
     render('login', error.message || '无法连接服务');
   }
-})();
+}
+bootLogin();

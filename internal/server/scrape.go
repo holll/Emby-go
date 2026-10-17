@@ -25,24 +25,26 @@ import (
 
 // scrapeStatus 刮削任务的进度快照，供管理端轮询。
 type scrapeStatus struct {
-	Running    bool     `json:"running"`
-	Kind       string   `json:"kind"` // scrape / scrape_avatars
-	Total      int      `json:"total"`
-	Done       int      `json:"done"`
-	Success    int      `json:"success"`
-	Skipped    int      `json:"skipped"`
-	Failed     int      `json:"failed"`
-	Current    string   `json:"current"`
-	StartedAt  string   `json:"started_at,omitempty"`
-	FinishedAt string   `json:"finished_at,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	Cancelled  bool     `json:"cancelled"`
-	Failures   []string `json:"failures,omitempty"` // 失败/待确认样例，限流留存
+	Running            bool     `json:"running"`
+	Kind               string   `json:"kind"` // scrape / scrape_avatars
+	Total              int      `json:"total"`
+	Done               int      `json:"done"`
+	Success            int      `json:"success"`
+	Skipped            int      `json:"skipped"`
+	Failed             int      `json:"failed"`
+	Current            string   `json:"current"`
+	StartedAt          string   `json:"started_at,omitempty"`
+	FinishedAt         string   `json:"finished_at,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	Cancelled          bool     `json:"cancelled"`
+	IndexRefreshFailed bool     `json:"index_refresh_failed,omitempty"`
+	Failures           []string `json:"failures,omitempty"` // 失败/待确认样例，限流留存
 }
 
 const maxScrapeFailureSamples = 20
 
 var errScrapeBusy = errors.New("刮削任务正在进行中")
+var errScrapeIndexRefresh = errors.New("刮削文件已保存，但索引刷新未确认；请检查存储后重新扫库")
 
 // claimNFO 独占 NFO 写入通道。kind 为 scan / probe / scrape / scrape_avatars。
 //
@@ -142,7 +144,13 @@ func (a *App) endScrape(err error) {
 	// 所以不能只认 err==nil：那样取消会被记成失败、Cancelled 永远为 false。
 	status.Cancelled = ctx != nil && ctx.Err() != nil &&
 		(err == nil || errors.Is(err, context.Canceled))
-	if err != nil && !status.Cancelled {
+	if status.IndexRefreshFailed {
+		// Cancellation does not make saved-but-unindexed output disappear.
+		status.Error = errScrapeIndexRefresh.Error()
+	} else if errors.Is(err, scraper.ErrAvatarWriteIncomplete) {
+		// Cancellation must not hide saved avatar output requiring repair.
+		status.Error = scraper.ErrAvatarWriteIncomplete.Error()
+	} else if err != nil && !status.Cancelled {
 		status.Error = err.Error()
 	}
 	// 必须调用 cancel 回收 context：否则每次任务结束都会在 rootCtx 上
@@ -272,17 +280,20 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 		defer a.releaseNFO("scrape")
 		return scraper.New(cfg, a.db).Run(a.scrapeContext(), opts)
 	}()
-	a.finishTask(taskID, err)
-	a.endScrape(err)
-
 	// 取消或熔断不撤销此前已落盘的成功项，仍须导入这些 NFO。
 	// 扫描不使用已取消的刮削 context。
 	if progress.Success > 0 {
 		if _, scanErr := a.scanLibraries(0); scanErr != nil {
-			slog.Warn("刮削后整库扫描失败", "error", scanErr)
+			a.scrapeTaskMu.Lock()
+			a.scrapeStatus.IndexRefreshFailed = true
+			a.scrapeTaskMu.Unlock()
+			err = errors.Join(err, errScrapeIndexRefresh)
+			slog.Warn("刮削后整库扫描失败，索引刷新未确认")
 		}
 	}
 	a.cache.Clear()
+	a.finishTask(taskID, err)
+	a.endScrape(err)
 	slog.Info("刮削任务结束", "success", progress.Success, "skipped", progress.Skipped,
 		"failed", progress.Failed, "total", progress.Total, "error", err)
 	return err

@@ -51,19 +51,20 @@ const (
 
 // probeStatus 探测任务的进度快照，供管理端轮询。
 type probeStatus struct {
-	Running    bool     `json:"running"`
-	Total      int      `json:"total"`
-	Done       int      `json:"done"`
-	Success    int      `json:"success"`
-	Skipped    int      `json:"skipped"`
-	Failed     int      `json:"failed"`
-	Current    string   `json:"current"`
-	StartedAt  string   `json:"started_at,omitempty"`
-	FinishedAt string   `json:"finished_at,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	Cancelled  bool     `json:"cancelled"`
-	Aborted    bool     `json:"aborted,omitempty"` // 因连续失败被主动中止（区别于人工取消）
-	Failures   []string `json:"failures,omitempty"`
+	Running       bool     `json:"running"`
+	Total         int      `json:"total"`
+	Done          int      `json:"done"`
+	Success       int      `json:"success"`
+	Skipped       int      `json:"skipped"`
+	Failed        int      `json:"failed"`
+	Current       string   `json:"current"`
+	StartedAt     string   `json:"started_at,omitempty"`
+	FinishedAt    string   `json:"finished_at,omitempty"`
+	Error         string   `json:"error,omitempty"`
+	Cancelled     bool     `json:"cancelled"`
+	Aborted       bool     `json:"aborted,omitempty"` // 因连续失败被主动中止（区别于人工取消）
+	Failures      []string `json:"failures,omitempty"`
+	RefreshFailed int      `json:"refresh_failed,omitempty"` // 保存后未确认版本刷新的媒体库数，不计入逐文件失败。
 
 	// 以下为内部状态，不对外输出。
 	consecutiveFailures int `json:"-"` // 连续失败计数，成功即归零
@@ -140,7 +141,12 @@ func (a *App) prepareProbe(req probeRequest) (probePlan, error) {
 		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
 		return probePlan{}, err
 	}
-	movies, err := a.db.MoviesForProbe(req.LibraryID, req.Status, req.Limit)
+	// Empty remains legacy success; only an explicit all removes the status filter.
+	statusFilter := req.Status
+	if statusFilter == "all" {
+		statusFilter = ""
+	}
+	movies, err := a.db.MoviesForProbe(req.LibraryID, statusFilter, req.Limit)
 	if err != nil {
 		return probePlan{}, err
 	}
@@ -388,13 +394,16 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 
 	// 探测只改 NFO，索引库字段（片长等）要等下一次扫库才更新；这里只清缓存，
 	// 让已写入的流信息立刻对 API 生效。
+	refreshFailed := 0
 	cleared := make(map[int64]struct{})
 	for libraryID := range touched {
 		if _, done := cleared[libraryID]; done {
 			continue
 		}
 		cleared[libraryID] = struct{}{}
-		_ = a.db.BumpVersion(libraryID)
+		if err := a.db.BumpVersion(libraryID); err != nil {
+			refreshFailed++
+		}
 	}
 	a.cache.Clear()
 	a.evictNFOStreams()
@@ -414,6 +423,16 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 		status.Error = fmt.Sprintf("连续 %d 条探测失败，疑似探测环境异常（如 ffprobe 不可用或媒体库不可读），任务已提前中止；已处理 %d/%d，失败样例见 failures",
 			status.consecutiveFailures, status.Done, status.Total)
 	}
+	status.RefreshFailed = refreshFailed
+	var refreshErr error
+	if refreshFailed > 0 {
+		refreshErr = errors.New("探测文件已保存，但缓存版本刷新未确认；请检查存储后重新扫库")
+		if status.Error != "" {
+			status.Error += "；" + refreshErr.Error()
+		} else {
+			status.Error = refreshErr.Error()
+		}
+	}
 	success, skipped, failed, done := status.Success, status.Skipped, status.Failed, status.Done
 	a.probeCancel = nil
 	a.probeTaskMu.Unlock()
@@ -423,6 +442,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	if aborted {
 		result = errors.New("连续失败过多已中止")
 	}
+	result = errors.Join(result, refreshErr)
 	a.finishTask(taskID, result)
 	slog.Info("媒体信息探测结束", "task_id", taskID, "success", success, "skipped", skipped,
 		"failed", failed, "handled", done, "total", len(targets), "aborted", aborted, "cancelled", cancelled)

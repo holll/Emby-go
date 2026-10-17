@@ -64,8 +64,8 @@ func TestIsScannerProbe(t *testing.T) {
 	}
 }
 
-// TestNoRouteSkipsScannerProbes 端到端守住探针的用途：公网扫描器刷出来的
-// 路径不写 api_probe，未实现的 Emby 端点照常记录，供「探针驱动补端点」使用。
+// Public scanner traffic is excluded. Unimplemented endpoints now retain only
+// fixed resource families, never raw paths that might themselves be secrets.
 func TestNoRouteSkipsScannerProbes(t *testing.T) {
 	a, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "test.db")}, cache.NewMemory(64))
 	if err != nil {
@@ -89,7 +89,13 @@ func TestNoRouteSkipsScannerProbes(t *testing.T) {
 
 	scanner := []string{"/.svn/entries", "/emby-115-cf.7z", "/wp-login.php"}
 	emby := []string{"/Branding/Configuration", "/Persons"}
-	for _, path := range append(append([]string{}, scanner...), emby...) {
+	for _, path := range scanner {
+		get404(path)
+	}
+	if probes, err := a.db.Probes(100); err != nil || len(probes) != 0 {
+		t.Fatalf("scanner traffic was recorded: %v err=%v", probes, err)
+	}
+	for _, path := range emby {
 		get404(path)
 	}
 
@@ -108,9 +114,12 @@ func TestNoRouteSkipsScannerProbes(t *testing.T) {
 			t.Errorf("扫描器路径 %s 不应写入 api_probe", path)
 		}
 	}
+	if len(probes) != 2 || !recorded["/[UNMATCHED]"] || !recorded["/persons/[UNMATCHED]"] {
+		t.Fatalf("expected safe resource families, got %v", probes)
+	}
 	for _, path := range emby {
-		if !recorded[path] {
-			t.Errorf("Emby 端点 %s 应写入 api_probe", path)
+		if recorded[path] {
+			t.Errorf("raw endpoint persisted: %s", path)
 		}
 	}
 }

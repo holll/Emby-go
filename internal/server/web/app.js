@@ -64,12 +64,18 @@ async function api(path, options = {}) {
   if (response.status === 401) {
     localStorage.removeItem('emby_token');
     window.location.replace('/');
-    throw new Error('登录已失效');
+    const error = new Error('登录已失效');
+    error.status = 401;
+    throw error;
   }
   if (!response.ok) {
     let message = '请求失败';
-    try { message = (await response.json()).error || message; } catch { /* ignore */ }
-    throw new Error(message);
+    let code;
+    try { const body = await response.json(); message = body.error || message; code = body.code; } catch { /* ignore */ }
+    const error = new Error(message);
+    error.status = response.status;
+    error.code = code;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -339,6 +345,7 @@ let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索
 async function pageItems() {
   const gen = pageGen;
   const requestGen = ++wallGen; // 必须在 /libraries 之前作废同导航内的旧筛选请求
+  stopProbePolling();
   wallState = null;
   const params = new URLSearchParams(location.search);
   // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
@@ -445,6 +452,8 @@ async function pageItems() {
   });
   const searchInput = document.querySelector('#item-search');
   searchInput.addEventListener('input', debounce(() => {
+    // 切页或同页重建之后，旧搜索延时不能改URL或复活新观察器。
+    if (gen !== pageGen || document.querySelector('#item-search') !== searchInput) return;
     const q = new URLSearchParams(location.search);
     const value = searchInput.value.trim();
     if (value) q.set('search', value); else q.delete('search');
@@ -470,6 +479,8 @@ async function pageItems() {
   });
   const probeButton = document.querySelector('#probe-media');
   if (probeButton) probeButton.addEventListener('click', runProbeAll);
+  // 页面恢复也走有超时/退避的观察器，不在启动阶段裸读全局进度。
+  startProbePolling();
   // 事件委托：卡片按页追加，统一在容器上处理，避免每页重新绑定。
   document.querySelector('#wall').addEventListener('click', async event => {
     const probe = event.target.closest('[data-probe]');
@@ -506,11 +517,12 @@ async function pageItems() {
     const item = wallState.items.find(m => String(m.id) === card.dataset.play);
     if (item) openDetail(item);
   });
-  // 键盘可达：卡片获得焦点后回车/空格打开详情（桌面端无障碍）。
+  // 只处理卡片本身的键盘激活；内部原生按钮保留默认点击行为。
   document.querySelector('#wall').addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.isComposing || event.repeat) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const card = event.target.closest('.wall-card');
-    if (!card) return;
+    if (!card || event.target !== card) return;
     event.preventDefault();
     const item = wallState.items.find(m => String(m.id) === card.dataset.play);
     if (item) openDetail(item);
@@ -522,6 +534,8 @@ async function pageItems() {
 function reloadWall() {
   if (!wallState) return;
   wallGen += 1; // 作废尚未返回的旧请求
+  // 搜索不重建DOM，但仍更换观察代次，避免旧回包污染或永久静默。
+  startProbePolling();
   wallState.offset = 0;
   wallState.total = 0;
   wallState.items = [];
@@ -689,6 +703,32 @@ function editLockFields(original, inputs) {
   ])];
 }
 
+// Explicit R1 recovery: re-read current NFO, never submit the old edit body.
+function renderEditRecovery(panel, id, result, onRecovered, isCurrent) {
+  panel.hidden = false;
+  const digest = result.recovery && result.recovery.nfo_sha256;
+  panel.innerHTML = `<p role="alert">NFO 已保存，但索引未完成。${result.manual_status === 'pending' ? '手动录入标记也未保存，请暂停自动刮削。' : ''} 不要再次提交旧表单。</p>
+    <p class="hint">恢复只重读当前 NFO，不覆盖文件。文件已变化时请重新打开条目核对；若无法恢复，请由管理员检查文件权限、媒体库及数据库后人工对账。此操作未排入后台队列。</p>
+    ${digest ? '<button class="btn" type="button" data-recover-edit>重试当前 NFO 索引</button>' : ''}
+    <p role="alert" data-recovery-error></p>`;
+  const retry = panel.querySelector('[data-recover-edit]');
+  if (!retry) return;
+  retry.addEventListener('click', async () => {
+    if (!isCurrent() || retry.disabled) return;
+    retry.disabled = true;
+    try {
+      const next = await api(`/items/${id}/recover-edit`, { method: 'POST', body: JSON.stringify({ nfo_sha256: digest }) });
+      if (!isCurrent()) return;
+      if (next.status === 'partial_success') renderEditRecovery(panel, id, next, onRecovered, isCurrent);
+      else onRecovered();
+    } catch (error) {
+      if (!isCurrent()) return;
+      panel.querySelector('[data-recovery-error]').textContent = error.message;
+      retry.disabled = false;
+    }
+  });
+}
+
 async function openDetail(item) {
   const gen = pageGen;
   const session = ++detailGen;
@@ -744,7 +784,8 @@ async function openDetail(item) {
 
       <section class="detail-section" id="detail-edit" hidden>
         <h3>编辑元数据 <small>写入 NFO，保存后归入「手动录入」</small></h3>
-        <form id="detail-edit-form" class="field-grid">
+        <form id="detail-edit-form" class="field-grid" aria-describedby="edit-clear-hint">
+          <p id="edit-clear-hint" class="hint" style="grid-column:1/-1">留空的文本、列表和年份会清除对应元数据；未展示的字段保持不变。取消不会保存。</p>
           <div class="field"><label for="e-title">标题</label><input id="e-title" value="${esc(m.Title || '')}"></div>
           <div class="field"><label for="e-number">番号</label><input id="e-number" value="${esc(m.Number || '')}"></div>
           <div class="field"><label for="e-year">年份</label><input id="e-year" type="number" min="1900" max="2100" value="${esc(m.Year || '')}"></div>
@@ -767,6 +808,7 @@ async function openDetail(item) {
             <button id="detail-edit-cancel" class="btn" type="button">取消</button>
             <span class="hint" style="margin:0">走标签级更新，NFO 里未建模的标签不会被丢弃。</span>
           </div>
+          <div id="detail-edit-recovery" class="field full" hidden></div>
         </form>
       </section>
 
@@ -852,11 +894,14 @@ async function openDetail(item) {
   const editCancel = document.querySelector('#detail-edit-cancel');
   if (editCancel) editCancel.addEventListener('click', () => { editSection.hidden = true; });
   const editForm = document.querySelector('#detail-edit-form');
+  let editNeedsRecovery = false;
   if (editForm) editForm.addEventListener('submit', async event => {
     event.preventDefault();
+    if (editNeedsRecovery) return; // Do not replay a stale edit after NFO was saved.
     const split = id => document.querySelector(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
     const year = Number(document.querySelector('#e-year').value) || 0;
-    // 人工编辑允许修改已锁定字段；空值仍按后端约定表示不修改。
+    // 新人工 PATCH：空字符串/空数组/年份0是显式清除，false是显式解锁。
+    // 不回退旧 PUT，否则清空会静默变成不修改。
     const body = {
       title: document.querySelector('#e-title').value.trim(),
       number: document.querySelector('#e-number').value.trim(),
@@ -874,7 +919,17 @@ async function openDetail(item) {
     const saveBtn = document.querySelector('#detail-edit-save');
     saveBtn.disabled = true;
     try {
-      await api(`/items/${m.id}`, { method: 'PUT', body: JSON.stringify(body) });
+      const result = await api(`/items/${m.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      if (result.status === 'partial_success') {
+        editNeedsRecovery = true;
+        toast('NFO 已保存，索引尚未完成，请处理恢复提示', 'error');
+        if (isCurrent()) renderEditRecovery(document.querySelector('#detail-edit-recovery'), m.id, result, () => {
+          toast('索引恢复完成（手动录入）');
+          closeDetail();
+          refreshPage(pageItems, gen);
+        }, isCurrent);
+        return;
+      }
       toast('元数据已保存（归类为手动录入）');
       if (!isCurrent()) return;
       closeDetail();
@@ -1068,11 +1123,11 @@ async function pageProbe() {
 /* ---------------------------------------------------------------- 刮削 */
 // 配置存 DB（config.yaml 不设 scrape 段）；密钥只写不回显，读取时返回掩码。
 async function pageScrape() {
+  stopScrapePolling();
   const gen = pageGen;
   const [settings, libs] = await Promise.all([api('/scrape/settings'), api('/libraries')]);
   const libraries = libs.items || [];
   const tr = settings.translate || {};
-  const progress = await api('/scrape/progress').catch(() => ({}));
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
 
@@ -1197,14 +1252,14 @@ async function pageScrape() {
     try {
       const result = await api('/scrape/run', { method: 'POST', body: JSON.stringify(body) });
       toast(`刮削已启动（${result.total} 条）`);
-      startScrapePolling();
+      if (gen === pageGen) startScrapePolling();
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelector('#avatar-start').addEventListener('click', async () => {
     try {
       const result = await api('/scrape/avatars', { method: 'POST', body: JSON.stringify({ library_id: Number(document.querySelector('#sc-lib').value) || 0 }) });
       toast(`头像任务已启动（${result.total} 个演员）`);
-      startScrapePolling();
+      if (gen === pageGen) startScrapePolling();
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelector('#scrape-cancel').addEventListener('click', async () => {
@@ -1212,8 +1267,12 @@ async function pageScrape() {
     catch (e) { toast(e.message, 'error'); }
   });
 
-  renderScrapeProgress(progress);
-  if (progress && progress.running) startScrapePolling();
+  // 首次查询也走有超时/鉴权分类的观察器，不能在页面初始化外单独悬挂。
+  const progressEls = scrapeEls();
+  progressEls.panel.hidden = false;
+  progressEls.detail.setAttribute('role', 'status');
+  progressEls.detail.textContent = '正在读取进度，任务状态未确认…';
+  startScrapePolling();
 }
 
 let scrapeTimer = null;
@@ -1255,17 +1314,63 @@ function renderScrapeProgress(p) {
   }
 }
 
-function stopScrapePolling() { if (scrapeTimer) { clearInterval(scrapeTimer); scrapeTimer = null; } }
+// 每次请求完成后才安排下一次；stop仅停止观察，不取消后台任务。
+function startProgressPolling(path, onProgress, onUnavailable, keepObserving = () => false) {
+  let stopped = false, timer = null, request = null, deadline = null, delay = 1500;
+  function stop() {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    if (deadline !== null) clearTimeout(deadline);
+    if (request) request.abort();
+  }
+  async function tick() {
+    if (stopped) return;
+    timer = null;
+    const controller = new AbortController();
+    request = controller;
+    deadline = setTimeout(() => controller.abort(), 10000);
+    try {
+      const p = await api(path, { signal: controller.signal });
+      if (stopped) return;
+      if (controller.signal.aborted) throw new Error('progress timeout');
+      if (!p || typeof p.running !== 'boolean') throw new Error('invalid progress');
+      onProgress(p);
+      delay = 1500;
+      if (!p.running && !keepObserving(p)) { stop(); return; }
+    } catch (error) {
+      if (stopped) return;
+      const denied = error.status === 401 || error.status === 403;
+      delay = Math.min(delay * 2, 15000);
+      onUnavailable(denied ? null : delay);
+      if (denied) stopped = true;
+    } finally {
+      if (deadline !== null) clearTimeout(deadline);
+      deadline = null;
+      request = null;
+    }
+    if (!stopped) timer = setTimeout(tick, delay);
+  }
+  timer = setTimeout(tick, 0);
+  return stop;
+}
+
+function stopScrapePolling() { if (scrapeTimer) { scrapeTimer(); scrapeTimer = null; } }
 
 function startScrapePolling() {
   stopScrapePolling();
-  scrapeTimer = setInterval(async () => {
-    try {
-      const p = await api('/scrape/progress');
-      renderScrapeProgress(p);
-      if (p && !p.running) { stopScrapePolling(); }
-    } catch { stopScrapePolling(); }
-  }, 1500);
+  const gen = pageGen;
+  scrapeTimer = startProgressPolling('/scrape/progress', p => {
+    if (gen === pageGen) renderScrapeProgress(p);
+  }, delay => {
+    if (gen !== pageGen) return;
+    const el = scrapeEls();
+    if (!el.panel) return;
+    el.panel.hidden = false;
+    el.detail.setAttribute('role', 'status');
+    el.detail.textContent = delay === null
+      ? '进度读取受限，任务状态未确认。请检查登录或权限后重新进入此页。'
+      : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
+  });
 }
 
 /* ------------------------------------------------------------ 单条刮削预览 */
@@ -1429,6 +1534,19 @@ function runBadge(status) {
   return `<span class="badge ${esc(status)}">${esc(RUN_STATUS_TEXT[status] || status)}</span>`;
 }
 
+// Merge only on same-type edits: hidden supported settings (limit/overwrite)
+// must survive a name/cron change. A type change starts a fresh parameter set.
+function scheduledFormParams(kind, editing, stored, visible) {
+  const params = editing && editing.type === kind ? { ...stored } : {};
+  params.library_id = visible.library_id;
+  if (kind === 'probe') {
+    params.probe_status_contract = 'explicit-v1';
+    params.status = visible.status;
+    params.only_missing = visible.only_missing;
+  }
+  return params;
+}
+
 async function pageScheduled() {
   const gen = pageGen;
   const [data, libs] = await Promise.all([api('/scheduled'), api('/libraries')]);
@@ -1438,8 +1556,13 @@ async function pageScheduled() {
   const libraries = libs.items || [];
   const editing = scheduledEditId ? items.find(item => item.id === scheduledEditId) : null;
   // 编辑时回填参数；参数在库里是 JSON 文本。
-  let params = {};
-  if (editing) { try { params = JSON.parse(editing.params || '{}') || {}; } catch { params = {}; } }
+  let params = {}, paramsReadable = true;
+  if (editing) {
+    try {
+      params = JSON.parse(editing.params || '{}');
+      if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('invalid params');
+    } catch { params = {}; paramsReadable = false; }
+  }
 
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
   content.innerHTML = `
@@ -1463,7 +1586,7 @@ async function pageScheduled() {
           <select id="s-status">
             <option value="success">可播放</option>
             <option value="manual">手动录入</option>
-            <option value="">全部</option>
+            <option value="all">全部已有 NFO 的影片</option>
           </select></div>
         <div class="field" data-show="probe"><label>探测范围</label>
           <label class="check"><input id="s-only-missing" type="checkbox"> 仅未探测的条目</label></div>
@@ -1474,7 +1597,10 @@ async function pageScheduled() {
             `<button type="button" class="btn btn-sm preset" data-cron="${esc(expr)}">${esc(text)}</button>`).join('')}</div></div>
         <p class="hint full" id="s-preview" style="grid-column:1/-1">标准 5 段（分 时 日 月 周）或 @daily/@hourly 等描述符；留空无法保存。</p>
         <div class="form-foot" style="grid-column:1/-1">
-          <button id="sched-submit" class="btn btn-accent" type="submit">${icon('plus')}<span>${editing ? '保存修改' : '新建任务'}</span></button>
+          ${paramsReadable ? '' : '<p role="alert">原任务参数无法读取，已禁止保存。请先由管理员核对配置，不会用空参数覆盖。</p>'}
+          ${editing && !editing.config_etag ? '<p role="alert">服务器未提供配置校验令牌，已禁止覆盖保存。请更新服务后刷新。</p>' : ''}
+          <p id="sched-conflict" role="alert" hidden></p>
+          <button id="sched-submit" class="btn btn-accent" type="submit"${paramsReadable && (!editing || editing.config_etag) ? '' : ' disabled'}>${icon('plus')}<span>${editing ? '保存修改' : '新建任务'}</span></button>
         </div>
       </form>
     </section>
@@ -1539,7 +1665,8 @@ async function pageScheduled() {
   // 回填编辑中的参数。
   if (editing) {
     document.querySelector('#s-lib').value = String(params.library_id || 0);
-    if (params.status) document.querySelector('#s-status').value = params.status;
+    // Legacy omitted/null/empty status means success, never infer all.
+    document.querySelector('#s-status').value = params.status || 'success';
     document.querySelector('#s-only-missing').checked = params.only_missing !== false;
   } else {
     document.querySelector('#s-only-missing').checked = true;
@@ -1564,24 +1691,30 @@ async function pageScheduled() {
 
   document.querySelector('#sched-form').addEventListener('submit', async event => {
     event.preventDefault();
+    if (!paramsReadable) { toast('原任务参数无法读取，请先核对配置', 'error'); return; }
+    if (editing && !editing.config_etag) { toast('缺少配置校验令牌，请更新服务后刷新', 'error'); return; }
+    const conflict = document.querySelector('#sched-conflict');
+    if (conflict && conflict.hidden === false) return;
     const kind = typeEl.value;
-    const params = { library_id: Number(document.querySelector('#s-lib').value) || 0 };
-    if (kind === 'probe') {
-      params.status = document.querySelector('#s-status').value;
-      params.only_missing = document.querySelector('#s-only-missing').checked;
-    }
+    const libraryValue = document.querySelector('#s-lib').value;
+    if (kind !== 'reindex' && libraryValue === '') { toast('原媒体库不可用，请明确选择媒体库', 'error'); return; }
+    const taskParams = scheduledFormParams(kind, editing, params, {
+      library_id: Number(libraryValue) || 0,
+      status: document.querySelector('#s-status').value,
+      only_missing: document.querySelector('#s-only-missing').checked
+    });
     const body = {
       name: document.querySelector('#s-name').value.trim(),
       type: kind,
       cron: cronEl.value.trim(),
       enabled: document.querySelector('#s-enabled').checked,
-      params
+      params: taskParams
     };
     const submit = document.querySelector('#sched-submit');
     submit.disabled = true;
     try {
       if (editing) {
-        await api('/scheduled/' + editing.id, { method: 'PUT', body: JSON.stringify(body) });
+        await api('/scheduled/' + editing.id, { method: 'PATCH', headers: { 'If-Match': editing.config_etag }, body: JSON.stringify(body) });
         toast('计划任务已保存');
         scheduledEditId = null;
       } else {
@@ -1589,7 +1722,13 @@ async function pageScheduled() {
         toast(`计划任务「${body.name}」已创建`);
       }
       refreshPage(pageScheduled, gen);
-    } catch (e) { toast(e.message, 'error'); submit.disabled = false; }
+    } catch (e) {
+      toast(e.message, 'error');
+      if (e.status === 412) {
+        if (conflict) { conflict.hidden = false; conflict.textContent = '配置已被其他操作修改。当前输入未保存，请先复制需要保留的内容，再刷新核对；不会自动覆盖。'; }
+        submit.disabled = true;
+      } else { submit.disabled = false; }
+    }
   });
 
   document.querySelectorAll('[data-role]').forEach(el => {
@@ -1597,8 +1736,8 @@ async function pageScheduled() {
     const role = el.dataset.role;
     if (role === 'toggle') {
       el.addEventListener('change', async () => {
-        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); toast('状态已更新'); refreshPage(pageScheduled, gen); }
-        catch (e) { toast(e.message, 'error'); refreshPage(pageScheduled, gen); }
+        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); toast(editing ? '状态已更新，当前编辑输入保持；时间信息请保存或取消编辑后刷新' : '状态已更新'); if (!editing) refreshPage(pageScheduled, gen); }
+        catch (e) { toast(e.message, 'error'); if (editing) el.checked = !el.checked; else refreshPage(pageScheduled, gen); }
       });
     } else if (role === 'run') {
       el.addEventListener('click', async () => {
@@ -1612,9 +1751,19 @@ async function pageScheduled() {
         if (!confirm('删除该计划任务？已产生的影片数据不受影响。')) return;
         try {
           await api('/scheduled/' + id, { method: 'DELETE' });
-          if (scheduledEditId === Number(id)) scheduledEditId = null;
           toast('计划任务已删除');
-          refreshPage(pageScheduled, gen);
+          if (gen !== pageGen) return;
+          if (editing) {
+            el.closest('tr')?.remove();
+            if (editing.id === Number(id)) {
+              const panel = document.querySelector('#sched-conflict');
+              panel.hidden = false; panel.textContent = '此任务已删除。当前输入未保存，请先复制需要保留的内容，再刷新。';
+              document.querySelector('#sched-submit').disabled = true;
+            }
+          } else {
+            if (scheduledEditId === Number(id)) scheduledEditId = null;
+            refreshPage(pageScheduled, gen);
+          }
         } catch (e) { toast(e.message, 'error'); }
       });
     }
@@ -1637,6 +1786,8 @@ const pages = {
 let pageGen = 0;
 
 async function page(name) {
+  stopScrapePolling();
+  stopProbePolling();
   // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
   // 否则它会在新页面上命中同名元素，把不该关的面板关掉。
   cancelProbeHide();
@@ -1693,7 +1844,7 @@ function renderProbeProgress(p) {
   if (!el.panel) return; // 不在媒体墙页面时只保持轮询，不渲染
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
-  el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : '探测完成');
+  el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : (p.error ? '探测结束（存在错误）' : '探测完成'));
   const total = p.total || 0;
   const done = p.done || 0;
   el.count.textContent = total ? `${done}/${total}` : String(done);
@@ -1709,7 +1860,7 @@ function renderProbeProgress(p) {
 }
 
 function stopProbePolling() {
-  if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+  if (probeTimer) { probeTimer(); probeTimer = null; }
   cancelProbeHide();
 }
 
@@ -1721,27 +1872,47 @@ function setProbeButton(busy) {
   if (span) span.textContent = busy ? '探测中…' : '探测媒体信息';
 }
 
-function startProbePolling() {
-  if (probeTimer) return;
-  probeTimer = setInterval(async () => {
-    let p = null;
-    try { p = await api('/probe/media/progress'); } catch { /* ignore */ }
-    if (p) renderProbeProgress(p);
-    if (!p || !p.running) {
-      stopProbePolling();
-      setProbeButton(false);
-      if (p) {
-        if (p.cancelled) toast(`探测已中止：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`);
-        else toast(`探测完成：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`, p.failed ? 'error' : 'ok');
-        if (p.failures && p.failures.length) toast(`失败示例：${p.failures[0]}`, 'error');
-        // 自动收起，避免长期占位；有失败时保留，方便对照失败条数。
-        if (!p.failed) hideProbePanelLater();
-      }
+function probeProgressUnavailable(delay) {
+  const el = probeEls();
+  if (!el.panel) return;
+  el.panel.hidden = false;
+  el.title.textContent = '探测状态未确认';
+  el.detail.setAttribute('role', 'status');
+  el.detail.textContent = delay === null
+    ? '进度读取受限，任务状态未确认。请检查登录或权限后重新进入媒体墙。'
+    : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
+  setProbeButton(true); // 未确认空闲前，不允许盲目重复启动。
+}
+
+function startProbePolling(announced = false) {
+  stopProbePolling();
+  const gen = pageGen, requestGen = wallGen;
+  let observedRunning = announced;
+  setProbeButton(true);
+  probeTimer = startProgressPolling('/probe/media/progress', p => {
+    if (gen !== pageGen || requestGen !== wallGen) return;
+    renderProbeProgress(p);
+    if (p.running) { observedRunning = true; setProbeButton(true); return; }
+    stopProbePolling();
+    setProbeButton(false);
+    // 初读的历史终态不是本次任务完成通知；未知状态也不生成终态。
+    if (p.finished_at && observedRunning) {
+      if (p.cancelled) toast(`探测已中止：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`);
+      else if (p.error) toast(`探测结束：${p.error}`, 'error');
+      else toast(`探测完成：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`, p.failed ? 'error' : 'ok');
+      if (p.failures && p.failures.length) toast(`失败示例：${p.failures[0]}`, 'error');
     }
-  }, 1000);
+    if (p.finished_at && !p.failed && !p.error) hideProbePanelLater();
+  }, delay => {
+    if (gen !== pageGen || requestGen !== wallGen) return;
+    probeProgressUnavailable(delay);
+    if (delay === null) stopProbePolling();
+  });
 }
 
 async function runProbeAll() {
+  const gen = pageGen, requestGen = wallGen;
+  stopProbePolling();
   setProbeButton(true);
   const el = probeEls();
   if (el.panel) el.panel.hidden = false;
@@ -1749,6 +1920,7 @@ async function runProbeAll() {
   try {
     // 默认只补缺：已含 streamdetails 的条目跳过，避免每次全库重探（远程探测很慢）。
     const r = await api('/probe/media', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
+    if (gen !== pageGen || requestGen !== wallGen) return;
     if (!r.total) {
       toast(r.message || '没有可探测的影片');
       setProbeButton(false);
@@ -1756,11 +1928,12 @@ async function runProbeAll() {
       return;
     }
     toast(`开始探测 ${r.total} 条影片`);
-    startProbePolling();
+    startProbePolling(true);
   } catch (e) {
+    if (gen !== pageGen || requestGen !== wallGen) return;
     toast(e.message, 'error');
-    setProbeButton(false);
-    if (el.panel) el.panel.hidden = true;
+    if (e.status === 401 || e.status === 403) probeProgressUnavailable(null);
+    else { probeProgressUnavailable(3000); startProbePolling(); }
   }
 }
 
@@ -1793,6 +1966,8 @@ const scanCount = document.querySelector('#scan-progress-count');
 const scanFill = document.querySelector('#scan-progress-fill');
 const scanDetail = document.querySelector('#scan-progress-detail');
 let scanTimer = null;
+let scanSubmitting = false;
+let scanObservation = 0;
 // 扫描完成后面板自动收起的延时句柄。与 probeHideTimer 同理：
 // 句柄不托管时，上一轮排下的 4 秒定时器会关掉下一轮刚显示出来的面板
 //（而那时轮询已停，面板再也不会被显示回来）。
@@ -1810,7 +1985,9 @@ function renderScanProgress(p) {
   if (!p || (!p.running && !p.finished_at)) { scanPanel.hidden = true; return; }
   scanPanel.hidden = false;
   const lib = p.libraries > 1 ? `${p.library_name || '媒体库'}（${p.library_index}/${p.libraries}）` : (p.library_name || '媒体库');
-  scanTitle.textContent = p.running ? `正在扫描 ${lib}` : `扫描完成 ${lib}`;
+  scanTitle.textContent = p.running ? `正在扫描 ${lib}`
+    : `${p.error || p.failed ? '扫描结束（存在错误）' : '扫描完成'} ${lib}`;
+  scanDetail.setAttribute('role', 'status');
   const total = p.total || 0;
   const done = p.done || 0;
   scanCount.textContent = total ? `${done}/${total}` : String(done);
@@ -1826,60 +2003,110 @@ function renderScanProgress(p) {
   scanDetail.textContent = parts.join(' · ') || (p.running ? '正在读取目录…' : '');
 }
 
-function stopScanPolling() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } }
+function stopScanPolling() {
+  if (scanTimer) { scanTimer(); scanTimer = null; }
+  cancelScanHide();
+  scanObservation++;
+}
+
+function setScanButton(busy, label) {
+  const btn = document.querySelector('#scan');
+  if (!btn) return;
+  btn.disabled = busy;
+  const span = btn.querySelector('span');
+  if (span) span.textContent = label || (busy ? '扫描中…' : '开始扫描');
+}
+
+function scanProgressUnavailable(delay) {
+  scanPanel.hidden = false;
+  scanTitle.textContent = '扫描状态未确认';
+  scanDetail.setAttribute('role', 'status');
+  scanDetail.textContent = delay === null
+    ? '进度读取受限，任务状态未确认。请检查登录或权限后刷新页面。'
+    : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
+  setScanButton(true, '确认扫描状态…');
+}
 
 function startScanPolling() {
-  if (scanTimer) return;
-  cancelScanHide(); // 新一轮开始：作废上一轮排下的收起定时器
-  scanTimer = setInterval(async () => {
-    let p = null;
-    try { p = await api('/scan/progress'); } catch { /* ignore */ }
-    if (p) renderScanProgress(p);
-    if (!p || !p.running) {
+  stopScanPolling();
+  setScanButton(true, '确认扫描状态…');
+  scanTimer = startProgressPolling('/scan/progress', p => {
+    if (!p.running && scanSubmitting) {
+      // POST同步执行扫描：首个GET可能早于服务端接纳，或读到上一轮终态。
+      // 不把在途提交误判为空闲，也不停止后续观察。
+      scanPanel.hidden = false;
+      scanTitle.textContent = '扫描请求进行中';
+      scanDetail.setAttribute('role', 'status');
+      scanDetail.textContent = '扫描请求仍在等待响应，当前任务状态尚未确认。';
+      setScanButton(true, '等待扫描响应…');
+      return;
+    }
+    renderScanProgress(p);
+    setScanButton(p.running);
+    if (!p.running) {
       stopScanPolling();
-      const btn = document.querySelector('#scan');
-      if (btn) { btn.disabled = false; btn.querySelector('span').textContent = '开始扫描'; }
-      if (p) {
-        cancelScanHide();
-        scanHideTimer = setTimeout(() => { scanHideTimer = null; scanPanel.hidden = true; }, 4000);
+      if (p.finished_at && !p.failed && !p.error) {
+        const observation = scanObservation;
+        scanHideTimer = setTimeout(() => {
+          if (observation !== scanObservation || scanSubmitting || scanTimer) return;
+          scanHideTimer = null;
+          scanPanel.hidden = true;
+        }, 4000);
       }
     }
-  }, 600);
+  }, delay => {
+    scanProgressUnavailable(delay);
+    if (delay === null) stopScanPolling();
+  }, () => scanSubmitting);
 }
 
 async function runScan(libraryId) {
-  const scanBtn = document.querySelector('#scan');
-  scanBtn.disabled = true;
-  scanBtn.querySelector('span').textContent = '扫描中…';
-  cancelScanHide(); // 面板要重新显示，上一轮排下的收起必须作废
+  // 行内入口也必须服从全局状态：提交在途、状态未知或已确认运行均不可再次POST。
+  if (scanSubmitting || document.querySelector('#scan')?.disabled) return;
+  const gen = pageGen, requestGen = wallGen;
+  scanSubmitting = true;
+  let completed = false, denied = false;
   scanPanel.hidden = false;
-  scanTitle.textContent = '正在扫描…';
+  scanTitle.textContent = '正在启动扫描…';
   scanCount.textContent = '';
   scanDetail.textContent = '';
   startScanPolling();
   try {
     const url = libraryId ? `/scan?library_id=${encodeURIComponent(libraryId)}` : '/scan';
     const r = await api(url, { method: 'POST' });
+    completed = true;
     toast(`扫描完成：${r.success} 已刮削 / ${r.pending} 未刮削${r.skipped ? ` / 跳过 ${r.skipped} 个不兼容` : ''}`);
-  } catch (e) { toast(e.message, 'error'); }
-  try { renderScanProgress(await api('/scan/progress')); } catch { /* ignore */ }
-  startScanPolling();
-  scanBtn.disabled = false;
-  scanBtn.querySelector('span').textContent = '开始扫描';
-  // 只在当前页是媒体墙时增量刷新：无条件整页重渲染会把已加载的分页缓冲、
-  // 滚动位置和搜索焦点一起丢掉（reloadWall 才会保留筛选与焦点）。
+  } catch (e) {
+    toast(e.message, 'error');
+    denied = e.status === 401 || e.status === 403;
+  } finally {
+    scanSubmitting = false;
+  }
+  // 提交失败不重放POST；响应结束后只通过同一观察器重新确认全局状态。
+  if (denied) { stopScanPolling(); scanProgressUnavailable(null); }
+  else startScanPolling();
+  // 全局工具栏跨页面继续观察；提交回包不得刷新用户已切走/重新筛选的页面。
   const name = location.hash.replace('#', '');
-  if (pages[name] === pageItems) reloadWall(); else if (pages[name]) page(name);
+  if (completed && gen === pageGen && requestGen === wallGen && pages[name] === pageItems) reloadWall();
 }
 
 async function boot() {
   if (!token) { window.location.replace('/'); return; }
   try {
     const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': token } });
-    if (!response.ok) throw new Error('unauthorized');
+    if (response.status === 401) {
+      localStorage.removeItem('emby_token');
+      window.location.replace('/');
+      return;
+    }
+    if (!response.ok) throw new Error('authentication unavailable');
   } catch {
-    localStorage.removeItem('emby_token');
-    window.location.replace('/');
+    // A failed validation is not evidence that the stored credential is invalid.
+    content.innerHTML = `<section class="empty"><p role="alert">暂时无法验证登录状态，请检查服务或网络后重试。已保留登录凭据。</p><button id="auth-retry" class="btn btn-accent" type="button">重试验证</button></section>`;
+    document.querySelector('#auth-retry').addEventListener('click', event => {
+      event.currentTarget.disabled = true;
+      boot();
+    });
     return;
   }
   // 导航写 hash 并压入历史，配合 popstate 让浏览器前进/后退在页面间往返。
@@ -1911,26 +2138,9 @@ async function boot() {
     if (event.key === 'Escape' && !detailOverlay.hidden) { closeDetail(); return; }
     if (event.key === 'Escape' && !document.querySelector('#player-overlay').hidden) closePlayer();
   });
-  // 页面刷新/切换回来时，若扫描仍在进行则恢复进度显示。
-  try {
-    const p = await api('/scan/progress');
-    if (p && p.running) {
-      renderScanProgress(p);
-      startScanPolling();
-      const btn = document.querySelector('#scan');
-      btn.disabled = true;
-      btn.querySelector('span').textContent = '扫描中…';
-    }
-  } catch { /* ignore */ }
-  // 探测任务在服务端异步执行，切页/刷新后同样要恢复进度显示。
-  try {
-    const p = await api('/probe/media/progress');
-    if (p && p.running) {
-      renderProbeProgress(p);
-      startProbePolling();
-      setProbeButton(true);
-    }
-  } catch { /* ignore */ }
+  // 全局扫描观察不阻塞初始页面；首读也经过同一超时/恢复链路。
+  startScanPolling();
+  // 媒体墙渲染后由同一探测观察器恢复，boot不再裸读探测进度。
   const initial = location.hash.replace('#', '');
   page(pages[initial] ? initial : 'overview');
 }

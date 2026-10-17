@@ -36,7 +36,8 @@ var scheduledTypes = map[string]string{
 // scheduledView 计划任务列表项：定义 + 下次执行时间。
 type scheduledView struct {
 	store.ScheduledTask
-	NextRun string `json:"next_run,omitempty"`
+	NextRun    string `json:"next_run,omitempty"`
+	ConfigETag string `json:"config_etag"`
 }
 
 // —— 执行器：把调度器回调接到具体的服务动作上 ——
@@ -84,9 +85,13 @@ func (a *App) runScheduledScan(task scheduler.Task) error {
 
 // runScheduledProbe 执行媒体信息探测（同步阻塞直到结束）。
 func (a *App) runScheduledProbe(task scheduler.Task) error {
+	status, err := scheduledProbeStatus(task.Params)
+	if err != nil {
+		return err
+	}
 	req := probeRequest{
 		LibraryID: paramInt64(task.Params, "library_id"),
-		Status:    paramString(task.Params, "status"),
+		Status:    status,
 		Limit:     int(paramInt64(task.Params, "limit")),
 	}
 	if value, ok := task.Params["only_missing"]; ok {
@@ -147,6 +152,34 @@ func paramBool(v any) bool {
 	return false
 }
 
+// probeStatusContract opts only probe status into the strict, additive contract.
+// Unmarked legacy tasks retain their empty/null => success behavior.
+const probeStatusContract = "explicit-v1"
+
+func scheduledProbeStatus(raw map[string]any) (string, error) {
+	version, strict := raw["probe_status_contract"]
+	if !strict {
+		return paramString(raw, "status"), nil
+	}
+	if version != probeStatusContract {
+		return "", fmt.Errorf("unsupported probe_status_contract")
+	}
+	value, present := raw["status"]
+	if !present {
+		return "success", nil
+	}
+	status, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("probe status must be all, success or manual")
+	}
+	switch status {
+	case "all", "success", "manual":
+		return status, nil
+	default:
+		return "", fmt.Errorf("probe status must be all, success or manual")
+	}
+}
+
 // normalizeParams 按任务类型把请求参数整理成规范 JSON：
 // 只保留该类型认识的键，避免把垃圾字段沉淀进库。
 func normalizeParams(kind string, raw map[string]any) (string, error) {
@@ -158,7 +191,14 @@ func normalizeParams(kind string, raw map[string]any) (string, error) {
 		// 无参数
 	case "probe":
 		out["library_id"] = paramInt64(raw, "library_id")
-		if status := paramString(raw, "status"); status != "" {
+		status, err := scheduledProbeStatus(raw)
+		if err != nil {
+			return "", err
+		}
+		if _, strict := raw["probe_status_contract"]; strict {
+			out["probe_status_contract"] = probeStatusContract
+		}
+		if status != "" {
 			out["status"] = status
 		}
 		if limit := paramInt64(raw, "limit"); limit > 0 {
@@ -203,7 +243,7 @@ func (a *App) adminScheduledTasks(c *gin.Context) {
 	}
 	items := make([]scheduledView, 0, len(tasks))
 	for _, task := range tasks {
-		view := scheduledView{ScheduledTask: task}
+		view := scheduledResponse(task)
 		if next := a.sched.Next(task.ID); !next.IsZero() {
 			view.NextRun = next.Format(time.RFC3339)
 		}
@@ -267,7 +307,18 @@ func (a *App) adminCreateScheduledTask(c *gin.Context) {
 	}
 	a.reloadScheduled()
 	slog.Info("新建计划任务", "task_id", created.ID, "name", created.Name, "type", created.Type, "cron", created.Cron)
-	c.JSON(http.StatusOK, created)
+	c.JSON(http.StatusOK, scheduledResponse(created))
+}
+
+// adminConditionalScheduledTask requires a validator. This additive endpoint
+// prevents a stale new UI from falling back to an older server's unconditional PUT.
+// The body is the same complete configuration as PUT, not a JSON Merge Patch.
+func (a *App) adminConditionalScheduledTask(c *gin.Context) {
+	if _, present := c.Request.Header["If-Match"]; !present {
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "configuration validator required", "code": "SCHEDULED_PRECONDITION_REQUIRED"})
+		return
+	}
+	a.adminUpdateScheduledTask(c)
 }
 
 func (a *App) adminUpdateScheduledTask(c *gin.Context) {
@@ -287,8 +338,35 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 		return
 	}
 	task.ID = id
-	updated, err := a.db.UpdateScheduledTask(task)
+	var updated store.ScheduledTask
+	if values, conditional := c.Request.Header["If-Match"]; conditional {
+		if len(values) != 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "one configuration validator required"})
+			return
+		}
+		current, readErr := a.db.ScheduledTask(id)
+		if readErr != nil {
+			if store.NotFound(readErr) {
+				c.JSON(http.StatusPreconditionFailed, gin.H{"code": "SCHEDULED_CONFIG_CHANGED", "error": "计划配置已变化或删除，请保留当前输入，刷新后核对"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+			}
+			return
+		}
+		if strings.TrimSpace(values[0]) != scheduledConfigETag(current) {
+			c.JSON(http.StatusPreconditionFailed, gin.H{"code": "SCHEDULED_CONFIG_CHANGED", "error": "计划配置已变化，请保留当前输入，刷新后核对再保存"})
+			return
+		}
+		updated, err = a.db.CompareAndSwapScheduledTask(current, task)
+	} else {
+		// Compatibility: existing clients without validators retain PUT behavior.
+		updated, err = a.db.UpdateScheduledTask(task)
+	}
 	if err != nil {
+		if errors.Is(err, store.ErrScheduledConfigChanged) {
+			c.JSON(http.StatusPreconditionFailed, gin.H{"code": "SCHEDULED_CONFIG_CHANGED", "error": "计划配置已变化，请保留当前输入，刷新后核对再保存"})
+			return
+		}
 		if store.NotFound(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
@@ -298,7 +376,7 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 	}
 	a.reloadScheduled()
 	slog.Info("修改计划任务", "task_id", updated.ID, "name", updated.Name, "enabled", updated.Enabled)
-	c.JSON(http.StatusOK, updated)
+	c.JSON(http.StatusOK, scheduledResponse(updated))
 }
 
 // adminToggleScheduledTask 只切换启用状态；调度器随即重建，无需重启。
@@ -324,7 +402,7 @@ func (a *App) adminToggleScheduledTask(c *gin.Context) {
 		return
 	}
 	slog.Info("切换计划任务状态", "task_id", id, "enabled", updated.Enabled)
-	c.JSON(http.StatusOK, updated)
+	c.JSON(http.StatusOK, scheduledResponse(updated))
 }
 
 func (a *App) adminDeleteScheduledTask(c *gin.Context) {

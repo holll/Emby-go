@@ -54,9 +54,9 @@ type RunOptions struct {
 	Overwrite   bool
 	// RefreshPerMovie 为真时每部写完立即单文件重扫（单条路径）；批量为假，结束后整库扫一次。
 	RefreshPerMovie bool
-	// OnProgress 每次处理完一部回调一次（可为 nil）。
+	// OnProgress 每次处理完一部回调一次（可为 nil），同一轮先交付 OnProgress 再交付 OnItem，回调之间不并发。
 	OnProgress func(Progress)
-	// OnItem 每部处理完回调（可为 nil），供调用方收集失败原因与失效图片缓存。
+	// OnItem 每部处理完回调（可为 nil），收集失败原因与失效图片缓存；慢回调会背压交付，不得同步等待另一项或本轮结束。
 	OnItem func(ItemResult)
 }
 
@@ -95,44 +95,41 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 	var (
 		mu      sync.Mutex
 		aborted atomic.Bool
-		total   atomic.Int64
 	)
-	report := func(update func(*Progress)) {
+	emit := func(result ItemResult) {
+		// Serialize the complete delivery, as in the avatar worker loop.
+		// Callbacks must return without waiting for another item or this run.
 		mu.Lock()
-		update(&progress)
+		defer mu.Unlock()
+		progress.Done++
+		progress.Current = result.Title
+		switch result.Status {
+		case StatusSuccess:
+			progress.Success++
+			progress.Consecutive = 0
+		case StatusSkipped:
+			progress.Skipped++
+			progress.Consecutive = 0
+		default:
+			progress.Failed++
+			if result.Fatal {
+				progress.Consecutive++
+			} else {
+				progress.Consecutive = 0
+			}
+		}
 		snapshot := progress
-		mu.Unlock()
 		if opts.OnProgress != nil {
 			opts.OnProgress(snapshot)
 		}
-	}
-
-	emit := func(result ItemResult) {
-		total.Add(1)
-		other := total.Load()
-		report(func(p *Progress) {
-			p.Done = int(other)
-			p.Current = result.Title
-			switch result.Status {
-			case StatusSuccess:
-				p.Success++
-				p.Consecutive = 0
-			case StatusSkipped:
-				p.Skipped++
-				// 跳过不是故障，不累加连续失败。
-				p.Consecutive = 0
-			default:
-				p.Failed++
-				if result.Fatal {
-					p.Consecutive++
-				} else {
-					// 服务有响应（只是这条数据有问题），说明 MetaTube 可达，故障计数清零。
-					p.Consecutive = 0
-				}
-			}
-		})
 		if opts.OnItem != nil {
 			opts.OnItem(result)
+		}
+		if result.Status == StatusFailed && snapshot.Consecutive >= MaxConsecutiveFailures {
+			if aborted.CompareAndSwap(false, true) {
+				slog.Warn("刮削触发熔断：连续失败过多，中止本次任务",
+					"consecutive", snapshot.Consecutive, "done", snapshot.Done, "total", len(movies))
+			}
 		}
 	}
 
@@ -151,19 +148,6 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 				}
 				result := s.scrapeOne(ctx, movie, opts)
 				emit(result)
-				if result.Status == StatusFailed {
-					mu.Lock()
-					consecutive := progress.Consecutive
-					mu.Unlock()
-					if consecutive >= MaxConsecutiveFailures {
-						// 连续失败到阈值：判定为环境性故障（MetaTube 不可达 / token 失效），
-						// 继续跑只会把剩余影片全部标记为失败。
-						if aborted.CompareAndSwap(false, true) {
-							slog.Warn("刮削触发熔断：连续失败过多，中止本次任务",
-								"consecutive", consecutive, "done", total.Load(), "total", len(movies))
-						}
-					}
-				}
 			}
 		}()
 	}
@@ -177,8 +161,8 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 	wg.Wait()
 
 	if aborted.Load() {
-		return progress, fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
-			MaxConsecutiveFailures, progress.Done, len(movies))
+		return progress, errors.Join(ctx.Err(), fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
+			MaxConsecutiveFailures, progress.Done, len(movies)))
 	}
 	if err := ctx.Err(); err != nil {
 		return progress, err

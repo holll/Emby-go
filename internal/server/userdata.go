@@ -1,24 +1,19 @@
 package server
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"emby-go/internal/store"
 
 	"github.com/gin-gonic/gin"
 )
 
 // userDataJSON 组装 UserItemDataDto 形态的响应。
-func (a *App) userDataJSON(id int64) (gin.H, bool) {
-	m, err := a.db.Movie(id)
-	if err != nil || !m.IsVisible() {
-		return nil, false
-	}
-	d, _ := a.db.Data(id)
-	percentage := float64(0)
-	if m.RuntimeSeconds > 0 && d.PositionTicks > 0 {
-		percentage = float64(d.PositionTicks) / float64(m.RuntimeSeconds*10000000) * 100
-	}
+func (a *App) userDataJSON(id int64, d store.UserData) gin.H {
 	return gin.H{
 		"ItemId":                strconv.FormatInt(id, 10),
 		"ServerId":              a.serverID,
@@ -26,14 +21,17 @@ func (a *App) userDataJSON(id int64) (gin.H, bool) {
 		"PlayCount":             d.PlayCount,
 		"Played":                d.Played,
 		"IsFavorite":            d.IsFavorite,
-		"PlayedPercentage":      percentage,
+		"PlayedPercentage":      d.PlayedPercentage,
 		"LastPlayedDate":        d.LastPlayedAt,
-	}, true
+	}
 }
 
-// userDataWrite 在用户数据写后统一 bump 版本：列表/详情缓存 key 均含库版本号，据此自然失效。
-func (a *App) userDataWrite(libraryID int64) {
-	_ = a.db.BumpVersion(libraryID)
+func userDataWriteError(c *gin.Context, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "user data write failed"})
 }
 
 func (a *App) favoriteItem(c *gin.Context, favorite bool) {
@@ -50,17 +48,12 @@ func (a *App) favoriteItem(c *gin.Context, favorite bool) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if err := a.db.SetFavorite(id, favorite); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	data, err := a.db.SetIndexedFavoriteData(id, favorite)
+	if err != nil {
+		userDataWriteError(c, err)
 		return
 	}
-	a.userDataWrite(movie.LibraryID)
-	resp, ok := a.userDataJSON(id)
-	if !ok {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }
 
 func (a *App) favorite(c *gin.Context)   { a.favoriteItem(c, true) }
@@ -80,17 +73,12 @@ func (a *App) rateItem(c *gin.Context, likes int) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if err := a.db.SetLikes(id, likes); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	data, err := a.db.SetIndexedLikesData(id, likes)
+	if err != nil {
+		userDataWriteError(c, err)
 		return
 	}
-	a.userDataWrite(movie.LibraryID)
-	resp, ok := a.userDataJSON(id)
-	if !ok {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }
 
 // rating 处理 POST /Users/{uid}/Items/{id}/Rating?Likes=true|false。
@@ -122,15 +110,10 @@ func (a *App) hideFromResume(c *gin.Context) {
 		return
 	}
 	hide := strings.EqualFold(c.Query("Hide"), "true")
-	if err := a.db.SetHideFromResume(id, hide); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	data, err := a.db.SetIndexedHideFromResumeData(id, hide)
+	if err != nil {
+		userDataWriteError(c, err)
 		return
 	}
-	a.userDataWrite(movie.LibraryID)
-	resp, ok := a.userDataJSON(id)
-	if !ok {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }

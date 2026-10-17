@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestRedactedRequestPath(t *testing.T) {
+func TestRedactedRequestQuery(t *testing.T) {
 	for _, query := range []string{
 		"api_key=secret", "ApiKey=secret", "X-Emby-Token=secret",
 		"X-MediaBrowser-Token=secret", "TOKEN=secret", "access_token=secret",
@@ -20,20 +20,19 @@ func TestRedactedRequestPath(t *testing.T) {
 		"api_key=secret;other=value",
 	} {
 		t.Run(query, func(t *testing.T) {
-			got := redactedRequestPath("/Videos/1/stream?" + query)
+			got := redactedRequestQuery(query)
 			if strings.Contains(got, "secret") || !strings.Contains(got, "REDACTED") {
 				t.Fatalf("凭据未脱敏：%s", got)
 			}
 		})
 	}
-	for _, path := range []string{"/Items", "/Items?searchTerm=a%20b&Limit=10"} {
-		if got := redactedRequestPath(path); got != path {
-			t.Errorf("无凭据路径被修改：%q，期望 %q", got, path)
+	for _, query := range []string{"", "Limit=10"} {
+		if got := redactedRequestQuery(query); got != query {
+			t.Errorf("允许的参数被修改：%q，期望 %q", got, query)
 		}
 	}
-	got := redactedRequestPath("/Videos/1/stream?api_key=secret&Static=true&MediaSourceId=1")
-	_, rawQuery, _ := strings.Cut(got, "?")
-	values, err := url.ParseQuery(rawQuery)
+	got := redactedRequestQuery("api_key=secret&Static=true&MediaSourceId=1")
+	values, err := url.ParseQuery(got)
 	if err != nil || values.Get("Static") != "true" || values.Get("MediaSourceId") != "1" {
 		t.Fatalf("非敏感参数未保留：%s，错误：%v", got, err)
 	}

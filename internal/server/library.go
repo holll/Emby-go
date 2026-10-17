@@ -462,7 +462,7 @@ func (a *App) boxsetItemFrom(name string, stat store.CollectionStat) gin.H {
 func (a *App) counts(c *gin.Context) {
 	_, total, err := a.db.SearchFiltered(0, "", "", "", false, "title", false, 1, 0)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	collections := a.cachedCollections()
@@ -498,11 +498,13 @@ func (a *App) resume(c *gin.Context) {
 	}
 	movies, total, err := a.db.Resumed(limit, start)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
-	dataMap, _ := a.db.DataFor(movieIDs(movies))
-	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
+	dataMap, actorMap, ok := a.itemAssociations(c, movieIDs(movies))
+	if !ok {
+		return
+	}
 	items := make([]gin.H, 0, len(movies))
 	for _, movie := range movies {
 		items = append(items, a.embyItemActors(movie, dataMap[movie.ID], actorMap[movie.ID], true))
@@ -526,8 +528,19 @@ func (a *App) similar(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
+	// The source movie participates in the result: bind its read, not just the
+	// later candidate query/cache write, to the captured version namespace.
+	version := a.db.Version("g:version")
 	src, err := a.db.Movie(id)
-	if err != nil || !src.IsVisible() {
+	if err != nil {
+		if store.NotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		} else {
+			itemDataUnavailable(c)
+		}
+		return
+	}
+	if !src.IsVisible() {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -536,7 +549,7 @@ func (a *App) similar(c *gin.Context) {
 		limit = 12
 	}
 	// 相似度结果按 (版本,影片,limit) 短缓存，重复进入详情页直接命中。
-	simKey := "similar:" + a.db.Version("g:version") + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
+	simKey := "similar:" + version + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(simKey); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -544,7 +557,7 @@ func (a *App) similar(c *gin.Context) {
 	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列）。
 	candidates, err := a.db.SimilarCandidates(src, similarPoolSize(limit))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	candidateIDs := make([]int64, 0, len(candidates))
@@ -553,7 +566,7 @@ func (a *App) similar(c *gin.Context) {
 	}
 	movies, err := a.db.MoviesByIDs(candidateIDs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 
@@ -586,8 +599,10 @@ func (a *App) similar(c *gin.Context) {
 	for _, r := range results {
 		ids = append(ids, r.movie.ID)
 	}
-	dataMap, _ := a.db.DataFor(ids)
-	actorMap, _ := a.db.ActorsFor(ids)
+	dataMap, actorMap, ok := a.itemAssociations(c, ids)
+	if !ok {
+		return
+	}
 	out := make([]gin.H, 0, len(results))
 	for _, r := range results {
 		out = append(out, a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true))
@@ -658,7 +673,7 @@ func (a *App) views(c *gin.Context) {
 	}
 	libs, e := a.db.Libraries()
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	out := make([]gin.H, 0, len(libs))
@@ -864,11 +879,13 @@ func (a *App) latest(c *gin.Context) {
 	}
 	movies, err := a.db.Latest(libraryID, limit, 0)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
-	dataMap, _ := a.db.DataFor(movieIDs(movies))
-	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
+	dataMap, actorMap, ok := a.itemAssociations(c, movieIDs(movies))
+	if !ok {
+		return
+	}
 	// Latest 返回裸数组（实测真实 Emby 不是 {Items:...} 包裹），同样支持 ?Fields=。
 	fields := requestedFields(c)
 	out := make([]gin.H, 0, len(movies))
@@ -891,11 +908,13 @@ func (a *App) suggestions(c *gin.Context) {
 	}
 	movies, err := a.db.Latest(0, limit, 0)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
-	dataMap, _ := a.db.DataFor(movieIDs(movies))
-	actorMap, _ := a.db.ActorsFor(movieIDs(movies))
+	dataMap, actorMap, ok := a.itemAssociations(c, movieIDs(movies))
+	if !ok {
+		return
+	}
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
 		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
@@ -968,7 +987,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		favorite := strings.Contains(strings.ToLower(c.Query("Filters")), "isfavorite")
 		ms, total, e := a.db.SearchScoped(0, collection, c.Query("SearchTerm"), c.Query("Years"), genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
 		if e != nil {
-			c.JSON(500, gin.H{"error": e.Error()})
+			itemDataUnavailable(c)
 			return
 		}
 		a.respondItems(c, ms, total, start, "")
@@ -1010,7 +1029,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 	}
 	ms, total, e := a.db.SearchScoped(lib, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	a.respondItems(c, ms, total, start, key)
@@ -1101,8 +1120,10 @@ func embyTime(raw string) string {
 func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, cacheKey string) {
 	fields := requestedFields(c)
 	ids := movieIDs(ms)
-	dataMap, _ := a.db.DataFor(ids)
-	actorMap, _ := a.db.ActorsFor(ids)
+	dataMap, actorMap, ok := a.itemAssociations(c, ids)
+	if !ok {
+		return
+	}
 	out := make([]gin.H, 0, len(ms))
 	for _, m := range ms {
 		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
@@ -1131,7 +1152,7 @@ func movieIDs(ms []store.Movie) []int64 {
 func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
 	stats, err := a.db.CollectionStats(a.collectionMinMovies())
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	term = strings.ToLower(strings.TrimSpace(term))
@@ -1239,7 +1260,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		itemDataUnavailable(c)
 		return
 	}
 	sort.Strings(names)

@@ -115,7 +115,7 @@ curl -H "X-Emby-Token: <key>" http://<host>:18080/Users/1/Views
 
 ```yaml
 port: 18080               # 监听端口
-debug: false              # true 时启用 gin 调试 + 详细请求体日志
+debug: false              # true 时增加安全请求元数据；不输出请求头/请求体或原始错误
 db_path: "emby-go.db"     # SQLite 文件
 server_name: "Emby-go"    # 对外站名
 server_id: ""             # 留空自动生成稳定 UUID

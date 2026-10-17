@@ -70,6 +70,16 @@ func EncodeWebP(src io.ReadSeeker, destination string) error {
 	return file.Close()
 }
 
+// EncodeWebPTo encodes into a caller-owned writer with the same decode limits
+// and quality as EncodeWebP. It neither closes nor syncs the writer.
+func EncodeWebPTo(src io.ReadSeeker, dst io.Writer) error {
+	img, err := decodeLimited(src)
+	if err != nil {
+		return err
+	}
+	return webp.Encode(dst, img, &webp.EncoderOptions{Quality: defaultQuality, Method: 4})
+}
+
 // EncodeWebPBuffer 把图片编码为 webp 字节，供缩略图这类「不落盘中转」的场景使用。
 // quality <=0 时用默认画质。
 func EncodeWebPBuffer(img image.Image, quality int) ([]byte, error) {

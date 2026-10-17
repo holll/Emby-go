@@ -35,7 +35,8 @@
   --line-strong: rgba(255, 255, 255, 0.14);
   --text: var(--white);
   --muted: var(--white-60);
-  --dim: var(--white-38);
+  /* 标签/提示同样是必要文字，不能沿用装饰图形的38%白色透明度。 */
+  --dim: var(--white-60);
   --accent: var(--blue);
   --accent-strong: #3fa4ff;
   --accent-soft: rgba(10, 132, 255, 0.15);

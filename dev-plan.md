@@ -20,7 +20,7 @@
 | 未刮影片 | 仅 http(s) 且无 NFO → 登记 pending；Web 手动录入 NFO + 上传封面/背景 → success 进入 Emby |
 | 播放 | **302 直拉**：PlaybackInfo 返回本服务流地址 → `GET /videos/{itemId}/stream` 实时读 `.strm` → http(s) 则 **302 Location=真实地址** 客户端直拉；服务端不转发字节、不转码。实测遇防盗链/UA/Range 问题 → 同源**转发兜底**（§5.2） |
 | 失败反馈 | 播放遇到死链/上游 403/404 → 明确错误不白屏不崩溃（302 模式尽力透传，转发兜底可原样回上游状态码）；非 http 源根本不会进 Emby |
-| 未知接口探针 | 路由匹配不上的请求（Emby 各类客户端会发五花八门的请求）→ **NoRoute 记录 method/path/query/请求体**，供 Web 调试页查看，驱动补端点 |
+| 未知接口探针 | NoRoute仅记录固定方法、脱敏资源分类和少量安全query，不记录原始未知路径/请求体；同类聚合、seen上限128。调试页用于观察未支持资源分类，不再从诊断记录恢复完整未知端点（隐私优先） |
 | 续播/进度 | 最小 UserData：`position_ticks / play_count / played / last_played_at`，Item 回填支持“继续播放” |
 | 播放带宽 | 直拉模式不占本服务带宽，适配万部规模 |
 | 主题 | 深色影院风服务于 Emby 客户端；Web 后台工具性但同套深色令牌 |

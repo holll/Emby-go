@@ -127,7 +127,9 @@ func (a *App) firstCollectionPoster(names []string) string {
 // 图片接口每张图都要拿一次图片路径，直接查库会让整页海报串行排队
 // （SQLite 写只有一条连接，读虽已放开并发，但每张图一次查询依然是纯浪费）。
 func (a *App) cachedMovie(id int64) (store.Movie, bool) {
-	key := "m:" + strconv.FormatInt(id, 10)
+	// Capture before reading: a late old read may only fill its old namespace.
+	version := a.db.Version("g:version")
+	key := "m:" + version + ":" + strconv.FormatInt(id, 10)
 	if raw, ok := a.imgMeta.Get(key); ok {
 		var m store.Movie
 		if json.Unmarshal(raw, &m) == nil {
@@ -1169,12 +1171,8 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if err := a.db.SetPlayed(id, played); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	if err := a.db.BumpVersion(movie.LibraryID); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if err := a.db.SetIndexedPlayed(id, played); err != nil {
+		userDataWriteError(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)

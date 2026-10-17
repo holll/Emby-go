@@ -67,7 +67,7 @@ func (a *App) adminDeleteLibrary(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	if err = a.db.DeleteLibrary(id); err != nil {
+	if err = a.db.DeleteIndexedLibrary(id); err != nil {
 		if store.NotFound(err) {
 			c.JSON(404, gin.H{"error": "library not found"})
 			return
@@ -75,7 +75,6 @@ func (a *App) adminDeleteLibrary(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	_ = a.db.BumpVersion(id)
 	a.cache.Clear()
 	slog.Info("删除媒体库", "library_id", id)
 	c.Status(http.StatusNoContent)
@@ -427,7 +426,10 @@ func (a *App) adminItems(c *gin.Context) {
 	for _, movie := range ms {
 		ids = append(ids, movie.ID)
 	}
-	dataMap, _ := a.db.DataFor(ids)
+	dataMap, ok := a.itemDataFor(c, ids)
+	if !ok {
+		return
+	}
 	userData := make(map[string]gin.H, len(dataMap))
 	for id, data := range dataMap {
 		userData[strconv.FormatInt(id, 10)] = gin.H{
@@ -444,16 +446,14 @@ func (a *App) adminDelete(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	movie, err := a.db.Movie(id)
-	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
-		return
-	}
-	if err = a.db.DeleteMovie(id); err != nil {
+	if err = a.db.DeleteIndexedMovie(id); err != nil {
+		if store.NotFound(err) {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	_ = a.db.BumpVersion(movie.LibraryID)
 	a.cache.Clear()
 	c.Status(http.StatusNoContent)
 }
@@ -482,20 +482,28 @@ type editRequest struct {
 // 只写 NFO，不写 movies 表：元数据真源是 NFO，索引由 `RescanOne` 重建——
 // 直接 UpsertMovie 会把状态写回 success，人工录入的分类就留不住了
 // （重扫时 scanner 会按库里已有的 manual 集合保留它）。
-func (a *App) adminEdit(c *gin.Context) {
+func (a *App) adminEdit(c *gin.Context) { a.adminEditMode(c, false) }
+
+func (a *App) adminPatch(c *gin.Context) { a.adminEditMode(c, true) }
+
+func (a *App) adminEditMode(c *gin.Context, strict bool) {
 	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
 	if e != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	m, e := a.db.Movie(id)
-	if e != nil {
-		c.JSON(404, gin.H{"error": "not found"})
-		return
-	}
 	var req editRequest
-	if c.ShouldBindJSON(&req) != nil {
-		c.JSON(400, gin.H{"error": "invalid json"})
+	if strict {
+		req, e = decodeEditPatch(c.Request.Body)
+	} else {
+		e = c.ShouldBindJSON(&req)
+	}
+	if e != nil {
+		message := "invalid json"
+		if strict {
+			message = "invalid metadata fields"
+		}
+		c.JSON(400, gin.H{"error": message})
 		return
 	}
 	if req.LockedFields != nil {
@@ -512,18 +520,19 @@ func (a *App) adminEdit(c *gin.Context) {
 		return
 	}
 	defer a.releaseNFO("edit")
-	nfoPath := strings.TrimSpace(m.NFOPath)
-	if nfoPath == "" {
-		// 没有 NFO 的条目（未刮削）以 .strm 同名路径为落点，UpdateScraped 会新建。
-		nfoPath = strings.TrimSuffix(m.SourcePath, filepath.Ext(m.SourcePath)) + ".nfo"
+	m, e := a.db.Movie(id)
+	if e != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
 	}
+	nfoPath := editNFOPath(m)
 	if _, e = nfo.Read(nfoPath); e != nil && !errors.Is(e, os.ErrNotExist) {
 		c.JSON(400, gin.H{"error": "nfo 不可读: " + e.Error()})
 		return
 	}
 	// 走标签级更新而不是「读成结构体 → 整体重写」：NFO 里可能有外部工具写的
 	// 扩展标签，整体重写会静默丢掉它们（见 internal/nfo/update.go 的说明）。
-	// Overwrite=true：编辑是人工显式覆盖，空值仍表示「本次不修改该字段」。
+	// Overwrite=true：人工显式覆盖。旧PUT空值不修改；新PATCH独立传清空标签。
 	fields := nfo.ScrapeFields{Overwrite: true, ManualEdit: true, LockedFields: req.LockedFields, LockData: req.LockData}
 	if req.Title != nil {
 		fields.Title = strings.TrimSpace(*req.Title)
@@ -555,27 +564,15 @@ func (a *App) adminEdit(c *gin.Context) {
 	if req.Label != nil {
 		fields.Label = strings.TrimSpace(*req.Label)
 	}
+	if strict {
+		fields.ClearFields = req.clearTags()
+	}
 	if e = nfo.UpdateScraped(nfoPath, fields); e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	// 先标记为人工录入，再重扫：重扫会读 DB 里已有的 manual 集合，从而保留这个分类
-	//（顺序不能反——反过来重扫会先把状态写成 pending，分类就丢了）。
-	if e = a.db.MarkManual(m.SourcePath, nfoPath); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
-		return
-	}
-	// 索引交给重扫重建：它会按 NFO 现状刷新元数据，并把该片保留在「手动录入」。
-	library, e := a.db.Library(m.LibraryID)
-	if e == nil {
-		if _, e = scanner.RescanOne(a.db, library, m.SourcePath); e != nil {
-			slog.Warn("元数据编辑后重扫失败", "movie_id", m.ID, "error", e)
-			e = nil // NFO 已落盘，下次扫库会带上；不算保存失败
-		}
-	}
-	a.cache.Clear()
-	slog.Info("元数据已编辑", "movie_id", m.ID, "title", fields.Title, "nfo", nfoPath)
-	c.JSON(200, gin.H{"status": "success"})
+	// 文件已经落盘；后续任何失败必须表达为部分成功，不能伪报保存失败或全成功。
+	a.finishEditedNFO(c, m, nfoPath, "")
 }
 
 // trimList 去掉列表项首尾空白并丢弃空项；返回非 nil 空切片表示「清空该列表」。
@@ -673,24 +670,14 @@ func (a *App) adminImage(c *gin.Context) {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	switch kind {
-	case "poster", "primary":
-		m.PosterPath = dest
-	case "backdrop", "fanart":
-		m.BackdropPath = dest
-	case "landscape":
-		m.LandscapePath = dest
-	}
 	// 同名图片被覆盖，立即失效它的 tag 缓存，否则客户端几分钟内仍拿旧图。
 	a.invalidateImageTag(dest)
-	size, mtime := scanner.SourceStat(m.SourcePath)
-	_, e = a.db.UpsertMovie(m, size, mtime)
-	if e == nil {
-		e = a.db.BumpVersion(m.LibraryID)
-	}
+	// Do not write the pre-upload Movie snapshot back over concurrent edits.
+	// This transaction covers the indexed path and versions, not the saved file.
+	e = a.db.SetIndexedImage(id, kind, dest)
 	a.cache.Clear()
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		c.JSON(500, gin.H{"error": "image saved but index update failed", "code": "IMAGE_INDEX_FAILED", "saved": true, "indexed": false})
 		return
 	}
 	c.JSON(200, gin.H{"status": "success", "path": dest})
@@ -745,8 +732,8 @@ func (a *App) adminProbe(c *gin.Context) {
 }
 
 func (a *App) adminClearProbes(c *gin.Context) {
-	if err := a.db.ClearProbes(); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if err := a.clearDiagnosticProbes(); err != nil {
+		c.JSON(500, gin.H{"error": "probe history clear failed"})
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -776,7 +763,7 @@ func (a *App) adminCreateAPIKey(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	slog.Info("创建 API 密钥", "name", key.Name)
+	slog.Info("创建 API 密钥")
 	c.JSON(200, key)
 }
 
@@ -791,10 +778,7 @@ func (a *App) adminDeleteAPIKey(c *gin.Context) {
 		return
 	}
 	a.cache.Delete("apikey:" + key)
-	prefix := key
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
-	}
-	slog.Info("删除 API 密钥", "key_prefix", prefix)
+	// Even a prefix is credential material; names may also contain pasted secrets.
+	slog.Info("删除 API 密钥")
 	c.Status(http.StatusNoContent)
 }

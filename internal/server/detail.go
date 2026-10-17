@@ -18,7 +18,7 @@ import (
 // 管理端单条详情：媒体墙详情抽屉的数据源。
 //
 // 只读，不含编辑/收藏/标记已看。技术参数复用 streamsFor()（主文件读 NFO、
-// 分段读各自 mediainfo.json），演员复用 db.Actors()，不重复实现解析逻辑。
+// 分段读各自 mediainfo.json），演员复用批量关联读取，不重复实现解析逻辑。
 
 // detailFile 一个媒体文件（主文件或分段）的展示信息。
 type detailFile struct {
@@ -48,8 +48,26 @@ func (a *App) adminItemDetail(c *gin.Context) {
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		if store.NotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		} else {
+			itemDataUnavailable(c)
+		}
 		return
+	}
+	data, actorMap, ok := a.itemAssociations(c, []int64{movie.ID})
+	if !ok {
+		return
+	}
+	userData, hasUserData := data[movie.ID]
+	libraryName := ""
+	lib, err := a.db.Library(movie.LibraryID)
+	if err != nil && !store.NotFound(err) {
+		itemDataUnavailable(c)
+		return
+	}
+	if err == nil {
+		libraryName = lib.Name
 	}
 
 	paths := append([]string{movie.SourcePath}, movie.AdditionalParts...)
@@ -82,7 +100,7 @@ func (a *App) adminItemDetail(c *gin.Context) {
 	}
 
 	actors := make([]detailActor, 0, 8)
-	if list, err := a.db.Actors(movie.ID); err == nil {
+	if list := actorMap[movie.ID]; len(list) > 0 {
 		dir := a.avatarsDir()
 		for _, actor := range list {
 			item := detailActor{Name: actor.Name, AvatarURL: actor.AvatarURL}
@@ -97,12 +115,6 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		}
 	}
 
-	libraryName := ""
-	if lib, err := a.db.Library(movie.LibraryID); err == nil {
-		libraryName = lib.Name
-	}
-	data, _ := a.db.DataFor([]int64{movie.ID})
-	userData, hasUserData := data[movie.ID]
 	lockedFields := make([]string, 0)
 	lockData := false
 	nfoPath := movie.NFOPath

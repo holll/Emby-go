@@ -3,10 +3,12 @@ package scraper
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,17 +32,23 @@ import (
 
 // AvatarResult 一个演员的头像处理结果。
 type AvatarResult struct {
-	Actor     string
-	Provider  string
-	AvatarURL string
-	Image     string
-	Movies    int
-	Status    string // success / skipped / failed
-	Reason    string
+	Actor              string
+	Provider           string
+	AvatarURL          string
+	Image              string
+	Movies             int
+	NFOFailed          int
+	IndexRefreshFailed int
+	Status             string // success / skipped / failed
+	Reason             string
 	// Fatal 标记这次失败是否属于环境性故障（MetaTube 不可达/鉴权失败）。
 	// 与影片刮削 ItemResult.Fatal 同义，决定要不要计入熔断计数。
 	Fatal bool
 }
+
+// ErrAvatarWriteIncomplete reports saved output whose NFO/index stages failed.
+// It deliberately excludes underlying file paths, SQL and upstream responses.
+var ErrAvatarWriteIncomplete = errors.New("头像文件已保存，但部分 NFO/索引更新未确认；请检查并修复 NFO 后重新扫库")
 
 // RunAvatars 批量补全头像：只处理「头像为空」的演员，已存在的不重复下载（幂等）。
 func (s *Scraper) RunAvatars(ctx context.Context, libraryID int64, limit int,
@@ -75,14 +83,20 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 	}
 
 	var (
-		mu      sync.Mutex
-		aborted atomic.Bool
-		done    atomic.Int64
+		mu         sync.Mutex
+		aborted    atomic.Bool
+		incomplete atomic.Bool
 	)
 	emit := func(result AvatarResult) {
-		count := int(done.Add(1))
+		// Serialize state and both callbacks as one delivery. Workers may finish
+		// out of order, but observers must never see progress move backwards or
+		// receive another item's progress between this item's two callbacks.
 		mu.Lock()
-		progress.Done = count
+		defer mu.Unlock()
+		if result.NFOFailed > 0 || result.IndexRefreshFailed > 0 {
+			incomplete.Store(true)
+		}
+		progress.Done++
 		progress.Current = result.Actor
 		switch result.Status {
 		case StatusSuccess:
@@ -103,7 +117,6 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 			}
 		}
 		snapshot := progress
-		mu.Unlock()
 		if onProgress != nil {
 			onProgress(snapshot)
 		}
@@ -111,9 +124,7 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 			onItem(result)
 		}
 		if result.Status == StatusFailed {
-			mu.Lock()
-			consecutive := progress.Consecutive
-			mu.Unlock()
+			consecutive := snapshot.Consecutive
 			if consecutive >= MaxConsecutiveFailures {
 				if aborted.CompareAndSwap(false, true) {
 					slog.Warn("头像任务触发熔断：连续失败过多，中止本次任务", "consecutive", consecutive)
@@ -145,10 +156,14 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 	close(jobs)
 	wg.Wait()
 
+	resultErr := ctx.Err()
 	if aborted.Load() {
-		return progress, fmt.Errorf("连续 %d 个演员头像失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止", MaxConsecutiveFailures)
+		resultErr = errors.Join(resultErr, fmt.Errorf("连续 %d 个演员头像失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止", MaxConsecutiveFailures))
 	}
-	return progress, ctx.Err()
+	if incomplete.Load() {
+		resultErr = errors.Join(resultErr, ErrAvatarWriteIncomplete)
+	}
+	return progress, resultErr
 }
 
 // scrapeAvatar 处理单个演员。
@@ -199,22 +214,27 @@ func (s *Scraper) scrapeAvatar(ctx context.Context, name string) AvatarResult {
 		}
 		changed, err := nfo.SetActorThumb(movie.NFOPath, name, result.AvatarURL)
 		if err != nil {
-			slog.Warn("写入演员头像真源失败", "actor", name, "nfo", movie.NFOPath, "error", err)
+			result.NFOFailed++
+			slog.Warn("头像 NFO 写入未确认", "movie_id", movie.ID)
 			continue
 		}
 		if !changed {
 			continue
 		}
 		if err := s.rescan(movie); err != nil {
-			slog.Warn("头像写入后重扫失败", "actor", name, "movie_id", movie.ID, "error", err)
+			result.IndexRefreshFailed++
+			slog.Warn("头像 NFO 已保存但索引刷新未确认", "movie_id", movie.ID)
 			continue
 		}
 		result.Movies++
 	}
 	// 索引里的头像标识与远端地址最后写：重扫会把 <thumb> 带进 actors.avatar_url，
 	// 但重扫不认识本地副本，avatar_tag 只能由这里补。
-	if err := s.store.SetActorAvatar(name, result.AvatarURL, avatar.Tag(data)); err != nil {
+	if err := s.store.SetIndexedActorAvatar(name, result.AvatarURL, avatar.Tag(data)); err != nil {
 		return s.avatarFailure(result, "写入头像索引失败: "+err.Error(), nil)
+	}
+	if result.NFOFailed > 0 || result.IndexRefreshFailed > 0 {
+		return s.avatarFailure(result, ErrAvatarWriteIncomplete.Error(), nil)
 	}
 	result.Status = StatusSuccess
 	slog.Info("演员头像已更新", "actor", name, "provider", match.Provider, "movies", result.Movies)
@@ -287,14 +307,21 @@ func foldName(raw string) string {
 // writeWebP 把下载到的图片字节转 webp 落盘（临时文件 + 原子 rename）。
 // 下载失败或转码失败都不会留下半截文件。
 func writeWebP(data []byte, dest string) error {
-	tmp := dest + ".tmp"
-	if err := imageutil.EncodeWebP(bytes.NewReader(data), tmp); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("转 webp 失败: %w", err)
-	}
-	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.Remove(tmp)
+	// Same directory for rename atomicity; O_EXCL and a random suffix give each
+	// writer its own inode. Never reopen by path or touch the legacy dest.tmp.
+	// 0666 retains os.Create's umask-filtered creation mode.
+	tmp := filepath.Join(filepath.Dir(dest), "."+filepath.Base(dest)+"."+rand.Text()+".tmp")
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
 		return err
 	}
-	return nil
+	defer os.Remove(tmp)
+	if err = imageutil.EncodeWebPTo(bytes.NewReader(data), file); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("转 webp 失败: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dest)
 }

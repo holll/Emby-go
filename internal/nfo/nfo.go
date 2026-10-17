@@ -239,6 +239,26 @@ func Read(path string) (MovieMeta, error) {
 	if err != nil {
 		return MovieMeta{}, err
 	}
+	// encoding/xml matches unqualified struct tags by local name, so a
+	// vendor:plot could otherwise resurrect a cleared <plot> in the index.
+	// For ordinary unqualified movie documents, exclude namespaced direct
+	// extensions from the read view only. Their original bytes stay on disk.
+	// Keep legacy reads of namespaced root documents unchanged (the updater
+	// already refuses to rewrite those documents).
+	text := string(b)
+	elements, _, root, err := directElements(text)
+	if err != nil {
+		return MovieMeta{}, err
+	}
+	if root.Space == "" && root.Local == "movie" {
+		for i := len(elements) - 1; i >= 0; i-- {
+			element := elements[i]
+			if element.name.Space != "" {
+				text = text[:element.start] + text[element.end:]
+			}
+		}
+		b = []byte(text)
+	}
 	var m MovieMeta
 	if err := xml.Unmarshal(b, &m); err != nil {
 		return MovieMeta{}, err

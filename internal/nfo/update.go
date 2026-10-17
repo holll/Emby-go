@@ -56,6 +56,10 @@ type ScrapeFields struct {
 	// ManualEdit 仅由人工编辑入口设置：绕过已有字段锁（仍遵守 Overwrite），
 	// 并允许修改以下锁配置。自动刮削即使 Overwrite=true 也必须遵守现有锁。
 	ManualEdit bool
+	// ClearFields contains direct scalar/list tag names explicitly cleared by
+	// the strict manual PATCH adapter. Ignored unless ManualEdit is true.
+	// Scrapers and the legacy PUT adapter never populate it.
+	ClearFields []string
 	// nil 保持原配置；非 nil 空列表解除字段锁。未知锁名原样保留。
 	LockedFields *[]string
 	// nil 保持原配置；非 nil 显式写入 true/false。
@@ -90,20 +94,30 @@ func UpdateScraped(path string, f ScrapeFields) error {
 	indent := childIndent(text)
 	// 已持有路径锁，读取本次最新原文的锁；禁止用调用方缓存的元数据判定。
 	locked := lockedTags(text, f.ManualEdit)
+	clear := map[string]bool{}
+	if f.ManualEdit {
+		for _, tag := range f.ClearFields {
+			clear[tag] = true
+		}
+	}
 
 	// 单值标签
 	for _, tag := range scalarTags {
 		value := scalarValue(f, tag)
-		if locked[tag] || value == "" || (hasScalar(text, tag) && !f.Overwrite) {
+		if locked[tag] || (value == "" && !clear[tag]) || (hasScalar(text, tag) && !f.Overwrite) {
 			continue
 		}
-		text = upsertScalar(text, tag, value, indent)
+		if value == "" {
+			text = replaceBlocks(text, tag, nil, indent)
+		} else {
+			text = upsertScalar(text, tag, value, indent)
+		}
 	}
 
 	// 列表标签
 	for _, tag := range listTags {
 		values := listValue(f, tag)
-		if locked[tag] || len(values) == 0 || (hasAnyBlock(text, tag) && !f.Overwrite) {
+		if locked[tag] || (len(values) == 0 && !clear[tag]) || (hasAnyBlock(text, tag) && !f.Overwrite) {
 			continue
 		}
 		text = replaceBlocks(text, tag, renderList(tag, values, indent), indent)

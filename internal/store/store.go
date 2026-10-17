@@ -111,40 +111,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
-	if err := s.init(); err != nil {
+	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
-	_, _ = db.Exec("ALTER TABLE userdata ADD COLUMN last_stopped_ticks INTEGER DEFAULT -1")
-	_, _ = db.Exec("ALTER TABLE userdata ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE userdata ADD COLUMN likes INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE userdata ADD COLUMN hide_from_resume INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN landscape_path TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN collection TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN official_rating TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN sortname TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN taglines TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN provider_id TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN additional_parts TEXT NOT NULL DEFAULT '[]'")
-	// 头像内容标识（Emby PrimaryImageTag）：存量库通过 ALTER 补列，新库见 init 的建表语句。
-	_, _ = db.Exec("ALTER TABLE actors ADD COLUMN avatar_tag TEXT")
-	// 刮削结果可见性（需求 5f）：不新增 status 枚举，失败/待确认都记在这两列上。
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_at TEXT")
-	_, _ = db.Exec("ALTER TABLE movies ADD COLUMN last_scrape_error TEXT")
-	// 媒体库显示顺序。存量库补列后全为 0，`ORDER BY sort_order,id` 退化成按 id，
-	// 与加这个字段之前的行为一致，不需要回填。
-	_, _ = db.Exec("ALTER TABLE libraries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
-	// 列表/详情/续播/实体聚合都按 status（+ library_id/collection）过滤，建索引避免全表扫描。
-	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_library_status ON movies(library_id,status)")
-	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_status ON movies(status)")
-	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movies_collection ON movies(collection)")
-	// 「不兼容」类别已废弃：非 http(s) 源在扫描阶段直接跳过、不再入库。
-	// 存量库里这些行永远不可播放，一次性清掉（在索引之后执行，避免白建索引）。
-	if _, err := db.Exec("DELETE FROM movies WHERE status='incompatible'"); err != nil {
-		slog.Warn("清理历史不兼容记录失败", "error", err)
-	}
-	// 相似度倒排索引：按 (kind,value) 定位到影片，movie_id 随索引一起返回，避免回表。
-	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_movie_features_lookup ON movie_features(kind,value,movie_id)")
 	// 载入全局版本号到内存（kv 无该行时视为 0）。
 	var version string
 	_ = db.QueryRow("SELECT value FROM kv WHERE key='g:version'").Scan(&version)
@@ -176,10 +146,16 @@ func (s *Store) waitFeaturesReady() {
 	}
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close drains the initialization backfill before releasing its database.
+// sql.DB.Close alone does not join the goroutine between its SQL operations.
+func (s *Store) Close() error {
+	s.waitFeaturesReady()
+	return s.db.Close()
+}
 
-func (s *Store) init() error {
-	_, err := s.db.Exec(`PRAGMA foreign_keys=ON;
+// baseSchema is frozen as part of migration 1. Future schema changes belong in
+// a new migration rather than modifying an already released checksum.
+const baseSchema = `
 CREATE TABLE IF NOT EXISTS libraries (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, path TEXT UNIQUE NOT NULL, type TEXT DEFAULT 'movies', enabled INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER NOT NULL, source_path TEXT UNIQUE NOT NULL, file_size INTEGER DEFAULT 0, file_mtime TEXT, source_protocol TEXT, source_container TEXT, number TEXT, status TEXT NOT NULL, nfo_path TEXT, output_dir TEXT, title TEXT, original_title TEXT, plot TEXT, year INTEGER, premiered TEXT, rating REAL, director TEXT, series TEXT, maker TEXT, label TEXT, collection TEXT, official_rating TEXT, sortname TEXT, taglines TEXT, provider_id TEXT, genres TEXT, tags TEXT, studios TEXT, poster_path TEXT, backdrop_path TEXT, landscape_path TEXT, runtime_seconds INTEGER DEFAULT 0, additional_parts TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(library_id) REFERENCES libraries(id));
 CREATE TABLE IF NOT EXISTS userdata (movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, position_ticks INTEGER DEFAULT 0, play_count INTEGER DEFAULT 0, played INTEGER DEFAULT 0, last_played_at TEXT, last_stopped_ticks INTEGER DEFAULT -1, is_favorite INTEGER NOT NULL DEFAULT 0, likes INTEGER NOT NULL DEFAULT 0, hide_from_resume INTEGER NOT NULL DEFAULT 0);
@@ -192,9 +168,7 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT
 CREATE TABLE IF NOT EXISTS administrators (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS access_tokens (token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_status TEXT, last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`)
-	return err
-}
+CREATE TABLE IF NOT EXISTS scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_status TEXT, last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`
 
 func passwordHash(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -237,6 +211,13 @@ func (s *Store) AdministratorName() (string, error) {
 
 func (s *Store) SaveAccessToken(token string) error {
 	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at) VALUES(?,?)", token, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// DeleteAccessToken revokes only the supplied login session. It is idempotent
+// at the store boundary and never deletes API keys or other sessions.
+func (s *Store) DeleteAccessToken(token string) error {
+	_, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", token)
 	return err
 }
 
@@ -431,29 +412,6 @@ func parseStrings(v string) []string {
 	return out
 }
 
-// BumpVersion 提升全局版本号与指定媒体库的版本号（列表/详情/实体缓存键的前缀）。
-//
-// 两条 kv 必须包在同一个事务里：分两次 Exec 时前一条成功、后一条失败会留下
-// 「全局变了、库没变」的不一致状态，重试又会多跳一次。内存里的 gversion 也要
-// 等事务提交成功后才自增——否则 DB 写失败后内存已经变了，重启后从 kv 重载会回退。
-func (s *Store) BumpVersion(libraryID int64) error {
-	libKey := "lib:" + strconv.FormatInt(libraryID, 10) + ":version"
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, key := range []string{"g:version", libKey} {
-		if _, err := tx.Exec(`INSERT INTO kv(key,value) VALUES(?,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`, key); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.gversion.Add(1)
-	return nil
-}
 func (s *Store) Version(key string) string {
 	if key == "g:version" {
 		return strconv.FormatInt(s.gversion.Load(), 10)
@@ -482,28 +440,32 @@ func (s *Store) SetKV(key, value string) error {
 }
 
 func (s *Store) UpsertMovie(m Movie, size int64, mtime time.Time) (int64, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	q := `INSERT INTO movies(library_id,source_path,file_size,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,collection,official_rating,sortname,taglines,provider_id,genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,additional_parts,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET library_id=excluded.library_id,file_size=excluded.file_size,file_mtime=excluded.file_mtime,source_protocol=excluded.source_protocol,source_container=excluded.source_container,number=excluded.number,status=excluded.status,nfo_path=excluded.nfo_path,output_dir=excluded.output_dir,title=excluded.title,original_title=excluded.original_title,plot=excluded.plot,year=excluded.year,premiered=excluded.premiered,rating=excluded.rating,director=excluded.director,series=excluded.series,maker=excluded.maker,label=excluded.label,collection=excluded.collection,official_rating=excluded.official_rating,sortname=excluded.sortname,taglines=excluded.taglines,provider_id=excluded.provider_id,genres=excluded.genres,tags=excluded.tags,studios=excluded.studios,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,landscape_path=excluded.landscape_path,runtime_seconds=excluded.runtime_seconds,additional_parts=excluded.additional_parts,updated_at=excluded.updated_at`
-	tx, err := s.db.Begin()
+	var id int64
+	err := s.writeTx(func(tx *sql.Tx) error {
+		var err error
+		id, err = upsertMovieTx(tx, m, size, mtime)
+		if err != nil {
+			return err
+		}
+		return refreshFeaturesTx(tx, id)
+	})
 	if err != nil {
 		return 0, err
 	}
-	if _, err = tx.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), now, now); err != nil {
-		_ = tx.Rollback()
+	return id, nil
+}
+
+// upsertMovieTx only writes metadata. The caller refreshes features after all
+// related actor changes, and owns commit/rollback and version publication.
+func upsertMovieTx(tx *sql.Tx, m Movie, size int64, mtime time.Time) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `INSERT INTO movies(library_id,source_path,file_size,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,collection,official_rating,sortname,taglines,provider_id,genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,additional_parts,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET library_id=excluded.library_id,file_size=excluded.file_size,file_mtime=excluded.file_mtime,source_protocol=excluded.source_protocol,source_container=excluded.source_container,number=excluded.number,status=excluded.status,nfo_path=excluded.nfo_path,output_dir=excluded.output_dir,title=excluded.title,original_title=excluded.original_title,plot=excluded.plot,year=excluded.year,premiered=excluded.premiered,rating=excluded.rating,director=excluded.director,series=excluded.series,maker=excluded.maker,label=excluded.label,collection=excluded.collection,official_rating=excluded.official_rating,sortname=excluded.sortname,taglines=excluded.taglines,provider_id=excluded.provider_id,genres=excluded.genres,tags=excluded.tags,studios=excluded.studios,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,landscape_path=excluded.landscape_path,runtime_seconds=excluded.runtime_seconds,additional_parts=excluded.additional_parts,updated_at=excluded.updated_at`
+	if _, err := tx.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), now, now); err != nil {
 		return 0, err
 	}
 	var id int64
-	if err = tx.QueryRow("SELECT id FROM movies WHERE source_path=?", m.SourcePath).Scan(&id); err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	// 相似度倒排特征随元数据一起更新（同一事务，避免出现半新半旧的特征）。
-	if err = refreshFeaturesTx(tx, id); err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	if err = tx.Commit(); err != nil {
+	if err := tx.QueryRow("SELECT id FROM movies WHERE source_path=?", m.SourcePath).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -928,61 +890,17 @@ func (s *Store) DeleteLibrary(id int64) error {
 	return tx.Commit()
 }
 
+// DeleteMissingSources retains the legacy no-version contract. Scan uses
+// ReconcileMissingSources to atomically publish the authoritative inventory.
 func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{}) error {
-	rows, err := s.db.Query("SELECT source_path FROM movies WHERE library_id=?", libraryID)
-	if err != nil {
+	// Close the read cursor before acquiring a pinned write connection.
+	missing, err := missingSourcePaths(s.db, libraryID, paths)
+	if err != nil || len(missing) == 0 {
 		return err
 	}
-	var missing []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if _, ok := paths[path]; !ok {
-			missing = append(missing, path)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	// 先关掉结果集再开事务：SQLite 同一连接上挂着只读游标时开写事务会互相阻塞，
-	// 而连接池只有几条连接，可能直接凑成死锁。
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	// 整批一个事务：中途失败会留下「只删了一半」的索引，与磁盘不一致
-	//（下次扫描又会把剩下的删掉，但期间索引与真实文件对不上，列表会显示已消失的片子）。
-	// 批量 IN 同时省掉几百次往返。
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	const chunk = 500
-	for start := 0; start < len(missing); start += chunk {
-		end := start + chunk
-		if end > len(missing) {
-			end = len(missing)
-		}
-		batch := missing[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
-		args := make([]any, 0, len(batch)+1)
-		args = append(args, libraryID)
-		for _, path := range batch {
-			args = append(args, path)
-		}
-		query := "DELETE FROM movies WHERE library_id=? AND source_path IN (" + placeholders + ")"
-		if _, err := tx.Exec(query, args...); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return s.writeTx(func(tx *sql.Tx) error {
+		return deleteSourcePathsTx(tx, libraryID, missing)
+	})
 }
 
 func movieScan(row *sql.Rows) (Movie, error) {
@@ -1217,51 +1135,42 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	return out, total, rows.Err()
 }
 func (s *Store) Data(id int64) (UserData, error) {
-	var d UserData
-	var played, favorite, likes, hidden int
-	err := s.db.QueryRow(`SELECT position_ticks,play_count,played,COALESCE(last_played_at,''),COALESCE(last_stopped_ticks,-1),
-		COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE movie_id=?`, id).Scan(&d.PositionTicks, &d.PlayCount, &played, &d.LastPlayedAt, &d.StoppedTicks, &favorite, &likes, &hidden)
-	d.Played = played != 0
-	d.IsFavorite = favorite != 0
-	d.Likes = likes
-	d.HideFromResume = hidden != 0
+	d, err := readUserData(s.db, id)
 	if err == sql.ErrNoRows {
 		return UserData{}, nil
 	}
 	return d, err
 }
 
-// DataFor 批量读取多部影片的 UserData（一次 IN 查询，替代列表页逐片 Data() 的 N+1）。
+// DataFor 批量读取多部影片的 UserData；大列表按参数预算分块，共享方法内快照。
 func (s *Store) DataFor(ids []int64) (map[int64]UserData, error) {
 	out := make(map[int64]UserData, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := s.db.Query(`SELECT movie_id,position_ticks,play_count,played,COALESCE(last_played_at,''),COALESCE(last_stopped_ticks,-1),
-		COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE movie_id IN (`+placeholders+`)`, args...)
+	err := s.readIDBatches(ids, func(q batchQueryer, marks string, args []any) error {
+		rows, err := q.Query(`SELECT movie_id,position_ticks,play_count,played,COALESCE(last_played_at,''),COALESCE(last_stopped_ticks,-1),
+   COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE movie_id IN (`+marks+`)`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var d UserData
+			var id int64
+			var played, favorite, likes, hidden int
+			if err := rows.Scan(&id, &d.PositionTicks, &d.PlayCount, &played, &d.LastPlayedAt, &d.StoppedTicks, &favorite, &likes, &hidden); err != nil {
+				return err
+			}
+			d.Played = played != 0
+			d.IsFavorite = favorite != 0
+			d.Likes = likes
+			d.HideFromResume = hidden != 0
+			out[id] = d
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var d UserData
-		var id int64
-		var played, favorite, likes, hidden int
-		if err := rows.Scan(&id, &d.PositionTicks, &d.PlayCount, &played, &d.LastPlayedAt, &d.StoppedTicks, &favorite, &likes, &hidden); err != nil {
-			return nil, err
-		}
-		d.Played = played != 0
-		d.IsFavorite = favorite != 0
-		d.Likes = likes
-		d.HideFromResume = hidden != 0
-		out[id] = d
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ActorRef 演员及其头像索引。
@@ -1274,34 +1183,32 @@ type ActorRef struct {
 	AvatarTag string `json:"avatar_tag,omitempty"`
 }
 
-// ActorsFor 批量读取多部影片的演员列表（一次 IN 查询，替代列表页逐片 Actors() 的 N+1），
-// 同时带回头像字段——列表页的 People[] 需要 PrimaryImageTag，逐片回查会退化成 N+1。
+// ActorsFor 按参数预算批量读取演员及头像，大列表共享方法内快照。
+// 各影片演员保持姓名排序；重复输入 ID 不得重复演员。
 func (s *Store) ActorsFor(ids []int64) (map[int64][]ActorRef, error) {
 	out := make(map[int64][]ActorRef, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := s.db.Query(`SELECT ma.movie_id, ma.actor_name, COALESCE(a.avatar_url,''), COALESCE(a.avatar_tag,'')
-		FROM movie_actors ma LEFT JOIN actors a ON a.name=ma.actor_name
-		WHERE ma.movie_id IN (`+placeholders+`) ORDER BY ma.movie_id, ma.actor_name`, args...)
+	err := s.readIDBatches(ids, func(q batchQueryer, marks string, args []any) error {
+		rows, err := q.Query(`SELECT ma.movie_id,ma.actor_name,COALESCE(a.avatar_url,''),COALESCE(a.avatar_tag,'')
+   FROM movie_actors ma LEFT JOIN actors a ON a.name=ma.actor_name
+   WHERE ma.movie_id IN (`+marks+`) ORDER BY ma.movie_id,ma.actor_name`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var actor ActorRef
+			if err := rows.Scan(&id, &actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
+				return err
+			}
+			out[id] = append(out[id], actor)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int64
-		var actor ActorRef
-		if err := rows.Scan(&id, &actor.Name, &actor.AvatarURL, &actor.AvatarTag); err != nil {
-			return nil, err
-		}
-		out[id] = append(out[id], actor)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ActorAvatar 按演员名查头像索引；查无此人时返回零值（不报错）。
@@ -1377,19 +1284,13 @@ func (s *Store) SetHideFromResume(id int64, hidden bool) error {
 	return err
 }
 func (s *Store) Probe(method, path, query, body string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
+	return s.writeTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec("INSERT INTO api_probe(method,path,query,body_preview,created_at) VALUES(?,?,?,?,?)", method, path, query, body, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+		_, err := tx.Exec("DELETE FROM api_probe WHERE id NOT IN (SELECT id FROM api_probe ORDER BY id DESC LIMIT 1000)")
 		return err
-	}
-	if _, err = tx.Exec("INSERT INTO api_probe(method,path,query,body_preview,created_at) VALUES(?,?,?,?,?)", method, path, query, body, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err = tx.Exec("DELETE FROM api_probe WHERE id NOT IN (SELECT id FROM api_probe ORDER BY id DESC LIMIT 1000)"); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 func (s *Store) ClearProbes() error {
@@ -1401,12 +1302,16 @@ func (s *Store) ClearProbes() error {
 // 传入 avatar 为空时不清空已有头像——扫库多数时候只读到姓名，
 // 不能让一次扫描把头像任务已写入的索引抹掉。
 func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err = tx.Exec("DELETE FROM movie_actors WHERE movie_id=?", movieID); err != nil {
-		_ = tx.Rollback()
+	return s.writeTx(func(tx *sql.Tx) error {
+		if err := replaceActorsTx(tx, movieID, actors); err != nil {
+			return err
+		}
+		return refreshFeaturesTx(tx, movieID)
+	})
+}
+
+func replaceActorsTx(tx *sql.Tx, movieID int64, actors []ActorRef) error {
+	if _, err := tx.Exec("DELETE FROM movie_actors WHERE movie_id=?", movieID); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1415,25 +1320,18 @@ func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
 		if name == "" {
 			continue
 		}
-		if _, err = tx.Exec(`INSERT INTO actors(name,avatar_url,updated_at) VALUES(?,?,?)
+		if _, err := tx.Exec(`INSERT INTO actors(name,avatar_url,updated_at) VALUES(?,?,?)
 			ON CONFLICT(name) DO UPDATE SET
 				avatar_url=CASE WHEN excluded.avatar_url<>'' THEN excluded.avatar_url ELSE actors.avatar_url END,
 				updated_at=excluded.updated_at`,
 			name, strings.TrimSpace(actor.AvatarURL), now); err != nil {
-			_ = tx.Rollback()
 			return err
 		}
-		if _, err = tx.Exec("INSERT OR IGNORE INTO movie_actors(movie_id,actor_name) VALUES(?,?)", movieID, name); err != nil {
-			_ = tx.Rollback()
+		if _, err := tx.Exec("INSERT OR IGNORE INTO movie_actors(movie_id,actor_name) VALUES(?,?)", movieID, name); err != nil {
 			return err
 		}
 	}
-	// 演员是相似度特征之一，关系变了特征也要跟着变（同一事务）。
-	if err = refreshFeaturesTx(tx, movieID); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 // Actors 返回一部影片的演员（含头像索引），按姓名排序。
@@ -1519,9 +1417,19 @@ func (s *Store) CountByStatus(status string) (int, error) {
 // 与 UpsertMovie 的区别：只改这两列，不动其它索引字段——调用方（元数据编辑）
 // 紧接着会用 scanner.RescanOne 从 NFO 重建其余字段，重扫会因这条记录已是 manual 而保留分类。
 func (s *Store) MarkManual(sourcePath, nfoPath string) error {
-	_, err := s.db.Exec("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=?",
+	result, err := s.db.Exec("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=?",
 		nfoPath, time.Now().UTC().Format(time.RFC3339), sourcePath)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // 扫描器据此在重建索引时保留人工录入分类：一次扫描只查一次，

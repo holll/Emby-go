@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -68,11 +67,14 @@ type App struct {
 	probeCancel context.CancelFunc
 	rootCtx     context.Context
 	rootCancel  context.CancelFunc
+	startupWG   sync.WaitGroup // join startup DB readers before closing the store
 
 	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
 	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
-	probeMu   sync.Mutex
-	probeSeen map[string]struct{}
+	probeMu        sync.Mutex
+	probeSeen      map[string]struct{}
+	probeEpoch     uint64
+	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
 
 	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
 	sched *scheduler.Scheduler
@@ -192,19 +194,16 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 			return nil, err
 		}
 	}
-	if cfg.Debug {
-		gin.SetMode(gin.DebugMode)
-	} else {
-		gin.SetMode(gin.ReleaseMode)
-	}
+	// Framework debug redirect output can contain raw URLs outside middleware.
+	// App debug uses the sanitized metadata logger below, never Gin's raw debug.
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	middlewares := []gin.HandlerFunc{requestLogger()}
 	if cfg.Debug {
 		middlewares = append(middlewares, requestContentLogger())
 	}
-	// 恢复中间件在 panic 时打印堆栈，写入程序日志出口（同时保留控制台），
-	// 否则崩溃信息只会留在终端、落不进日志文件。
-	middlewares = append(middlewares, gin.RecoveryWithWriter(logging.AppWriter()))
+	// 不转储panic值或请求；它们可能包含凭据。仍保留固定故障事件和500。
+	middlewares = append(middlewares, requestRecoveryTo(logging.AppWriter()))
 	r.Use(middlewares...)
 	a.router = r
 	a.routes()
@@ -218,7 +217,11 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 
 	// 启动自检：MetaTube 不可达只告警不阻断启动（与 ffprobe 探测的做法一致）——
 	// 元数据服务是外部依赖，它挂了不该让整个媒体库服务起不来。
-	go a.checkScrapeBackend()
+	a.startupWG.Add(1)
+	go func() {
+		defer a.startupWG.Done()
+		a.checkScrapeBackend()
+	}()
 	return a, nil
 }
 
@@ -231,13 +234,14 @@ func (a *App) checkScrapeBackend() {
 	ctx, cancel := context.WithTimeout(a.rootCtx, 10*time.Second)
 	defer cancel()
 	if err := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout()).Health(ctx); err != nil {
-		slog.Warn("启动自检：MetaTube 不可达（不影响启动，刮削任务会失败）", "url", cfg.BaseURL, "error", err)
+		slog.Warn("启动自检：MetaTube 不可达（不影响启动，刮削任务会失败）", backendHealthLogFields(err)...)
 		return
 	}
-	slog.Info("启动自检：MetaTube 可达", "url", cfg.BaseURL)
+	slog.Info("启动自检：MetaTube 可达")
 }
 
-// Close 先停调度与在跑的探测任务再关库，避免后台 goroutine 继续写 NFO / 访问已关闭的 DB。
+// Close 请求取消后台任务，等待启动自检与 Store 初始化回填后关库。
+// 业务任务尚未统一 join；这里不保证全应用的有界退出。
 func (a *App) Close() {
 	if a.sched != nil {
 		a.sched.Stop()
@@ -248,6 +252,7 @@ func (a *App) Close() {
 	}
 	a.probeTaskMu.Unlock()
 	a.rootCancel()
+	a.startupWG.Wait()
 	a.db.Close()
 }
 func (a *App) Handler() http.Handler { return a.router }
@@ -314,10 +319,13 @@ func (a *App) routes() {
 	admin.POST("/scheduled", a.adminCreateScheduledTask)
 	admin.POST("/scheduled/validate", a.adminValidateCron)
 	admin.PUT("/scheduled/:id", a.adminUpdateScheduledTask)
+	admin.PATCH("/scheduled/:id", a.adminConditionalScheduledTask)
 	admin.DELETE("/scheduled/:id", a.adminDeleteScheduledTask)
 	admin.POST("/scheduled/:id/toggle", a.adminToggleScheduledTask)
 	admin.POST("/scheduled/:id/run", a.adminRunScheduledTask)
 	admin.PUT("/items/:id", a.adminEdit)
+	admin.PATCH("/items/:id", a.adminPatch)
+	admin.POST("/items/:id/recover-edit", a.adminRecoverEdit)
 	admin.POST("/items/:id/reread", a.adminReread)
 	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
 	// 单条手动刮削：预览 → 看 diff → 确认写入（无状态，取消零副作用）。
@@ -362,7 +370,7 @@ func (a *App) embyRoutes() []embyRoute {
 		{"POST", "/Sessions/Playing/Ping", true, a.noContent},
 		{"POST", "/Sessions/Capabilities", true, a.noContent},
 		{"POST", "/Sessions/Capabilities/Full", true, a.noContent},
-		{"POST", "/Sessions/Logout", true, a.noContent},
+		{"POST", "/Sessions/Logout", true, a.logout},
 		{"GET", "/DisplayPreferences/:pref", true, a.displayPreferences},
 		{"POST", "/DisplayPreferences/:pref", true, a.displayPreferences},
 		{"GET", "/System/Ext/ServerDomains", true, a.serverDomains},
@@ -506,17 +514,22 @@ func (a *App) noRoute(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	path := c.Request.URL.Path
 	if !strings.HasPrefix(path, "/api/") && !isScannerProbe(path) {
-		key := c.Request.Method + " " + path
+		// Unknown endpoint segments/query keys/body can contain arbitrary secrets.
+		// Aggregate by fixed resource family and standard method; never read a body.
+		method, safePath := diagnosticMethod(c.Request.Method), unmatchedDiagnosticPath(path)
+		key := method + " " + safePath
 		a.probeMu.Lock()
 		_, seen := a.probeSeen[key]
+		epoch := a.probeEpoch
+		if len(a.probeSeen) >= 128 {
+			seen = true
+		}
 		if !seen {
 			a.probeSeen[key] = struct{}{}
 		}
 		a.probeMu.Unlock()
-		// 只记首次：客户端探测期同一端点会反复命中，逐次写库会拖慢 404 响应。
 		if !seen {
-			body, _ := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
-			_ = a.db.Probe(c.Request.Method, path, c.Request.URL.RawQuery, string(body))
+			a.persistDiagnosticProbe(method, safePath, redactedRequestQuery(c.Request.URL.RawQuery), epoch)
 		}
 	}
 	c.JSON(404, gin.H{"error": "not found"})

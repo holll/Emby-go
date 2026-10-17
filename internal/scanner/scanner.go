@@ -24,6 +24,9 @@ type Result struct {
 	// 这类文件不再进入 movies 表，只在扫描结果里报个数。
 	Skipped int `json:"skipped"`
 	Failed  int `json:"failed"`
+	// IndexedSources is populated only by RescanOne after metadata/actors commit.
+	// It is internal evidence, not a new public scan-response field.
+	IndexedSources []string `json:"-"`
 }
 
 type candidate struct {
@@ -39,7 +42,9 @@ type candidate struct {
 // manualPaths 是「该库中已标记为人工录入的 source_path」集合：扫库/重扫只负责按磁盘
 // 现状重建索引，不该把人工录入降级成自动刮削结果，所以命中的条目保留 manual。
 type scanOptions struct {
-	manualPaths map[string]bool
+	manualPaths    map[string]bool
+	indexedSources *[]string
+	nonDestructive bool
 }
 
 // Progress 单次媒体库扫描的进度快照，供管理端轮询展示。
@@ -136,10 +141,12 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 		report(done, key)
 	}
 
-	if err := s.DeleteMissingSources(lib.ID, paths); err != nil {
-		return result, err
+	if result.Failed == 0 {
+		if err := s.ReconcileMissingSources(lib.ID, paths); err != nil {
+			return result, err
+		}
 	}
-	return result, s.BumpVersion(lib.ID)
+	return finishIndexScan(result)
 }
 
 // RescanOne 只重扫一个 .strm，用于单条刮削/编辑后立即刷新索引。
@@ -150,6 +157,16 @@ func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progres
 //   - 只处理该文件所属的分组（CD1/CD2 同组一起重建 AdditionalParts），
 //     批量场景下逐条调用它是 O(n²)，所以批量路径仍走整库 Scan。
 func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, error) {
+	return rescanOne(s, lib, strmPath, false)
+}
+
+// ReindexOne rebuilds current metadata without deleting invalid source records,
+// including other members of a CD group. Skipped targets remain incomplete.
+func ReindexOne(s *store.Store, lib store.Library, strmPath string) (Result, error) {
+	return rescanOne(s, lib, strmPath, true)
+}
+
+func rescanOne(s *store.Store, lib store.Library, strmPath string, nonDestructive bool) (Result, error) {
 	var result Result
 	info, err := os.Stat(strmPath)
 	if err != nil {
@@ -163,7 +180,7 @@ func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, erro
 	if err != nil {
 		return result, err
 	}
-	opts := scanOptions{manualPaths: manualPaths}
+	opts := scanOptions{manualPaths: manualPaths, indexedSources: &result.IndexedSources, nonDestructive: nonDestructive}
 
 	base := strings.TrimSuffix(filepath.Base(strmPath), filepath.Ext(strmPath))
 	candidate := candidate{path: strmPath, info: info, base: base, groupKey: strmPath}
@@ -191,7 +208,16 @@ func RescanOne(s *store.Store, lib store.Library, strmPath string) (Result, erro
 			}
 		}
 	}
-	return result, s.BumpVersion(lib.ID)
+	return finishIndexScan(result)
+}
+
+// Every mutation now commits its own version. A failed read still makes the
+// inventory incomplete, so Scan skips reconciliation and reports an error.
+func finishIndexScan(result Result) (Result, error) {
+	if result.Failed > 0 {
+		return result, errors.New("scan incomplete: source read failed")
+	}
+	return result, nil
 }
 
 // collectGroup 找到与目标候选同一 CD 分组的所有文件；非分集文件只返回它自己。
@@ -257,15 +283,21 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	line, err := ReadSource(item.path)
 	if err != nil {
 		result.Failed++
+		// Continue indexing readable items, but report an incomplete scan at
+		// the end and never run missing-source cleanup on this inventory.
 		return nil
 	}
 	setSource(&movie, line)
 	// 非 http(s) 源（ed2k 等）直接跳过：它们永远无法通过 Emby 播放，
 	// 写进 movies 表只会污染列表与统计。只在扫描结果里报个数。
 	if !ValidHTTP(line) {
+		if opts.nonDestructive {
+			result.Skipped++
+			return nil
+		}
 		// 同一路径可能曾经是有效源，单文件重扫也必须剔除旧的可播放索引。
 		if id, err := s.MovieIDByPath(item.path); err == nil {
-			if err := s.DeleteMovie(id); err != nil && !store.NotFound(err) {
+			if err := s.DeleteIndexedMovie(id); err != nil && !store.NotFound(err) {
 				return err
 			}
 		} else if !store.NotFound(err) {
@@ -296,15 +328,19 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		if opts.manualPaths[item.path] {
 			movie.Status = "manual"
 		}
+	}
+	if _, err := s.IndexMovie(movie, item.info.Size(), item.info.ModTime(), actors); err != nil {
+		return err
+	}
+	if nfoErr == nil {
 		result.Success++
 	} else {
 		result.Pending++
 	}
-	id, err := s.UpsertMovie(movie, item.info.Size(), item.info.ModTime())
-	if err != nil {
-		return err
+	if nfoErr == nil && opts.indexedSources != nil {
+		*opts.indexedSources = append(*opts.indexedSources, item.path)
 	}
-	return s.ReplaceActors(id, actors)
+	return nil
 }
 
 func applyMeta(movie *store.Movie, meta nfo.MovieMeta, nfoPath string) {

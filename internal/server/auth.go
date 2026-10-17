@@ -5,14 +5,9 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
-
-// accessTokenTTL 会话令牌在 Redis 中的存活时长。SQLite access_tokens 仍是持久真源，
-// Redis 仅作每请求校验的快速通道，miss 时回源 DB 并回填。
-const accessTokenTTL = 7 * 24 * time.Hour
 
 // setAdminName / currentAdminName 保护 adminName：初始化与登录会写，其它 handler 并发读。
 func (a *App) setAdminName(name string) {
@@ -61,42 +56,54 @@ func requestToken(c *gin.Context) string {
 	return token
 }
 
-func (a *App) authOK(c *gin.Context) bool {
+// authOK always consults the authoritative store. Never read or populate
+// credential positive caches: an in-flight refill could resurrect a revoked key.
+// A successful check only authorizes this request, not future requests or streams.
+func (a *App) authOK(c *gin.Context) (bool, error) {
 	token := requestToken(c)
 	if token == "" {
-		return false
-	}
-	if b, ok := a.cache.Get("token:" + token); ok && len(b) > 0 {
-		return true
+		return false, nil
 	}
 	valid, err := a.db.HasAccessToken(token)
-	if err == nil && valid {
-		a.cache.Set("token:"+token, []byte("1"), accessTokenTTL)
-		return true
+	if err != nil || valid {
+		return valid, err
 	}
-	// API 密钥：长期凭据，删除时由管理端显式清缓存。
-	if b, ok := a.cache.Get("apikey:" + token); ok && len(b) > 0 {
-		return true
-	}
-	if key, err := a.db.HasAPIKey(token); err == nil && key {
-		a.cache.Set("apikey:"+token, []byte("1"), accessTokenTTL)
-		return true
-	}
-	return false
+	return a.db.HasAPIKey(token)
 }
 
 func (a *App) requireAuth(c *gin.Context) {
-	if !a.authOK(c) {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+	valid, err := a.authOK(c)
+	if err != nil {
+		// Do not expose DB diagnostics or turn an outage into a logout/401.
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "authentication unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
+		})
+		return
+	}
+	if !valid {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "AUTH_INVALID"})
 		return
 	}
 	c.Next()
 }
 
+// logout is protected by requireAuth. API keys retain their existing lifetime:
+// only a matching login session is deleted, never the API-key record.
+func (a *App) logout(c *gin.Context) {
+	if err := a.db.DeleteAccessToken(requestToken(c)); err != nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "session revocation unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
+		})
+		return
+	}
+	// Exec returns only after the autocommit delete completes successfully.
+	c.Status(http.StatusNoContent)
+}
+
 func (a *App) authStatus(c *gin.Context) {
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"initialized": initialized})
@@ -117,7 +124,7 @@ func (a *App) initialize(c *gin.Context) {
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	if initialized {
@@ -143,7 +150,7 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	if !initialized {
@@ -152,7 +159,7 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	valid, err := a.db.AuthenticateAdministrator(strings.TrimSpace(req.Username), req.Pw)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	if !valid {
@@ -170,7 +177,6 @@ func (a *App) authenticate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存访问令牌失败"})
 		return
 	}
-	a.cache.Set("token:"+token, []byte("1"), accessTokenTTL)
 	c.JSON(http.StatusOK, gin.H{
 		"AccessToken": token,
 		"ServerId":    a.serverID,
