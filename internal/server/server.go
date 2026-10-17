@@ -63,6 +63,12 @@ type App struct {
 	scanMu     sync.RWMutex
 	scanStatus scanStatus
 
+	// D10：异步扫描任务表（进程内，容量 200，重启不恢复）。
+	scanTaskMu    sync.Mutex
+	scanTasks     map[int64]*asyncScanTask
+	scanTaskOrder []int64
+	scanTaskIdem  map[string]scanIdemEntry
+
 	// 媒体信息探测任务状态。probeCtx 挂在 rootCtx 之下：
 	// 任务在 goroutine 里跑，必须用常驻 context——用请求 context 会在 handler 返回时被取消。
 	probeTaskMu sync.RWMutex
@@ -177,7 +183,9 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
-		authLimiter: newAuthRateLimiter(),
+		authLimiter:  newAuthRateLimiter(),
+		scanTasks:    make(map[int64]*asyncScanTask),
+		scanTaskIdem: make(map[string]scanIdemEntry),
 	}
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
@@ -360,7 +368,9 @@ func (a *App) routes() {
 	admin.POST("/libraries/:id/cover", a.adminLibraryCover)
 	admin.DELETE("/libraries/:id/cover", a.adminLibraryCoverDelete)
 	admin.POST("/scan", a.adminScan)
-	admin.POST("/tasks/scan", a.adminScan)
+	// D10：/tasks/scan 走异步任务表；旧同步 /scan 保留到验收集通过。
+	admin.POST("/tasks/scan", a.adminSubmitScan)
+	admin.GET("/tasks/:id", a.adminScanTaskStatus)
 	admin.GET("/scan/progress", a.adminScanProgress)
 	// 媒体信息探测（与扫库相互独立）。路径用 probe/media 以区别于已有的
 	// /probe——后者记录客户端调用过的未实现端点，语义完全不同。

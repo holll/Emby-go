@@ -402,7 +402,7 @@ P0 → P1 → P2（Emby 核心尽早可用，P2.0 契约校准先行）→ P3（
 - 本地 `go test` 全绿只证明本地回归，不替代真实客户端、浏览器、生产库与备份恢复演练。
 
 ### 9.5 当前基线（2026-10-17）
-- 49 批本地施工完成；`go build/vet/test` 全绿（15 包、358 个 Go 测试、79 个前端 VM 测试）。
+- 50 批本地施工完成；`go build/vet/test` 全绿（15 包、364 个 Go 测试、79 个前端 VM 测试）。
 - 批次 41 关闭 BE-05 的 HTTP 读超时、请求体 413、登录/初始化 429 与代理头收紧；chunked 超限文案、单进程内存限流、反向代理后的 IP 共享与 TLS/初始化引导仍未闭合。
 - 批次 42 建立出站信任边界（internal/outbound）：协议白名单、DNS 解析与拨号地址校验并钉住 IP、逐跳重定向策略、响应头/拨号/握手/连接预算；代理模式无法钉住实际连接地址、ffprobe 子进程出站与真实 NAS 场景未验，D04 未批。
 - 未闭合：BE-02（D02 风险接受，技术隔离未做）、BE-09 代理模式残余、BE-10、BE-07 持久任务、DB-02 播放计数、FE-04/09/10 交互与 a11y 的真实浏览器验收。
@@ -412,5 +412,6 @@ P0 → P1 → P2（Emby 核心尽早可用，P2.0 契约校准先行）→ P3（
 - 批次 46 修 FE-04 基础：遮罩统一焦点栈（Esc 按 z-index、Tab 循环、关闭恢复焦点），详情抽屉/播放器补 dialog 语义与初始焦点。
 - 批次 47 修 BE-08：NoRoute 去重加 6 小时 TTL、容量满时 LRU 淘汰最旧、写库令牌桶（burst 60、1 QPS），预算耗尽不占位。
 - 批次 48 落地 D02：API 密钥明确为管理员全权凭据，设置页与 README 具名标注风险；未来多用户版本非管理员不得建 key（BE-02 风险接受关闭）。
+- 批次 50 落地 D10/BE-07（扫描路径）：`POST /api/admin/tasks/scan` 返回 202+`task_id`，`GET /api/admin/tasks/:id` 查 queued/running/succeeded/failed/skipped 与扫描计数；`Idempotency-Key` 1 小时内重放同一任务；任务表容量 200，满容只淘汰已完成，全部在跑则 429；重启即丢、不恢复不补跑。旧同步 `POST /api/admin/scan` 保留到验收集通过，探测/刮削仍用各自状态端点。
 - 批次 49 落地 D09/BE-04：SIGTERM/SIGINT 后 readiness 立即 503（`/api/health`、`/healthz`），停止新调度、取消探测/刮削、探测/刮削/立即执行 worker 与启动自检统一 join；HTTP Shutdown 与后台 drain 共享 15 秒预算，超时走有诊断的强制退出且不先关 DB。长流不主动撤销；部署侧强杀宽限建议 30s（`cmd/metatube/main.go` 的 `shutdownBudget`）。
-- 开工顺序与依赖见 PLAN-STATUS.md §5；下一批是 BE-07 持久任务（D10 已批），之后 DB-02 播放计数（D07 已批）。
+- 开工顺序与依赖见 PLAN-STATUS.md §5；下一批是 DB-02 播放会话/事件表与序列号协议（D07 已批），之后验收集与 CI 实跑。
