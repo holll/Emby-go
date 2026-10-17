@@ -341,3 +341,107 @@ func TestAcceptanceScanTaskAPI(t *testing.T) {
 		t.Fatalf("A10 重放 code=%d replayed=%v id=%d，期望 202/true/%d", code, replayed, replayID, taskID)
 	}
 }
+
+// TestAcceptanceManualEdit（A07 子集）：人工编辑元数据写入 NFO 并刷新索引；
+// 若允许扫描，再验证重扫后人工值不被旧 NFO 回写覆盖。
+//
+//	ACCEPTANCE_BASE_URL=... ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
+//	ACCEPTANCE_ALLOW_EDIT=1 [ACCEPTANCE_ALLOW_SCAN=1] \
+//	go test ./internal/server -run TestAcceptanceManualEdit -v
+func TestAcceptanceManualEdit(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("ACCEPTANCE_BASE_URL"), "/")
+	if base == "" {
+		t.Skip("未设置 ACCEPTANCE_BASE_URL，跳过真实实例验收")
+	}
+	if os.Getenv("ACCEPTANCE_ALLOW_EDIT") != "1" {
+		t.Skip("未设置 ACCEPTANCE_ALLOW_EDIT=1，跳过会写 NFO 的验收")
+	}
+	pass := os.Getenv("ACCEPTANCE_PASS")
+	if pass == "" {
+		t.Fatal("ACCEPTANCE_PASS 必填")
+	}
+	client := &acceptanceClient{base: base, http: &http.Client{Timeout: 30 * time.Second}}
+	token := client.login(t, userOrDefault(), pass)
+	itemID, _, ok := client.pickItem(t, token)
+	if !ok {
+		t.Skip("实例媒体库为空，人工编辑验收需先入库至少一部影片")
+	}
+	title := fmt.Sprintf("Acceptance Edit %d", time.Now().UnixNano())
+
+	// 严格 PATCH（独立字段语义），只改标题。
+	body, _ := json.Marshal(map[string]any{"title": title})
+	status, out := client.do(t, http.MethodPatch, "/api/admin/items/"+itemID, body, token)
+	if status != http.StatusOK {
+		t.Fatalf("A07 编辑 status=%d body=%s", status, out)
+	}
+	var saved struct {
+		Status string `json:"status"`
+		Saved  bool   `json:"saved"`
+	}
+	if err := json.Unmarshal(out, &saved); err != nil || !saved.Saved {
+		t.Fatalf("A07 编辑响应 saved=false: %s (%v)", out, err)
+	}
+
+	titleOf := func() string {
+		t.Helper()
+		code, raw := client.do(t, http.MethodGet, "/Users/1/Items/"+itemID, nil, token)
+		if code != http.StatusOK {
+			t.Fatalf("A07 详情 code=%d body=%s", code, raw)
+		}
+		var item struct{ Name string }
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatalf("A07 详情 JSON: %v (%s)", err, raw)
+		}
+		return item.Name
+	}
+	if got := titleOf(); got != title {
+		t.Fatalf("A07 编辑后标题=%q，期望 %q", got, title)
+	}
+
+	if os.Getenv("ACCEPTANCE_ALLOW_SCAN") != "1" {
+		return // 只验证写入与索引，不触发扫描
+	}
+	key := fmt.Sprintf("acceptance-edit-scan-%d", time.Now().UnixNano())
+	req, err := http.NewRequest(http.MethodPost, base+"/api/admin/tasks/scan", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Emby-Token", token)
+	req.Header.Set("Idempotency-Key", key)
+	resp, err := client.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	var task struct {
+		TaskID int64 `json:"task_id"`
+	}
+	if err := json.Unmarshal(raw, &task); err != nil || task.TaskID == 0 {
+		t.Fatalf("A07 提交扫描 code=%d body=%s (%v)", resp.StatusCode, raw, err)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		code, out := client.do(t, http.MethodGet, fmt.Sprintf("/api/admin/tasks/%d", task.TaskID), nil, token)
+		if code != http.StatusOK {
+			t.Fatalf("A07 任务状态 code=%d body=%s", code, out)
+		}
+		var st struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(out, &st); err != nil {
+			t.Fatalf("A07 任务 JSON: %v (%s)", err, out)
+		}
+		switch st.Status {
+		case "succeeded", "failed", "skipped":
+			if got := titleOf(); got != title {
+				t.Fatalf("A07 重扫后标题=%q，期望人工值 %q（不得被旧 NFO 回写）", got, title)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A07 扫描任务 %d 120s 未到终态", task.TaskID)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
