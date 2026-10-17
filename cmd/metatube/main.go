@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"emby-go/internal/config"
 	"emby-go/internal/logging"
@@ -58,8 +60,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer app.Close()
+	// 显式超时：默认 http.Server 没有读超时，慢速请求头/请求体可以长期占住连接。
+	// 不设 WriteTimeout：302 直链与网页代理是长响应，写超时会截断正在播放的流。
+	// 优雅退出（信号、Shutdown、readiness）故意留到 BE-04/D09 决策后再做。
+	srv := &http.Server{
+		Addr:              cfg.Addr(),
+		Handler:           app.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute, // 覆盖 32 MiB 图片上传的慢链路
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
 	slog.Info("Emby-go listening", "addr", cfg.Addr(), "version", version, "config", path)
-	if err := http.ListenAndServe(cfg.Addr(), app.Handler()); err != nil {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}

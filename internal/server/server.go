@@ -35,6 +35,9 @@ type App struct {
 	tasks      []task
 	nextTaskID int64
 
+	// 登录/初始化失败限流：进程内固定窗口，按 TCP 对端 IP 与账号计数。
+	authLimiter *authRateLimiter
+
 	// 进程内短缓存：图片 mtime tag 与 NFO 流信息解析结果，
 	// 避免列表/详情请求对媒体盘反复 stat / XML 解析（媒体盘可能较慢）。
 	tagMu sync.Mutex
@@ -161,6 +164,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{}),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
+		authLimiter: newAuthRateLimiter(),
 	}
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	a.serverName = cfg.ServerName
@@ -198,7 +202,10 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	// App debug uses the sanitized metadata logger below, never Gin's raw debug.
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	middlewares := []gin.HandlerFunc{requestLogger()}
+	// 不信任任何代理头：限流与日志按 TCP 对端 IP 计数，X-Forwarded-For 可被伪造。
+	// 将来若部署在反向代理后，必须先给出可信代理网段并单独评审。
+	_ = r.SetTrustedProxies(nil)
+	middlewares := []gin.HandlerFunc{requestLogger(), requestBodyLimit()}
 	if cfg.Debug {
 		middlewares = append(middlewares, requestContentLogger())
 	}

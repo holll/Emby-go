@@ -3,7 +3,9 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -100,6 +102,20 @@ func (a *App) logout(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// authRateLimited 在 IP 或账号超出失败预算时写 429 并返回 true。
+// 429 与 401 分开：客户端能据此退避，而不是把限流误判成密码错误。
+func (a *App) authRateLimited(c *gin.Context, username string) bool {
+	retry := a.authLimiter.retryAfter(c.ClientIP(), username)
+	if retry <= 0 {
+		return false
+	}
+	c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+		"error": "尝试次数过多，请稍后再试", "code": "AUTH_RATE_LIMITED", "retryable": true,
+	})
+	return true
+}
+
 func (a *App) authStatus(c *gin.Context) {
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
@@ -114,27 +130,37 @@ func validCredentials(username, password string) bool {
 }
 
 func (a *App) initialize(c *gin.Context) {
+	// 初始化只在空库时可用，按 IP 限流即可；失败一律计数，避免被当成
+	// 免费的账号枚举/写库入口。
+	if a.authRateLimited(c, "") {
+		return
+	}
 	var req struct {
 		Username string `json:"Username"`
 		Pw       string `json:"Pw"`
 	}
 	if c.ShouldBindJSON(&req) != nil || !validCredentials(req.Username, req.Pw) {
+		a.authLimiter.recordFailure(c.ClientIP(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "账号至少 3 个字符，密码至少 9 个字符"})
 		return
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
+		// 存储故障不是调用方的失败，不计数。
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	if initialized {
+		a.authLimiter.recordFailure(c.ClientIP(), "")
 		c.JSON(http.StatusConflict, gin.H{"error": "管理员已初始化"})
 		return
 	}
 	if err := a.db.InitializeAdministrator(strings.TrimSpace(req.Username), req.Pw); err != nil {
+		a.authLimiter.recordFailure(c.ClientIP(), "")
 		c.JSON(http.StatusConflict, gin.H{"error": "初始化失败，请更换账号后重试"})
 		return
 	}
+	a.authLimiter.reset(c.ClientIP(), "")
 	a.setAdminName(strings.TrimSpace(req.Username))
 	c.Status(http.StatusNoContent)
 }
@@ -145,7 +171,12 @@ func (a *App) authenticate(c *gin.Context) {
 		Pw       string `json:"Pw"`
 	}
 	if err := c.ShouldBind(&req); err != nil {
+		a.authLimiter.recordFailure(c.ClientIP(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credentials payload"})
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	if a.authRateLimited(c, username) {
 		return
 	}
 	initialized, err := a.db.HasAdministrator()
@@ -157,21 +188,23 @@ func (a *App) authenticate(c *gin.Context) {
 		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "管理员尚未初始化"})
 		return
 	}
-	valid, err := a.db.AuthenticateAdministrator(strings.TrimSpace(req.Username), req.Pw)
+	valid, err := a.db.AuthenticateAdministrator(username, req.Pw)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
 	if !valid {
+		a.authLimiter.recordFailure(c.ClientIP(), username)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
 		return
 	}
+	a.authLimiter.reset(c.ClientIP(), username)
 	b := make([]byte, 24)
 	if _, err = rand.Read(b); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成访问令牌失败"})
 		return
 	}
-	a.setAdminName(strings.TrimSpace(req.Username))
+	a.setAdminName(username)
 	token := hex.EncodeToString(b)
 	if err := a.db.SaveAccessToken(token); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存访问令牌失败"})
