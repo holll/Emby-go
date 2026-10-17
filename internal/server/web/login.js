@@ -35,6 +35,11 @@ function render(nextMode, error = '') {
         <div class="field">
           <label for="auth-confirm">确认密码</label>
           <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password" required placeholder="再次输入密码">
+        </div>
+        <div class="field">
+          <label for="auth-code">初始化验证码</label>
+          <input id="auth-code" name="Code" autocomplete="one-time-code" placeholder="部署设置 setup_code 时必填">
+          <p class="hint">公网或共享环境请先在配置中设置 setup_code，防止他人抢先初始化。</p>
         </div>` : ''}
         <p class="auth-error" role="alert">${esc(error)}</p>
         <button id="auth-submit" class="btn btn-accent" type="submit">${initializing ? '完成初始化' : '登录管理后台'}</button>
@@ -74,6 +79,7 @@ async function submit(event, initializing) {
   setAuthBusy(true);
   const path = initializing ? '/api/auth/initialize' : '/Users/AuthenticateByName';
   const payload = { Username: data.Username, Pw: data.Pw };
+  if (initializing && data.Code) payload.Code = data.Code;
   try {
     const response = await fetch(path, {
       method: 'POST',

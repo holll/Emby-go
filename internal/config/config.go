@@ -31,6 +31,16 @@ type Config struct {
 	// 登录会话有效期（天）。滑动续期；0 表示永不过期（兼容旧部署）。
 	SessionTTLDays int `yaml:"session_ttl_days"`
 
+	// SetupCode 非空时，首次初始化管理员必须携带该验证码（公网暴露前的引导保护）。
+	SetupCode string `yaml:"setup_code"`
+
+	// InitializeAllowFrom 是允许调用首次初始化的来源 CIDR 列表；为空表示不限制（仅记录警告）。
+	InitializeAllowFrom []string `yaml:"initialize_allow_from"`
+
+	// TrustedProxies 是允许提供 X-Forwarded-For 的反向代理 CIDR 列表。
+	// 为空时不信任任何代理头（限流与日志使用 TCP 对端地址）。
+	TrustedProxies []string `yaml:"trusted_proxies"`
+
 	// 媒体信息探测（独立于扫库）：调用系统 ffprobe 读取真实技术参数并写回 NFO。
 	FFProbePath      string `yaml:"ffprobe_path"`          // ffprobe 可执行文件路径；留空则从 PATH 查找
 	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测超时（秒），默认 90

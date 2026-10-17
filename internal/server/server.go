@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,8 @@ type App struct {
 	serverName string
 	// sessionTTL 是登录会话有效期（0=不过期），来自配置 session_ttl_days。
 	sessionTTL time.Duration
+	// initAllow 限制首次初始化来源；为空表示不限制。
+	initAllow  []netip.Prefix
 	taskMu     sync.Mutex
 	tasks      []task
 	nextTaskID int64
@@ -156,7 +159,15 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.RedisAddr == "" {
 		return nil, errors.New("缺少 redis_addr：Redis 为必选缓存后端")
 	}
-	return newApp(cfg, nil)
+	app, err := newApp(cfg, nil)
+	if err != nil {
+		return nil, err
+	}
+	// D04：未设置 setup_code 时提示部署边界，避免把初始化入口直接暴露到公网。
+	if cfg.SetupCode == "" {
+		slog.Warn("未设置 setup_code：首次初始化前请只监听回环/内网，或通过反向代理限制来源")
+	}
+	return app, nil
 }
 
 // newApp 供测试注入任意 cache 实现（如内存版），生产路径不走这里。
@@ -229,7 +240,22 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	r := gin.New()
 	// 不信任任何代理头：限流与日志按 TCP 对端 IP 计数，X-Forwarded-For 可被伪造。
 	// 将来若部署在反向代理后，必须先给出可信代理网段并单独评审。
-	_ = r.SetTrustedProxies(nil)
+	for _, cidr := range cfg.InitializeAllowFrom {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("initialize_allow_from 配置无效(%q): %w", cidr, err)
+		}
+		a.initAllow = append(a.initAllow, prefix.Masked())
+	}
+	if len(cfg.TrustedProxies) > 0 {
+		if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("trusted_proxies 配置无效: %w", err)
+		}
+	} else {
+		_ = r.SetTrustedProxies(nil)
+	}
 	middlewares := []gin.HandlerFunc{requestLogger(), requestBodyLimit()}
 	if cfg.Debug {
 		middlewares = append(middlewares, requestContentLogger())

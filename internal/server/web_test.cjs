@@ -205,6 +205,18 @@ test('登录失败只更新错误提示，保留已输入账号密码', async ()
   assert.equal(env.stored.length, 0);
 });
 
+test('初始化可携带 setup_code，未填写时不下发空字段', async () => {
+  const withCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123', Code: 'setup-code' },
+    () => ({ ok: true, status: 204, json: async () => ({}) }));
+  await withCode.box.submit({ preventDefault() {}, target: {} }, true);
+  assert.equal(JSON.parse(withCode.calls[0].options.body).Code, 'setup-code');
+
+  const withoutCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123' },
+    () => ({ ok: true, status: 204, json: async () => ({}) }));
+  await withoutCode.box.submit({ preventDefault() {}, target: {} }, true);
+  assert.equal('Code' in JSON.parse(withoutCode.calls[0].options.body), false);
+});
+
 test('初始化两次密码不一致时不发请求、保留输入并聚焦密码', async () => {
   const env = loginForm({ Username: 'admin', Pw: 'secret123', confirm: 'other', mode: 'initialize' },
     () => { throw new Error('密码不一致时不应请求'); });

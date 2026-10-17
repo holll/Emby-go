@@ -125,10 +125,21 @@ redis_addr: "127.0.0.1:6379"   # Redis 必选缓存后端
 redis_password: ""
 redis_db: 0
 session_ttl_days: 30      # 登录会话有效期（天），0=不过期；使用中自动续期
+setup_code: ""            # 首次初始化验证码（公网/共享环境必填）
+# initialize_allow_from: ["127.0.0.1/32"]  # 仅允许这些来源初始化
+# trusted_proxies: ["127.0.0.1/32"]        # 仅信任这些反向代理的 X-Forwarded-For
 server_domains: []        # 前端“服务器域名切换”候选
 ```
 
 `server_id` 会写入配置文件以保持稳定；`redis_addr` 必填，连接失败将拒绝启动。
+
+### 公网部署（D04 门禁）
+
+- **TLS 由反向代理终止**：本服务不内置 TLS。建议只监听回环（如 `port` 绑定 127.0.0.1），由 Nginx/Caddy 对外提供 https。
+- **初始化保护**：公网暴露前设置 `setup_code`（初始化必须携带），或配置 `initialize_allow_from` 限定来源 CIDR。
+- **代理头**：默认不信任 `X-Forwarded-For`；只有配置 `trusted_proxies` 后限流/日志才使用代理提供的真实 IP。
+- **单实例**：SQLite 与 Redis 为单一事实源，不要多实例共享同一 SQLite 文件；Redis 必选且失败拒绝启动。
+- **放行条件**：A03（未认证 401 不泄露）、A14（超大请求体 413）与 D01（会话期限）均已本地通过；公网启用仍需完成 PLAN-STATUS §3 的剩余人工项与备份/恢复演练。
 
 ## 开发
 

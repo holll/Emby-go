@@ -32,6 +32,16 @@ redis_db: 0
 # 设置页可「退出全部会话」立即撤销所有登录令牌；API 密钥不受影响。
 session_ttl_days: 30
 
+# 首次初始化的引导保护（D04）。
+# setup_code 非空时，POST /api/auth/initialize 必须携带相同 Code；建议公网/共享环境设置。
+setup_code: ""
+# 仅允许这些 CIDR 来源调用首次初始化；留空不限制（会记录警告）。
+# initialize_allow_from: ["127.0.0.1/32", "10.0.0.0/8"]
+
+# 反向代理 CIDR 白名单。为空时不信任 X-Forwarded-For（限流/日志用 TCP 对端地址）。
+# 只有反向代理与本站同机且确认会覆盖代理头时才配置。
+# trusted_proxies: ["127.0.0.1/32"]
+
 # 前端“服务器域名切换”候选列表（供 Web 客户端在多个入口间切换；可选）
 # server_domains:
 #   - name: "内网"

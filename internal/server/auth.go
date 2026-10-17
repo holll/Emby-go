@@ -1,10 +1,12 @@
 package server
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"math"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -145,14 +147,36 @@ func (a *App) authStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"initialized": initialized})
+	// setup_code_required 只暴露是否配置了引导验证码，不回显内容。
+	c.JSON(http.StatusOK, gin.H{"initialized": initialized, "setup_code_required": a.cfg.SetupCode != ""})
 }
 
 func validCredentials(username, password string) bool {
 	return len([]rune(strings.TrimSpace(username))) >= 3 && len([]rune(password)) >= 9
 }
 
+// initializeAllowed 按 initialize_allow_from 限制首次初始化的来源；为空时不限制。
+func (a *App) initializeAllowed(c *gin.Context) bool {
+	if len(a.initAllow) == 0 {
+		return true
+	}
+	addr, err := netip.ParseAddr(c.ClientIP())
+	if err != nil {
+		return false
+	}
+	for _, prefix := range a.initAllow {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) initialize(c *gin.Context) {
+	if !a.initializeAllowed(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "初始化入口不允许该来源", "code": "INIT_SOURCE_DENIED"})
+		return
+	}
 	// 初始化只在空库时可用，按 IP 限流即可；失败一律计数，避免被当成
 	// 免费的账号枚举/写库入口。
 	if a.authRateLimited(c, "") {
@@ -161,10 +185,17 @@ func (a *App) initialize(c *gin.Context) {
 	var req struct {
 		Username string `json:"Username"`
 		Pw       string `json:"Pw"`
+		Code     string `json:"Code"`
 	}
 	if c.ShouldBindJSON(&req) != nil || !validCredentials(req.Username, req.Pw) {
 		a.authLimiter.recordFailure(c.ClientIP(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "账号至少 3 个字符，密码至少 9 个字符"})
+		return
+	}
+	// D04：配置了 setup_code 时，首初始化必须携带；比较用恒定时间实现。
+	if a.cfg.SetupCode != "" && !hmac.Equal([]byte(req.Code), []byte(a.cfg.SetupCode)) {
+		a.authLimiter.recordFailure(c.ClientIP(), "")
+		c.JSON(http.StatusForbidden, gin.H{"error": "初始化验证码不正确", "code": "SETUP_CODE_INVALID"})
 		return
 	}
 	initialized, err := a.db.HasAdministrator()
