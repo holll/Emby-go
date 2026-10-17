@@ -149,7 +149,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | A01 认证 | 自动（撤销 `TestAcceptanceSessionRevoke`+过期单测）；HTTP 级可控时钟仍待补 | D01 已落地（批次 64） | 单测/验收名：`TestAccessTokenExpiryValidation`、`TestAcceptanceSessionRevoke`；部署级人工项未做 |
 | A02 旧缓存 | 自动（旧二进制对照，批次 58） | 旧提交 `9c4fcb0` worktree | `docs/..` LEAD 记录：删 token 后旧二进制 200 / 当前 401；Redis 故障注入仍未做 |
 | A03 迁移/UI/权限 | 自动子集（401/登录）**本地通过**；人工（旧库升级、key UI）待做 | 旧版本 DB fixture、浏览器 | acceptance 输出 + 截图 |
-| A04 原子/版本 | 自动（store 用例）+ 人工未做（提交后杀进程） | 可注入失败的 commit 屏障 | 测试：`TestUserSettingsAtomicAPI`、`TestAtomicWritesSurviveFailpoint`；杀进程演练待部署 |
+| A04 原子/版本 | 自动（store 用例）+ 人工未做（提交后杀进程） | 可注入失败的 commit 屏障 | 测试：`TestUserSettingsAtomicAPI`、`TestAdminDeleteAtomicFailureAndRetry`、`TestSaveMediaInfoAtomic`；杀进程演练待部署 |
 | A05 播放 | 自动（acceptance + 单测）**本地真实二进制通过**（双会话/重放/迟到心跳） | 已初始化实例、≥1 部影片 | acceptance 输出 |
 | A06 文件/索引 | 人工（NFO 失败/部分成功） | 可写失败目录（只读卷） | 日志 + 文件快照 |
 | A07 扫描 | 自动（scanner 回归）+ 人工（断源/删除前取消） | 可断源目录、SIGTERM 时机 | 测试名 + 日志 |
