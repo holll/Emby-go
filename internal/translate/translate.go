@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"emby-go/internal/outbound"
 )
 
 // DefaultTimeout 单次翻译请求超时。
@@ -45,14 +47,17 @@ type Client struct {
 	http *http.Client
 }
 
-// New 创建客户端。出网走 http.ProxyFromEnvironment（Go 默认 Transport），
-// 回环地址（自建 Deepl-Proxy 常在本机）有内建豁免，不会被误代理。
+// New 创建客户端。自建 Deepl-Proxy 常在本机/内网，因此允许私网目标；
+// 其余预算（协议、重定向、响应头、地址黑名单）由 internal/outbound 统一执行。
 func New(cfg Config) *Client {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: timeout}}
+	return &Client{cfg: cfg, http: outbound.NewClient(outbound.Options{
+		Timeout:      timeout,
+		AllowPrivate: true,
+	})}
 }
 
 // TargetLang 返回生效的目标语言（默认 ZH）。

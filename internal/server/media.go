@@ -20,6 +20,7 @@ import (
 
 	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
+	"emby-go/internal/outbound"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
 )
@@ -1022,8 +1023,15 @@ func (a *App) stream(c *gin.Context) {
 	http.Redirect(c.Writer, c.Request, raw, http.StatusFound)
 }
 
-// streamClient 供网页播放器代理播放使用：不设超时（长连接），由请求 context 控制取消。
-var streamClient = &http.Client{}
+// streamClient 供网页播放器代理播放使用：不设总超时（长连接），由请求 context 控制取消。
+// 播放地址来自用户配置的 strm，局域网/回环是正常用法，因此允许私网；
+// 链路本地（含云元数据）、组播等地址仍由 internal/outbound 拒绝。
+var streamClient = outbound.NewClient(outbound.Options{
+	AllowPrivate:          true,
+	Timeout:               0,
+	MaxConnsPerHost:       32,
+	ResponseHeaderTimeout: 30 * time.Second,
+})
 
 // proxyStream 为内置网页播放器代理真实媒体地址：透传 Range/状态码/关键响应头。
 // 解决 HTTPS 后台 + HTTP 源站的混合内容、跨域/防盗链导致的播放失败。
@@ -1045,7 +1053,8 @@ func (a *App) proxyStream(c *gin.Context) {
 	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, raw, nil)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		// 不回显上游地址：错误里可能带凭据或内网主机名。
+		c.JSON(http.StatusBadGateway, gin.H{"error": "playback source unavailable", "code": "UPSTREAM_UNAVAILABLE"})
 		return
 	}
 	if rng := c.GetHeader("Range"); rng != "" {
@@ -1058,7 +1067,8 @@ func (a *App) proxyStream(c *gin.Context) {
 	}
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		slog.Debug("proxy stream upstream failed", "movie_id", movie.ID)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "playback source unavailable", "code": "UPSTREAM_UNAVAILABLE"})
 		return
 	}
 	defer resp.Body.Close()

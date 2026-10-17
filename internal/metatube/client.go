@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"emby-go/internal/outbound"
 )
 
 // DefaultTimeout 单次请求超时。探测/刮削跑在后台任务里，宁可早失败也不要挂死。
@@ -35,16 +37,25 @@ type Client struct {
 }
 
 // New 创建客户端。baseURL 形如 https://metatube.example.com；超时 <=0 用默认值。
-// 出网走 http.ProxyFromEnvironment（Go 的默认 Transport 行为），
-// 尊重 HTTP_PROXY/NO_PROXY，回环地址有内建豁免。
+// 出站统一走 internal/outbound：只允许 http(s)、重定向 ≤3 跳、响应头有上限；
+// 默认拒绝私网目标，但配置的 MetaTube 主机例外（它常部署在内网或回环）。
+// HTTP(S)_PROXY 仍然生效。
 func New(baseURL, token string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	var allowHosts []string
+	if parsed, err := url.Parse(baseURL); err == nil && parsed.Hostname() != "" {
+		allowHosts = []string{parsed.Hostname()}
+	}
 	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		baseURL: baseURL,
 		token:   strings.TrimSpace(token),
-		http:    &http.Client{Timeout: timeout},
+		http: outbound.NewClient(outbound.Options{
+			Timeout:    timeout,
+			AllowHosts: allowHosts,
+		}),
 	}
 }
 
