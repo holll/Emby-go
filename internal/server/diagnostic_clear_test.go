@@ -288,7 +288,7 @@ func TestDiagnosticClearRejectsQueuedOldGeneration(t *testing.T) {
 	// rather than trying to control the scheduler between mutex acquisitions.
 	a.probeMu.Lock()
 	oldEpoch := a.probeEpoch
-	a.probeSeen[key] = struct{}{}
+	a.probeSeen[key] = probeSeenEntry{seenAt: time.Now()}
 	a.probeMu.Unlock()
 	assertProbeRetryState(t, a, db, 0, 1)
 	diagnosticClearAssertHTTP(t, diagnosticClearRequest(a, diagnosticClearToken), http.StatusNoContent)
@@ -298,7 +298,7 @@ func TestDiagnosticClearRejectsQueuedOldGeneration(t *testing.T) {
 
 	a.probeMu.Lock()
 	newEpoch := a.probeEpoch
-	a.probeSeen[key] = struct{}{}
+	a.probeSeen[key] = probeSeenEntry{seenAt: time.Now()}
 	a.probeMu.Unlock()
 	if newEpoch != oldEpoch+1 {
 		t.Fatalf("new epoch=%d; want %d", newEpoch, oldEpoch+1)

@@ -163,7 +163,7 @@ func TestNoRouteFailedWriteDoesNotConsumeBoundedSlot(t *testing.T) {
 	a, db, r := probeRetryFixture(t)
 	a.probeMu.Lock()
 	for i := 0; i < 127; i++ {
-		a.probeSeen[fmt.Sprint(i)] = struct{}{}
+		a.probeSeen[fmt.Sprint(i)] = probeSeenEntry{seenAt: time.Now()}
 	}
 	a.probeMu.Unlock()
 	if _, err := db.Exec("CREATE TRIGGER fail_probe BEFORE INSERT ON api_probe BEGIN SELECT RAISE(ABORT,'canary failure'); END;"); err != nil {
@@ -176,6 +176,8 @@ func TestNoRouteFailedWriteDoesNotConsumeBoundedSlot(t *testing.T) {
 	}
 	requestUnknown(t, r, "/Users/canary-retry")
 	assertProbeRetryState(t, a, db, 1, 128)
+	// 容量满后新端点不再被当作已见：LRU 淘汰最旧条目后照常记录一次，
+	// 内存仍受 128 上限约束（BE-08 批次 47）。
 	requestUnknown(t, r, "/System/canary-over-capacity")
-	assertProbeRetryState(t, a, db, 1, 128)
+	assertProbeRetryState(t, a, db, 2, 128)
 }

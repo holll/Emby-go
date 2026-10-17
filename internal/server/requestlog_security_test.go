@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -140,7 +141,7 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 	}
 	// Even pre-filled legacy or synthetic keys cannot grow an already full map.
 	for i := 0; len(a.probeSeen) < 128; i++ {
-		a.probeSeen[fmt.Sprint(i)] = struct{}{}
+		a.probeSeen[fmt.Sprint(i)] = probeSeenEntry{seenAt: time.Now()}
 	}
 	req := httptest.NewRequest("GET", "/System/AnotherUnimplemented", nil)
 	r.ServeHTTP(httptest.NewRecorder(), req)

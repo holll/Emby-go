@@ -27,7 +27,7 @@ func (a *App) clearDiagnosticProbes() error {
 		return err
 	}
 	a.probeMu.Lock()
-	a.probeSeen = make(map[string]struct{})
+	a.probeSeen = make(map[string]probeSeenEntry)
 	a.probeEpoch++
 	a.probeMu.Unlock()
 	return nil

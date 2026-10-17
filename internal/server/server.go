@@ -75,8 +75,11 @@ type App struct {
 	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
 	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
 	probeMu        sync.Mutex
-	probeSeen      map[string]struct{}
+	probeSeen      map[string]probeSeenEntry
 	probeEpoch     uint64
+	probeNow       func() time.Time // 测试可注入时钟；生产为 time.Now
+	probeTokens    float64          // 诊断写库令牌（burst 上限见 probeWriteBurst）
+	probeRefillAt  time.Time
 	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
 
 	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
@@ -161,7 +164,9 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	}
 	a := &App{
 		cfg: cfg, db: db, cache: cacheStore,
-		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry), probeSeen: make(map[string]struct{}),
+		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
+		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
+		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
 		authLimiter: newAuthRateLimiter(),
@@ -515,6 +520,20 @@ func isScannerProbe(path string) bool {
 	return false
 }
 
+// 诊断去重与写库预算参数（BE-08）：128 条内存上限、6 小时去重窗口、
+// 令牌桶 60 次突发 + 平均每秒 1 次落库，避免唯一路径洪水把写放大成
+// 每秒数百次 SQLite 事务。
+const (
+	probeSeenLimit      = 128
+	probeSeenTTL        = 6 * time.Hour
+	probeWriteBurst     = 60.0
+	probeWritePerSecond = 1.0
+)
+
+type probeSeenEntry struct {
+	seenAt time.Time
+}
+
 func (a *App) noRoute(c *gin.Context) {
 	// 客户端会探测式地反复请求未实现端点；404 一旦被浏览器/中间层缓存，
 	// 后续补上实现客户端也拿不到——明确禁止缓存。
@@ -525,19 +544,76 @@ func (a *App) noRoute(c *gin.Context) {
 		// Aggregate by fixed resource family and standard method; never read a body.
 		method, safePath := diagnosticMethod(c.Request.Method), unmatchedDiagnosticPath(path)
 		key := method + " " + safePath
-		a.probeMu.Lock()
-		_, seen := a.probeSeen[key]
-		epoch := a.probeEpoch
-		if len(a.probeSeen) >= 128 {
-			seen = true
-		}
-		if !seen {
-			a.probeSeen[key] = struct{}{}
-		}
-		a.probeMu.Unlock()
-		if !seen {
+		write, epoch := a.observeProbe(key, a.probeClock())
+		if write {
 			a.persistDiagnosticProbe(method, safePath, redactedRequestQuery(c.Request.URL.RawQuery), epoch)
 		}
 	}
 	c.JSON(404, gin.H{"error": "not found"})
+}
+
+func (a *App) probeClock() time.Time {
+	if a.probeNow != nil {
+		return a.probeNow()
+	}
+	return time.Now()
+}
+
+// observeProbe 在 probeMu 内完成去重、TTL 过期、容量淘汰与写库预算扣减。
+// 返回是否应落库，以及预约时的 epoch（clear 提交后 epoch 变化则放弃写入）。
+// 预算耗尽时不占位：后续请求会在令牌恢复后重试，避免把端点永久标记为已见。
+func (a *App) observeProbe(key string, now time.Time) (bool, uint64) {
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	if entry, ok := a.probeSeen[key]; ok {
+		if now.Sub(entry.seenAt) < probeSeenTTL {
+			return false, a.probeEpoch
+		}
+		delete(a.probeSeen, key)
+	}
+	if len(a.probeSeen) >= probeSeenLimit {
+		a.evictProbeSeenLocked(now)
+	}
+	if !a.takeProbeWriteTokenLocked(now) {
+		return false, a.probeEpoch
+	}
+	a.probeSeen[key] = probeSeenEntry{seenAt: now}
+	return true, a.probeEpoch
+}
+
+// evictProbeSeenLocked 先清过期项，仍满则淘汰最久未出现的键（LRU）。
+// 旧实现容量满后把所有新端点都当已见，导致新端点永远进不了诊断列表。
+func (a *App) evictProbeSeenLocked(now time.Time) {
+	var oldestKey string
+	var oldest time.Time
+	for key, entry := range a.probeSeen {
+		if now.Sub(entry.seenAt) >= probeSeenTTL {
+			delete(a.probeSeen, key)
+			continue
+		}
+		if oldestKey == "" || entry.seenAt.Before(oldest) {
+			oldestKey, oldest = key, entry.seenAt
+		}
+	}
+	if len(a.probeSeen) >= probeSeenLimit && oldestKey != "" {
+		delete(a.probeSeen, oldestKey)
+	}
+}
+
+func (a *App) takeProbeWriteTokenLocked(now time.Time) bool {
+	if a.probeRefillAt.IsZero() {
+		a.probeTokens, a.probeRefillAt = probeWriteBurst, now
+	}
+	if elapsed := now.Sub(a.probeRefillAt); elapsed > 0 {
+		a.probeTokens += elapsed.Seconds() * probeWritePerSecond
+		if a.probeTokens > probeWriteBurst {
+			a.probeTokens = probeWriteBurst
+		}
+		a.probeRefillAt = now
+	}
+	if a.probeTokens < 1 {
+		return false
+	}
+	a.probeTokens--
+	return true
 }
