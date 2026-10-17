@@ -81,6 +81,29 @@
 | D11 | 备份范围/频率/保留、RPO/RTO、凭据恢复 | DB-01/DB-07 |
 | D12 | 浏览器/真机/读屏矩阵、性能基线阈值、验收人 | FE-06/11/12、A13/A15 |
 
+### 2.1 D02 提案（待用户批准，2026-10-17）
+
+**现状**：永久单管理员；登录会话与 API key 都是全权；无 Principal/scope；`/api/admin/*` 与 Emby 媒体面共用 `requireAuth`；播放器直链、图片端点匿名。任何 key 泄露都可改设置、读密钥、触发扫描。
+
+**推荐方案（单用户 + 粗粒度 scope，分两批）**
+
+1. 保留永久单用户，不引入多用户/RBAC/用户表。
+2. scope 枚举：`admin`（全部管理 API）、`media`（Emby 列表/详情/PlaybackInfo/流/图片代理）、`playback`（播放心跳/停止）、`userdata`（收藏/评分/已看）。
+3. 凭据绑定 scope：管理员会话=全部 scope；API key 创建时选择「播放 key」（`media`+`playback`，可选 `userdata`）或「管理员 key」（`admin`）；登录会话始终管理员。
+4. 旧 key/旧会话迁移为 `admin`，UI 与文档明确标注「管理员 key，具名接受全权风险」，不宣称播放隔离已全覆盖；旧 key 的权限映射按 D01/D02 另行轮换。
+5. 执行顺序：批次 48 先做管理面隔离（`admin` scope 才能进 `/api/admin/*`；403/401/503 语义与裸路径、`/emby`、GET/HEAD 别名一致），再在批次 49 细分 Emby 面的 `playback`/`userdata`。
+6. 图片保持匿名（浏览器 img 不能带自定义头；D02 记为已接受风险），仅保留出站与体积预算。
+
+**被否选项**：B. 维持全权，仅把 key 改名为管理员 key 并具名接受风险（最快，但 BE-02 只能以「风险接受」关闭）；C. 多用户 RBAC（超出单用户产品定位）。
+
+**影响**：`access_tokens`/`api_keys` 增 `scope` 列（默认 `admin` 兼容旧数据）；`authOK` 改为返回 `Principal{Scope set}`；管理组中间件加 scope 校验；密钥 UI 增加类型选择与掩码展示；新增 403 语义与矩阵测试。
+
+### 2.2 D07 / D09 / D10 建议默认值（同样待批）
+
+- **D07 播放计数**：不建播放事件/多会话表；沿用 userdata 位置字段，同一影片 24 小时内同位置去重；进度只前进（显式重播/停止可重置）；旧 `/Sessions/Playing/Progress` 协议继续接受并降级为同一写链；DB-02 只做写链版本化，不做观看统计。
+- **D09 退出预算**：SIGTERM 后 readiness 立即为 false、停止接纳；HTTP Shutdown 与后台任务取消/join 共享 15 秒总预算，超时强制退出并记录诊断；长流不主动撤销（客户端断开即止）；部署强杀宽限建议 30 秒。
+- **D10 任务语义**：进程内 Task 注册表（id/kind/state/progress/error/时间戳），创建返回 202+task_id；同 kind+参数 1 小时内幂等复用；容量 200，超限 429；重启丢进行中任务并在文档声明「不承诺重启恢复」；旧同步 `/scan` 保留到 A 验收集通过后再下线；调度时区固定 Asia/Shanghai。
+
 ## 3. 验收 A01–A15
 
 **全部未执行**。验收定义与断言见 `docs/architecture-database-frontend-review-2026-10-16.md` §9；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
