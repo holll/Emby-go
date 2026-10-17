@@ -1,11 +1,15 @@
 # MetaTube Media Server — 开发计划
 
-> 定位：**兼容 Emby API 协议的第三方媒体库软件**。元数据真源为 NFO——本期**只读取现成 NFO**，
-> 不内置刮削器/翻译/插件运行时（标准刮削器插件规范列为 roadmap）。
+> 定位：**兼容 Emby API 协议的第三方媒体库软件**。元数据真源为 NFO；2026-10 起内置
+> MetaTube 刮削与标题/简介翻译（需配置上游后启用；标准刮削器插件规范仍列 roadmap）。
 > **媒体源只支持 `http(s)` 的 `.strm`**；`ed2k` 等非 HTTP 内容视为**不兼容**，在扫库/记录页提示，不进 Emby。
 > Web 提供**管理后台**（非影院浏览端），浏览海报墙通过 Yamby 等 Emby 客户端完成。
 > 支持规模 7000 → 1 万部。原则：不背历史包袱，大胆重构。
-> **技术选型：Go + Gin + SQLite(modernc) + 原生 JS 嵌入单二进制。**
+> **技术选型：Go + Gin + SQLite(modernc) + Redis（必选缓存）+ 原生 JS 嵌入单二进制。**
+>
+> **文档分层**：本文件是方案（目标/边界/契约）；逐项施工状态与放行门禁以
+> [PLAN-STATUS.md](PLAN-STATUS.md) 为唯一台账。方案与实现冲突时先改方案再改代码，
+> 不允许 README/计划继续描述已删除或未实现的功能。
 
 ## 1. 定位与边界（已确认）
 
@@ -13,20 +17,25 @@
 |---|---|
 | 产品 | Emby API 兼容的第三方媒体库服务端 |
 | 浏览入口 | **Yamby 等 Emby 客户端**（协议只对齐 Emby，不做 Jellyfin）；验收以 §7 接口级自测为准，不依赖 GUI |
-| Web 界面 | **管理后台**：设置 / 媒体库 / 扫描 / 影片记录（含未刮/**不兼容提示**）/ 手动补录 / 任务 / 接口调试 |
+| Web 界面 | **管理后台**：设置 / 媒体库 / 扫描 / 影片记录（含未刮/**不兼容提示**）/ 刮削（预览-确认）/ 媒体探测 / 计划任务 / API 密钥 / 接口调试 |
 | 用户体系 | 本期**单用户**（现有管理员账号映射为唯一 Emby 用户） |
-| 元数据来源 | **只读现成 NFO**（标题/原名/剧情/年份/评分/导演/演员/系列/制作商/标签等）；编辑/手动录入写 NFO 后同步 DB 索引 |
+| 元数据来源 | **NFO 为真源**（标题/原名/剧情/年份/评分/导演/演员/系列/制作商/标签等）；可选内置 MetaTube 刮削补全并写回 NFO；编辑/刮削统一写 NFO 后同步 DB 索引 |
 | 媒体源支持 | `.strm` 内容**只支持 `http/https`**；扫库时解析归类，`ed2k` 及其它 scheme → **incompatible（不兼容）**：**不进 Emby items**，在扫库/记录页醒目提示（数量+列表+原因），可换 http 源后“重读源/重扫”入库 |
-| 未刮影片 | 仅 http(s) 且无 NFO → 登记 pending；Web 手动录入 NFO + 上传封面/背景 → success 进入 Emby |
+| 未刮影片 | 仅 http(s) 且无 NFO → 登记 pending；后台编辑字段或单条/批量刮削补全 → success 进入 Emby（独立“手动录入”端点已于 2026-10-12 移除，功能并入编辑/刮削链） |
 | 播放 | **302 直拉**：PlaybackInfo 返回本服务流地址 → `GET /videos/{itemId}/stream` 实时读 `.strm` → http(s) 则 **302 Location=真实地址** 客户端直拉；服务端不转发字节、不转码。实测遇防盗链/UA/Range 问题 → 同源**转发兜底**（§5.2） |
 | 失败反馈 | 播放遇到死链/上游 403/404 → 明确错误不白屏不崩溃（302 模式尽力透传，转发兜底可原样回上游状态码）；非 http 源根本不会进 Emby |
 | 未知接口探针 | NoRoute仅记录固定方法、脱敏资源分类和少量安全query，不记录原始未知路径/请求体；同类聚合、seen上限128。调试页用于观察未支持资源分类，不再从诊断记录恢复完整未知端点（隐私优先） |
 | 续播/进度 | 最小 UserData：`position_ticks / play_count / played / last_played_at`，Item 回填支持“继续播放” |
 | 播放带宽 | 直拉模式不占本服务带宽，适配万部规模 |
 | 主题 | 深色影院风服务于 Emby 客户端；Web 后台工具性但同套深色令牌 |
-| 收藏/多用户/插件规范/翻译 | roadmap |
+| 收藏/多用户/插件规范/翻译 | 收藏、个人评分、标题/简介翻译已实现；多用户与权限、标准插件生态、转码仍在 roadmap |
 
 ## 2. 数据模型（重构后）
+
+> 以下是核心模型摘要，**完整列以 `internal/store/migrations.go` 为准**。2026-10 已增补：
+> `movies.provider_id / last_scrape_at / last_scrape_error / additional_parts / landscape_path`、
+> `userdata.is_favorite / likes / hide_from_resume / last_stopped_ticks`、`scheduled_tasks` 表、
+> `actors.avatar_tag` 与 `schema_migrations` 台账。新增列一律走新迁移，不改历史迁移定义。
 
 ```
 libraries(id, name, path UNIQUE, type, enabled, …)
@@ -70,7 +79,7 @@ api_probe(                                       -- 未知接口探针（环形/
 - **合集（BoxSet）**：由 NFO `<set><name>` 聚合。Views 追加一个 `CollectionType=boxsets` 的「合集」媒体库（Id="boxsets"），其子项为 BoxSet（id 形如 `boxset:<base64>`）；某合集成员 = `collection=<该合集名>` 的可见影片；**合集范围内的类型（Genre/Tag/Studio/Person）列表只返回该上下文内数量≥1 的项**
 - **媒体库外部 id**：媒体库对 Emby 层暴露 `libraryIDBase(1e12)+内部库id`（影片 id 是小自增，二者全局不冲突，对齐 Emby 唯一 item id）。库封面取子项**宽图 fanart 优先**（4.9 auto_poster 观感），无则回退海报；Views 补 `PrimaryImageAspectRatio`
 - `source_protocol/source_container` 扫描时解析缓存；**播放时实时读 .strm 取最终 URL**，避免外部刷新链接后用陈旧地址
-- 本期无 provider/meta_providers 等刮削字段（roadmap 插件规范再加）
+- 刮削字段已落地：`movies.provider_id / last_scrape_at / last_scrape_error`；字段锁与人工覆盖策略见 PLAN-STATUS；标准 provider 插件体系仍 roadmap
 - `kv` 表存**失效版本号**（`lib:{id}:version`、`g:version`）：任何对该库 movies 的写（扫描/编辑/手动录入/删除）都 bump；缓存键带版本号即可整体失效，无需逐条删除
 
 ## 3. 技术选型
@@ -80,7 +89,7 @@ api_probe(                                       -- 未知接口探针（环形/
 | 语言/框架 | Go 1.25 + **gin-gonic/gin** | 用户意向；v1 已验证，生态成熟 |
 | 数据库 | SQLite（`modernc.org/sqlite` 纯 Go，CGo-free） | 沿用 v1；万部规模单文件足够 |
 | 数据访问 | 手写 SQL（database/sql） | 轻量可控，避免 ORM 心智负担 |
-| 缓存 | **可选 Redis**（`github.com/redis/go-redis/v9`），共用 `internal/cache` 接口 | 默认 `memory`(进程内 LRU) 零外部依赖；改 `driver=redis` 即启用 |
+| 缓存 | **Redis 必选**（`github.com/redis/go-redis/v9`），共用 `internal/cache` 接口；memory 实现保留给测试注入 | 生产路径 `server.New` 强制连接并 Ping，缺失/失败拒绝启动（2026-10 现状；恢复可选化须先过 D04） |
 | 缓存一致性 | 单写者 bump 版本号；**缓存只作加速，真源 = SQLite/NFO** | 换缓存后端不失失效语义 |
 | 配置 | YAML（`gopkg.in/yaml.v3`） | 沿用 |
 | Web 前端 | `go:embed` 内嵌原生 HTML/JS/CSS | 单二进制，无构建链 |
@@ -90,9 +99,9 @@ api_probe(                                       -- 未知接口探针（环形/
 | 测试 | `testing` + `httptest`；接口级断言脚本/`go test` 集成 | §7 验收依赖它 |
 | 部署 | 单二进制 + 单端口（沿用 18080） | 简单 |
 
-> 缓存定位：**只加速不存真**。SQLite 是事实源，NFO 是元数据真源。单机单用户默认 `memory` 驱动即可满足万部；
-> 何时值得切 Redis：跨重启保留会话/token 与任务队列、需要多实例水平扩展、实测热点查询/慢网络挂载读 strm 变瓶颈。
-> Redis 非本期必需，按可选项融入。
+> 缓存定位：**只加速不存真**。SQLite 是事实源，NFO 是元数据真源。当前生产强制 Redis，
+> 与最初“memory 默认”的设计相反：换取跨重启的缓存版本一致与会话可见性，代价是部署多一个必选组件。
+> **在 D04 批准改回可选之前，不得把 Redis 说成可选**；测试通过 `newApp` 注入 memory。
 
 **模块结构（伪代码级目录）**
 
@@ -290,9 +299,10 @@ tok 存 key "sess:{token}" TTL=7d（memory 驱动则退化为进程内 map）
 - **NFO→DB upsert**：读现成 NFO 进索引；`POST /api/admin/reindex` 全量重建幂等；迁移工具（旧库 → 重扫重建）
 - 保留：libraries/settings/auth、图片端点、登录
 
-### P1 · 检索 API + 手动补录后端
+### P1 · 检索 API + 编辑/补录后端
+> 状态：已完成。独立“手动录入”端点在 2026-10-12 收敛进编辑/刮削链（见 PLAN-STATUS 漂移记录）。
 - `GET /api/admin/items`：SQL 检索（view/sort/filter/search/page），仅 success/manual；支持按源协议筛
-- 手动录入：字段 + **源地址（仅 http(s)，校验）** + 封面/背景上传或 URL → 写 strm/NFO/图 → success 即时入 Emby
+- 补录：pending 影片通过 `PATCH /api/admin/items/:id` 显式清空/填写，或单条刮削预览确认后写 NFO/图 → success 即时入 Emby
 - 编辑已刮元数据：写回 NFO 并 upsert；演员/详情/related 基础端点
 - **缓存层 `internal/cache`**：memory 默认 + Redis adapter 可选（`driver=redis`）；Items 分页/详情/strm 分类走读缓存，写侧 bump 版本失效（§4.8）
 
@@ -311,14 +321,22 @@ tok 存 key "sess:{token}" TTL=7d（memory 驱动则退化为进程内 map）
 - **扫库/记录页不兼容提示**：incompatible 统计卡片 + 列表（来源/原因/操作：换源后重读）
 - 影片列表网格+状态筛选，卡片标可播放（http 可播 vs 不兼容）；单部操作：编辑 / 手动录入 / 重读源 / 删除
 
+### P3+ · 原方案外的增补（2026-10 实装）
+- 内置 MetaTube 刮削（批量/单条预览-确认/演员头像）与标题/简介翻译
+- 媒体信息探测（ffprobe → NFO `<streamdetails>`，详情页「已探测」）
+- 计划任务（cron，保存即重建调度，支持条件更新）
+- API 密钥（长期等权令牌；权限隔离待 D02）
+- 网页播放代理 `/Videos/{id}/proxy`（仅网页播放器兜底，Emby 客户端仍 302）
+- 合集 BoxSet、多分段 AdditionalParts、收藏/个人评分/相似推荐
+
 ### P4 · 打磨
 - 未刮/不兼容引导、错误/空状态、移动端触感、万部性能、a11y/reduced-motion
 
 ### Roadmap（不在本期）
-- **标准刮削器插件规范**（核心零内置刮削器）+ 自动翻译管线
+- **标准刮削器插件规范**（当前是内置 MetaTube 适配器，不是通用插件运行时）；翻译增强
 - ed2k / 非 HTTP 网关（如需“整库可播”另行立项）
 - 转码/倍速/外挂字幕/m3u8 增强播放；多源/画质切换
-- 收藏、多用户与权限；观看统计、向量相关推荐
+- 多用户与权限；观看统计、向量相关推荐（收藏/评分已实现）
 - （可选）Jellyfin 兼容子集
 
 ## 7. 验收基准（接口级自测，不依赖 GUI）
@@ -355,3 +373,35 @@ tok 存 key "sess:{token}" TTL=7d（memory 驱动则退化为进程内 map）
 
 ## 8. 执行顺序
 P0 → P1 → P2（Emby 核心尽早可用，P2.0 契约校准先行）→ P3（Web 管理）→ P4。
+
+> 2026-10-17 实际：P0–P3 已交付，P4 部分；另完成 P3+ 增补与 40 批工程整改（见 PLAN-STATUS）。后续顺序改由整改依赖决定：
+> R1-D 部署门禁（BE-05/09）→ R2 生命周期 → R3 持久任务 → R4 量化优化，且必须先关闭对应 D 决策。
+
+## 9. 施工治理（2026-10-17 修订）
+
+原方案只定义“做什么”，没有定义“怎么证明做完”。40 批施工暴露的问题全部在治理层，故补充为强制门禁。
+
+### 9.1 文档分层与单一台账
+- 本文件 = 方案；[PLAN-STATUS.md](PLAN-STATUS.md) = 唯一进度台账（35 项 + D01–D12 + A01–A15 + R0–R4 + 批次映射）。
+- README = 用户可操作事实（安装/配置/能力边界）。**README 与路由/代码不一致时以代码为准，并立即修 README**，不得留到下一批。
+- `docs/` 是内部施工记录（`.gitignore` 排除），不作为放行依据。
+
+### 9.2 提交纪律
+- 每批一个 commit，消息含批次号与条目编号（如 `feat(security): BE-05 request budgets`）。
+- 开工前工作区必须干净；禁止在大量未提交变更之上继续叠加（2026-10-17 已建立 checkpoint `1b93a06`）。
+- 测试与代码同批提交，不允许“测试稍后补”。
+
+### 9.3 文档一致性门禁
+- 功能删除/替换当批必须同步：README、本文件、路由表、PLAN-STATUS 四处。
+- 禁止描述未实现能力。历史反例：README 曾同时写“不内置刮削器 / 手动补录 / 可选 Redis”，三者均已失真。
+- 新增或改变“必选外部依赖”必须同时改 README、`config.example.yaml` 与本文件 §3。
+
+### 9.4 生产放行门禁（沿用审查方案）
+- A01–A15 未全过、D01–D12 未批、或 BE/DB/FE 条目仍为“部分/未开始”时，不得宣称生产可用。
+- DB-01、A08/A09、整项认证安全、全应用退出、NFO 持久恢复在对应批次明确关闭前，一律不得标“完成”。
+- 本地 `go test` 全绿只证明本地回归，不替代真实客户端、浏览器、生产库与备份恢复演练。
+
+### 9.5 当前基线（2026-10-17）
+- 40 批本地施工完成并 checkpoint；`go build/vet/test` 全绿（14 包、329 个 Go 测试、74 个前端 VM 测试）。
+- 未闭合：BE-02/05/09/10、BE-04 退出协调、BE-07 持久任务、DB-02 播放计数、FE-04/09/10 交互与 a11y。
+- 开工顺序与依赖见 PLAN-STATUS.md §5；批次 41 从 BE-05 开始。
