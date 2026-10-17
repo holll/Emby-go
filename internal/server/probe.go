@@ -199,7 +199,8 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		return
 	}
 	taskID := a.startTask("probe")
-	go func() { _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) }()
+	a.workerWG.Add(1)
+	go func() { defer a.workerWG.Done(); _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) }()
 	slog.Info("媒体信息探测已启动", "task_id", taskID, "movies", plan.movies, "files", len(plan.targets), "only_missing", plan.onlyMissing)
 	c.JSON(http.StatusAccepted, gin.H{"task_id": taskID, "total": len(plan.targets), "movies": plan.movies})
 }

@@ -247,9 +247,13 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 	if !a.startScrapeTask(c, "scrape", total) {
 		return
 	}
-	go a.executeScrape(cfg, scraper.RunOptions{
-		LibraryID: req.LibraryID, OnlyMissing: onlyMissing, Limit: req.Limit, Overwrite: cfg.Overwrite,
-	})
+	a.workerWG.Add(1)
+	go func() {
+		defer a.workerWG.Done()
+		_ = a.executeScrape(cfg, scraper.RunOptions{
+			LibraryID: req.LibraryID, OnlyMissing: onlyMissing, Limit: req.Limit, Overwrite: cfg.Overwrite,
+		})
+	}()
 	slog.Info("刮削任务已启动", "total", total, "library_id", req.LibraryID, "only_missing", onlyMissing, "overwrite", cfg.Overwrite)
 	c.JSON(http.StatusAccepted, gin.H{"total": total})
 }
@@ -335,7 +339,8 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 	if !a.startScrapeTask(c, "scrape_avatars", len(names)) {
 		return
 	}
-	go a.executeScrapeAvatars(cfg, req.LibraryID, req.Limit)
+	a.workerWG.Add(1)
+	go func() { defer a.workerWG.Done(); _ = a.executeScrapeAvatars(cfg, req.LibraryID, req.Limit) }()
 	slog.Info("演员头像任务已启动", "actors", len(names), "library_id", req.LibraryID)
 	c.JSON(http.StatusAccepted, gin.H{"total": len(names)})
 }

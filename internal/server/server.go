@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,6 +82,13 @@ type App struct {
 	probeTokens    float64          // 诊断写库令牌（burst 上限见 probeWriteBurst）
 	probeRefillAt  time.Time
 	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
+
+	ready        atomic.Bool    // readiness：收到退出信号后立即为 false
+	shutdownOnce sync.Once      // BeginShutdown 幂等
+	closeOnce    sync.Once      // Close 幂等
+	workerWG     sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
+	schedMu      sync.Mutex
+	schedDone    context.Context // scheduler.Stop 返回的完成信号（BeginShutdown 写入）
 
 	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
 	sched *scheduler.Scheduler
@@ -171,6 +179,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
 		authLimiter: newAuthRateLimiter(),
 	}
+	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
@@ -252,20 +261,71 @@ func (a *App) checkScrapeBackend() {
 	slog.Info("启动自检：MetaTube 可达")
 }
 
-// Close 请求取消后台任务，等待启动自检与 Store 初始化回填后关库。
-// 业务任务尚未统一 join；这里不保证全应用的有界退出。
+// BeginShutdown 让 readiness 立即失败、停止新调度、取消可取消的后台任务。
+// 幂等，只做一次；真正等待使用 WaitBackground，超时由调用方决定强制退出。
+func (a *App) BeginShutdown() {
+	a.shutdownOnce.Do(func() {
+		a.ready.Store(false)
+		if a.sched != nil {
+			done := a.sched.Stop()
+			a.schedMu.Lock()
+			a.schedDone = done
+			a.schedMu.Unlock()
+		}
+		a.probeTaskMu.Lock()
+		if a.probeCancel != nil {
+			a.probeCancel()
+		}
+		a.probeTaskMu.Unlock()
+		a.scrapeTaskMu.Lock()
+		if a.scrapeCancel != nil {
+			a.scrapeCancel()
+		}
+		a.scrapeTaskMu.Unlock()
+		a.rootCancel()
+	})
+}
+
+// WaitBackground 在 ctx 预算内等待启动自检、探测/刮削/立即执行 worker 与
+// 调度器在跑任务结束。必须先在调用方触发 BeginShutdown，避免等待后又登记新工作。
+func (a *App) WaitBackground(ctx context.Context) error {
+	a.schedMu.Lock()
+	schedDone := a.schedDone
+	a.schedMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		a.workerWG.Wait()
+		a.startupWG.Wait()
+		if schedDone != nil {
+			<-schedDone.Done()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Close 取消后台任务并关库；幂等，供 defer 与显式退出路径重复调用。
 func (a *App) Close() {
-	if a.sched != nil {
-		a.sched.Stop()
+	a.closeOnce.Do(func() {
+		a.BeginShutdown()
+		a.startupWG.Wait()
+		a.db.Close()
+	})
+}
+
+// health 是公开的 readiness 探针：只暴露进程是否仍在接纳，不泄露版本/依赖细节。
+func (a *App) health(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	if !a.ready.Load() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "shutting_down"})
+		return
 	}
-	a.probeTaskMu.Lock()
-	if a.probeCancel != nil {
-		a.probeCancel()
-	}
-	a.probeTaskMu.Unlock()
-	a.rootCancel()
-	a.startupWG.Wait()
-	a.db.Close()
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 func (a *App) Handler() http.Handler { return a.router }
 
@@ -282,6 +342,8 @@ func (a *App) routes() {
 	r.GET("/web/app.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
+	r.GET("/api/health", a.health)
+	r.GET("/healthz", a.health)
 	r.GET("/api/auth/status", noStore, a.authStatus)
 	r.POST("/api/auth/initialize", noStore, a.initialize)
 	// 刮削预览用的图片代理刻意不挂鉴权：它要能直接放进 <img src>，而浏览器不会给

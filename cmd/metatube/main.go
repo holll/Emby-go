@@ -1,18 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"emby-go/internal/config"
 	"emby-go/internal/logging"
 	"emby-go/internal/server"
 )
+
+// shutdownBudget 是 D09 批准的总退出预算；部署强杀宽限建议 30s，需大于它。
+const shutdownBudget = 15 * time.Second
 
 // 以下变量由发布构建通过 -ldflags "-X main.version=..." 注入，默认值为本地构建。
 var (
@@ -72,8 +78,40 @@ func main() {
 		MaxHeaderBytes:    64 << 10,
 	}
 	slog.Info("Emby-go listening", "addr", cfg.Addr(), "version", version, "config", path)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("server stopped", "error", err)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped", "error", err)
+			os.Exit(1)
+		}
+		return
+	case <-sigCtx.Done():
+	}
+
+	// D09 已批：readiness 立即失败、停止新调度；HTTP drain 与后台任务取消/join
+	// 共享同一个 15 秒预算；长流不主动撤销，超时后走有诊断的强制退出路径
+	// （不先关 DB 再放任写入）。
+	slog.Info("收到退出信号：开始有界关闭", "budget", shutdownBudget.String())
+	app.BeginShutdown()
+	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+	defer cancel()
+	errs := make(chan error, 2)
+	go func() { errs <- srv.Shutdown(shutCtx) }()
+	go func() { errs <- app.WaitBackground(shutCtx) }()
+	var failed error
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil && failed == nil {
+			failed = err
+		}
+	}
+	if failed != nil {
+		slog.Error("有界关闭超时：强制退出（跳过 DB 优雅关闭）", "error", failed)
 		os.Exit(1)
 	}
+	app.Close()
+	slog.Info("已退出")
 }

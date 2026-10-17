@@ -435,7 +435,9 @@ func (a *App) adminRunScheduledTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	a.workerWG.Add(1)
 	go func() {
+		defer a.workerWG.Done()
 		if err := a.sched.RunNow(id); err != nil {
 			slog.Warn("立即执行计划任务失败", "task_id", id, "error", err)
 		}
