@@ -317,9 +317,8 @@ function wallCard(item, ud) {
     ? `<img loading="lazy" src="${esc(poster)}" alt="">`
     : `<span class="wall-path" title="${esc(item.source_path)}">${esc(item.source_path || title || '—')}</span>`;
   const label = title || String(item.source_path || '').split(/[\\/]/).pop() || '—';
-  const a11y = ` tabindex="0" role="button" aria-label="查看 ${esc(label)} 详情"`;
   return `
-    <article class="wall-card" data-play="${item.id}"${a11y}>
+    <article class="wall-card" data-play="${item.id}">
       <div class="wall-poster">
         ${body}
         <div class="wall-badges">${badges}</div>
@@ -332,7 +331,7 @@ function wallCard(item, ud) {
         ${playable ? `<button class="wall-play" data-quickplay="${item.id}" title="直接播放">${icon('play')}</button>` : ''}
       </div>
       <div class="wall-meta">
-        <strong title="${esc(title || item.source_path)}">${esc(label)}</strong>
+        <button type="button" class="wall-title" data-open="${item.id}" title="${esc(title || item.source_path)}">${esc(label)}</button>
         <small>${esc(sub)}</small>
       </div>
     </article>`;
@@ -512,18 +511,15 @@ async function pageItems() {
       if (target) openPlayer(target);
       return;
     }
+    const open = event.target.closest('[data-open]');
+    if (open) {
+      event.stopPropagation();
+      const target = wallState.items.find(m => String(m.id) === open.dataset.open);
+      if (target) openDetail(target);
+      return;
+    }
     const card = event.target.closest('.wall-card');
     if (!card) return;
-    const item = wallState.items.find(m => String(m.id) === card.dataset.play);
-    if (item) openDetail(item);
-  });
-  // 只处理卡片本身的键盘激活；内部原生按钮保留默认点击行为。
-  document.querySelector('#wall').addEventListener('keydown', event => {
-    if (event.defaultPrevented || event.isComposing || event.repeat) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    const card = event.target.closest('.wall-card');
-    if (!card || event.target !== card) return;
-    event.preventDefault();
     const item = wallState.items.find(m => String(m.id) === card.dataset.play);
     if (item) openDetail(item);
   });

@@ -502,57 +502,42 @@ function wallKey(target, key, extra = {}) {
     preventDefault() { this.defaultPrevented = true; }, ...extra };
 }
 
-test('只有媒体卡片本身的Enter和空格打开详情并阻止默认滚动', async () => {
-  const env = await wallKeyboardFixture();
-  for (const key of ['Enter', ' ']) {
-    const event = wallKey(env.card, key);
-    env.handlers.keydown(event);
-    assert.equal(event.defaultPrevented, true);
-  }
-  assert.deepEqual(env.calls, [['detail', 7], ['detail', 7]]);
+test('媒体卡片不再整体充当按钮：模板无 role=button/tabindex，标题是独立按钮', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
+  assert.ok(!/<article class="wall-card" data-play="\$\{item\.id\}"[^>]*role=/.test(src), '卡片不得整体 role=button');
+  assert.ok(!/<article class="wall-card" data-play="\$\{item\.id\}"[^>]*tabindex/.test(src), '卡片不得整体可聚焦');
+  assert.match(src, /class="wall-title" data-open="\$\{item\.id\}"/, '标题必须是可聚焦按钮');
+  assert.ok(!src.includes("document.querySelector('#wall').addEventListener('keydown'"), '卡片级 keydown 必须移除（避免嵌套交互）');
 });
 
-test('媒体墙内按钮及其图标的键盘事件不被父卡片截获，点击委托仍只执行自身动作', async () => {
+test('点击标题按钮与整卡都打开详情，内部按钮仍只执行自身动作', async () => {
+  const env = await wallKeyboardFixture();
+  // 标题按钮点击 → 详情。
+  await env.handlers.click({
+    target: { closest: selector => selector === '[data-open]' ? { dataset: { open: '7' } } : null },
+    stopPropagation() {},
+  });
+  assert.deepEqual(env.calls, [['detail', 7]]);
+  // 海报等空白区域点击 → 仍走整卡分支打开详情。
+  env.calls.length = 0;
+  await env.handlers.click({
+    target: { closest: selector => selector === '.wall-card' ? env.card : null },
+    stopPropagation() {},
+  });
+  assert.deepEqual(env.calls, [['detail', 7]]);
+  // 内部动作按钮不会被详情分支截获。
   for (const [field, expected] of [
     ['probe', ['probe', '7']], ['reread', ['/items/7/reread', 'POST']],
     ['delete', ['/items/7', 'DELETE']], ['quickplay', ['play', 7]]
   ]) {
-    for (const iconTarget of [false, true]) {
-      for (const key of ['Enter', ' ']) {
-        const env = await wallKeyboardFixture();
-        const button = { dataset: { [field]: '7' }, closest(selector) {
-          if (selector === '.wall-card') return env.card;
-          return selector === `[data-${field}]` ? this : null;
-        } };
-        const target = iconTarget ? { closest: selector => button.closest(selector) } : button;
-        const event = wallKey(target, key);
-        env.handlers.keydown(event);
-        assert.equal(event.defaultPrevented, false, `${field}/${key}: 保留原生按钮默认行为`);
-        assert.deepEqual(env.calls, [], `${field}: keydown不得误开详情`);
-        // VM不合成浏览器默认点击；显式调用真实委托，验证动作不会落到详情分支。
-        await env.handlers.click({ target, stopPropagation() {} });
-        assert.deepEqual(env.calls, [expected]);
-      }
-    }
+    env.calls.length = 0;
+    const button = { dataset: { [field]: '7' }, closest(selector) {
+      if (selector === '.wall-card') return env.card;
+      return selector === `[data-${field}]` ? this : null;
+    } };
+    await env.handlers.click({ target: button, stopPropagation() {} });
+    assert.deepEqual(env.calls, [expected], `${field}: 只执行自身动作`);
   }
-});
-
-test('媒体卡片忽略组合输入、按键重复、已处理事件及普通子节点', async () => {
-  const env = await wallKeyboardFixture();
-  for (const key of ['Enter', ' ']) {
-    for (const flag of ['isComposing', 'repeat', 'defaultPrevented']) {
-      const event = wallKey(env.card, key, { [flag]: true });
-      let prevented = 0; event.preventDefault = () => { prevented++; };
-      env.handlers.keydown(event);
-      assert.equal(prevented, 0);
-    }
-    const nested = wallKey({ closest: () => env.card }, key);
-    env.handlers.keydown(nested);
-    assert.equal(nested.defaultPrevented, false);
-  }
-  const unrelated = wallKey(env.card, 'ArrowDown'); env.handlers.keydown(unrelated);
-  assert.equal(unrelated.defaultPrevented, false);
-  assert.deepEqual(env.calls, []);
 });
 
 // 静态色值护栏，不是完整CSS渲染器：不覆盖图片、滤镜、梯度、继承opacity或任意叠层。

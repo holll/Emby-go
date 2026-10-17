@@ -693,7 +693,12 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
 .wall-play svg { width: 40px; height: 40px; color: #fff; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6)); }
 .wall-card:hover .wall-play { opacity: 1; }
 .wall-meta { display: grid; gap: 2px; }
-.wall-meta strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wall-title {
+  all: unset; cursor: pointer; display: block;
+  font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wall-title:focus-visible { outline: 2px solid var(--accent, #7aa2ff); outline-offset: 2px; border-radius: 3px; }
+.wall-title:hover { text-decoration: underline; }
 .wall-meta small { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 实体筛选芯片（详情抽屉跳转过来时的当前筛选） */
