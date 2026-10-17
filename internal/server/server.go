@@ -389,7 +389,8 @@ func (a *App) routes() {
 	// 这里只做「限定 kind + 限定目标服务 + 限时限量」的转发，不放大暴露面。
 	r.GET("/api/admin/scrape/image", a.adminScrapeImage)
 
-	admin := r.Group("/api/admin", a.requireAuth, noStore)
+	// noStore 必须先于 requireAuth：鉴权失败会 Abort，后面的中间件不再执行。
+	admin := r.Group("/api/admin", noStore, a.requireAuth)
 	admin.GET("/libraries", a.adminLibraries)
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
@@ -653,7 +654,7 @@ func (a *App) noRoute(c *gin.Context) {
 			a.persistDiagnosticProbe(method, safePath, redactedRequestQuery(c.Request.URL.RawQuery), epoch)
 		}
 	}
-	c.JSON(404, gin.H{"error": "not found"})
+	c.JSON(404, gin.H{"error": "not found", "code": "NOT_FOUND"})
 }
 
 func (a *App) probeClock() time.Time {

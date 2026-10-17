@@ -238,3 +238,16 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | README:78 | “手动补录” | 改为编辑/刮削链（端点 2026-10-12 已移除） |
 | README:155 | “不做刮削器” | 改为不做通用插件，内置适配器除外 |
 | dev-plan §1–§3、§6、Roadmap | 手动补录/零刮削/可选 Redis/无 provider 字段 | 按实现校准，并新增 §9 施工治理 |
+
+## 8. v2 施工台账（v1.5.0 之后）
+
+v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.md](dev-plan.md) §10，契约正文见 [API-CONTRACT.md](API-CONTRACT.md)。
+
+| 批次 | 主题 | 状态 | 边界 |
+|---|---|---|---|
+| 73 | 契约基线：`API-CONTRACT.md`、关键路由/错误信封契约测试、未知路由 `NOT_FOUND`、admin 组 `no-store` 先于鉴权 | ✅ 本地完成 | 管理面 400/404/500 仍有只带 `error` 的旧响应（批次 74） |
+| 74 | 管理面错误码补齐（纯增量） | 计划 | 需逐端点补 `code` 并加断言，不改既有人类可读文本 |
+| 75 | 弃用机制 | 计划 | v2 内只登记不删除 |
+| 76 | 兼容回归：旧客户端抓包与字段抽检 | 计划 | 需部署环境/真机 |
+
+门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。

@@ -95,6 +95,8 @@ Split/
 
 Emby 兼容 API 同时注册在根路径与 `/emby` 前缀下：
 
+> 对外接口的稳定字段、错误码与变更规则见 [API-CONTRACT.md](API-CONTRACT.md)（v2 起只增不改）。
+
 ```text
 服务器地址：http://<host>:18080          # 或 http://<host>:18080/emby
 账号/密码：  初始化向导创建的管理员
