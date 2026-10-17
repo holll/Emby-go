@@ -212,7 +212,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 7. ~~**CI**：新增 build/vet/test/node-test 工作流。~~ 已建（2026-10-17），已在本机按工作流命令全量镜像通过（test 全套、`-race ./internal/server ./internal/outbound` 233s、web 79/79）；尚未 push，GitHub 首次实跑未确认。
 8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。D01 会话期限与撤销全部会话已落地（批次 64，含迁移 3、设置页与 API）。
 
-## 6. 批次映射（1–71）
+## 6. 批次映射（1–72）
 
 | 批次 | 主题 |
 |---|---|
@@ -261,6 +261,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 69 | D08 索引失败恢复提示：迁移 5 `edit_failures`，恢复列表与超 7 天提示，成功重索引自动清除 |
 | 70 | D11 备份与恢复：`cmd/embybackup` SQLite `VACUUM INTO` 快照 + NFO 副本 + 保留 N 份；README 恢复与轮换步骤 |
 | 71 | D12 落地记录 + A01–A15 证据回填：自动项列测试名/数据，人工部署项显式保留为未执行 |
+| 72 | CI 实跑闭环：vuln 门禁改用 1.27.x 补丁版，GitHub run 39052328722 全绿 |
 | 57 | A15 性能冒烟：5000 部合成库扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 47MB |
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |
