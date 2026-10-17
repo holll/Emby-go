@@ -741,6 +741,10 @@ func (a *App) adminClearProbes(c *gin.Context) {
 
 // —— API 密钥管理：密钥可作 X-Emby-Token / api_key 直接调用 Emby 接口 ——
 
+// API 密钥是管理员凭据（D02，2026-10-17 已确认）：当前单用户版本中
+// 任何密钥都可调用全部管理与 Emby 接口；未来引入多用户后，非管理员用户
+// 不得创建或管理 API 密钥。列表当前仍返回密钥原文，属 BE-03/D03 的
+// 摘要与 key_id 迁移边界，迁移前不要据此宣称「列表最小披露」。
 func (a *App) adminAPIKeys(c *gin.Context) {
 	keys, err := a.db.APIKeys()
 	if err != nil {

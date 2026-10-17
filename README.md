@@ -102,14 +102,16 @@ Emby 兼容 API 同时注册在根路径与 `/emby` 前缀下：
 
 已对齐的浏览主链路：认证 → Views（媒体库 + 合集）→ Latest/Resume/Suggestions → Items（排序/过滤/分页/搜索）→ 详情/图片 → 相似推荐 → PlaybackInfo → `/Videos/{id}/stream`（302 直拉）→ 进度/收藏/评分上报。
 
-### API 密钥
+### 管理员 API 密钥
 
-后台「API 密钥」创建后，可用密钥直接调用 Emby API（等价于登录令牌，长期有效）：
+后台「管理员 API 密钥」创建后，可用密钥直接调用全部管理与 Emby 接口（全权、长期有效）：
 
 ```bash
 curl -H "X-Emby-Token: <key>" http://<host>:18080/Users/1/Views
 # 或 http://<host>:18080/Users/1/Views?api_key=<key>
 ```
+
+> **权限边界（D02 已确认）**：当前为永久单用户版本，API 密钥即管理员凭据，泄露等于交出管理面；请只发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。图片端点保持匿名以兼容浏览器 `<img>`/客户端，不因持有密钥而收窄。
 
 ## 配置（config.yaml）
 

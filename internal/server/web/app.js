@@ -1125,7 +1125,8 @@ async function pageSettings() {
     </section>
 
     <section class="panel">
-      <div class="panel-head"><h2>API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 供脚本/第三方客户端直接调用 Emby API</span></div>
+      <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
+      <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>
       ${keys.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
@@ -1138,12 +1139,12 @@ async function pageSettings() {
               <button class="icon-btn danger" data-key-delete="${esc(item.key)}" title="删除密钥">${icon('trash')}</button>
             </div></td>
           </tr>`).join('')}</tbody>
-        </table></div>` : empty('还没有 API 密钥', '在下方创建后即可用 X-Emby-Token 调用接口。')}
+        </table></div>` : empty('还没有管理员 API 密钥', '在下方创建后即可用 X-Emby-Token 调用全部接口。')}
       <form id="apikey-form" class="field-grid" style="margin-top:18px">
-        <div class="field"><label for="key-name">新建密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
+        <div class="field"><label for="key-name">新建管理员密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建</span></button></div>
       </form>
-      <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即凭据，请勿外泄。</p>
+      <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即管理员凭据，请勿外泄；删除前先确认使用方。</p>
     </section>`;
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
