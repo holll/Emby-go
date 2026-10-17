@@ -79,7 +79,7 @@
 | D09 | ✅ 已批（2026-10-17）：SIGTERM 即 readiness=false，15s 总预算，长流不撤销，部署宽限 30s | BE-04（★） |
 | D10 | ✅ 已批（2026-10-17）：进程内任务表、202+task_id、1h 幂等、容量 200、重启不恢复、旧 /scan 保留至验收集通过 | BE-07、R3 |
 | D11 | ✅ 已批（2026-10-18）：按 §2.4 默认值——每日自动备份数据库+NFO、保留 7 份；RPO 24h/RTO 1h；恢复后需重置管理员密码（凭据不入备份） | ✅ 已落地（批次 70）：`cmd/embybackup` 一致性快照+NFO+保留清理；README 恢复步骤；定时执行由部署者配置 |
-| D12 | ✅ 已批（2026-10-18）：按 §2.4 默认值——浏览器矩阵 Chromium/Firefox/WebKit + iOS Safari/Android Chrome 抽测；性能基线 p95 列表 ≤ 300ms、详情 ≤ 150ms、扫描 5000 项 ≤ 60s；验收人=项目所有者 | FE-06/11/12、A13/A15 |
+| D12 | ✅ 已批（2026-10-18）：按 §2.4 默认值——浏览器矩阵 Chromium/Firefox/WebKit + iOS Safari/Android Chrome 抽测；性能基线 p95 列表 ≤ 300ms、详情 ≤ 150ms、扫描 5000 项 ≤ 60s；验收人=项目所有者 | ✅ 已落地（批次 71）：矩阵与阈值已固化并有 A13/A15 证据；真机抽测仍属部署验收 |
 
 ### 2.1 D02 提案（待用户批准，2026-10-17）
 
@@ -146,21 +146,21 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 | 项 | 方式 | 前置/环境 | 证据 |
 |---|---|---|---|
-| A01 认证 | 自动（撤销：`TestAcceptanceSessionRevoke`，需 `ACCEPTANCE_ALLOW_REVOKE=1`）；过期边界由 store 可控时钟单测覆盖，HTTP 级可控时钟待补 | 迁移 3 会话期限（D01）**已落地**（批次 64） | 测试名 + 输出 |
-| A02 旧缓存 | 自动（待补：缓存故障注入） | Redis 双实例/断连注入 | 测试名 + 输出 |
+| A01 认证 | 自动（撤销 `TestAcceptanceSessionRevoke`+过期单测）；HTTP 级可控时钟仍待补 | D01 已落地（批次 64） | 单测/验收名：`TestAccessTokenExpiryValidation`、`TestAcceptanceSessionRevoke`；部署级人工项未做 |
+| A02 旧缓存 | 自动（旧二进制对照，批次 58） | 旧提交 `9c4fcb0` worktree | `docs/..` LEAD 记录：删 token 后旧二进制 200 / 当前 401；Redis 故障注入仍未做 |
 | A03 迁移/UI/权限 | 自动子集（401/登录）**本地通过**；人工（旧库升级、key UI）待做 | 旧版本 DB fixture、浏览器 | acceptance 输出 + 截图 |
-| A04 原子/版本 | 自动（现有 store 用例）+ 人工（提交后杀进程） | 可注入失败的 commit 屏障 | 测试名 + 日志 |
+| A04 原子/版本 | 自动（store 用例）+ 人工未做（提交后杀进程） | 可注入失败的 commit 屏障 | 测试：`TestUserSettingsAtomicAPI`、`TestAtomicWritesSurviveFailpoint`；杀进程演练待部署 |
 | A05 播放 | 自动（acceptance + 单测）**本地真实二进制通过**（双会话/重放/迟到心跳） | 已初始化实例、≥1 部影片 | acceptance 输出 |
 | A06 文件/索引 | 人工（NFO 失败/部分成功） | 可写失败目录（只读卷） | 日志 + 文件快照 |
 | A07 扫描 | 自动（scanner 回归）+ 人工（断源/删除前取消） | 可断源目录、SIGTERM 时机 | 测试名 + 日志 |
 | A08 迁移 | 自动（migrations_test 篡改/漂移）+ 人工（只读卷） | 每个支持版本 fixture | 测试名 + 输出 |
-| A09 恢复/回退 | 人工 | T0 备份 + 旧二进制 + Redis | 演练记录（D11 批准后） |
-| A10 任务 | 自动（scan_tasks 单测）+ 人工（崩溃/取消） | 真实进程 kill -9 | 测试名 + 日志 |
+| A09 恢复/回退 | 人工（批次 56 本机演练） | T0 备份 + 当前二进制 + 假 Redis | 记录：SIGTERM 52ms；备份 172K；删库后 initialized=false；还原 1.2s 可服务；标题/PlayCount/PositionTicks/NFO 保留 |
+| A10 任务 | 自动（`scan_tasks_test.go` 6 组）+ 人工 kill -9 未做 | 真实进程 kill -9 | 单测/实跑：202/幂等/409/容量/1h 过期；崩溃不恢复语义未演练 |
 | A11 退出 | 单测 + 自动（health）；**本地 SIGTERM 实跑通过**；503 窗口/长流/超时路径待演练 | 部署侧 30s 宽限 | 测试名 + 演练记录 |
-| A12 跨层兼容 | 自动（现有契约测试）+ 人工（旧客户端） | 旧版 Emby 客户端 | 测试名 + 抓包/截图 |
-| A13 浏览器/a11y | 人工（浏览器矩阵） | D12 批准矩阵、Playwright | 录屏/截图 + 用例 ID |
-| A14 入口/资源 | 自动子集（413/401/健康）**本地通过**；暴力/慢头/canary 待做 | 压测工具、代理拓扑 | acceptance + 报告 |
-| A15 性能/语义 | 人工（固定硬件基线） | D12 阈值、同参数前后采样 | p95/p99 报告 |
+| A12 跨层兼容 | 自动（契约测试 + Playwright 页面/axe）+ 人工旧客户端未做 | 旧版 Emby 客户端 | `contract_test.go`；批次 59 axe 0 violations；真实旧客户端抓包待做 |
+| A13 浏览器/a11y | 自动（Playwright 三引擎巡检，批次 60） | D12 矩阵（Chromium/Firefox/WebKit） | 7 页面 ×3 引擎 0 console error/0 axe/0 移动溢出；键盘流程 `keyboard.cjs`；截图 `docs/screenshots/` |
+| A14 入口/资源 | 自动（413/401/健康 + 登录限流 429）本地通过；慢头/大 header 压测未做 | 压测工具、代理拓扑 | `limits_test.go`、acceptance 输出；慢头依赖部署侧代理 |
+| A15 性能/语义 | 自动（批次 57 固定参数） | D12 阈值、同参数前后采样 | 5000 项扫描 11.0s；列表 Limit=50 p95 17.2ms、Limit=200 p95 49.7ms；详情 p95 7.1ms；RSS 47.5MB；`docs/acceptance/bench.cjs` |
 
 > 自动化只证明协议/计数层；D12 未批前 A13/A15 不得标通过。生产验收仍需可登录部署。
 
@@ -212,7 +212,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 7. ~~**CI**：新增 build/vet/test/node-test 工作流。~~ 已建（2026-10-17），已在本机按工作流命令全量镜像通过（test 全套、`-race ./internal/server ./internal/outbound` 233s、web 79/79）；尚未 push，GitHub 首次实跑未确认。
 8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。D01 会话期限与撤销全部会话已落地（批次 64，含迁移 3、设置页与 API）。
 
-## 6. 批次映射（1–70）
+## 6. 批次映射（1–71）
 
 | 批次 | 主题 |
 |---|---|
@@ -260,6 +260,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 68 | D05 历史凭据审计：历史 `config.yaml` 无真实口令，工作区无本地库/日志，上线前轮换 checklist 入台账 |
 | 69 | D08 索引失败恢复提示：迁移 5 `edit_failures`，恢复列表与超 7 天提示，成功重索引自动清除 |
 | 70 | D11 备份与恢复：`cmd/embybackup` SQLite `VACUUM INTO` 快照 + NFO 副本 + 保留 N 份；README 恢复与轮换步骤 |
+| 71 | D12 落地记录 + A01–A15 证据回填：自动项列测试名/数据，人工部署项显式保留为未执行 |
 | 57 | A15 性能冒烟：5000 部合成库扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 47MB |
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |
