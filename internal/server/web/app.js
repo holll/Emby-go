@@ -387,9 +387,9 @@ async function pageItems() {
   const sorts = [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
   // 库少时平铺成 Tab，库多（>8）转下拉，避免筛选行被撑爆。
   const libFilter = libraries.length <= 8
-    ? `<button class="pill ${libraryID === '' ? 'is-active' : ''}" data-lib="">全部库</button>` +
-      libraries.map(lib => `<button class="pill ${libraryID === String(lib.Id) ? 'is-active' : ''}" data-lib="${esc(lib.Id)}">${esc(lib.Name)}</button>`).join('')
-    : `<select id="item-lib"><option value="">全部库</option>${libraries.map(lib =>
+    ? `<button class="pill ${libraryID === '' ? 'is-active' : ''}" data-lib="" aria-pressed="${libraryID === ''}">全部库</button>` +
+      libraries.map(lib => `<button class="pill ${libraryID === String(lib.Id) ? 'is-active' : ''}" data-lib="${esc(lib.Id)}" aria-pressed="${libraryID === String(lib.Id)}">${esc(lib.Name)}</button>`).join('')
+    : `<select id="item-lib" aria-label="媒体库"><option value="">全部库</option>${libraries.map(lib =>
         `<option value="${esc(lib.Id)}" ${libraryID === String(lib.Id) ? 'selected' : ''}>${esc(lib.Name)}</option>`).join('')}</select>`;
   content.innerHTML = `
     <section class="panel">
@@ -402,11 +402,11 @@ async function pageItems() {
       </div>
       ${libraries.length ? `<div class="filters">${libFilter}</div>` : ''}
       ${entity ? `<div class="filters"><span class="filter-chip">${esc(entity[1])}：${esc(entity[2])}
-        <button class="chip-x" id="entity-clear" title="清除该筛选">✕</button></span></div>` : ''}
+        <button class="chip-x" id="entity-clear" title="清除该筛选" aria-label="清除筛选">✕</button></span></div>` : ''}
       <div class="filters">
-        ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}">${esc(label)}</button>`).join('')}
-        <input id="item-search" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}" style="min-width:200px">
-        <select id="item-sort">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+        ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
+        <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}" style="min-width:200px">
+        <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
       </div>
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
@@ -779,7 +779,7 @@ async function openDetail(item) {
         <button id="detail-probe" class="btn">${icon('probe')}<span>探测媒体信息</span></button>
         <button id="detail-scrape" class="btn">${icon('search')}<span>刮削</span></button>
         <button id="detail-reread" class="btn">${icon('refresh')}<span>重读源</span></button>
-        <button id="detail-edit-toggle" class="btn">${icon('edit')}<span>编辑元数据</span></button>
+        <button id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit">${icon('edit')}<span>编辑元数据</span></button>
       </div>
 
       <section class="detail-section" id="detail-edit" hidden>
@@ -889,10 +889,16 @@ async function openDetail(item) {
   const editSection = document.querySelector('#detail-edit');
   const editToggle = document.querySelector('#detail-edit-toggle');
   if (editToggle && editSection) {
-    editToggle.addEventListener('click', () => { editSection.hidden = !editSection.hidden; });
+    editToggle.addEventListener('click', () => {
+      editSection.hidden = !editSection.hidden;
+      editToggle.setAttribute('aria-expanded', String(!editSection.hidden));
+    });
   }
   const editCancel = document.querySelector('#detail-edit-cancel');
-  if (editCancel) editCancel.addEventListener('click', () => { editSection.hidden = true; });
+  if (editCancel) editCancel.addEventListener('click', () => {
+    editSection.hidden = true;
+    editToggle?.setAttribute('aria-expanded', 'false');
+  });
   const editForm = document.querySelector('#detail-edit-form');
   let editNeedsRecovery = false;
   if (editForm) editForm.addEventListener('submit', async event => {
@@ -1619,7 +1625,7 @@ async function pageScheduled() {
             <td class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
             <td>${runBadge(item.last_status)}
               <small class="hint" style="margin:2px 0 0;display:block">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
-            <td><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}"${item.enabled ? ' checked' : ''}><i></i></label></td>
+            <td><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"${item.enabled ? ' checked' : ''}><i></i></label></td>
             <td><div class="row-actions">
               <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="立即执行一次">${icon('play')}<span>执行</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>

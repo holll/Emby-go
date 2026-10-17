@@ -223,6 +223,20 @@ test('登录成功保存 token 并跳转管理后台', async () => {
   assert.deepEqual(env.redirects, ['/admin']);
 });
 
+test('筛选、计划任务与编辑展开暴露可访问名称和状态', () => {
+  for (const snippet of [
+    'id="item-search" aria-label="搜索媒体"',
+    'id="item-sort" aria-label="排序方式"',
+    'id="item-lib" aria-label="媒体库"',
+    'data-lib="" aria-pressed="${libraryID === \x27\x27}"',
+    'data-status="${value}" aria-pressed="${status === value}"',
+    'id="entity-clear" title="清除该筛选" aria-label="清除筛选"',
+    'id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit"',
+    "editToggle.setAttribute('aria-expanded', String(!editSection.hidden))",
+    'aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"'
+  ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
+});
+
 function recoveryPanel() {
   const error = { textContent: '' };
   let html = '', retry;
