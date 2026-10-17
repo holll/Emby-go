@@ -434,6 +434,48 @@ func checkConstraints(db schemaDB, table string) ([]string, error) {
 	return result, nil
 }
 
+// Migration 2（D07 已批）：播放会话/事件表，承载「一次播放只计一次」的
+// 序列号协议。sessions 以客户端 PlaySessionId（缺失时回退 item:<id>）为主键，
+// last_event_seq 单调递增；stopped 幂等由「仅在 stopped=0 时迁移」保证。
+const playbackMigrationVersion = 2
+
+var migration2Statements = []string{
+	`CREATE TABLE IF NOT EXISTS playback_sessions (
+		session_key TEXT PRIMARY KEY,
+		movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+		device_id TEXT NOT NULL DEFAULT '',
+		started_at TEXT NOT NULL,
+		last_event_seq INTEGER NOT NULL DEFAULT 0,
+		position_ticks INTEGER NOT NULL DEFAULT 0,
+		stopped INTEGER NOT NULL DEFAULT 0,
+		stopped_at TEXT
+	)`,
+	`CREATE TABLE IF NOT EXISTS playback_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_key TEXT NOT NULL REFERENCES playback_sessions(session_key) ON DELETE CASCADE,
+		seq INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		position_ticks INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		UNIQUE(session_key, seq)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_playback_sessions_movie ON playback_sessions(movie_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_playback_events_session ON playback_events(session_key, seq)`,
+}
+
+func migration2Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration2Statements, "\n"))))
+}
+
+func applyMigration2(tx *sql.Tx) error {
+	for _, statement := range migration2Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration 2: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -447,7 +489,7 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("read migration ledger: %w", err)
 	}
-	applied := false
+	applied := map[int]bool{}
 	for rows.Next() {
 		var version int
 		var checksum string
@@ -455,28 +497,50 @@ func (s *Store) migrate() error {
 			rows.Close()
 			return err
 		}
-		if version != 1 || checksum != baselineChecksum() {
+		switch version {
+		case 1:
+			if checksum != baselineChecksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case playbackMigrationVersion:
+			if checksum != migration2Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
 		}
-		applied = true
+		applied[version] = true
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return err
 	}
-	if !applied {
+	if !applied[1] {
 		if err := applyBaseline(tx); err != nil {
 			return fmt.Errorf("schema migration 1: %w", err)
+		}
+	}
+	if !applied[playbackMigrationVersion] {
+		if err := applyMigration2(tx); err != nil {
+			return err
 		}
 	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
-	if !applied {
-		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(1,?,?)", baselineChecksum(), time.Now().UTC().Format(time.RFC3339)); err != nil {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if !applied[1] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(1,?,?)", baselineChecksum(), now); err != nil {
 			return fmt.Errorf("record schema migration 1: %w", err)
+		}
+	}
+	if !applied[playbackMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", playbackMigrationVersion, migration2Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", playbackMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

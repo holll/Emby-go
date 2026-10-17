@@ -1120,6 +1120,8 @@ func (a *App) playing(c *gin.Context) {
 	var req struct {
 		ItemId        string `json:"ItemId"`
 		PositionTicks int64  `json:"PositionTicks"`
+		PlaySessionId string `json:"PlaySessionId"`
+		DeviceId      string `json:"DeviceId"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback payload"})
@@ -1132,22 +1134,25 @@ func (a *App) playing(c *gin.Context) {
 	}
 	// 当前用户状态以主影片为单位；合法分段共享主影片记录，进度保持分段内相对位置。
 	id := movie.ID
-	d, err := a.db.Data(id)
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
+	// 播放计数由 D07 会话/事件协议保证一次播放只计一次（迁移 2）：
+	// start/progress/stopped 都进同一事务；重复 Stopped 与停止后的迟到心跳
+	// 不会再改计数或覆盖停止标记，也不能靠重放同一位置来回滚 play_count。
+	kind := store.PlaybackStart
+	switch strings.ToLower(filepath.Base(c.Request.URL.Path)) {
+	case "progress":
+		kind = store.PlaybackProgress
+	case "stopped":
+		kind = store.PlaybackStopped
 	}
-	positionTicks := req.PositionTicks
-	stoppedTicks := int64(-1)
-	playCount := d.PlayCount
-	isStopped := strings.EqualFold(filepath.Base(c.Request.URL.Path), "Stopped")
-	if isStopped {
-		stoppedTicks = req.PositionTicks
-		if d.StoppedTicks != req.PositionTicks {
-			playCount++
-		}
-	}
-	if err := a.db.SavePlayback(id, positionTicks, playCount, time.Now().UTC().Format(time.RFC3339), stoppedTicks); err != nil {
+	isStopped := kind == store.PlaybackStopped
+	if _, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
+		SessionKey:    req.PlaySessionId,
+		MovieID:       id,
+		DeviceID:      req.DeviceId,
+		Kind:          kind,
+		PositionTicks: req.PositionTicks,
+		Now:           time.Now(),
+	}); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
