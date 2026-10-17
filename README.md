@@ -141,6 +141,17 @@ server_domains: []        # 前端“服务器域名切换”候选
 - **单实例**：SQLite 与 Redis 为单一事实源，不要多实例共享同一 SQLite 文件；Redis 必选且失败拒绝启动。
 - **放行条件**：A03（未认证 401 不泄露）、A14（超大请求体 413）与 D01（会话期限）均已本地通过；公网启用仍需完成 PLAN-STATUS §3 的剩余人工项与备份/恢复演练。
 
+## 备份与恢复（D11）
+
+```bash
+# 每日一次：SQLite 一致性快照 + 各媒体库 .nfo，保留最近 7 份
+go run ./cmd/embybackup -db ./data/emby.db -out /backups/emby -retain 7
+```
+
+- 备份目录按 UTC 时间戳命名，内含 `db.sqlite` 与 `nfo/lib-<id>/`；只删时间戳命名的旧目录，手工目录不会被清理。
+- 恢复：停止服务 → 用备份的 `db.sqlite` 覆盖数据库、把 `nfo/lib-<id>/` 覆盖回对应媒体库 → 启动后重新扫描；恢复后按 D05 轮换管理员密码、撤销全部会话与 API 密钥。
+- 契约：RPO 24h / RTO 1h；Redis 不备份；备份不含管理员密码明文（D03 摘要化后数据库内只有密钥摘要）。
+
 ## 开发
 
 ```bash

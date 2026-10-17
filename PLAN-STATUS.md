@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 15 包全绿；393 个 Test 函数（server 31.5s / store 11.6s；3 个实时验收用例未设 env 时跳过）；实时验收 3 个（A01/A05/A06 等子集，env 未设时跳过） |
+| `go test ./...` | 15 包全绿；396 个 Test 函数（server 31.5s / store 11.6s；3 个实时验收用例未设 env 时跳过）；实时验收 3 个（A01/A05/A06 等子集，env 未设时跳过） |
 | `node --test internal/server/web_test.cjs` | 81/81 通过 |
 | 测试形态 | httptest + 内存库为主；无真实 Emby 客户端、真实浏览器、生产库、备份恢复演练 |
 | CI | 首次实跑 run 39049816235（`f5f860f`）：**go ✅（4m50s）/ web ✅ / vuln ❌**——vuln 失败原因是 CI 用 Go 1.26.0，标准库 `net/http` 调用链命中漏洞；随后 go.mod 上调 1.27.0 并重跑 |
@@ -78,7 +78,7 @@
 | D08 | ✅ 已批（2026-10-18）：按 §2.4 默认值——NFO 为人工编辑真源；索引失败给恢复入口与 7 天提示；锁字段阻止自动覆盖；备份含 NFO 与数据库 | ✅ 已落地（批次 69）：迁移 5 `edit_failures`，设置页「索引恢复」列表+超 7 天提示；成功重索引自动清除；NFO 真源/锁字段此前已实现；备份含 NFO 随 D11 |
 | D09 | ✅ 已批（2026-10-17）：SIGTERM 即 readiness=false，15s 总预算，长流不撤销，部署宽限 30s | BE-04（★） |
 | D10 | ✅ 已批（2026-10-17）：进程内任务表、202+task_id、1h 幂等、容量 200、重启不恢复、旧 /scan 保留至验收集通过 | BE-07、R3 |
-| D11 | ✅ 已批（2026-10-18）：按 §2.4 默认值——每日自动备份数据库+NFO、保留 7 份；RPO 24h/RTO 1h；恢复后需重置管理员密码（凭据不入备份） | DB-01/DB-07 |
+| D11 | ✅ 已批（2026-10-18）：按 §2.4 默认值——每日自动备份数据库+NFO、保留 7 份；RPO 24h/RTO 1h；恢复后需重置管理员密码（凭据不入备份） | ✅ 已落地（批次 70）：`cmd/embybackup` 一致性快照+NFO+保留清理；README 恢复步骤；定时执行由部署者配置 |
 | D12 | ✅ 已批（2026-10-18）：按 §2.4 默认值——浏览器矩阵 Chromium/Firefox/WebKit + iOS Safari/Android Chrome 抽测；性能基线 p95 列表 ≤ 300ms、详情 ≤ 150ms、扫描 5000 项 ≤ 60s；验收人=项目所有者 | FE-06/11/12、A13/A15 |
 
 ### 2.1 D02 提案（待用户批准，2026-10-17）
@@ -212,7 +212,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 7. ~~**CI**：新增 build/vet/test/node-test 工作流。~~ 已建（2026-10-17），已在本机按工作流命令全量镜像通过（test 全套、`-race ./internal/server ./internal/outbound` 233s、web 79/79）；尚未 push，GitHub 首次实跑未确认。
 8. **前端独立项**：FE-09（44）、FE-10（45）、FE-04（46）已部分完成；FE-07 需触屏/elementFromPoint 复核，FE-15 需 D12 对比度基线。D01 会话期限与撤销全部会话已落地（批次 64，含迁移 3、设置页与 API）。
 
-## 6. 批次映射（1–69）
+## 6. 批次映射（1–70）
 
 | 批次 | 主题 |
 |---|---|
@@ -259,6 +259,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 67 | D06 版本域验收：收藏/评分/已看/编辑/删除后版本推进且读己之写；无版本缓存键不命中 |
 | 68 | D05 历史凭据审计：历史 `config.yaml` 无真实口令，工作区无本地库/日志，上线前轮换 checklist 入台账 |
 | 69 | D08 索引失败恢复提示：迁移 5 `edit_failures`，恢复列表与超 7 天提示，成功重索引自动清除 |
+| 70 | D11 备份与恢复：`cmd/embybackup` SQLite `VACUUM INTO` 快照 + NFO 副本 + 保留 N 份；README 恢复与轮换步骤 |
 | 57 | A15 性能冒烟：5000 部合成库扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 47MB |
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |
