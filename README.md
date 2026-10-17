@@ -130,9 +130,13 @@ server_domains: []        # 前端“服务器域名切换”候选
 ## 开发
 
 ```bash
+go build ./...
 go vet ./...
 go test ./...
+node --test internal/server/web_test.cjs   # 前端 VM 测试
 ```
+
+`main` 分支推送与 PR 会跑 [ci.yml](.github/workflows/ci.yml)：build/vet/test、认证与出站关键包的 race，以及前端 VM 测试。发布仍由 `v*` tag 触发。
 
 ### 发布（GitHub Actions）
 

@@ -1,0 +1,57 @@
+name: ci
+
+# main 分支推送与 PR 跑完整回归；发布仍由 release.yml 的 v* tag 触发。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# 同一分支的新推送取消旧任务，避免排队浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      # 认证限流、请求预算与出站策略是并发敏感路径，额外跑 race。
+      - name: Race (auth/outbound)
+        run: go test -race -count=1 ./internal/server ./internal/outbound
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Frontend VM tests
+        run: node --test internal/server/web_test.cjs
