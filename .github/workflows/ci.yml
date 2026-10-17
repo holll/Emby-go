@@ -25,7 +25,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          go-version-file: go.mod
           cache: true
 
       # 格式门禁：避免机器生成/手写混排的 diff 进入主干。
@@ -44,6 +44,23 @@ jobs:
       # 认证限流、请求预算、出站策略与播放会话计数是并发敏感路径，额外跑 race。
       - name: Race (auth/outbound/store)
         run: go test -race -count=1 ./internal/server ./internal/outbound ./internal/store
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 依赖漏洞门禁：只允许「未被调用」的模块漏洞，调用链命中即失败。
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   web:
     runs-on: ubuntu-latest
