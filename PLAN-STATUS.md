@@ -167,6 +167,8 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A09 恢复演练（批次 56，本机）：SIGTERM 52ms 退出 → 备份 172K（DB+NFO+config）→ 删除 DB 重启得 `{"initialized":false}`（确认丢失）→ 还原后重启 1.2s：`initialized:true`、登录成功、标题/`PlayCount=12`/`PositionTicks=300000000` 全部保留、NFO 一致。
 - A12 UI 冒烟（批次 59，Playwright/Chromium 156 headless，1280×800 + 390×844）：登录 → 媒体墙（100 卡）→ 搜索「Perf Movie 42」命中 → 详情抽屉打开且首焦点在抽屉内 → 连按 8 次 Tab 焦点仍在抽屉（焦点圈）→ Esc 关闭后焦点回到卡片标题按钮；控制台 0 error；截图 `docs/screenshots/01-login..05-mobile.png`，脚本 `docs/acceptance/ui.cjs`。
 - A12 跨浏览器页面巡检（批次 60，Chromium/Firefox/WebKit × 7 页：总览/媒体库/媒体墙/计划任务/接口探针/刮削/设置）：三浏览器全部 0 控制台错误、移动视口横向溢出 0px；Chromium 逐页截图 `docs/screenshots/chromium-*.png`。纯键盘流程（批次 60）：autofocus 账号 → Tab 密码 → Enter 提交 → Tab 到「媒体墙」Enter → Tab 到标题按钮 Enter → 详情抽屉显示对应影片，全程无鼠标、0 error。
+- A12 功能级断言（批次 61，`docs/acceptance/func.cjs`）：设置页创建 API key→用该 key 调 `/api/admin/settings` 200→UI 删除→同 key 立即 401；计划任务新建→列表出现→删除；详情「编辑元数据」改标题→保存后抽屉关闭、墙面卡片标题更新、重开详情仍为新标题（NFO 已写）；快捷播放按钮打开播放器浮层（标题=影片名）并可关闭；全程 0 error。截图 `docs/screenshots/func-detail-edited.png`。
+- A15 混合负载（批次 62，`docs/acceptance/mixed.cjs`）：5000 项全库扫描进行中，12 个并发 worker（列表×5/详情/并发播放停止×2）持续 12s：共 5930 请求、**0 错误**、494 rps、p95 55ms、p99 94ms、max 594ms；扫描最终 success=5000。
 - A13 可访问性（批次 59/60，axe-core WCAG 2.1 A/AA）：修复 2 个 serious（100 节点 `nested-interactive`、100 节点 `label-content-name-mismatch`）与 1 个 critical（刮削页 `<select id="sc-lib">` 缺可访问名，补 `aria-label="媒体库"`）；复跑 **Chromium/Firefox/WebKit × 7 页全部 0 violations**；卡片改为「非交互容器 + 独立标题按钮」，内部按钮保持原生语义；脚本 `docs/acceptance/axe.cjs`、`pages.cjs`。
 - A02 旧正缓存回归（批次 58，本机双二进制对照）：旧提交 `9c4fcb0` 登录→删 `access_tokens` 全部行→重启→旧 token 仍 **200**（Redis 正缓存在重启后继续授权）；当前二进制同流程→**401**。证明 BE-06 取消认证正缓存后的失效路径生效。
 - A15 性能冒烟（批次 57，本机，合成 5000 部）：同步扫描 5000 项 **11.0s**（success=5000）；keep-alive 10 并发：列表 `Limit=50` p50 3.4ms/p95 **17.2ms**/p99 66ms、1639 rps；`Limit=200` p95 49.7ms；详情 p50 3.2ms/p95 **7.1ms**/p99 12.7ms；进程 RSS 47.5MB、DB 1.6MB；0 错误。均远低于 D12 建议阈值（列表 p95<300ms、详情 p95<150ms、内存<300MB）。
@@ -234,6 +236,8 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 58 | A02 旧正缓存对照：旧版本删 token 后仍 200，当前版本 401 |
 | 59 | A12 Playwright 冒烟 + A13 axe 审计；修复卡片嵌套交互与可访问名不匹配 |
 | 60 | A12 跨浏览器 3×7 页巡检 + 纯键盘流程；A13 修复刮削页 select 可访问名，全页 0 violations |
+| 61 | A12 功能级断言：API key 创建/使用/删除、计划任务新建/删除、元数据编辑、播放器开合 |
+| 62 | A15 扫描中混合负载：5930 请求 0 错误、p95 55ms、扫描 success=5000 |
 
 ## 7. 文档漂移修复记录
 
