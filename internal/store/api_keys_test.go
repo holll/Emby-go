@@ -35,7 +35,12 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	if ok, err := s.HasAPIKey(created.Key); err != nil || !ok {
 		t.Fatalf("plaintext credential rejected: ok=%v err=%v", ok, err)
 	}
-	if ok, err := s.HasAPIKey("0" + created.Key[1:]); err != nil || ok {
+	// 首字符随机，固定换成 "0" 有 1/16 概率与原值相同；换成确定不同的字符。
+	wrong := "0" + created.Key[1:]
+	if created.Key[0] == '0' {
+		wrong = "1" + created.Key[1:]
+	}
+	if ok, err := s.HasAPIKey(wrong); err != nil || ok {
 		t.Fatalf("wrong credential accepted: ok=%v err=%v", ok, err)
 	}
 	var stored string
