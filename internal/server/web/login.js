@@ -8,7 +8,10 @@ async function status() {
   return response.json();
 }
 
-function render(mode, error = '', busy = false) {
+let mode = 'login';
+
+function render(nextMode, error = '') {
+  mode = nextMode;
   const initializing = mode === 'initialize';
   const copy = initializing
     ? '首次运行需要创建唯一管理员账户。账户信息仅保存在本机 SQLite 数据库中，不外传、不可恢复。'
@@ -18,39 +21,57 @@ function render(mode, error = '', busy = false) {
       <p class="eyebrow">Emby-go · Archive Console</p>
       <h1>${initializing ? '建立管理员账户' : '欢迎回来'}</h1>
       <p class="auth-copy">${copy}</p>
-      <form id="auth-form" class="auth-form">
+      <form id="auth-form" class="auth-form" data-mode="${initializing ? 'initialize' : 'login'}">
         <div class="field">
           <label for="auth-user">管理员账号</label>
-          <input id="auth-user" name="Username" autocomplete="username" minlength="3" required ${busy ? 'disabled' : 'autofocus'} placeholder="至少 3 个字符">
+          <input id="auth-user" name="Username" autocomplete="username" minlength="3" required autofocus placeholder="至少 3 个字符">
         </div>
         <div class="field">
           <label for="auth-pw">密码</label>
-          <input id="auth-pw" name="Pw" type="password" autocomplete="${initializing ? 'new-password' : 'current-password'}" minlength="9" required ${busy ? 'disabled' : ''} placeholder="至少 9 个字符">
+          <input id="auth-pw" name="Pw" type="password" autocomplete="${initializing ? 'new-password' : 'current-password'}" minlength="9" required${initializing ? ' aria-describedby="auth-pw-hint"' : ''} placeholder="至少 9 个字符">
+          ${initializing ? '<p class="hint" id="auth-pw-hint">至少 9 个字符；建议 12 位以上并混用字符。</p>' : ''}
         </div>
         ${initializing ? `
         <div class="field">
           <label for="auth-confirm">确认密码</label>
-          <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password" required ${busy ? 'disabled' : ''} placeholder="再次输入密码">
+          <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password" required placeholder="再次输入密码">
         </div>` : ''}
         <p class="auth-error" role="alert">${esc(error)}</p>
-        <button class="btn btn-accent" type="submit" ${busy ? 'disabled' : ''}>${busy ? '请稍候…' : (initializing ? '完成初始化' : '登录管理后台')}</button>
+        <button id="auth-submit" class="btn btn-accent" type="submit">${initializing ? '完成初始化' : '登录管理后台'}</button>
       </form>
       <p class="auth-note">NFO 为元数据真源 · 仅 http/https .strm 进入 Emby</p>
     </section>`;
 
   const form = document.querySelector('#auth-form');
   form.addEventListener('submit', event => submit(event, initializing));
-  if (!busy && initializing) document.querySelector('#auth-user')?.focus();
+  if (initializing) document.querySelector('#auth-user')?.focus();
+}
+
+function setAuthError(message) {
+  const node = document.querySelector('.auth-error');
+  if (node) node.textContent = message || '';
+}
+
+// setAuthBusy 只切换禁用态与按钮文案，不重建表单，避免清空已输入内容。
+function setAuthBusy(busy) {
+  const form = document.querySelector('#auth-form');
+  if (!form) return;
+  form.querySelectorAll('input, button').forEach(element => { element.disabled = busy; });
+  const button = form.querySelector('#auth-submit') || form.querySelector('button[type="submit"]');
+  if (!button) return;
+  button.textContent = busy ? '请稍候…' : (form.dataset.mode === 'initialize' ? '完成初始化' : '登录管理后台');
 }
 
 async function submit(event, initializing) {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
+  setAuthError('');
   if (initializing && data.Pw !== data.confirm) {
-    render('initialize', '两次输入的密码不一致');
+    setAuthError('两次输入的密码不一致');
+    document.querySelector('#auth-pw')?.focus();
     return;
   }
-  render(initializing ? 'initialize' : 'login', '', true);
+  setAuthBusy(true);
   const path = initializing ? '/api/auth/initialize' : '/Users/AuthenticateByName';
   const payload = { Username: data.Username, Pw: data.Pw };
   try {
@@ -62,7 +83,9 @@ async function submit(event, initializing) {
     if (!response.ok) {
       let message = '请求失败';
       try { message = (await response.json()).error || message; } catch { /* ignore */ }
-      render(initializing ? 'initialize' : 'login', message);
+      setAuthBusy(false);
+      setAuthError(message);
+      document.querySelector('#auth-pw')?.focus();
       return;
     }
     if (initializing) {
@@ -73,7 +96,8 @@ async function submit(event, initializing) {
     localStorage.setItem('emby_token', token);
     window.location.replace('/admin');
   } catch (error) {
-    render(initializing ? 'initialize' : 'login', error.message || '网络错误');
+    setAuthBusy(false);
+    setAuthError(error.message || '网络错误');
   }
 }
 

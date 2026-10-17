@@ -163,6 +163,66 @@ for (const kind of ['admin', 'login']) {
   });
 }
 
+function loginForm(values, respond) {
+  const focused = [], stored = [], redirects = [], calls = [];
+  const errorNode = { textContent: '' };
+  const button = { disabled: false, textContent: '登录管理后台' };
+  const user = { value: values.Username || '', disabled: false, focus: () => focused.push('#auth-user') };
+  const pw = { value: values.Pw || '', disabled: false, focus: () => focused.push('#auth-pw') };
+  const form = {
+    dataset: { mode: values.mode || 'login' },
+    querySelectorAll: () => [user, pw, button],
+    querySelector: id => id === '#auth-submit' ? button : null,
+    addEventListener() {}
+  };
+  const rootNode = { innerHTML: '' };
+  const box = sandbox({
+    FormData: class { constructor() { return new Map(Object.entries(values)); } },
+    document: { querySelector: selector => ({
+      '.auth-error': errorNode, '#auth-form': form, '#auth-pw': pw, '#auth-user': user, '#auth-root': rootNode
+    })[selector] ?? null },
+    localStorage: { getItem: () => null, setItem: (key, value) => stored.push([key, value]) },
+    fetch: async (path, options) => { calls.push({ path, options }); return respond(path); },
+    window: { location: { replace: path => redirects.push(path) } }
+  });
+  const login = fs.readFileSync(path.join(__dirname, 'web/login.js'), 'utf8');
+  vm.runInContext(login.replace(/\nbootLogin\(\);\s*$/, ''), box);
+  return { box, calls, focused, stored, redirects, errorNode, button, rootNode };
+}
+
+test('登录失败只更新错误提示，保留已输入账号密码', async () => {
+  const env = loginForm({ Username: 'admin', Pw: 'secret123' },
+    () => ({ ok: false, status: 401, json: async () => ({ error: '账号或密码错误' }) }));
+  await env.box.submit({ preventDefault() {}, target: {} }, false);
+  assert.equal(env.errorNode.textContent, '账号或密码错误');
+  assert.equal(env.button.disabled, false);
+  assert.equal(env.button.textContent, '登录管理后台');
+  assert.equal(env.rootNode.innerHTML, '', '错误时不得重建表单');
+  assert.deepEqual(env.focused, ['#auth-pw']);
+  assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].path, '/Users/AuthenticateByName');
+  assert.equal(JSON.parse(env.calls[0].options.body).Pw, 'secret123');
+  assert.equal(env.stored.length, 0);
+});
+
+test('初始化两次密码不一致时不发请求、保留输入并聚焦密码', async () => {
+  const env = loginForm({ Username: 'admin', Pw: 'secret123', confirm: 'other', mode: 'initialize' },
+    () => { throw new Error('密码不一致时不应请求'); });
+  await env.box.submit({ preventDefault() {}, target: {} }, true);
+  assert.equal(env.errorNode.textContent, '两次输入的密码不一致');
+  assert.equal(env.calls.length, 0);
+  assert.deepEqual(env.focused, ['#auth-pw']);
+  assert.equal(env.rootNode.innerHTML, '');
+});
+
+test('登录成功保存 token 并跳转管理后台', async () => {
+  const env = loginForm({ Username: 'admin', Pw: 'secret123' },
+    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: 'tok-1' }) }));
+  await env.box.submit({ preventDefault() {}, target: {} }, false);
+  assert.deepEqual(env.stored, [['emby_token', 'tok-1']]);
+  assert.deepEqual(env.redirects, ['/admin']);
+});
+
 function recoveryPanel() {
   const error = { textContent: '' };
   let html = '', retry;
