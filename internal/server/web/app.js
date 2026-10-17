@@ -637,6 +637,7 @@ function closeDetail() {
   detailGen += 1;
   detailOverlay.hidden = true;
   detailDrawer.innerHTML = '';
+  overlayPop('#detail-overlay');
 }
 
 // gotoEntity 跳到媒体墙并按该实体过滤（单值筛选，URL 可见、抽屉关闭）。
@@ -729,12 +730,95 @@ function renderEditRecovery(panel, id, result, onRecovered, isCurrent) {
   });
 }
 
+/* 遮罩焦点：z-index 顺序与 Esc/Tab 行为一致（FE-04）。 */
+const overlayFocusStack = [];
+const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay'];
+
+function overlayVisible(selector) {
+  const overlay = document.querySelector(selector);
+  return !!overlay && !overlay.hidden;
+}
+
+function topOverlaySelector() {
+  return OVERLAY_LAYERS.find(overlayVisible) || '';
+}
+
+function overlayFocusables(selector) {
+  const overlay = document.querySelector(selector);
+  if (!overlay || typeof overlay.querySelectorAll !== 'function') return [];
+  return Array.from(overlay.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter(element => !element.hidden);
+}
+
+function overlayContains(overlay, element) {
+  if (!overlay || !element) return false;
+  return typeof overlay.contains === 'function' ? overlay.contains(element) : false;
+}
+
+// overlayPush 记录触发元素并把焦点移入遮罩；重复打开同一遮罩不会重复入栈。
+function overlayPush(selector) {
+  const overlay = document.querySelector(selector);
+  if (!overlay) return;
+  const active = document.activeElement;
+  const trigger = active && active !== document.body ? active : null;
+  if (!overlayFocusStack.some(entry => entry.selector === selector)) overlayFocusStack.push({ selector, trigger });
+  const target = overlayFocusables(selector)[0] || overlay;
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+// overlayFocusFirst 在异步内容渲染后把焦点移到首个可操作元素；焦点已离开则不抢。
+function overlayFocusFirst(selector) {
+  if (topOverlaySelector() !== selector) return;
+  const overlay = document.querySelector(selector);
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== overlay && !overlayContains(overlay, active)) return;
+  const target = overlayFocusables(selector)[0];
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+function overlayPop(selector) {
+  for (let i = overlayFocusStack.length - 1; i >= 0; i--) {
+    if (overlayFocusStack[i].selector !== selector) continue;
+    const { trigger } = overlayFocusStack.splice(i, 1)[0];
+    if (trigger && typeof trigger.focus === 'function') {
+      const stillThere = !document.contains || document.contains(trigger);
+      if (stillThere) trigger.focus();
+    }
+    return;
+  }
+}
+
+// overlayTrapTab 保持 Tab/Shift+Tab 在顶层遮罩内循环。
+function overlayTrapTab(event) {
+  if (event.key !== 'Tab') return;
+  const selector = topOverlaySelector();
+  if (!selector) return;
+  const overlay = document.querySelector(selector);
+  const items = overlayFocusables(selector);
+  if (!items.length) {
+    event.preventDefault();
+    if (overlay && typeof overlay.focus === 'function') overlay.focus();
+    return;
+  }
+  const first = items[0], last = items[items.length - 1];
+  const active = document.activeElement;
+  const inside = active === overlay || overlayContains(overlay, active);
+  if (event.shiftKey) {
+    if (!inside || active === first) { event.preventDefault(); last.focus(); }
+  } else if (!inside || active === last) {
+    event.preventDefault(); first.focus();
+  }
+}
+/* 遮罩焦点结束 */
+
 async function openDetail(item) {
   const gen = pageGen;
   const session = ++detailGen;
   const isCurrent = () => gen === pageGen && session === detailGen;
   detailDrawer.innerHTML = '<div class="detail-body"><p class="hint">加载中…</p></div>';
   detailOverlay.hidden = false;
+  overlayPush('#detail-overlay');
   let data;
   try {
     data = await api(`/items/${item.id}/detail`);
@@ -949,6 +1033,7 @@ async function openDetail(item) {
   detailDrawer.querySelectorAll('[data-entity-key]').forEach(el => el.addEventListener('click', () => {
     gotoEntity(el.dataset.entityKey, el.dataset.entityValue);
   }));
+  overlayFocusFirst('#detail-overlay');
 }
 
 // entityIdOf 生成与后端一致的虚拟实体 id（小写类型 + base64url 名称）。
@@ -967,6 +1052,7 @@ function closePlayer() {
   const overlay = document.querySelector('#player-overlay');
   if (overlay) overlay.hidden = true;
   document.body.classList.remove('player-open');
+  overlayPop('#player-overlay');
 }
 
 // streamURL 构造播放地址。播放器是 <video>/artplayer，浏览器不会给它带
@@ -981,6 +1067,7 @@ function openPlayer(item) {
   const title = item.Title || String(item.source_path || '').split(/[\\/]/).pop() || '播放';
   document.querySelector('#player-title').textContent = title;
   overlay.hidden = false;
+  overlayPush('#player-overlay');
   document.body.classList.add('player-open');
   const stage = document.querySelector('#player-stage');
   stage.innerHTML = '';
@@ -1386,6 +1473,7 @@ function closeScrapePreview() {
   const overlay = document.querySelector('#scrape-overlay');
   if (overlay) overlay.hidden = true;
   scrapeState = null;
+  overlayPop('#scrape-overlay');
 }
 
 // openScrapePreview 打开单条刮削预览：先取候选，再自动 inspect 推荐项。
@@ -1393,6 +1481,7 @@ async function openScrapePreview(item) {
   const overlay = document.querySelector('#scrape-overlay');
   const body = document.querySelector('#scrape-body');
   overlay.hidden = false;
+  overlayPush('#scrape-overlay');
   body.innerHTML = '<p class="hint">正在搜索候选…</p>';
   // 捕获本次会话的状态对象：await 期间浮层可能被关掉（scrapeState 置 null）
   // 或换成另一条影片，回写时必须认这个对象、而不是认全局变量。
@@ -2140,9 +2229,14 @@ async function boot() {
   });
   document.querySelector('#scrape-close').addEventListener('click', closeScrapePreview);
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !document.querySelector('#scrape-overlay').hidden) { closeScrapePreview(); return; }
-    if (event.key === 'Escape' && !detailOverlay.hidden) { closeDetail(); return; }
-    if (event.key === 'Escape' && !document.querySelector('#player-overlay').hidden) closePlayer();
+    if (event.key === 'Escape') {
+      const top = topOverlaySelector();
+      if (top === '#scrape-overlay') closeScrapePreview();
+      else if (top === '#player-overlay') closePlayer();
+      else if (top === '#detail-overlay') closeDetail();
+      return;
+    }
+    overlayTrapTab(event);
   });
   // 全局扫描观察不阻塞初始页面；首读也经过同一超时/恢复链路。
   startScanPolling();

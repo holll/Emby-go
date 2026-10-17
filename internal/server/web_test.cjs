@@ -237,6 +237,65 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
+test('遮罩层级决定 Esc 目标，Tab 在顶层遮罩循环并恢复触发焦点', () => {
+  const log = [];
+  const focusable = name => ({ name, hidden: false, disabled: false, focus() { log.push(name); } });
+  const trigger = focusable('card-trigger');
+  const closeBtn = focusable('player-close');
+  const secondBtn = focusable('player-second');
+  const overlays = {};
+  const items = { '#scrape-overlay': [], '#player-overlay': [closeBtn, secondBtn], '#detail-overlay': [] };
+  function overlayEl(selector) {
+    if (!overlays[selector]) {
+      const buttons = items[selector] || [];
+      overlays[selector] = {
+        hidden: true,
+        focus() { log.push('focus ' + selector); },
+        querySelectorAll: () => buttons,
+        contains: element => buttons.includes(element)
+      };
+    }
+    return overlays[selector];
+  }
+  let active = null;
+  const box = sandbox({
+    document: {
+      get activeElement() { return active; }, set activeElement(value) { active = value; },
+      querySelector: selector => selector in items ? overlayEl(selector) : null,
+      contains: () => true, addEventListener() {}
+    }
+  });
+  vm.runInContext(section('/* 遮罩焦点：', '/* 遮罩焦点结束 */'), box);
+  overlayEl('#detail-overlay').hidden = false;
+  overlayEl('#player-overlay').hidden = false;
+  assert.equal(box.topOverlaySelector(), '#player-overlay', '播放器在详情之上');
+  overlayEl('#scrape-overlay').hidden = false;
+  assert.equal(box.topOverlaySelector(), '#scrape-overlay', '刮削预览在最上层');
+  overlayEl('#scrape-overlay').hidden = true;
+
+  active = trigger;
+  box.overlayPush('#detail-overlay');
+  assert.equal(log.at(-1), 'focus #detail-overlay', '内容渲染前先聚焦遮罩容器');
+  box.overlayPop('#detail-overlay');
+  assert.equal(log.at(-1), 'card-trigger', '关闭后恢复触发元素');
+
+  active = null;
+  const tab = { key: 'Tab', shiftKey: false, prevented: false, preventDefault() { this.prevented = true; } };
+  box.overlayTrapTab(tab);
+  assert.equal(tab.prevented, true);
+  assert.equal(log.at(-1), 'player-close');
+
+  active = closeBtn;
+  const inside = { key: 'Tab', shiftKey: false, prevented: false, preventDefault() { this.prevented = true; } };
+  box.overlayTrapTab(inside);
+  assert.equal(inside.prevented, false, '遮罩内正常 Tab 不拦截');
+
+  const shift = { key: 'Tab', shiftKey: true, prevented: false, preventDefault() { this.prevented = true; } };
+  box.overlayTrapTab(shift);
+  assert.equal(shift.prevented, true);
+  assert.equal(log.at(-1), 'player-second', 'Shift+Tab 从首项回绕到末项');
+});
+
 function recoveryPanel() {
   const error = { textContent: '' };
   let html = '', retry;
