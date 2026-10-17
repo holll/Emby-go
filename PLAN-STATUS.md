@@ -10,12 +10,12 @@
 
 | 项 | 结果 |
 |---|---|
-| `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.26.0） |
+| `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
 | `go test ./...` | 15 包全绿；373 个 Test 函数（server 29.2s / store 11.6s）；真实实例验收 1 个（env 未设时跳过） |
 | `node --test internal/server/web_test.cjs` | 79/79 通过 |
 | 测试形态 | httptest + 内存库为主；无真实 Emby 客户端、真实浏览器、生产库、备份恢复演练 |
-| CI | `.github/workflows/ci.yml`：gofmt/build/vet/test、server+outbound+store race、前端 VM、govulncheck；已 push 到 origin main，运行结果见 GitHub Actions |
+| CI | 首次实跑 run 39049816235（`f5f860f`）：**go ✅（4m50s）/ web ✅ / vuln ❌**——vuln 失败原因是 CI 用 Go 1.26.0，标准库 `net/http` 调用链命中漏洞；随后 go.mod 上调 1.27.0 并重跑 |
 | 生产放行 | **否**。A01–A15 未全执行（A01 等 D01 落地）；D01–D12 已全部批准，公网门禁另需 A03/A14 + D01 会话期限实现 |
 
 ## 1. 审查 35 项状态
@@ -168,7 +168,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A12 UI 冒烟（批次 59，Playwright/Chromium 156 headless，1280×800 + 390×844）：登录 → 媒体墙（100 卡）→ 搜索「Perf Movie 42」命中 → 详情抽屉打开且首焦点在抽屉内 → 连按 8 次 Tab 焦点仍在抽屉（焦点圈）→ Esc 关闭后焦点回到卡片标题按钮；控制台 0 error；截图 `docs/screenshots/01-login..05-mobile.png`，脚本 `docs/acceptance/ui.cjs`。
 - A12 跨浏览器页面巡检（批次 60，Chromium/Firefox/WebKit × 7 页：总览/媒体库/媒体墙/计划任务/接口探针/刮削/设置）：三浏览器全部 0 控制台错误、移动视口横向溢出 0px；Chromium 逐页截图 `docs/screenshots/chromium-*.png`。纯键盘流程（批次 60）：autofocus 账号 → Tab 密码 → Enter 提交 → Tab 到「媒体墙」Enter → Tab 到标题按钮 Enter → 详情抽屉显示对应影片，全程无鼠标、0 error。
 - A12 功能级断言（批次 61，`docs/acceptance/func.cjs`）：设置页创建 API key→用该 key 调 `/api/admin/settings` 200→UI 删除→同 key 立即 401；计划任务新建→列表出现→删除；详情「编辑元数据」改标题→保存后抽屉关闭、墙面卡片标题更新、重开详情仍为新标题（NFO 已写）；快捷播放按钮打开播放器浮层（标题=影片名）并可关闭；全程 0 error。截图 `docs/screenshots/func-detail-edited.png`。
-- 依赖漏洞扫描（批次 63）：`govulncheck ./...` 升级前命中 9 个调用链（x/net v0.25.0 ×8、x/text v0.15.0 ×1）；升级 x/net 0.60.0 + x/text 0.42.0（连带 x/crypto 0.57.0、x/sys 0.48.0、go 1.26.0）后 **调用链 0 命中**；CI 新增 `vuln` job 作为门禁。
+- 依赖漏洞扫描（批次 63）：`govulncheck ./...` 升级前命中 9 个调用链（x/net v0.25.0 ×8、x/text v0.15.0 ×1）；升级 x/net 0.60.0 + x/text 0.42.0（连带 x/crypto 0.57.0、x/sys 0.48.0）后 **调用链 0 命中**；CI 新增 `vuln` job 作为门禁。首次 CI 实跑显示 Go 1.26.0 标准库本身有漏洞（annotations 12 条指向 `http.Header.Set/Get/Del`、`http.Client.Do`），据此 go.mod 上调 `go 1.27.0`。
 - A15 混合负载（批次 62，`docs/acceptance/mixed.cjs`）：5000 项全库扫描进行中，12 个并发 worker（列表×5/详情/并发播放停止×2）持续 12s：共 5930 请求、**0 错误**、494 rps、p95 55ms、p99 94ms、max 594ms；扫描最终 success=5000。
 - A13 可访问性（批次 59/60，axe-core WCAG 2.1 A/AA）：修复 2 个 serious（100 节点 `nested-interactive`、100 节点 `label-content-name-mismatch`）与 1 个 critical（刮削页 `<select id="sc-lib">` 缺可访问名，补 `aria-label="媒体库"`）；复跑 **Chromium/Firefox/WebKit × 7 页全部 0 violations**；卡片改为「非交互容器 + 独立标题按钮」，内部按钮保持原生语义；脚本 `docs/acceptance/axe.cjs`、`pages.cjs`。
 - A02 旧正缓存回归（批次 58，本机双二进制对照）：旧提交 `9c4fcb0` 登录→删 `access_tokens` 全部行→重启→旧 token 仍 **200**（Redis 正缓存在重启后继续授权）；当前二进制同流程→**401**。证明 BE-06 取消认证正缓存后的失效路径生效。

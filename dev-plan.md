@@ -86,7 +86,7 @@ api_probe(                                       -- 未知接口探针（环形/
 
 | 项 | 选型 | 理由 |
 |---|---|---|
-| 语言/框架 | Go 1.26（go.mod 声明）+ **gin-gonic/gin** | 用户意向；v1 已验证，生态成熟 |
+| 语言/框架 | Go 1.27（go.mod 声明）+ **gin-gonic/gin** | 用户意向；v1 已验证，生态成熟 |
 | 数据库 | SQLite（`modernc.org/sqlite` 纯 Go，CGo-free） | 沿用 v1；万部规模单文件足够 |
 | 数据访问 | 手写 SQL（database/sql） | 轻量可控，避免 ORM 心智负担 |
 | 缓存 | **Redis 必选**（`github.com/redis/go-redis/v9`），共用 `internal/cache` 接口；memory 实现保留给测试注入 | 生产路径 `server.New` 强制连接并 Ping，缺失/失败拒绝启动（2026-10 现状；恢复可选化须先过 D04） |

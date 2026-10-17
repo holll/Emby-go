@@ -1,6 +1,6 @@
 module emby-go
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/deepteams/webp v1.2.7
