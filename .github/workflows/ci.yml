@@ -28,6 +28,10 @@ jobs:
           go-version: '1.25.x'
           cache: true
 
+      # 格式门禁：避免机器生成/手写混排的 diff 进入主干。
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
       - name: Build
         run: go build ./...
 
@@ -37,9 +41,9 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      # 认证限流、请求预算与出站策略是并发敏感路径，额外跑 race。
-      - name: Race (auth/outbound)
-        run: go test -race -count=1 ./internal/server ./internal/outbound
+      # 认证限流、请求预算、出站策略与播放会话计数是并发敏感路径，额外跑 race。
+      - name: Race (auth/outbound/store)
+        run: go test -race -count=1 ./internal/server ./internal/outbound ./internal/store
 
   web:
     runs-on: ubuntu-latest
