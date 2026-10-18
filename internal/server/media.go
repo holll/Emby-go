@@ -279,7 +279,7 @@ func (a *App) imageInfo(c *gin.Context) {
 				c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
 				return
 			}
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
 		movie, err := a.db.Movie(id)
@@ -292,7 +292,7 @@ func (a *App) imageInfo(c *gin.Context) {
 			c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
 			return
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	// 合集：仅 Primary（代表海报）。
@@ -347,7 +347,7 @@ func (a *App) movieImageInfo(m store.Movie) []gin.H {
 func (a *App) playback(c *gin.Context) {
 	movie, sourcePath, id, ok := a.resolvePlaybackTarget(c.Param("id"))
 	if !ok || !movie.IsVisible() || (movie.SourceProtocol != "http" && movie.SourceProtocol != "https") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -476,7 +476,7 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid media response"})
+		apiError(c, http.StatusInternalServerError, "invalid media response")
 		return
 	}
 	token := requestToken(c)
@@ -1003,16 +1003,16 @@ func randomSessionID() string {
 func (a *App) stream(c *gin.Context) {
 	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
 	if !ok || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	raw, err := scanner.ReadSource(sourcePath)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		apiError(c, http.StatusNotFound, "source not found")
 		return
 	}
 	if !scanner.ValidHTTP(raw) {
-		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported source"})
+		apiError(c, http.StatusUnsupportedMediaType, "unsupported source")
 		return
 	}
 	if c.Request.Method == http.MethodHead {
@@ -1039,16 +1039,16 @@ var streamClient = outbound.NewClient(outbound.Options{
 func (a *App) proxyStream(c *gin.Context) {
 	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
 	if !ok || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	raw, err := scanner.ReadSource(sourcePath)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		apiError(c, http.StatusNotFound, "source not found")
 		return
 	}
 	if !scanner.ValidHTTP(raw) {
-		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported source"})
+		apiError(c, http.StatusUnsupportedMediaType, "unsupported source")
 		return
 	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, raw, nil)
@@ -1110,7 +1110,7 @@ func containerMIME(container string) string {
 func (a *App) playing(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback payload"})
+		apiError(c, http.StatusBadRequest, "invalid playback payload")
 		return
 	}
 	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
@@ -1124,12 +1124,12 @@ func (a *App) playing(c *gin.Context) {
 		DeviceId      string `json:"DeviceId"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback payload"})
+		apiError(c, http.StatusBadRequest, "invalid playback payload")
 		return
 	}
 	movie, _, _, ok := a.resolvePlaybackTarget(req.ItemId)
 	if !ok || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	// 当前用户状态以主影片为单位；合法分段共享主影片记录，进度保持分段内相对位置。
@@ -1153,7 +1153,7 @@ func (a *App) playing(c *gin.Context) {
 		PositionTicks: req.PositionTicks,
 		Now:           time.Now(),
 	}); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	// 进度心跳（Progress）几秒一次，若每次都 BumpVersion，列表/实体/详情/相似缓存
@@ -1163,7 +1163,7 @@ func (a *App) playing(c *gin.Context) {
 	// 心跳只精确失效该片的详情缓存（它 TTL 1 小时，不失效会长时间显示旧进度）。
 	if isStopped {
 		if err := a.db.BumpVersion(movie.LibraryID); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			apiError(c, 500, err.Error())
 			return
 		}
 	} else {
@@ -1178,12 +1178,12 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	if err := a.db.SetIndexedPlayed(id, played); err != nil {
@@ -1200,12 +1200,12 @@ func (a *App) unplayed(c *gin.Context) { a.setPlayed(c, false) }
 func (a *App) additionalParts(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	items := make([]gin.H, 0, len(movie.AdditionalParts))

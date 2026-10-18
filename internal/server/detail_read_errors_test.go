@@ -59,7 +59,7 @@ func TestAdminDetailMissingAndDisabledDataRemainCompatible(t *testing.T) {
 	h := f.a.Handler()
 	for _, id := range []string{"not-an-id", "9223372036854775807"} {
 		w := associationGET(h, "/api/admin/items/"+id+"/detail", "fixture-admin-delete")
-		if w.Code != 404 || w.Body.String() != `{"error":"not found"}` {
+		if w.Code != 404 || w.Body.String() != `{"code":"NOT_FOUND","error":"not found"}` {
 			t.Fatalf("missing %s: %d %s", id, w.Code, w.Body.String())
 		}
 	}

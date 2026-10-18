@@ -113,7 +113,7 @@ func TestSimilarMissingHiddenAndInvalidRemainNotFound(t *testing.T) {
 	h := f.a.Handler()
 	for _, id := range []string{"invalid", "999999", fmt.Sprint(f.victim)} {
 		w := associationGET(h, "/Items/"+id+"/Similar", "fixture-admin-delete")
-		if w.Code != http.StatusNotFound || w.Body.String() != `{"error":"not found"}` {
+		if w.Code != http.StatusNotFound || w.Body.String() != `{"code":"NOT_FOUND","error":"not found"}` {
 			t.Fatalf("id=%s: %d %s", id, w.Code, w.Body.String())
 		}
 	}

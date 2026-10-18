@@ -37,7 +37,7 @@
 
 | HTTP | code | 语义 |
 |---|---|---|
-| 400 | `INVALID_REQUEST` | 通用参数/请求体不合法（批次 74 起覆盖 `/api/*`） |
+| 400 | `INVALID_REQUEST` | 通用参数/请求体不合法（批次 74 覆盖 `/api/*`，批次 76 覆盖 Emby 兼容端点） |
 | 400 | `IDEMPOTENCY_KEY_TOO_LONG` | 幂等键超过 128 字符 |
 | 400 | `SCHEDULED_PRECONDITION_REQUIRED` | 条件更新缺前置 |
 | 400 | `SCHEDULED_CONFIG_CHANGED` | 计划任务并发修改 |
@@ -60,7 +60,8 @@
 
 自批次 74 起，`/api/*` 的 400/404/409/428/500/502/503 都由统一 helper 补通用 `code`（`INVALID_REQUEST` / `NOT_FOUND` / `CONFLICT` / `PRECONDITION_REQUIRED` / `INTERNAL` / `UPSTREAM_UNAVAILABLE` / `UNAVAILABLE`），端点有更精确语义时保留专用 `code`（如 `SCAN_BUSY`）。
 
-未闭合：Emby 兼容端点的少数错误仍可能只带 `error`（例如详情/列表读失败的 500、部分 404），批次 76 协议审计时统一；在此之前客户端对缺失 `code` 做兜底。
+自批次 76 起 Emby 兼容端点的错误也统一带 `code`（详情/列表读失败 500、播放上报 400、各类 404 均由 `apiError` 输出）。
+唯一例外：图片端点的未知 kind 返回 `404` **空 body**（浏览器 `<img>` 不需要 JSON），契约测试 `TestEmbyCompat` 固定该行为。
 
 ## 4. 稳定字段（Emby 浏览主链路）
 
@@ -68,7 +69,7 @@
 |---|---|---|
 | 认证 | `POST /Users/AuthenticateByName` | 返回 `AccessToken`、`User.Id/Name`；失败 401 `AUTH_INVALID` |
 | 系统 | `GET /System/Info/Public`、`GET /System/Ping` | 无需鉴权；`ServerName`/`Id`/`Version` 必在 |
-| 用户 | `GET /Users/Me`、`GET /Users/Public` | 单用户映射到管理员 |
+| 用户 | `GET /Users/Me`、`GET /Users/Public` | 单用户映射到管理员；`/Users/Public` 恒返回空数组（不公开用户列表） |
 | 视图 | `GET /Users/:uid/Views` | 库 `Id/Name/CollectionType` |
 | 列表 | `GET /Users/:uid/Items`、`GET /Items` | `Items`、`TotalRecordCount`；排序/筛选参数为可选增量 |
 | 详情 | `GET /Items/:id`、`GET /Users/:uid/Items/:id` | `Id/Name/Type/ImageTags/UserData/MediaSources` |
@@ -76,7 +77,7 @@
 | 播放信息 | `GET|POST /Items/:id/PlaybackInfo` | 单 `MediaSources`，`DirectPlay/DirectStream=true`、`Transcoding=false` |
 | 播放上报 | `POST /Sessions/Playing`、`/Progress`、`/Stopped` | 204；计数由会话+序号保证幂等 |
 | 续播 | `GET /Users/:uid/Items/Resume` | `UserData.PlaybackPositionTicks` 有效 |
-| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回更新后的 `UserData` |
+| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回更新后的 `UserData`；评分用查询参数 `Likes=true|false`；`UserData.Likes` 为 bool，未评分时该字段不出现 |
 | 流/转发 | `GET /videos/:id/stream`、`GET /Videos/:id/proxy` | 302 或转发；失败 502 `UPSTREAM_UNAVAILABLE` |
 
 管理端点（`/api/admin/*`）是后台契约，供本仓库 Web 前端与脚本使用；清单见 `internal/server/server.go` 的 `routes()`，不在 Emby 兼容承诺内。
@@ -108,6 +109,6 @@ Warning: 299 - "deprecated endpoint; use POST /api/admin/tasks/scan"
 
 ## 6. 门禁
 
-- 契约测试：`go test ./internal/server -run TestAPIContract -count=1`。
+- 契约测试：`go test ./internal/server -run 'TestAPIContract|TestEmbyCompat' -count=1`。
 - 关键路由清单在 `api_contract_test.go` 中硬编码；新增/删除路由必须同批更新测试与本文件。
 - 契约测试与 CI（`.github/workflows/ci.yml`）同批跑；未通过不得打 tag。

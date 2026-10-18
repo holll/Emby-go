@@ -62,7 +62,7 @@ CREATE TRIGGER fail_user_api AFTER UPDATE ON userdata BEGIN INSERT INTO fixture_
 					}
 				}
 				w := userSettingRequest(h, route, "fixture-admin-delete")
-				if w.Code != 500 || strings.Contains(w.Body.String(), "fixture-user-api") || w.Body.String() != "{\"error\":\"user data write failed\"}" {
+				if w.Code != 500 || strings.Contains(w.Body.String(), "fixture-user-api") || w.Body.String() != "{\"code\":\"INTERNAL\",\"error\":\"user data write failed\"}" {
 					t.Fatalf("write error status=%d body=%s", w.Code, w.Body.String())
 				}
 				if adminDeleteSnapshot(t, f) != before || f.a.db.Version("g:version") != version {

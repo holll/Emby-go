@@ -13,10 +13,10 @@ import (
 )
 
 // userDataJSON 组装 UserItemDataDto 形态的响应。
-func (a *App) userDataJSON(id int64, d store.UserData) gin.H {
-	return gin.H{
-		"ItemId":                strconv.FormatInt(id, 10),
-		"ServerId":              a.serverID,
+// userDataDTO 统一 UserData 输出形状。Likes 用 Emby 的 bool 语义：
+// true=赞、false=踩，未评分时不出现（给客户端“可清除”的状态）。
+func userDataDTO(d store.UserData) gin.H {
+	h := gin.H{
 		"PlaybackPositionTicks": d.PositionTicks,
 		"PlayCount":             d.PlayCount,
 		"Played":                d.Played,
@@ -24,14 +24,25 @@ func (a *App) userDataJSON(id int64, d store.UserData) gin.H {
 		"PlayedPercentage":      d.PlayedPercentage,
 		"LastPlayedDate":        d.LastPlayedAt,
 	}
+	if d.Likes != 0 {
+		h["Likes"] = d.Likes > 0
+	}
+	return h
+}
+
+func (a *App) userDataJSON(id int64, d store.UserData) gin.H {
+	h := userDataDTO(d)
+	h["ItemId"] = strconv.FormatInt(id, 10)
+	h["ServerId"] = a.serverID
+	return h
 }
 
 func userDataWriteError(c *gin.Context, err error) {
 	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "user data write failed"})
+	apiError(c, http.StatusInternalServerError, "user data write failed")
 }
 
 func (a *App) favoriteItem(c *gin.Context, favorite bool) {
@@ -40,12 +51,12 @@ func (a *App) favoriteItem(c *gin.Context, favorite bool) {
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	data, err := a.db.SetIndexedFavoriteData(id, favorite)
@@ -65,12 +76,12 @@ func (a *App) rateItem(c *gin.Context, likes int) {
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	data, err := a.db.SetIndexedLikesData(id, likes)
@@ -89,7 +100,7 @@ func (a *App) rating(c *gin.Context) {
 	case "false":
 		a.rateItem(c, -1)
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Likes required (true|false)"})
+		apiError(c, http.StatusBadRequest, "Likes required (true|false)")
 	}
 }
 
@@ -101,12 +112,12 @@ func (a *App) hideFromResume(c *gin.Context) {
 	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil || !movie.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	hide := strings.EqualFold(c.Query("Hide"), "true")

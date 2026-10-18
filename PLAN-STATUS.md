@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；400 个 Test 函数（server 32.0s / store 13.2s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；403 个 Test 函数（server 32.3s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 82/82 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39052879140（`45c1344`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -248,6 +248,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 73 | 契约基线：`API-CONTRACT.md`、关键路由/错误信封契约测试、未知路由 `NOT_FOUND`、admin 组 `no-store` 先于鉴权 | ✅ 本地完成 | 管理面旧响应当时仍只带 `error`（已于批次 74 补齐） |
 | 74 | 管理面错误码补齐（纯增量）：`/api/*` 统一 `apiError`，139 处旧响应补 `INVALID_REQUEST`/`NOT_FOUND`/`CONFLICT`/`PRECONDITION_REQUIRED`/`INTERNAL`/`UNAVAILABLE`；契约测试补 400 用例 | ✅ 本地完成 | Emby 兼容端点少数错误仍只带 `error`（批次 76 统一）；专用 `code`（`SCAN_BUSY` 等）保持不变 |
 | 75 | 弃用机制：`internal/server/deprecation.go` 登记表 + RFC 8594/8288 弃用头；首个登记 `POST /api/admin/scan`（Sunset 2027-04-01）；Web 扫描迁移到 `POST /api/admin/tasks/scan` | ✅ 本地完成 | v2 内只登记不删除；旧同步入口仍可用；移除需 Sunset 且升 v3 |
-| 76 | 兼容回归：旧客户端抓包与字段抽检 | 计划 | 需部署环境/真机 |
+| 76 | 协议抽检（不依赖抓包）：Emby 兼容端点 41 处错误补 `code`；`emby_compat_test.go` 覆盖 System/User/Views/Items 形状、分页边界、容忍未知参数、404/400 信封、图片 404 空 body；修复评分接受但不回显的问题（新增 `userDataDTO`，`Likes` 按 bool 回显） | ✅ 本地完成 | 旧客户端抓包与真机走查（A12 的抓包部分）仍需用户提供设备/部署环境 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。

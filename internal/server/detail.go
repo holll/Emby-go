@@ -43,13 +43,13 @@ type detailActor struct {
 func (a *App) adminItemDetail(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil {
 		if store.NotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			apiError(c, http.StatusNotFound, "not found")
 		} else {
 			itemDataUnavailable(c)
 		}

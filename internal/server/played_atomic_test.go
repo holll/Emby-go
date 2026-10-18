@@ -46,7 +46,7 @@ CREATE TRIGGER fail_played_api AFTER UPDATE ON userdata BEGIN INSERT INTO played
 					}
 				}
 				w := userSettingRequest(h, route, "fixture-admin-delete")
-				if w.Code != 500 || w.Body.String() != "{\"error\":\"user data write failed\"}" || strings.Contains(w.Body.String(), "private") {
+				if w.Code != 500 || w.Body.String() != "{\"code\":\"INTERNAL\",\"error\":\"user data write failed\"}" || strings.Contains(w.Body.String(), "private") {
 					t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 				}
 				if adminDeleteSnapshot(t, f) != before || f.a.db.Version("g:version") != version {

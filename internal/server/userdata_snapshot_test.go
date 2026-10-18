@@ -28,7 +28,7 @@ func TestUserSettingsResponseReadFailureRollsBack(t *testing.T) {
 					t.Fatal(err)
 				}
 				w := userSettingRequest(f.a.Handler(), settingRoutes(f.victim)[op], "fixture-admin-delete")
-				if w.Code != http.StatusInternalServerError || w.Body.String() != "{\"error\":\"user data write failed\"}" || strings.Contains(w.Body.String(), "private-response-canary") {
+				if w.Code != http.StatusInternalServerError || w.Body.String() != "{\"code\":\"INTERNAL\",\"error\":\"user data write failed\"}" || strings.Contains(w.Body.String(), "private-response-canary") {
 					t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 				}
 				if adminDeleteSnapshot(t, f) != before || f.a.db.Version("g:version") != version {
@@ -61,6 +61,14 @@ func TestUserSettingsResponseShapeAndCapturedValue(t *testing.T) {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 		}
 		want := map[string]any{"ItemId": fmt.Sprint(f.victim), "ServerId": f.a.serverID, "PlaybackPositionTicks": float64(600000000), "PlayCount": float64(3), "Played": true, "IsFavorite": true, "PlayedPercentage": float64(50), "LastPlayedDate": "2026-10-17T00:00:00Z"}
+		// Likes 按库内当前评分回显：未评分不出现，赞/踩输出 true/false。
+		var likes int
+		if err := f.db.QueryRow("SELECT likes FROM userdata WHERE movie_id=?", f.victim).Scan(&likes); err != nil {
+			t.Fatalf("读取评分失败: %v", err)
+		}
+		if likes != 0 {
+			want["Likes"] = likes > 0
+		}
 		if !reflect.DeepEqual(body, want) {
 			t.Fatalf("response=%v want=%v", body, want)
 		}

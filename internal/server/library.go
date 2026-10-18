@@ -477,7 +477,7 @@ func (a *App) counts(c *gin.Context) {
 // genres 处理 GET /Genres（库内流派实体列表，可按媒体库/合集范围过滤）。
 func (a *App) genres(c *gin.Context) {
 	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		apiError(c, http.StatusNotFound, "user not found")
 		return
 	}
 	libraryID, collection := parseParentScope(c.Query("ParentId"))
@@ -515,7 +515,7 @@ func (a *App) resume(c *gin.Context) {
 // nextUp 无剧集库，恒为空结果（Emby 客户端主屏会调用）。
 func (a *App) nextUp(c *gin.Context) {
 	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		apiError(c, http.StatusNotFound, "user not found")
 		return
 	}
 	a.emptyItems(c)
@@ -525,7 +525,7 @@ func (a *App) nextUp(c *gin.Context) {
 func (a *App) similar(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	// The source movie participates in the result: bind its read, not just the
@@ -534,14 +534,14 @@ func (a *App) similar(c *gin.Context) {
 	src, err := a.db.Movie(id)
 	if err != nil {
 		if store.NotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			apiError(c, http.StatusNotFound, "not found")
 		} else {
 			itemDataUnavailable(c)
 		}
 		return
 	}
 	if !src.IsVisible() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "12"))
@@ -751,7 +751,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 		"ServerId":  a.serverID,
 		"Container": m.SourceContainer,
 		"CanDelete": false, "CanDownload": false, "SupportsSync": false,
-		"UserData": d,
+		"UserData": userDataDTO(d),
 	}
 	if m.RuntimeSeconds > 0 {
 		v["RunTimeTicks"] = m.RuntimeSeconds * 10000000
@@ -820,7 +820,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	v["BackdropImageTags"] = backdrops
 	if m.RuntimeSeconds > 0 && d.PositionTicks > 0 {
 		d.PlayedPercentage = float64(d.PositionTicks) / float64(m.RuntimeSeconds*10000000) * 100
-		v["UserData"] = d
+		v["UserData"] = userDataDTO(d)
 	}
 	return v
 }
@@ -842,7 +842,7 @@ func normalizeDate(raw string) string {
 
 func (a *App) rootItems(c *gin.Context) {
 	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		apiError(c, http.StatusNotFound, "user not found")
 		return
 	}
 	a.itemsQuery(c)
@@ -1305,7 +1305,7 @@ func (a *App) item(c *gin.Context) {
 				c.JSON(http.StatusOK, a.partItem(m, part-2))
 				return
 			}
-			c.JSON(404, gin.H{"error": "not found"})
+			apiError(c, 404, "not found")
 			return
 		}
 		// 单个合集（boxset:<b64>）。
@@ -1314,7 +1314,7 @@ func (a *App) item(c *gin.Context) {
 				c.JSON(http.StatusOK, item)
 				return
 			}
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
 		// 虚拟实体（genre:/tag:/studio:/person:）详情：避免 404，返回最小 BaseItemDto。
@@ -1329,14 +1329,14 @@ func (a *App) item(c *gin.Context) {
 			c.JSON(http.StatusOK, item)
 			return
 		}
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	// 媒体库外部 id（libraryIDBase+内部库 id）：返回 CollectionFolder DTO。
 	if libID, ok := parseLibraryExternal(id); ok {
 		lib, e := a.db.Library(libID)
 		if e != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
 		c.JSON(http.StatusOK, a.collectionFolderDTO(lib))
@@ -1350,7 +1350,7 @@ func (a *App) item(c *gin.Context) {
 	}
 	m, e := a.db.Movie(id)
 	if e != nil || !m.IsVisible() {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	d, _ := a.db.Data(id)
