@@ -102,6 +102,8 @@ D01–D12 已于 2026-10-17/18 全部批准并落地，原提案正文与上表�
 
 **生产部署验收未执行**；自动子集与真实二进制冒烟已用假 Redis+合成媒体本地跑通（见 §3.1），不等于部署验收。验收定义与断言见 `docs/architecture-database-frontend-review-2026-10-16.md` §9；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
 
+批次 83 后在当前构建（`0056730`）复跑真实二进制：`TestAcceptanceLive`、`TestAcceptanceConcurrentPlayback`、`TestAcceptanceScanTaskAPI`、`TestAcceptanceManualEdit`、`TestAcceptanceSessionRevoke` 全部 PASS（假 Redis + 合成媒体）。
+
 自动子集（批次 52 新增，`internal/server/acceptance_test.go`）：
 
 ```bash
@@ -166,7 +168,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | R1-N 正确性 | ◐（最大进展） | DB-09、DB-03 多写路径、DB-02 播放会话/事件（批次 51）、FE-01/02/13 阶段 1/14 子项 |
 | R2 生命周期 | ◐ | BE-08 批次 47 主体、BE-04 批次 49、FE-03/05/06 局部、FE-09 批次 44、FE-10 批次 45、FE-04 批次 46；FE-07/15 未做 |
 | R3 任务与边界 | ◐ | 批次 50 建立扫描异步任务表（202/task_id/1h 幂等/容量 200，进程内不恢复）；探测/刮削仍用各自状态端点；无持久任务/NFO 操作意图，重启不补跑 |
-| R4 量化优化 | ○ | DB-04/05/06/10、FE-11 未做；A15 自动基线已执行（批次 57/62），固定硬件与真机复测未做 |
+| R4 量化优化 | ◐ | 批次 79–83 收口：FE-11 基线+图片预算、DB-05/06 索引、DB-04 搜索量化（暂不 FTS5）、DB-10 候选分批/回填/JSON 定位、DB-05 投影与深分页量化（维持语义）；剩余：真实 50k 库、冷缓存、索引写放大与 ANALYZE 漂移；A15 自动基线已执行（批次 57/62），固定硬件与真机复测未做 |
 
 ## 5. 下一步队列（按依赖）
 
