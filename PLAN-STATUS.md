@@ -13,7 +13,7 @@
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
 | `go test ./...` | 16 包全绿；425 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
-| `node --test internal/server/web_test.cjs` | 84/84 通过 |
+| `node --test internal/server/web_test.cjs` | 85/85 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
 | 生产放行 | **否**。部署级人工验收（A01/A04/A06/A08/A10/A11/A12/A14）未执行；D01–D12 已全部批准并落地，公网门禁另需按 D04 配置 `setup_code`/来源白名单/可信代理与 TLS |
