@@ -60,7 +60,7 @@ type RunOptions struct {
 	OnItem func(ItemResult)
 }
 
-// Run 批量刮削：并发处理候选影片，带熔断与进度回调。
+// Run 批量刮削：按 200 部游标分批取候选，跨批共享并发/熔断/进度。
 //
 // 返回的 error 只表示「整批无法继续」（环境性故障/上下文取消）；
 // 单部的失败记在 ItemResult 里，不影响其余影片。
@@ -71,11 +71,48 @@ func (s *Scraper) Run(ctx context.Context, opts RunOptions) (Progress, error) {
 	if s.store == nil {
 		return Progress{}, errors.New("缺少存储，无法读取刮削候选")
 	}
-	movies, err := s.store.MoviesForScrape(opts.LibraryID, opts.OnlyMissing, opts.Limit)
+	total, err := s.store.CountMoviesForScrape(opts.LibraryID, opts.OnlyMissing)
 	if err != nil {
 		return Progress{}, err
 	}
-	return s.runMovies(ctx, movies, opts)
+	if opts.Limit > 0 && opts.Limit < total {
+		total = opts.Limit
+	}
+	st := &runState{progress: Progress{Total: total}}
+	afterID := int64(0)
+	for {
+		want := scrapeBatchSize
+		if opts.Limit > 0 {
+			remaining := opts.Limit - st.snapshot().Done
+			if remaining <= 0 {
+				break
+			}
+			if remaining < want {
+				want = remaining
+			}
+		}
+		movies, err := s.store.MoviesForScrapeBatch(opts.LibraryID, opts.OnlyMissing, afterID, want)
+		if err != nil {
+			return st.snapshot(), err
+		}
+		if len(movies) == 0 {
+			break
+		}
+		s.runMoviesInto(ctx, movies, opts, st)
+		afterID = movies[len(movies)-1].ID
+		if st.aborted.Load() || ctx.Err() != nil {
+			break
+		}
+	}
+	final := st.snapshot()
+	if st.aborted.Load() {
+		return final, errors.Join(ctx.Err(), fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
+			MaxConsecutiveFailures, final.Done, final.Total))
+	}
+	if err := ctx.Err(); err != nil {
+		return final, err
+	}
+	return final, nil
 }
 
 // RunMovies 对给定影片列表执行刮削（单条手动路径复用同一套并发与熔断逻辑）。
@@ -87,49 +124,74 @@ func (s *Scraper) RunMovies(ctx context.Context, movies []store.Movie, opts RunO
 }
 
 func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunOptions) (Progress, error) {
-	progress := Progress{Total: len(movies)}
-	if len(movies) == 0 {
-		return progress, nil
+	st := &runState{progress: Progress{Total: len(movies)}}
+	s.runMoviesInto(ctx, movies, opts, st)
+	final := st.snapshot()
+	if st.aborted.Load() {
+		return final, errors.Join(ctx.Err(), fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
+			MaxConsecutiveFailures, final.Done, final.Total))
 	}
+	if err := ctx.Err(); err != nil {
+		return final, err
+	}
+	return final, nil
+}
 
-	var (
-		mu      sync.Mutex
-		aborted atomic.Bool
-	)
+// runState 在分批任务中跨批共享进度与熔断状态。
+// 熔断计数必须跨批累计，否则每批都会重新数连续失败，等于没有熔断。
+type runState struct {
+	mu       sync.Mutex
+	progress Progress
+	aborted  atomic.Bool
+}
+
+func (st *runState) snapshot() Progress {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.progress
+}
+
+// scrapeBatchSize 是流式取候选的批大小：200 部约含 plot 等宽字段时也只有几 MB。
+const scrapeBatchSize = 200
+
+// runMoviesInto 处理一批影片，把结果累加到共享状态并触发回调。
+// 返回的错误只用于放弃整批（目前为 nil）；单部结果由 emit 记录。
+func (s *Scraper) runMoviesInto(ctx context.Context, movies []store.Movie, opts RunOptions, st *runState) {
+	if len(movies) == 0 {
+		return
+	}
+	// 完整的投递（进度快照 + 单条结果）在同一把锁内串行完成：
+	// 回调可能较慢，但并发投递会让调用方看到乱序/并发覆盖，测试与上层都依赖顺序。
 	emit := func(result ItemResult) {
-		// Serialize the complete delivery, as in the avatar worker loop.
-		// Callbacks must return without waiting for another item or this run.
-		mu.Lock()
-		defer mu.Unlock()
-		progress.Done++
-		progress.Current = result.Title
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		st.progress.Done++
+		st.progress.Current = result.Title
 		switch result.Status {
 		case StatusSuccess:
-			progress.Success++
-			progress.Consecutive = 0
+			st.progress.Success++
+			st.progress.Consecutive = 0
 		case StatusSkipped:
-			progress.Skipped++
-			progress.Consecutive = 0
+			st.progress.Skipped++
+			st.progress.Consecutive = 0
 		default:
-			progress.Failed++
+			st.progress.Failed++
 			if result.Fatal {
-				progress.Consecutive++
+				st.progress.Consecutive++
 			} else {
-				progress.Consecutive = 0
+				st.progress.Consecutive = 0
 			}
 		}
-		snapshot := progress
+		snapshot := st.progress
+		if snapshot.Consecutive >= MaxConsecutiveFailures && st.aborted.CompareAndSwap(false, true) {
+			slog.Warn("刮削触发熔断：连续失败过多，中止本次任务",
+				"consecutive", snapshot.Consecutive, "done", snapshot.Done, "total", snapshot.Total)
+		}
 		if opts.OnProgress != nil {
 			opts.OnProgress(snapshot)
 		}
 		if opts.OnItem != nil {
 			opts.OnItem(result)
-		}
-		if result.Status == StatusFailed && snapshot.Consecutive >= MaxConsecutiveFailures {
-			if aborted.CompareAndSwap(false, true) {
-				slog.Warn("刮削触发熔断：连续失败过多，中止本次任务",
-					"consecutive", snapshot.Consecutive, "done", snapshot.Done, "total", len(movies))
-			}
 		}
 	}
 
@@ -143,7 +205,7 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 			// 熔断后不直接退出：派发方可能还在阻塞投递，排空 channel 才不会死锁
 			//（与探测任务的处理方式一致）。
 			for movie := range jobs {
-				if ctx.Err() != nil || aborted.Load() {
+				if ctx.Err() != nil || st.aborted.Load() {
 					continue
 				}
 				result := s.scrapeOne(ctx, movie, opts)
@@ -152,22 +214,13 @@ func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunO
 		}()
 	}
 	for _, movie := range movies {
-		if ctx.Err() != nil || aborted.Load() {
+		if ctx.Err() != nil || st.aborted.Load() {
 			break
 		}
 		jobs <- movie
 	}
 	close(jobs)
 	wg.Wait()
-
-	if aborted.Load() {
-		return progress, errors.Join(ctx.Err(), fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
-			MaxConsecutiveFailures, progress.Done, len(movies)))
-	}
-	if err := ctx.Err(); err != nil {
-		return progress, err
-	}
-	return progress, nil
 }
 
 // scrapeOne 处理一部影片：搜索 → 选结果 → 取详情 → 落盘。

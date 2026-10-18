@@ -43,7 +43,7 @@
 | DB-07 | context 与锁/池/WAL 观测 | ○ | — | QueryContext/BeginTx、DB.Stats、busy/WAL 指标均无；单写队列未决 |
 | DB-08 | 逐特征 SQL 与分块 IN | ◐ | 29,30,31 | DataFor/ActorsFor 已分块；逐来源特征判定与 MoviesByIDs 未统一 |
 | DB-09 | 影片与演员分事务提交 | ✅ | 10-13 | 影片+演员+特征+双库版本同事务；NFO 与 SQLite 非联合事务 |
-| DB-10 | 候选全量加载/回填/JSON 诊断 | ○ | — | 游标分批、回填进度/重试/取消、损坏 JSON 定位未做；R4 |
+| DB-10 | 候选全量加载/回填/JSON 诊断 | ◐ | 82 | 批次 82：刮削候选改 200 部 id 游标分批（`MoviesForScrapeBatch`），跨批共享熔断/进度，峰值内存不再随库大小增长；特征回填暴露 `done/total/running`，Close 先取消再等待；`CorruptedJSON` 定位损坏 JSON（影片+列），`GET /api/admin/recovery` 增 `corrupt_json_total/corrupt_json`、`settings` 增 `features_backfill`。边界：单条手动路径仍传切片、损坏列表无 UI 修复动作、回填无重试计数/进度持久化 |
 | FE-01 | 计划探测“全部”退化 | ✅ | 5 | 前后端须同批发布；真实计划触发/浏览器未验 |
 | FE-02 | 字段不能清空却报成功 | ✅ | 7 | 多管理员无修订条件；NFO gate 非跨进程 CAS；R3 持久意图未做 |
 | FE-03 | 卡片键盘事件截获按钮 | ◐ | 17 | 仅事件目标即卡片本身才处理；role=button 仍嵌套按钮；读屏/焦点未验 |
@@ -254,5 +254,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 79 | FE-11 30 页 DOM/内存基线 + 图片宽度预算：媒体墙/详情 `srcset` 与 `maxWidth`，详情海报尺寸属性；实测 3,100 卡 DOM 74,533、堆 9.5MB | ✅ 本地完成 | 真机、低端机与 5k 以上库未测；未做窗口化 |
 | 80 | DB-05/06 二级索引：演员反向索引 + 可见影片标题部分索引，迁移 6 内置 `ANALYZE`；EXPLAIN/计时证据 | ✅ 本地完成 | 轻量投影/keyset 未做；写放大与大库冷缓存未测 |
 | 81 | DB-04 搜索量化：新增 `BenchmarkSearch*` 固定 5k 基准（标题/类型/演员/深页）+ 50k 行扫描测量，结论暂不引入 FTS5/关系表 | ✅ 本地完成 | FTS5 语义回归、中文分词、写入放大与真实 50k 库未测 |
+| 82 | DB-10：刮削候选游标分批（不再整库装载）、回填进度/取消、损坏 JSON 定位（store+recovery/settings API） | ✅ 本地完成 | 手动单条路径仍传切片；损坏 JSON 无 UI 修复；回填进度不持久化 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。

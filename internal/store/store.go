@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,12 @@ type Store struct {
 	gversion atomic.Int64
 	// featuresReady 在首次倒排特征回填结束时关闭（见 Open）。
 	featuresReady chan struct{}
+	// 特征回填进度与取消（DB-10）：Done/Total 供诊断接口读取，Cancel 用于 Close 时尽快收尾。
+	featuresDone       atomic.Int64
+	featuresTotal      atomic.Int64
+	featuresRunning    atomic.Bool
+	featuresCancel     chan struct{}
+	featuresCancelOnce sync.Once
 	// visibleCount/visibleVersion 可见影片数缓存（见 visibleMovieCount）。
 	visibleCount   atomic.Int64
 	visibleVersion atomic.Int64
@@ -112,7 +119,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, featuresCancel: make(chan struct{})}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -131,7 +138,11 @@ func Open(path string) (*Store, error) {
 		defer close(s.featuresReady)
 		start := time.Now()
 		if err := s.ensureFeatures(); err != nil {
-			slog.Warn("相似度特征回填失败，相似推荐可能不完整", "error", err)
+			if errors.Is(err, errFeaturesBackfillCanceled) {
+				slog.Debug("相似度特征回填在关闭前取消")
+			} else {
+				slog.Warn("相似度特征回填失败，相似推荐可能不完整", "error", err)
+			}
 			return
 		}
 		if elapsed := time.Since(start); elapsed > time.Second {
@@ -151,8 +162,46 @@ func (s *Store) waitFeaturesReady() {
 // Close drains the initialization backfill before releasing its database.
 // sql.DB.Close alone does not join the goroutine between its SQL operations.
 func (s *Store) Close() error {
+	s.CancelFeatureBackfill()
 	s.waitFeaturesReady()
 	return s.db.Close()
+}
+
+// errFeaturesBackfillCanceled 表示 Close 主动中止了启动回填；下次 Open 会重跑。
+var errFeaturesBackfillCanceled = errors.New("相似度特征回填已取消")
+
+// FeatureBackfillStatus 返回启动时倒排特征回填的进度（Running=false 时 Done 为最终值）。
+type FeatureBackfillStatus struct {
+	Running bool  `json:"running"`
+	Done    int64 `json:"done"`
+	Total   int64 `json:"total"`
+}
+
+// FeatureBackfillStatus 读取回填进度，供健康/诊断接口与运维判断大库是否仍在预热。
+func (s *Store) FeatureBackfillStatus() FeatureBackfillStatus {
+	return FeatureBackfillStatus{
+		Running: s.featuresRunning.Load(),
+		Done:    s.featuresDone.Load(),
+		Total:   s.featuresTotal.Load(),
+	}
+}
+
+// CancelFeatureBackfill 请求中止启动回填（幂等）。已提交的批次保留，未完成的下次启动重跑。
+func (s *Store) CancelFeatureBackfill() {
+	s.featuresCancelOnce.Do(func() {
+		if s.featuresCancel != nil {
+			close(s.featuresCancel)
+		}
+	})
+}
+
+func (s *Store) featuresCanceled() bool {
+	select {
+	case <-s.featuresCancel:
+		return true
+	default:
+		return false
+	}
 }
 
 // baseSchema is frozen as part of migration 1. Future schema changes belong in
@@ -575,6 +624,9 @@ const featureBuildVersion = "1"
 
 // ensureFeatures 存量库回填倒排特征；kv 里记版本号，只在首次或版本变化时重建。
 func (s *Store) ensureFeatures() error {
+	if s.featuresCanceled() {
+		return errFeaturesBackfillCanceled
+	}
 	if value, _ := s.kvValue("features:ready"); value == featureBuildVersion {
 		return nil
 	}
@@ -597,6 +649,9 @@ func (s *Store) ensureFeatures() error {
 	}
 	// 分批提交：每部一个事务在大库上要跑十几秒，整库一个事务又会长时间占着写锁，
 	// 与前台写入（扫描/刮削）撞上就是 SQLITE_BUSY。200 部一批把写锁窗口压到百毫秒级。
+	s.featuresTotal.Store(int64(len(ids)))
+	s.featuresRunning.Store(true)
+	defer s.featuresRunning.Store(false)
 	const batchSize = 200
 	for start := 0; start < len(ids); start += batchSize {
 		end := start + batchSize
@@ -608,14 +663,22 @@ func (s *Store) ensureFeatures() error {
 			return err
 		}
 		for _, id := range ids[start:end] {
+			if s.featuresCanceled() {
+				_ = tx.Rollback()
+				return errFeaturesBackfillCanceled
+			}
 			if err = refreshFeaturesTx(tx, id); err != nil {
 				_ = tx.Rollback()
 				return err
 			}
+			s.featuresDone.Add(1)
 		}
 		if err = tx.Commit(); err != nil {
 			return err
 		}
+	}
+	if s.featuresCanceled() {
+		return errFeaturesBackfillCanceled
 	}
 	// 标记落库：中途失败时下次启动会重跑，部分完成也不会让特征表半死不活
 	//（未标记时 UpsertMovie 仍会增量维护）。
@@ -2069,6 +2132,50 @@ func (s *Store) MoviesForScrape(libraryID int64, onlyMissing bool, limit int) ([
 		}
 		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
 	}
+	query += " ORDER BY id"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movie
+	for rows.Next() {
+		m, err := movieScan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MoviesForScrapeBatch 按 id 游标返回一批刮削候选，供全量任务流式处理，
+// 避免一次性把整库影片（含 plot 等宽字段）读进内存。afterID 为上一批最后一条 id。
+func (s *Store) MoviesForScrapeBatch(libraryID int64, onlyMissing bool, afterID int64, limit int) ([]Movie, error) {
+	query := "SELECT " + movieCols + " FROM movies"
+	args := []any{}
+	if libraryID > 0 {
+		query += " WHERE library_id=?"
+		args = append(args, libraryID)
+	}
+	if onlyMissing {
+		if libraryID > 0 {
+			query += " AND"
+		} else {
+			query += " WHERE"
+		}
+		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+	}
+	if libraryID > 0 || onlyMissing {
+		query += " AND id > ?"
+	} else {
+		query += " WHERE id > ?"
+	}
+	args = append(args, afterID)
 	query += " ORDER BY id"
 	if limit > 0 {
 		query += " LIMIT ?"

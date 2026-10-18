@@ -176,5 +176,11 @@ func (a *App) adminEditRecoveryList(c *gin.Context) {
 			stale++
 		}
 	}
-	c.JSON(200, gin.H{"items": failures, "total": len(failures), "stale_over_7d": stale})
+	corrupt, err := a.db.CorruptedJSON(20)
+	if err != nil {
+		slog.Warn("元数据 JSON 体检失败", "error", err)
+		corrupt = store.JSONCorruptionReport{Items: []store.JSONColumnCorruption{}}
+	}
+	c.JSON(200, gin.H{"items": failures, "total": len(failures), "stale_over_7d": stale,
+		"corrupt_json_total": corrupt.Total, "corrupt_json": corrupt.Items})
 }

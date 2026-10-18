@@ -54,3 +54,33 @@ func TestEditRecoveryListAndClearOnSuccess(t *testing.T) {
 		t.Fatalf("failures not cleared: %+v", body)
 	}
 }
+
+// DB-10：恢复列表同时暴露损坏 JSON 定位与启动回填进度（形状稳定，计数为 0 时也返回空数组）。
+func TestRecoveryReportsCorruptJSONAndBackfillStatus(t *testing.T) {
+	app, media := detailTestApp(t, t.TempDir(), patchFixture)
+	ts, token := detailServer(t, app)
+	if _, err := app.db.AddLibrary("L", media); err != nil {
+		t.Fatal(err)
+	}
+	scanOnce(t, ts, token)
+	resp, body := embyCall(t, ts, "GET", "/api/admin/recovery", token, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("recovery=%d %+v", resp.StatusCode, body)
+	}
+	if body["corrupt_json_total"] != float64(0) {
+		t.Fatalf("corrupt_json_total=%v", body["corrupt_json_total"])
+	}
+	if _, ok := body["corrupt_json"].([]any); !ok {
+		t.Fatalf("corrupt_json 应为数组: %T", body["corrupt_json"])
+	}
+	_, settings := embyCall(t, ts, "GET", "/api/admin/settings", token, "")
+	bf, ok := settings["features_backfill"].(map[string]any)
+	if !ok {
+		t.Fatalf("features_backfill 缺失: %+v", settings["features_backfill"])
+	}
+	for _, key := range []string{"running", "done", "total"} {
+		if _, ok := bf[key]; !ok {
+			t.Fatalf("features_backfill 缺 %q: %+v", key, bf)
+		}
+	}
+}
