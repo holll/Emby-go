@@ -1204,7 +1204,7 @@ test('扫描所有入口在状态未知或正在运行时拒绝重复提交，�
     assert.equal(env.posts().length, 1, 'confirmed running must gate every local entry');
     await env.fire(1500); assert.equal(env.node('#scan').disabled, false);
     await env.box.runScan(9); assert.equal(env.posts().length, 2);
-    assert.equal(env.posts()[1].path, '/scan?library_id=9');
+    assert.equal(env.posts()[1].path, '/tasks/scan?library_id=9');
     env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
   }
 });
@@ -1334,7 +1334,7 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
     const env = scanFixture(async () => reads++ ? { running: true, done: 1 } : initial,
       () => new Promise(resolve => { finish = resolve; }));
     const pending = env.box.runScan('lib &1'); await env.box.runScan(2);
-    assert.equal(env.posts().length, 1); assert.equal(env.posts()[0].path, '/scan?library_id=lib%20%261');
+    assert.equal(env.posts().length, 1); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=lib%20%261');
     await env.fire(0);
     assert.equal(env.node('#scan').disabled, true); assert.equal(env.node('#scan-progress').hidden, false);
     assert.match(env.node('#scan-progress-title').textContent, /请求进行中/);
@@ -1350,9 +1350,9 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
 
 test('实际runScan成功后只由重读终态释放按钮，不重放POST或重复toast', async () => {
   const env = scanFixture(async () => scanTerminal);
-  await env.box.runScan(); assert.equal(env.posts()[0].path, '/scan');
+  await env.box.runScan(); assert.equal(env.posts()[0].path, '/tasks/scan');
   assert.equal(env.node('#scan').disabled, true); assert.equal(env.gets().length, 0);
-  assert.match(env.toasts[0][0], /扫描完成：2 已刮削 \/ 1 未刮削/);
+  assert.match(env.toasts[0][0], /扫描任务已启动/);
   await env.fire(0); assert.equal(env.node('#scan').disabled, false);
   assert.equal(env.posts().length, 1); assert.equal(env.toasts.length, 1);
   env.box.stopScanPolling(); assert.equal(env.timers.size, 0);

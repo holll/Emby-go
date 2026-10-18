@@ -85,7 +85,24 @@
 
 - **允许（增量）**：新增端点、新增 JSON 字段、新增可选查询参数/请求头、新增 `code`。
 - **禁止（v2 内）**：删除/改名已发布字段、改变状态码或 `code` 语义、改变认证载体要求、改变 302/转发的可用前提。
-- **弃用**：先标记并在 README/本文件登记，至少一个 minor 版本后移除；移除视为破坏性变更。
+- **弃用**：先登记到下方 §5.1，运行时对旧端点回 `Deprecation`/`Sunset`/`Link` 头；实现至少保留到 `Sunset` 日期，移除视为破坏性变更（升 v3）。
+
+### 5.1 弃用登记表
+
+| 端点 | 替代 | 登记版本 | Sunset | 现状 |
+|---|---|---|---|---|
+| `POST /api/admin/scan`（同步扫描） | `POST /api/admin/tasks/scan`（202 + 任务轮询） | v2.0.0 | 2027-04-01 | 可用；响应带弃用头；Web 前端已迁移到异步入口 |
+
+弃用头（RFC 8594 / RFC 8288）：
+
+```http
+Deprecation: true
+Sunset: Thu, 01 Apr 2027 00:00:00 GMT
+Link: </api/admin/tasks/scan>; rel="successor-version"
+Warning: 299 - "deprecated endpoint; use POST /api/admin/tasks/scan"
+```
+
+规则：登记项必须有可用的替代路径与 `Sunset`；登记表在 `internal/server/deprecation.go`，契约测试核对路径真实存在且响应确实带弃用头。
 - **破坏性变更**：升 v3，并在 v2 最后一个 minor 提供迁移说明与双写/双读窗口。
 - JSON 字段名大小写、时间格式、ticks 单位（100ns）不得变更。
 

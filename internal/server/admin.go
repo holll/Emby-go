@@ -338,6 +338,8 @@ func (a *App) scanning() bool {
 }
 
 func (a *App) adminScan(c *gin.Context) {
+	// v2 弃用登记：同步扫描由 /api/admin/tasks/scan 替代，旧入口保留到 Sunset。
+	markDeprecated(c, legacySyncScan)
 	if a.scanning() {
 		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return

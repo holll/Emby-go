@@ -427,7 +427,7 @@ v1.5.0 已把安全与数据正确性整备完成；v2 的目标不是加功能�
 
 - 73 契约基线：`API-CONTRACT.md` + `internal/server/api_contract_test.go`（关键路由清单、错误信封、no-store）+ 未知路由补稳定 `NOT_FOUND`（✅ 本地完成）。
 - 74 管理面错误码补齐：`/api/*` 的 400/404/409/428/500/502/503 经统一 `apiError` 带 `code`（纯增量，专用 code 保留；✅ 本地完成）。
-- 75 弃用机制：弃用标记、README/契约登记、至少一个 minor 的移除窗口。
+- 75 弃用机制：登记表 + 运行时 `Deprecation`/`Sunset`/`Link` 头；首个登记项为同步 `POST /api/admin/scan`（Web 前端已迁移到异步任务入口）。（✅ 本地完成）
 - 76 兼容回归：旧客户端抓包附录与 Emby 协议字段抽检（需部署/真机）。
 
 **门禁**：契约测试通过；路由或错误信封变更必须同批更新 `API-CONTRACT.md`；未通过不得打 tag。

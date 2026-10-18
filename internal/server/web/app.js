@@ -2173,7 +2173,7 @@ function startScanPolling() {
   setScanButton(true, '确认扫描状态…');
   scanTimer = startProgressPolling('/scan/progress', p => {
     if (!p.running && scanSubmitting) {
-      // POST同步执行扫描：首个GET可能早于服务端接纳，或读到上一轮终态。
+      // 异步提交在途：首个GET可能早于 worker 启动，或读到上一轮终态。
       // 不把在途提交误判为空闲，也不停止后续观察。
       scanPanel.hidden = false;
       scanTitle.textContent = '扫描请求进行中';
@@ -2213,10 +2213,11 @@ async function runScan(libraryId) {
   scanDetail.textContent = '';
   startScanPolling();
   try {
-    const url = libraryId ? `/scan?library_id=${encodeURIComponent(libraryId)}` : '/scan';
-    const r = await api(url, { method: 'POST' });
+    // 异步入口：202 只代表任务已排队，进度与计数由 /scan/progress 观察器呈现。
+    const url = libraryId ? `/tasks/scan?library_id=${encodeURIComponent(libraryId)}` : '/tasks/scan';
+    await api(url, { method: 'POST' });
     completed = true;
-    toast(`扫描完成：${r.success} 已刮削 / ${r.pending} 未刮削${r.skipped ? ` / 跳过 ${r.skipped} 个不兼容` : ''}`);
+    toast('扫描任务已启动，进度见上方面板');
   } catch (e) {
     toast(e.message, 'error');
     denied = e.status === 401 || e.status === 403;
