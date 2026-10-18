@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；405 个 Test 函数（server 32.7s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；408 个 Test 函数（server 32.7s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -38,8 +38,8 @@
 | DB-02 | 播放计数读改写竞争 | ◐ | 51 | 批次 51 完成：迁移 2 建 `playback_sessions`/`playback_events`（会话键=PlaySessionId，缺失回退 `item:<id>`），`last_event_seq` 单调序号；`RecordPlaybackEvent` 单事务写会话+事件+userdata，stopped 仅 `stopped=0→1` 原子 +1，重复 Stopped/重放/重启后重放幂等，停止后迟到 Progress 忽略；事件表保留最近 2 万条。剩余：无 PlaySessionId 的旧客户端需先发 Playing 重开才能再计一次；无观看时长统计与按会话查询 API；`SavePlayback` 仍被旧测试/夹具使用 |
 | DB-03 | 业务提交与缓存版本分离 | ◐ | 9-15,24,25,27,34 | 已覆盖 metadata/删除/清理/manual/相似/图片/userdata/设置/played/头像；播放进度、Stopped/心跳、扫描检查点未合并；跨进程版本镜像未做 |
 | DB-04 | JSON 筛选与包含搜索 | ○ | — | 未引 FTS5/关系表；`%term%`/JSON 包含/演员 EXISTS 原样；R4/A15 |
-| DB-05 | COUNT/宽投影/深 OFFSET | ○ | — | 轻量投影、候选索引、keyset 未落地；R4 |
-| DB-06 | 演员反向索引缺口 | ○ | — | `idx_movie_actors_actor_movie` 未建；R4 |
+| DB-05 | COUNT/宽投影/深 OFFSET | ◐ | 80 | 批次 80 建部分索引 `idx_movies_visible_title`/`idx_movies_visible_library_title` 并在迁移 6 末尾 `ANALYZE`；实测 5,000 部库：全局首页 1.57→0.05ms、深页 OFFSET 2000 3.08→0.16ms、单库 0.05ms，`EXPLAIN` 无临时排序；COUNT 仍走 `idx_movies_status`；轻量投影、keyset/深 OFFSET 上限未做 |
+| DB-06 | 演员反向索引缺口 | ◐ | 80 | 批次 80 建 `idx_movie_actors_actor_movie(actor_name,movie_id)`；种子实验（200 演员 / 9,950 关系）`ActorsMissingAvatar` 9.01→0.96ms；`MoviesByActor` 计划不变（movies 驱动，2.2ms），仍靠主键探测；未在真实刮削库测写放大 |
 | DB-07 | context 与锁/池/WAL 观测 | ○ | — | QueryContext/BeginTx、DB.Stats、busy/WAL 指标均无；单写队列未决 |
 | DB-08 | 逐特征 SQL 与分块 IN | ◐ | 29,30,31 | DataFor/ActorsFor 已分块；逐来源特征判定与 MoviesByIDs 未统一 |
 | DB-09 | 影片与演员分事务提交 | ✅ | 10-13 | 影片+演员+特征+双库版本同事务；NFO 与 SQLite 非联合事务 |
@@ -252,5 +252,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 77 | 前端独立项（FE-15 部分）：计划任务单次提交、cron 校验 latest-wins、服务器时区明示 | ✅ 本地完成 | 真实触屏/跨时区设备走查仍待部署或真机 |
 | 78 | FE-07 复核与焦点循环修复：Playwright `elementFromPoint`/触屏/背景关闭/命中区恢复；`overlayTrapTab` 改受控循环，修复播放器内 Tab 落到 body | ✅ 本地完成 | 真机触屏与真实读屏仍未验 |
 | 79 | FE-11 30 页 DOM/内存基线 + 图片宽度预算：媒体墙/详情 `srcset` 与 `maxWidth`，详情海报尺寸属性；实测 3,100 卡 DOM 74,533、堆 9.5MB | ✅ 本地完成 | 真机、低端机与 5k 以上库未测；未做窗口化 |
+| 80 | DB-05/06 二级索引：演员反向索引 + 可见影片标题部分索引，迁移 6 内置 `ANALYZE`；EXPLAIN/计时证据 | ✅ 本地完成 | 轻量投影/keyset 未做；写放大与大库冷缓存未测 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。

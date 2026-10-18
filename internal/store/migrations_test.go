@@ -137,7 +137,8 @@ func TestMigrationRejectsUnknownOrModifiedLedger(t *testing.T) {
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=3",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=4",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=5",
-		"INSERT INTO schema_migrations VALUES(6,'future','t0')",
+		"UPDATE schema_migrations SET checksum='tampered' WHERE version=6",
+		"INSERT INTO schema_migrations VALUES(7,'future','t0')",
 	} {
 		t.Run(statement, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "check.db")
@@ -163,7 +164,7 @@ func TestMigrationRejectsSchemaAndIndexDrift(t *testing.T) {
 		"ALTER TABLE userdata ADD COLUMN unexpected TEXT",
 		"ALTER TABLE schema_migrations RENAME TO old_ledger; CREATE TABLE schema_migrations(version INTEGER, checksum TEXT NOT NULL, applied_at TEXT NOT NULL); INSERT INTO schema_migrations SELECT * FROM old_ledger; DROP TABLE old_ledger",
 		"DROP INDEX idx_movies_status; CREATE INDEX idx_movies_status ON movies(title)",
-		"ALTER TABLE movies DROP COLUMN title",
+		"DROP INDEX idx_movies_visible_title; DROP INDEX idx_movies_visible_library_title; ALTER TABLE movies DROP COLUMN title",
 		"ALTER TABLE movies ADD COLUMN generated_title TEXT GENERATED ALWAYS AS (title) VIRTUAL",
 		"CREATE UNIQUE INDEX unexpected_unique_title ON movies(title)",
 		"DROP INDEX idx_movies_status; CREATE INDEX idx_movies_status ON movies(status DESC)",

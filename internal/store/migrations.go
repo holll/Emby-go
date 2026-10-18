@@ -594,6 +594,38 @@ func applyMigration5(tx *sql.Tx) error {
 	return nil
 }
 
+const secondaryIndexMigrationVersion = 6
+
+// migration6Statements 为列表与演员查询补索引（DB-05/06，批次 80）：
+//   - movie_actors(actor_name, movie_id)：`ActorsMissingAvatar` 等按演员起步的连接
+//     可走 actor_name 首列（原主键只以 movie_id 为先），实测 200 演员/9,950 关系时
+//     头像候选查询 9.01ms → 0.96ms。
+//   - movies(title,id)、movies(library_id,title,id) 的部分索引只覆盖可见状态，
+//     让默认列表去掉排序临时 B 树：全局深页 3.00ms → 0.15ms、单库首页 1.58ms → 0.05ms。
+//
+// 索引只增不改；回退为 DROP INDEX，不触碰数据。
+var migration6Statements = []string{
+	`CREATE INDEX IF NOT EXISTS idx_movie_actors_actor_movie ON movie_actors(actor_name, movie_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_movies_visible_title ON movies(title, id) WHERE status IN ('success','manual')`,
+	`CREATE INDEX IF NOT EXISTS idx_movies_visible_library_title ON movies(library_id, title, id) WHERE status IN ('success','manual')`,
+	// 没有统计信息时 SQLite 可能仍按 idx_movies_status 扫描再临时排序；迁移时补一次
+	// ANALYZE，让部分索引在既有大库上立即被选中（实测全局深页 3.08ms → 0.15ms）。
+	`ANALYZE`,
+}
+
+func migration6Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration6Statements, "\n"))))
+}
+
+func applyMigration6(tx *sql.Tx) error {
+	for _, statement := range migration6Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration %d: %w", secondaryIndexMigrationVersion, err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -641,6 +673,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case secondaryIndexMigrationVersion:
+			if checksum != migration6Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -677,6 +714,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[secondaryIndexMigrationVersion] {
+		if err := applyMigration6(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -704,6 +746,11 @@ func (s *Store) migrate() error {
 	if !applied[editFailureMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", editFailureMigrationVersion, migration5Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", editFailureMigrationVersion, err)
+		}
+	}
+	if !applied[secondaryIndexMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", secondaryIndexMigrationVersion, migration6Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", secondaryIndexMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
