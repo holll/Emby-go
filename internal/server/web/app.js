@@ -1,5 +1,6 @@
 /* Emby-go 管理控制台前端 —— 单文件，无依赖 */
 let token = localStorage.getItem('emby_token');
+let me = null; // /api/auth/me：Web 端据此区分管理员与普通用户
 // D03：新建密钥的原文只在创建后显示一次，刷新/离开页面即丢弃。
 let createdAPIKey = null;
 const content = document.querySelector('#content');
@@ -1115,7 +1116,14 @@ function openPlayer(item) {
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
 async function pageSettings() {
   const gen = pageGen;
-  const [s, keyData, recovery] = await Promise.all([api('/settings'), api('/apikeys'), api('/recovery')]);
+  if (!me || !me.is_admin) {
+    renderSelfPassword();
+    return;
+  }
+  const [s, keyData, recovery, users, libs, logins, plays] = await Promise.all([
+    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries'),
+    api('/login-events?limit=20'), api('/playback-events?limit=20')
+  ]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
     ['监听地址', s.listen],
@@ -1154,6 +1162,55 @@ async function pageSettings() {
           </tr>`).join('')}</tbody>
         </table></div>` : empty('没有待恢复条目', '索引失败时会在这里显示；成功重新索引后自动清除。')}
     </section>
+    <section class="panel" aria-labelledby="users-title">
+      <div class="panel-head"><h2 id="users-title">用户管理</h2><span class="hint" style="margin:0">共 ${esc(String((users.users || []).length))} 个账户 · 媒体库默认无授权</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>账户</th><th>角色</th><th>最后登录</th><th>媒体库授权</th><th style="text-align:right">操作</th></tr></thead>
+        <tbody>${(users.users || []).map(u => `<tr data-user-row="${u.id}">
+          <td><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? ' <span class="badge">owner</span>' : ''}</td>
+          <td>${u.is_admin ? '管理员' : '普通用户'}</td>
+          <td class="mono">${esc(u.last_login_at || '—')}</td>
+          <td><div class="chip-row">${(libs.items || []).map(l => `<label class="check"><input type="checkbox" data-user-lib="${u.id}" value="${l.Id}"${(u.library_ids || []).includes(l.Id) ? ' checked' : ''}> ${esc(l.Name)}</label>`).join('') || '—'}</div></td>
+          <td><div class="row-actions">
+            <button class="btn btn-sm" data-user-save="${u.id}">保存授权</button>
+            <button class="btn btn-sm" data-user-reset="${u.id}" data-user-name="${esc(u.name)}">重置密码</button>
+            <button class="icon-btn danger" data-user-del="${u.id}" title="删除用户"${u.id === 1 ? ' disabled' : ''}>${icon('trash')}</button>
+          </div></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <form id="user-create-form" class="field-grid" style="margin-top:18px">
+        <div class="field"><label for="user-name">新用户名</label><input id="user-name" name="name" minlength="3" required placeholder="至少 3 个字符"></div>
+        <div class="field"><label for="user-pass">初始密码</label><input id="user-pass" name="password" type="password" minlength="9" required placeholder="至少 9 个字符"></div>
+        <div class="field"><label class="check"><input id="user-admin" name="is_admin" type="checkbox"> 管理员</label></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建用户</span></button></div>
+      </form>
+      <p class="hint">普通用户默认看不到任何媒体库；在行内勾选后点「保存授权」。删除用户会保留其播放与登录历史。</p>
+    </section>
+
+    <section class="panel" aria-labelledby="audit-title">
+      <div class="panel-head"><h2 id="audit-title">活动记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="audit-refresh" class="btn btn-sm">刷新</button></div>
+      <h3 style="margin:12px 0 6px">登录记录</h3>
+      ${(logins.events || []).length ? `<div class="table-wrap"><table>
+        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th></tr></thead>
+        <tbody>${logins.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.name || '—')}</td><td class="mono">${esc(e.ip || '—')}</td><td>${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
+      </table></div>` : empty('暂无登录记录', '登录成功与失败都会记录。')}
+      <h3 style="margin:18px 0 6px">播放记录</h3>
+      ${(plays.events || []).length ? `<div class="table-wrap"><table>
+        <thead><tr><th>时间</th><th>账户</th><th>影片</th><th>事件</th><th>位置</th></tr></thead>
+        <tbody>${plays.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.user_name || '—')}</td><td>${esc(e.movie_title || '#' + e.movie_id)}</td><td>${esc(e.kind)}</td><td class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
+      </table></div>` : empty('暂无播放记录', '播放/进度/停止事件会记录在这里。')}
+    </section>
+
+    <section class="panel" aria-labelledby="pw-title">
+      <div class="panel-head"><h2 id="pw-title">修改我的密码</h2></div>
+      <form id="pw-form" class="field-grid">
+        <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
+        <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
+      </form>
+      <p class="hint">修改后当前与其它设备的登录令牌都会失效，需要重新登录。</p>
+    </section>
+
     <section class="panel">
       <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
       <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>
@@ -1217,6 +1274,70 @@ async function pageSettings() {
     try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
+  document.querySelector('#user-create-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const data = new FormData(event.target);
+    const body = { name: String(data.get('name') || '').trim(), password: String(data.get('password') || ''), is_admin: data.get('is_admin') === 'on' };
+    try { await api('/users', { method: 'POST', body: JSON.stringify(body) }); toast('用户已创建'); refreshPage(pageSettings, gen); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+  document.querySelectorAll('[data-user-save]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.userSave;
+    const checked = Array.from(document.querySelectorAll(`[data-user-lib="${id}"]:checked`)).map(input => Number(input.value));
+    try { await api('/users/' + id + '/libraries', { method: 'PUT', body: JSON.stringify({ library_ids: checked }) }); toast('媒体库授权已保存', 'ok'); }
+    catch (e) { toast(e.message, 'error'); }
+  }));
+  document.querySelectorAll('[data-user-reset]').forEach(button => button.addEventListener('click', async () => {
+    const value = prompt(`为 ${button.dataset.userName} 设置新密码（至少 9 个字符）：`);
+    if (!value) return;
+    try { await api('/users/' + button.dataset.userReset, { method: 'PUT', body: JSON.stringify({ password: value }) }); toast('密码已重置，该用户的登录会话已失效', 'ok'); }
+    catch (e) { toast(e.message, 'error'); }
+  }));
+  document.querySelectorAll('[data-user-del]').forEach(button => button.addEventListener('click', async () => {
+    if (!confirm('删除该用户？其播放与登录历史会保留并标注已删除，令牌立即失效。')) return;
+    try { await api('/users/' + button.dataset.userDel, { method: 'DELETE' }); toast('用户已删除'); refreshPage(pageSettings, gen); }
+    catch (e) { toast(e.message, 'error'); }
+  }));
+  document.querySelector('#audit-refresh')?.addEventListener('click', () => refreshPage(pageSettings, gen));
+  document.querySelector('#pw-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const response = await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token }, body: JSON.stringify({ current_password: document.querySelector('#pw-current').value, new_password: document.querySelector('#pw-new').value }) });
+      const body = response.status === 204 ? {} : await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || '修改失败');
+      toast('密码已修改，请重新登录', 'ok');
+      localStorage.removeItem('emby_token');
+      setTimeout(() => window.location.replace('/'), 800);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+// renderSelfPassword 是普通用户的设置页：没有服务配置/密钥/用户管理，只有改密。
+function renderSelfPassword() {
+  content.innerHTML = `
+    <section class="panel">
+      <div class="panel-head"><h2>账户</h2><span class="hint" style="margin:0">${esc(me ? me.name : '')}</span></div>
+      <p class="hint">普通用户通过 Emby 客户端观看；服务配置与用户管理仅管理员可见。</p>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>修改我的密码</h2></div>
+      <form id="pw-form" class="field-grid">
+        <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
+        <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
+      </form>
+    </section>`;
+  document.querySelector('#pw-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const response = await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token }, body: JSON.stringify({ current_password: document.querySelector('#pw-current').value, new_password: document.querySelector('#pw-new').value }) });
+      const body = response.status === 204 ? {} : await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || '修改失败');
+      toast('密码已修改，请重新登录', 'ok');
+      localStorage.removeItem('emby_token');
+      setTimeout(() => window.location.replace('/'), 800);
+    } catch (e) { toast(e.message, 'error'); }
+  });
 }
 
 /* ---------------------------------------------------------------- 任务日志 */
@@ -2262,6 +2383,8 @@ async function boot() {
       return;
     }
     if (!response.ok) throw new Error('authentication unavailable');
+    const dto = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
+    me = dto ? { name: dto.Name || '', is_admin: !!(dto.Policy && dto.Policy.IsAdministrator) } : null;
   } catch {
     // A failed validation is not evidence that the stored credential is invalid.
     content.innerHTML = `<section class="empty"><p role="alert">暂时无法验证登录状态，请检查服务或网络后重试。已保留登录凭据。</p><button id="auth-retry" class="btn btn-accent" type="button">重试验证</button></section>`;
@@ -2270,6 +2393,14 @@ async function boot() {
       boot();
     });
     return;
+  }
+  // 当前账户（普通用户只保留「设置」里的改密条目，管理页一律隐藏；观看走 Emby 客户端）。
+  // 管理员标记直接取 /Users/Me 的 Policy.IsAdministrator，避免额外请求。
+  if (me && !me.is_admin) {
+    document.querySelectorAll('.nav-item').forEach(item => {
+      if (item.dataset.page !== 'settings' && typeof item.remove === 'function') item.remove();
+    });
+    if (location.hash !== '#settings') location.hash = '#settings';
   }
   // 导航写 hash 并压入历史，配合 popstate 让浏览器前进/后退在页面间往返。
   document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {

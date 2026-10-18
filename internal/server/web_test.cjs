@@ -1466,3 +1466,21 @@ test('图片请求带宽度预算与 1x/2x srcset（FE-11）', () => {
   assert.match(source, /\?maxWidth=540 1x, \$\{backdropBase\}\?maxWidth=1080 2x/);
   assert.match(source, /class="detail-backdrop" src="\$\{esc\(backdrop\)\}"\$\{backdropSrcset \? ` srcset=/);
 });
+test('多用户管理 UI 契约：用户管理、媒体库授权与活动记录面板', () => {
+  assert.match(source, /<h2 id="users-title">用户管理<\/h2>/);
+  assert.match(source, /id="user-create-form"/);
+  assert.match(source, /data-user-lib="\$\{u\.id\}"/);
+  assert.match(source, /data-user-save=/);
+  assert.match(source, /data-user-del=/);
+  assert.match(source, /api\('\/users', \{ method: 'POST'/);
+  assert.match(source, /\/users\/' \+ id \+ '\/libraries'/);
+  assert.match(source, /<h2 id="audit-title">活动记录<\/h2>/);
+  assert.match(source, /api\('\/login-events\?limit=20'\)/);
+  assert.match(source, /api\('\/playback-events\?limit=20'\)/);
+  assert.match(source, /id="pw-form"/);
+  assert.match(source, /fetch\('\/api\/auth\/password'/);
+  assert.match(source, /function renderSelfPassword\(\)/);
+  // 普通用户（Policy.IsAdministrator=false）只保留设置页入口。
+  assert.match(source, /if \(me && !me\.is_admin\) \{/);
+  assert.match(source, /dto\.Policy && dto\.Policy\.IsAdministrator/);
+});
