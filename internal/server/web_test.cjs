@@ -453,6 +453,17 @@ test('损坏参数或已消失媒体库不允许静默覆盖或变成全部', as
   assert.match(source, /paramsReadable \? '' : '<p role="alert">/);
 });
 
+test('计划任务 cron 校验 latest-wins、单次提交且提示服务器时区', async () => {
+  assert.match(source, /let cronSeq = 0;/);
+  assert.match(source, /if \(seq !== cronSeq \|\| cronEl\.value\.trim\(\) !== expr\) return;/);
+  assert.match(source, /服务器时区 \$\{result\.time_zone \|\| '本地'\}/);
+  assert.match(source, /if \(submit\.disabled\) return;/);
+  const env = scheduledSubmitFixture();
+  await env.submit();
+  await env.submit();
+  assert.equal(env.calls.length, 1);
+});
+
 test('计划存量参数解析拒绝损坏JSON和非对象，不能按空配置保存', () => {
   for (const value of ['not json', 'null', '[]', 'false', '42']) {
     const box = sandbox({ editing: { params: value }, observed: null });

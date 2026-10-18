@@ -1736,7 +1736,7 @@ async function pageScheduled() {
         <div class="field full"><label>常用预设</label>
           <div class="preset-row">${CRON_PRESETS.map(([text, expr]) =>
             `<button type="button" class="btn btn-sm preset" data-cron="${esc(expr)}">${esc(text)}</button>`).join('')}</div></div>
-        <p class="hint full" id="s-preview" style="grid-column:1/-1">标准 5 段（分 时 日 月 周）或 @daily/@hourly 等描述符；留空无法保存。</p>
+        <p class="hint full" id="s-preview" style="grid-column:1/-1">标准 5 段（分 时 日 月 周）或 @daily/@hourly 等描述符；按服务器本地时区执行，浏览器时区只影响展示；留空无法保存。</p>
         <div class="form-foot" style="grid-column:1/-1">
           ${paramsReadable ? '' : '<p role="alert">原任务参数无法读取，已禁止保存。请先由管理员核对配置，不会用空参数覆盖。</p>'}
           ${editing && !editing.config_etag ? '<p role="alert">服务器未提供配置校验令牌，已禁止覆盖保存。请更新服务后刷新。</p>' : ''}
@@ -1792,15 +1792,22 @@ async function pageScheduled() {
   }
 
   // 即时校验表达式并预览后续执行时间（后端解析，与调度用同一套规则）。
+  // cronSeq 实现 latest-wins：慢请求返回时若表达式已变，旧结果作废，不覆盖新预览。
+  let cronSeq = 0;
   const checkCron = debounce(async () => {
     const expr = cronEl.value.trim();
+    const seq = ++cronSeq;
     if (!expr) { preview.textContent = '请输入 cron 表达式。'; preview.style.color = ''; return; }
     try {
       const result = await api('/scheduled/validate', { method: 'POST', body: JSON.stringify({ cron: expr }) });
+      if (seq !== cronSeq || cronEl.value.trim() !== expr) return;
       if (!result.valid) { preview.textContent = '表达式非法：' + result.error; preview.style.color = 'var(--danger)'; return; }
-      preview.textContent = '接下来执行：' + (result.next_runs || []).map(fmtTime).join(' · ');
+      preview.textContent = `接下来执行（服务器时区 ${result.time_zone || '本地'}）：` + (result.next_runs || []).map(fmtTime).join(' · ');
       preview.style.color = '';
-    } catch (e) { preview.textContent = e.message; preview.style.color = 'var(--danger)'; }
+    } catch (e) {
+      if (seq !== cronSeq || cronEl.value.trim() !== expr) return;
+      preview.textContent = e.message; preview.style.color = 'var(--danger)';
+    }
   }, 300);
 
   // 回填编辑中的参数。
@@ -1832,6 +1839,9 @@ async function pageScheduled() {
 
   document.querySelector('#sched-form').addEventListener('submit', async event => {
     event.preventDefault();
+    // 单次提交：按钮在请求期间保持 disabled，重复提交（含双击/回车连发）直接忽略。
+    const submit = document.querySelector('#sched-submit');
+    if (submit.disabled) return;
     if (!paramsReadable) { toast('原任务参数无法读取，请先核对配置', 'error'); return; }
     if (editing && !editing.config_etag) { toast('缺少配置校验令牌，请更新服务后刷新', 'error'); return; }
     const conflict = document.querySelector('#sched-conflict');
@@ -1851,7 +1861,6 @@ async function pageScheduled() {
       enabled: document.querySelector('#s-enabled').checked,
       params: taskParams
     };
-    const submit = document.querySelector('#sched-submit');
     submit.disabled = true;
     try {
       if (editing) {

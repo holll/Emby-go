@@ -463,7 +463,7 @@ func (a *App) adminValidateCron(c *gin.Context) {
 	for _, run := range runs {
 		times = append(times, run.Format(time.RFC3339))
 	}
-	c.JSON(http.StatusOK, gin.H{"valid": true, "next_runs": times})
+	c.JSON(http.StatusOK, gin.H{"valid": true, "next_runs": times, "time_zone": time.Now().Location().String()})
 }
 
 // reloadScheduled 让调度器重新装载（保存后即时生效）。失败只告警：库里已有定义，重启仍会生效。
