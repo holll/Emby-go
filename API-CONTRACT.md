@@ -83,6 +83,15 @@
 
 管理端点（`/api/admin/*`）是后台契约，供本仓库 Web 前端与脚本使用；清单见 `internal/server/server.go` 的 `routes()`，不在 Emby 兼容承诺内。
 
+### 4.1 多用户管理面（批次 86 起）
+
+- `GET /api/admin/users` → `{"users":[{id,name,is_admin,created_at,last_login_at,library_ids}],"total":n}`；不返回密码哈希。
+- `POST /api/admin/users` → 201；`PUT /api/admin/users/:id`、`PUT /api/admin/users/:id/libraries`、`DELETE /api/admin/users/:id`（删除当前账户 400）。
+- `GET /api/admin/login-events?user_id=&limit=` → 登录审计（失败登录 `user_id=0`，不归因具体账户）。
+- `GET /api/admin/playback-events?user_id=&limit=` → 播放事件（含 `movie_title`/`user_name` 快照；用户删除后快照仍在）。
+- `POST /api/auth/password`（需登录）→ 204，改密后撤销该账户全部会话。
+- 可见性：媒体库按用户授权（`user_libraries`，默认无授权）；管理员不受限。Emby 数据只认本人。
+
 ## 5. 变更规则（v2）
 
 - **允许（增量）**：新增端点、新增 JSON 字段、新增可选查询参数/请求头、新增 `code`。

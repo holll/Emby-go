@@ -216,6 +216,13 @@ func (s *Store) DeleteUser(id int64) error {
 		if _, err := tx.Exec("DELETE FROM api_keys WHERE user_id=?", id); err != nil {
 			return err
 		}
+		// 播放/登录审计保留（含用户 id 快照）；个人播放数据随账户删除。
+		if _, err := tx.Exec("DELETE FROM userdata WHERE user_id=?", id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM user_libraries WHERE user_id=?", id); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("DELETE FROM users WHERE id=?", id); err != nil {
 			return err
 		}
@@ -277,4 +284,29 @@ func (s *Store) APIKeyUser(key string) (int64, bool, error) {
 		return 0, false, err
 	}
 	return userID, true, nil
+}
+
+// RevokeUserAccessTokens 撤销某账户的全部登录会话（改密后强制重新登录）。
+func (s *Store) RevokeUserAccessTokens(userID int64) error {
+	_, err := s.db.Exec(`DELETE FROM access_tokens WHERE user_id=?`, userID)
+	return err
+}
+
+// UserLastLogin 返回每个账户最近一次成功登录时间。
+func (s *Store) UserLastLogin() (map[int64]string, error) {
+	rows, err := s.db.Query(`SELECT user_id, MAX(created_at) FROM login_events WHERE success=1 AND user_id IS NOT NULL GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var at string
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, err
+		}
+		out[id] = at
+	}
+	return out, rows.Err()
 }

@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；422 个 Test 函数（server 34.5s / store 14.1s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；424 个 Test 函数（server 38.0s / store 16.4s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -258,6 +258,9 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 81 | DB-04 搜索量化：新增 `BenchmarkSearch*` 固定 5k 基准（标题/类型/演员/深页）+ 50k 行扫描测量，结论暂不引入 FTS5/关系表 | ✅ 本地完成 | FTS5 语义回归、中文分词、写入放大与真实 50k 库未测 |
 | 82 | DB-10：刮削候选游标分批（不再整库装载）、回填进度/取消、损坏 JSON 定位（store+recovery/settings API） | ✅ 本地完成 | 手动单条路径仍传切片；损坏 JSON 无 UI 修复；回填进度不持久化 |
 | 83 | DB-05 列表宽投影/深分页量化：50k 宽/窄投影与 OFFSET 20000 计时、`BenchmarkSearchAdminWidePage200`；结论暂不投影/不设 OFFSET 硬上限 | ✅ 本地完成 | 真实 50k 库与冷缓存未测；JSON 编码体积未单独计量 |
+| 84 | 多用户基座（迁移 7）：`users` 表、token/API key 绑定 `user_id`、按 `users` 登录与管理员判定、初始管理员回退与管理员 API 路径 | ✅ 本地完成 | 媒体库可见性未按用户限制；Emby 多用户仅同一账户 |
+| 85 | 按用户隔离播放数据（迁移 8）：`userdata` 重建为 `(user_id,movie_id)`、`playback_sessions.user_id`、`login_events` 登录审计（成功归户、失败记 id=0）；Emby UI 数据只认本人 | ✅ 本地完成 | 管理员跨用户查看只有数据库层，尚无 API/UI |
+| 86 | 多用户管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`（默认无授权）、管理员只读审计 API（登录/播放记录）、自助改密并撤销会话；删除用户保留审计 | ✅ 本地完成 | 可见性尚未在浏览/流/详情路径强制（批次 87）；前端管理页待批次 88；审计表无独立清理任务（写入时按 90 天/5 万条裁剪） |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。
 
@@ -269,14 +272,18 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 |---|---|---|---|
 | 84 | 用户模型基座：迁移 7 建 `users` 表并从 `administrators` 复制 id=1；`access_tokens`/`api_keys` 增 `user_id`；登录改为按用户校验、会话绑定用户；`/api/admin/*` 增加 `requireAdmin`（403 `ADMIN_REQUIRED`）；`/Users/{id}` 支持已存在用户 | ✅ 本地完成 | `userdata`/播放会话仍是单用户结构，普通用户暂时看到与管理员相同的播放数据；Emby 端点仍只认 `Users/1` 的数据；无用户管理 UI/API |
 | 85 | 按用户隔离播放数据：迁移 8 重建 `userdata` 为 `(user_id, movie_id)`、播放会话带 `user_id`、新增 `login_events`；store 增加 `DataUser`/`DataForUser`/`WriteIndexed*ForUser`/`RecordPlaybackEvent.UserID`；服务端一律按当前登录用户读写 | ✅ 本地完成 | 旧行归 user 1；Emby `/Users/{uid}` 仅允许当前用户 id（管理员代看留批次 86）；未做跨用户列表 API |
-| 86 | Emby 用户面：`/Users` 列表、`Users/{id}/Items` 等按当前用户过滤；普通用户只能访问自己的 id；管理端用户 CRUD API | 待做 | 管理员查看他人数据的产品语义待定 |
-| 87 | Web 管理 UI：用户列表/创建/改密/停用/删除；非管理员隐藏管理入口与 API 密钥创建 | 待做 | 真机与读屏复测 |
+| 86 | 管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`、管理员只读审计 API（登录/播放记录）、自助改密撤销会话；删除用户保留审计 | ✅ 本地完成 | 可见性尚未在浏览/流/详情路径强制；前端页待 88 |
+| 87 | 可见性强制：非管理员只能看到被授权的媒体库（默认无授权），浏览/列表/搜索/详情/播放/图片路径统一校验；管理员不受限 | 待做 | 管理员代改不开放（只读审计）；Emby 跨用户读仍禁止 |
+| 88 | Web 管理 UI：用户列表/创建/改密/删除/媒体库授权、登录与播放活动记录页；非管理员隐藏入口；普通用户设置页可自助改密 | 待做 | 真机与读屏复测 |
 
-## 10. 多用户设计决策（批次 84）
+## 10. 多用户设计决策（批次 84；批次 86 补充）
 
 - **账户**：`users(id INTEGER PRIMARY KEY, name UNIQUE, password_hash, is_admin, created_at, updated_at)`；id=1 为初始管理员，迁移从旧 `administrators` 复制，旧表保留以支持二进制回退。
 - **会话**：`access_tokens.user_id` 默认 1；登录成功后会话绑定账户，`requireAuth` 把 `store.User` 放入请求上下文。
 - **API 密钥**：`api_keys.user_id` 默认 1；`APIKeyUser` 解析所属账户；仅管理员可创建（D02）。旧密钥归管理员。
+- **可见性（m03632）**：媒体库按用户分配，新用户默认**全部不可见**；管理员不受限。Emby 数据只认本人，管理员跨用户只读审计走网页 API。
+- **审计（m03632）**：登录/播放记录保留 90 天且最多 5 万条；失败登录记 `user_id=0`（防枚举）并记 IP；删除用户保留审计（名字快照），个人播放数据随账户删除。
+- **管理边界（m03632）**：管理员只读查看他人播放/登录记录，不代改；普通用户可自助改密，管理员也可重置。
 - **管理员边界**：`/api/admin/*` 统一 `noStore → requireAuth → requireAdmin`；非管理员返回 403 `ADMIN_REQUIRED`，不再默认“任何 token 都是管理员”。
 - **兼容**：users 行缺失且会话属于 id=1 时，回退旧 `administrators`（或空库夹具）识别为管理员，避免升级瞬间把旧管理员锁在门外；该回退在 85/86 完成后应删除。
 - **未决**：普通用户是否可见全部媒体库/合集；管理员能否代看/代改他人播放数据；密码策略（沿用 ≥9 字符）；用户禁用（批次 87 实现为 `disabled` 列还是删除待定）。

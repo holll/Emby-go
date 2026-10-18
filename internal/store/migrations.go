@@ -517,6 +517,32 @@ func applyMigration2(tx *sql.Tx) error {
 
 // userdataMigrationVersion 8：userdata 重建为 (user_id, movie_id) 复合主键，
 // playback_sessions 增 user_id，新增 login_events 登录审计表。
+const userLibrariesMigrationVersion = 9
+
+// migration9Statements 增加“用户-媒体库”授权表（批次 86）：默认无授权，
+// 管理员显式分配后才可见；管理员账户不受该表限制（见 server 层）。
+var migration9Statements = []string{
+	`CREATE TABLE IF NOT EXISTS user_libraries (
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		library_id INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+		PRIMARY KEY(user_id, library_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_user_libraries_library ON user_libraries(library_id)`,
+}
+
+func migration9Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration9Statements, "\n"))))
+}
+
+func applyMigration9(tx *sql.Tx) error {
+	for _, statement := range migration9Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("迁移 9 失败: %w", err)
+		}
+	}
+	return nil
+}
+
 const userdataMigrationVersion = 8
 
 var migration8Statements = []string{
@@ -798,6 +824,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case userLibrariesMigrationVersion:
+			if checksum != migration9Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -849,6 +880,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[userLibrariesMigrationVersion] {
+		if err := applyMigration9(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -891,6 +927,11 @@ func (s *Store) migrate() error {
 	if !applied[userdataMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", userdataMigrationVersion, migration8Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", userdataMigrationVersion, err)
+		}
+	}
+	if !applied[userLibrariesMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", userLibrariesMigrationVersion, migration9Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", userLibrariesMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

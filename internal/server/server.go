@@ -383,6 +383,8 @@ func (a *App) routes() {
 	r.GET("/healthz", a.health)
 	r.GET("/api/auth/status", noStore, a.authStatus)
 	r.POST("/api/auth/initialize", noStore, a.initialize)
+	auth := r.Group("/api/auth", noStore, a.requireAuth)
+	auth.POST("/password", a.changePassword)
 	// 刮削预览用的图片代理刻意不挂鉴权：它要能直接放进 <img src>，而浏览器不会给
 	// 图片请求带自定义头（X-Emby-Token），挂鉴权只会让缩略图全部 401。
 	// 上游 MetaTube 的图片端点本身也是公开的（Jellyfin 插件同样直接引用），
@@ -413,6 +415,13 @@ func (a *App) routes() {
 	admin.DELETE("/items/:id", a.adminDelete)
 	admin.GET("/probe", a.adminProbe)
 	admin.DELETE("/probe", a.adminClearProbes)
+	admin.GET("/users", a.adminListUsers)
+	admin.POST("/users", a.adminCreateUser)
+	admin.PUT("/users/:id", a.adminUpdateUser)
+	admin.DELETE("/users/:id", a.adminDeleteUser)
+	admin.PUT("/users/:id/libraries", a.adminSetUserLibraries)
+	admin.GET("/login-events", a.adminLoginEvents)
+	admin.GET("/playback-events", a.adminPlaybackEvents)
 	admin.GET("/apikeys", a.adminAPIKeys)
 	admin.POST("/apikeys", a.adminCreateAPIKey)
 	admin.DELETE("/apikeys/:key", a.adminDeleteAPIKey)

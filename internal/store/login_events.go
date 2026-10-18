@@ -24,8 +24,26 @@ func (s *Store) RecordLoginEvent(userID int64, name, ip string, success bool, no
 	if userID > 0 {
 		uid = userID
 	}
-	_, err := s.db.Exec(`INSERT INTO login_events(user_id,name,ip,success,created_at) VALUES(?,?,?,?,?)`,
-		uid, name, ip, b2i(success), now.UTC().Format(time.RFC3339))
+	createdAt := now.UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO login_events(user_id,name,ip,success,created_at) VALUES(?,?,?,?,?)`,
+		uid, name, ip, b2i(success), createdAt); err != nil {
+		return err
+	}
+	return s.pruneLoginEvents(now)
+}
+
+// 登录审计保留 90 天且最多 5 万条，避免长期运行无限增长。
+const (
+	loginEventRetention = 90 * 24 * time.Hour
+	loginEventMaxRows   = 50000
+)
+
+func (s *Store) pruneLoginEvents(now time.Time) error {
+	cutoff := now.Add(-loginEventRetention).UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`DELETE FROM login_events WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM login_events WHERE id NOT IN (SELECT id FROM login_events ORDER BY id DESC LIMIT ?)`, loginEventMaxRows)
 	return err
 }
 
