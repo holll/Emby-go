@@ -22,8 +22,8 @@ func authPrivacyRequest(h http.Handler, method, path string) *httptest.ResponseR
 func assertAuthPrivateError(t *testing.T, w *httptest.ResponseRecorder, status int, message string) {
 	t.Helper()
 	var body map[string]any
-	if w.Code != status || json.Unmarshal(w.Body.Bytes(), &body) != nil || len(body) != 1 || body["error"] != message {
-		t.Fatalf("status=%d body=%s; expected %d %q", w.Code, w.Body.String(), status, message)
+	if w.Code != status || json.Unmarshal(w.Body.Bytes(), &body) != nil || len(body) != 2 || body["error"] != message || body["code"] != errorCodeForStatus(status) {
+		t.Fatalf("status=%d body=%s; expected %d %q with code %q", w.Code, w.Body.String(), status, message, errorCodeForStatus(status))
 	}
 	for _, secret := range []string{"private-admin-canary", "private-password-canary", "private-sql-canary", "sql:", "password_hash", "no such table", "NULL"} {
 		if strings.Contains(w.Body.String(), secret) {

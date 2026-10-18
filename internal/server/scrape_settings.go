@@ -148,7 +148,7 @@ type scrapeSettingsRequest struct {
 func (a *App) adminSaveScrapeSettings(c *gin.Context) {
 	var req scrapeSettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		apiError(c, http.StatusBadRequest, "invalid json")
 		return
 	}
 	writes := map[string]string{}
@@ -182,15 +182,15 @@ func (a *App) adminSaveScrapeSettings(c *gin.Context) {
 	}
 	putString(settingAvatarsDir, req.AvatarsDir)
 	if err := putInt(settingTimeout, req.TimeoutSeconds, 1, 600); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := putInt(settingConcurrency, req.Concurrency, 1, 8); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := putInt(settingImageQuality, req.ImageQuality, 1, 100); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	putBool(settingDownloadImages, req.DownloadImages)
@@ -205,14 +205,14 @@ func (a *App) adminSaveScrapeSettings(c *gin.Context) {
 			writes[settingTranslateAPIKey] = strings.TrimSpace(*tr.APIKey)
 		}
 		if err := putInt(settingTranslateTimeout, tr.TimeoutSeconds, 1, 300); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			apiError(c, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 
 	for key, value := range writes {
 		if err := a.db.SetSetting(key, value); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			apiError(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}

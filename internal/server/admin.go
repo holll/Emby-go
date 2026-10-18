@@ -31,12 +31,12 @@ type task struct {
 func (a *App) adminLibraries(c *gin.Context) {
 	v, e := a.db.Libraries()
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	counts, e := a.db.LibraryCounts()
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	// 保留 Library 原本的 Id/Name/Path 键名并额外带 count，
@@ -64,15 +64,15 @@ func (a *App) adminLibraries(c *gin.Context) {
 func (a *App) adminDeleteLibrary(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	if err = a.db.DeleteIndexedLibrary(id); err != nil {
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "library not found"})
+			apiError(c, 404, "library not found")
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	a.cache.Clear()
@@ -85,22 +85,22 @@ func (a *App) adminDeleteLibrary(c *gin.Context) {
 func (a *App) adminMoveLibrary(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	var req struct {
 		Direction string `json:"direction"`
 	}
 	if c.ShouldBindJSON(&req) != nil || (req.Direction != "up" && req.Direction != "down") {
-		c.JSON(400, gin.H{"error": "direction must be up or down"})
+		apiError(c, 400, "direction must be up or down")
 		return
 	}
 	if err = a.db.MoveLibrary(id, req.Direction == "up"); err != nil {
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "library not found"})
+			apiError(c, 404, "library not found")
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	// 顺序变了，库列表与 Views 的缓存都要失效。
@@ -113,26 +113,26 @@ func (a *App) adminMoveLibrary(c *gin.Context) {
 func (a *App) adminLibraryCover(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	lib, err := a.db.Library(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "library not found"})
+		apiError(c, 404, "library not found")
 		return
 	}
 	f, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(400, gin.H{"error": "file required"})
+		apiError(c, 400, "file required")
 		return
 	}
 	dest := filepath.Join(lib.Path, libraryCoverFileName)
 	if err = saveUploadedWebP(f, dest); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	if err = os.Rename(dest+".tmp", dest); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	a.invalidateImageTag(dest) // 同名文件被覆盖，立刻失效它的 tag 缓存
@@ -145,17 +145,17 @@ func (a *App) adminLibraryCover(c *gin.Context) {
 func (a *App) adminLibraryCoverDelete(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	lib, err := a.db.Library(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "library not found"})
+		apiError(c, 404, "library not found")
 		return
 	}
 	dest := filepath.Join(lib.Path, libraryCoverFileName)
 	if err = os.Remove(dest); err != nil && !os.IsNotExist(err) {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	a.invalidateImageTag(dest)
@@ -167,12 +167,12 @@ func (a *App) adminLibraryCoverDelete(c *gin.Context) {
 func (a *App) adminAddLibrary(c *gin.Context) {
 	var req struct{ Name, Path string }
 	if c.ShouldBindJSON(&req) != nil || req.Name == "" || req.Path == "" {
-		c.JSON(400, gin.H{"error": "name and path required"})
+		apiError(c, 400, "name and path required")
 		return
 	}
 	v, e := a.db.AddLibrary(req.Name, req.Path)
 	if e != nil {
-		c.JSON(400, gin.H{"error": e.Error()})
+		apiError(c, 400, e.Error())
 		return
 	}
 	c.JSON(200, v)
@@ -339,7 +339,7 @@ func (a *App) scanning() bool {
 
 func (a *App) adminScan(c *gin.Context) {
 	if a.scanning() {
-		c.JSON(http.StatusConflict, gin.H{"error": errScanBusy.Error()})
+		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return
 	}
 	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
@@ -348,14 +348,14 @@ func (a *App) adminScan(c *gin.Context) {
 	a.finishTask(taskID, err)
 	if err != nil {
 		if errors.Is(err, errScanBusy) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			apiError(c, http.StatusConflict, err.Error())
 			return
 		}
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "library not found"})
+			apiError(c, 404, "library not found")
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	c.JSON(200, result)
@@ -364,7 +364,7 @@ func (a *App) adminScan(c *gin.Context) {
 // adminReindex 全库重建索引（与扫描同一路径，仅范围是全部媒体库）。
 func (a *App) adminReindex(c *gin.Context) {
 	if a.scanning() {
-		c.JSON(http.StatusConflict, gin.H{"error": errScanBusy.Error()})
+		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return
 	}
 	slog.Info("开始重建索引")
@@ -373,14 +373,14 @@ func (a *App) adminReindex(c *gin.Context) {
 	a.finishTask(taskID, err)
 	if err != nil {
 		if errors.Is(err, errScanBusy) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			apiError(c, http.StatusConflict, err.Error())
 			return
 		}
 		if store.NotFound(err) {
 			c.JSON(200, result)
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	slog.Info("重建索引完成", "success", result.Success, "pending", result.Pending,
@@ -418,7 +418,7 @@ func (a *App) adminItems(c *gin.Context) {
 		Offset:     offset,
 	})
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	// 媒体墙需要观看状态（已看/收藏/进度）做角标与进度条。
@@ -443,15 +443,15 @@ func (a *App) adminItems(c *gin.Context) {
 func (a *App) adminDelete(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	if err = a.db.DeleteIndexedMovie(id); err != nil {
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "not found"})
+			apiError(c, 404, "not found")
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	a.cache.Clear()
@@ -489,7 +489,7 @@ func (a *App) adminPatch(c *gin.Context) { a.adminEditMode(c, true) }
 func (a *App) adminEditMode(c *gin.Context, strict bool) {
 	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
 	if e != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	var req editRequest
@@ -503,31 +503,31 @@ func (a *App) adminEditMode(c *gin.Context, strict bool) {
 		if strict {
 			message = "invalid metadata fields"
 		}
-		c.JSON(400, gin.H{"error": message})
+		apiError(c, 400, message)
 		return
 	}
 	if req.LockedFields != nil {
 		for _, field := range *req.LockedFields {
 			if strings.ContainsAny(field, "|\r\n") {
-				c.JSON(400, gin.H{"error": "字段锁名称不能包含分隔符或换行"})
+				apiError(c, 400, "字段锁名称不能包含分隔符或换行")
 				return
 			}
 		}
 	}
 	// 覆盖 NFO、manual 标记和索引刷新必须处于同一通道内，阻止旧扫描结果回写。
 	if !a.claimNFO("edit") {
-		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return
 	}
 	defer a.releaseNFO("edit")
 	m, e := a.db.Movie(id)
 	if e != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	nfoPath := editNFOPath(m)
 	if _, e = nfo.Read(nfoPath); e != nil && !errors.Is(e, os.ErrNotExist) {
-		c.JSON(400, gin.H{"error": "nfo 不可读: " + e.Error()})
+		apiError(c, 400, "nfo 不可读: "+e.Error())
 		return
 	}
 	// 走标签级更新而不是「读成结构体 → 整体重写」：NFO 里可能有外部工具写的
@@ -568,7 +568,7 @@ func (a *App) adminEditMode(c *gin.Context, strict bool) {
 		fields.ClearFields = req.clearTags()
 	}
 	if e = nfo.UpdateScraped(nfoPath, fields); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	// 文件已经落盘；后续任何失败必须表达为部分成功，不能伪报保存失败或全成功。
@@ -589,22 +589,22 @@ func trimList(values []string) []string {
 func (a *App) adminReread(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	if !a.claimNFO("edit") {
-		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return
 	}
 	defer a.releaseNFO("edit")
 	movie, err := a.db.Movie(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	libraries, err := a.db.Libraries()
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	var library store.Library
@@ -615,18 +615,18 @@ func (a *App) adminReread(c *gin.Context) {
 		}
 	}
 	if library.ID == 0 {
-		c.JSON(404, gin.H{"error": "library not found"})
+		apiError(c, 404, "library not found")
 		return
 	}
 	// 单文件重扫：整库重扫在「点一条重读源」这种场景下代价过高，
 	// 且会顺带触发 DeleteMissingSources，风险与收益不成比例。
 	if _, err = scanner.RescanOne(a.db, library, movie.SourcePath); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	movie, err = a.db.Movie(id)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "source no longer indexed"})
+		apiError(c, 404, "source no longer indexed")
 		return
 	}
 	a.cache.Clear()
@@ -651,23 +651,23 @@ func (a *App) adminImage(c *gin.Context) {
 	}
 	f, e := c.FormFile("file")
 	if e != nil {
-		c.JSON(400, gin.H{"error": "file required"})
+		apiError(c, 400, "file required")
 		return
 	}
 	kind := strings.ToLower(c.Param("kind"))
 	names := map[string]string{"poster": "poster.webp", "primary": "poster.webp", "backdrop": "fanart.webp", "fanart": "fanart.webp", "landscape": "landscape.webp"}
 	name, ok := names[kind]
 	if !ok {
-		c.JSON(400, gin.H{"error": "unsupported image kind"})
+		apiError(c, 400, "unsupported image kind")
 		return
 	}
 	dest := filepath.Join(m.OutputDir, name)
 	if e = saveUploadedWebP(f, dest); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	if e = os.Rename(dest+".tmp", dest); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	// 同名图片被覆盖，立即失效它的 tag 缓存，否则客户端几分钟内仍拿旧图。
@@ -716,7 +716,7 @@ func (a *App) adminStatus(c *gin.Context) {
 	for _, status := range []string{"success", "manual", "pending"} {
 		count, err := a.db.CountByStatus(status)
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			apiError(c, 500, err.Error())
 			return
 		}
 		result[status] = count
@@ -727,7 +727,7 @@ func (a *App) adminStatus(c *gin.Context) {
 func (a *App) adminProbe(c *gin.Context) {
 	v, e := a.db.Probes(100)
 	if e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+		apiError(c, 500, e.Error())
 		return
 	}
 	c.JSON(200, gin.H{"items": v})
@@ -735,7 +735,7 @@ func (a *App) adminProbe(c *gin.Context) {
 
 func (a *App) adminClearProbes(c *gin.Context) {
 	if err := a.clearDiagnosticProbes(); err != nil {
-		c.JSON(500, gin.H{"error": "probe history clear failed"})
+		apiError(c, 500, "probe history clear failed")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -750,7 +750,7 @@ func (a *App) adminClearProbes(c *gin.Context) {
 func (a *App) adminAPIKeys(c *gin.Context) {
 	keys, err := a.db.APIKeys()
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	c.JSON(200, gin.H{"items": keys, "total": len(keys)})
@@ -761,12 +761,12 @@ func (a *App) adminCreateAPIKey(c *gin.Context) {
 		Name string `json:"name"`
 	}
 	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Name) == "" {
-		c.JSON(400, gin.H{"error": "name required"})
+		apiError(c, 400, "name required")
 		return
 	}
 	key, err := a.db.CreateAPIKey(req.Name)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	slog.Info("创建 API 密钥")
@@ -777,10 +777,10 @@ func (a *App) adminDeleteAPIKey(c *gin.Context) {
 	key := c.Param("key")
 	if err := a.db.DeleteAPIKey(key); err != nil {
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "key not found"})
+			apiError(c, 404, "key not found")
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		apiError(c, 500, err.Error())
 		return
 	}
 	a.cache.Delete("apikey:" + key)

@@ -238,7 +238,7 @@ func normalizeParams(kind string, raw map[string]any) (string, error) {
 func (a *App) adminScheduledTasks(c *gin.Context) {
 	tasks, err := a.db.ScheduledTasks()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	items := make([]scheduledView, 0, len(tasks))
@@ -292,17 +292,17 @@ func validateScheduled(req scheduledRequest) (store.ScheduledTask, error) {
 func (a *App) adminCreateScheduledTask(c *gin.Context) {
 	var req scheduledRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		apiError(c, http.StatusBadRequest, "invalid json")
 		return
 	}
 	task, err := validateScheduled(req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	created, err := a.db.CreateScheduledTask(task)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	a.reloadScheduled()
@@ -324,24 +324,24 @@ func (a *App) adminConditionalScheduledTask(c *gin.Context) {
 func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	var req scheduledRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		apiError(c, http.StatusBadRequest, "invalid json")
 		return
 	}
 	task, err := validateScheduled(req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	task.ID = id
 	var updated store.ScheduledTask
 	if values, conditional := c.Request.Header["If-Match"]; conditional {
 		if len(values) != 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "one configuration validator required"})
+			apiError(c, http.StatusBadRequest, "one configuration validator required")
 			return
 		}
 		current, readErr := a.db.ScheduledTask(id)
@@ -349,7 +349,7 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 			if store.NotFound(readErr) {
 				c.JSON(http.StatusPreconditionFailed, gin.H{"code": "SCHEDULED_CONFIG_CHANGED", "error": "计划配置已变化或删除，请保留当前输入，刷新后核对"})
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+				apiError(c, http.StatusInternalServerError, "configuration unavailable")
 			}
 			return
 		}
@@ -368,10 +368,10 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 			return
 		}
 		if store.NotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			apiError(c, http.StatusNotFound, "task not found")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	a.reloadScheduled()
@@ -383,22 +383,22 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 func (a *App) adminToggleScheduledTask(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	current, err := a.db.ScheduledTask(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		apiError(c, http.StatusNotFound, "task not found")
 		return
 	}
 	if err := a.db.SetScheduledTaskEnabled(id, !current.Enabled); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	a.reloadScheduled()
 	updated, err := a.db.ScheduledTask(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	slog.Info("切换计划任务状态", "task_id", id, "enabled", updated.Enabled)
@@ -408,15 +408,15 @@ func (a *App) adminToggleScheduledTask(c *gin.Context) {
 func (a *App) adminDeleteScheduledTask(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	if err := a.db.DeleteScheduledTask(id); err != nil {
 		if store.NotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			apiError(c, http.StatusNotFound, "task not found")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	a.reloadScheduled()
@@ -428,11 +428,11 @@ func (a *App) adminDeleteScheduledTask(c *gin.Context) {
 func (a *App) adminRunScheduledTask(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	if _, err := a.db.ScheduledTask(id); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		apiError(c, http.StatusNotFound, "task not found")
 		return
 	}
 	a.workerWG.Add(1)
@@ -451,7 +451,7 @@ func (a *App) adminValidateCron(c *gin.Context) {
 		Cron string `json:"cron"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		apiError(c, http.StatusBadRequest, "invalid json")
 		return
 	}
 	runs, err := scheduler.Preview(strings.TrimSpace(req.Cron), 5)

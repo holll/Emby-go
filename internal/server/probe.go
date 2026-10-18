@@ -160,7 +160,7 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 	var req probeRequest
 	if c.Request.ContentLength > 0 {
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+			apiError(c, http.StatusBadRequest, "invalid json")
 			return
 		}
 	}
@@ -187,7 +187,7 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		if errors.Is(err, errProbeBusy) {
 			status = http.StatusConflict
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		apiError(c, status, err.Error())
 		return
 	}
 	if len(plan.targets) == 0 {
@@ -195,7 +195,7 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		return
 	}
 	if !a.beginProbe(len(plan.targets)) {
-		c.JSON(http.StatusConflict, gin.H{"error": errProbeBusy.Error()})
+		apiError(c, http.StatusConflict, errProbeBusy.Error())
 		return
 	}
 	taskID := a.startTask("probe")
@@ -219,7 +219,7 @@ func (a *App) adminProbeMediaCancel(c *gin.Context) {
 	running := a.probeStatus.Running
 	a.probeTaskMu.Unlock()
 	if !running || cancel == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "当前没有探测任务"})
+		apiError(c, http.StatusConflict, "当前没有探测任务")
 		return
 	}
 	cancel()
@@ -230,29 +230,29 @@ func (a *App) adminProbeMediaCancel(c *gin.Context) {
 func (a *App) adminProbeMediaItem(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
 	if strings.TrimSpace(movie.NFOPath) == "" {
-		c.JSON(http.StatusConflict, gin.H{"error": "该影片没有 NFO，探测结果无处写入；请先完成元数据刮削"})
+		apiError(c, http.StatusConflict, "该影片没有 NFO，探测结果无处写入；请先完成元数据刮削")
 		return
 	}
 	// 本端点同样会「读全文 → 改局部 → 原子写」该片的 NFO，必须走与批量探测
 	// 同一道 nfoGate：否则与刮削/扫库/批量探测并行时会互相覆盖。
 	// 用 "probe" 身份（与批量探测同名，靠 nfoRefs 计数保证释放正确）。
 	if !a.claimNFO("probe") {
-		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return
 	}
 	defer a.releaseNFO("probe")
 	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	ctx, cancel := a.requestContext(c)
@@ -300,7 +300,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 	}
 	a.cache.Clear()
 	if len(files) == 0 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "全部文件探测失败: " + strings.Join(failures, "；")})
+		apiError(c, http.StatusBadGateway, "全部文件探测失败: "+strings.Join(failures, "；"))
 		return
 	}
 	response := gin.H{

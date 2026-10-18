@@ -144,7 +144,7 @@ func (a *App) authRateLimited(c *gin.Context, username string) bool {
 func (a *App) authStatus(c *gin.Context) {
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
+		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	// setup_code_required 只暴露是否配置了引导验证码，不回显内容。
@@ -189,7 +189,7 @@ func (a *App) initialize(c *gin.Context) {
 	}
 	if c.ShouldBindJSON(&req) != nil || !validCredentials(req.Username, req.Pw) {
 		a.authLimiter.recordFailure(c.ClientIP(), "")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "账号至少 3 个字符，密码至少 9 个字符"})
+		apiError(c, http.StatusBadRequest, "账号至少 3 个字符，密码至少 9 个字符")
 		return
 	}
 	// D04：配置了 setup_code 时，首初始化必须携带；比较用恒定时间实现。
@@ -201,17 +201,17 @@ func (a *App) initialize(c *gin.Context) {
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
 		// 存储故障不是调用方的失败，不计数。
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
+		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	if initialized {
 		a.authLimiter.recordFailure(c.ClientIP(), "")
-		c.JSON(http.StatusConflict, gin.H{"error": "管理员已初始化"})
+		apiError(c, http.StatusConflict, "管理员已初始化")
 		return
 	}
 	if err := a.db.InitializeAdministrator(strings.TrimSpace(req.Username), req.Pw); err != nil {
 		a.authLimiter.recordFailure(c.ClientIP(), "")
-		c.JSON(http.StatusConflict, gin.H{"error": "初始化失败，请更换账号后重试"})
+		apiError(c, http.StatusConflict, "初始化失败，请更换账号后重试")
 		return
 	}
 	a.authLimiter.reset(c.ClientIP(), "")
@@ -226,7 +226,7 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	if err := c.ShouldBind(&req); err != nil {
 		a.authLimiter.recordFailure(c.ClientIP(), "")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credentials payload"})
+		apiError(c, http.StatusBadRequest, "invalid credentials payload")
 		return
 	}
 	username := strings.TrimSpace(req.Username)
@@ -235,33 +235,33 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
+		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	if !initialized {
-		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "管理员尚未初始化"})
+		apiError(c, http.StatusPreconditionRequired, "管理员尚未初始化")
 		return
 	}
 	valid, err := a.db.AuthenticateAdministrator(username, req.Pw)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication storage unavailable"})
+		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	if !valid {
 		a.authLimiter.recordFailure(c.ClientIP(), username)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
+		apiError(c, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
 	a.authLimiter.reset(c.ClientIP(), username)
 	b := make([]byte, 24)
 	if _, err = rand.Read(b); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成访问令牌失败"})
+		apiError(c, http.StatusInternalServerError, "生成访问令牌失败")
 		return
 	}
 	a.setAdminName(username)
 	token := hex.EncodeToString(b)
 	if err := a.db.SaveAccessTokenExpiring(token, a.sessionExpiry(time.Now())); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存访问令牌失败"})
+		apiError(c, http.StatusInternalServerError, "保存访问令牌失败")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -333,7 +333,7 @@ func (a *App) userByID(c *gin.Context) {
 
 func (a *App) validUser(c *gin.Context) bool {
 	if c.Param("uid") != "1" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		apiError(c, http.StatusNotFound, "user not found")
 		return false
 	}
 	return true

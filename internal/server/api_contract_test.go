@@ -82,6 +82,7 @@ func TestAPIContractErrorEnvelope(t *testing.T) {
 		{"emby 未认证", http.MethodGet, "/Users/Me", nil, http.StatusUnauthorized, "AUTH_INVALID"},
 		{"未知路径", http.MethodGet, "/api/definitely-not-here", nil, http.StatusNotFound, "NOT_FOUND"},
 		{"请求体超限", http.MethodPost, "/api/auth/initialize", bytes.Repeat([]byte("x"), int(defaultRequestBodyLimit)+1), http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE"},
+		{"初始化参数不合法", http.MethodPost, "/api/auth/initialize", []byte(`{"Username":"ab","Pw":"short"}`), http.StatusBadRequest, "INVALID_REQUEST"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

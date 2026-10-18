@@ -191,7 +191,7 @@ func (a *App) adminScrapeCancel(c *gin.Context) {
 	cancel, running := a.scrapeCancel, a.scrapeStatus.Running
 	a.scrapeTaskMu.Unlock()
 	if !running || cancel == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "当前没有刮削任务"})
+		apiError(c, http.StatusConflict, "当前没有刮削任务")
 		return
 	}
 	cancel()
@@ -212,7 +212,7 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 	var req scrapeRunRequest
 	if c.Request.ContentLength > 0 {
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+			apiError(c, http.StatusBadRequest, "invalid json")
 			return
 		}
 	}
@@ -225,19 +225,19 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未配置 MetaTube 地址或 token"})
+		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
 		return
 	}
 	if req.Overwrite != nil {
 		cfg.Overwrite = *req.Overwrite
 	}
 	if owner := a.nfoBusyOwner(); owner != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": owner + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, owner+"正在进行中，请稍后再试")
 		return
 	}
 	total, err := a.db.CountMoviesForScrape(req.LibraryID, onlyMissing)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if total == 0 {
@@ -311,7 +311,7 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 	}
 	if c.Request.ContentLength > 0 {
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+			apiError(c, http.StatusBadRequest, "invalid json")
 			return
 		}
 	}
@@ -320,16 +320,16 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未配置 MetaTube 地址或 token"})
+		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
 		return
 	}
 	if owner := a.nfoBusyOwner(); owner != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": owner + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, owner+"正在进行中，请稍后再试")
 		return
 	}
 	names, err := a.db.ActorsMissingAvatar(req.LibraryID, req.Limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if len(names) == 0 {
@@ -397,14 +397,14 @@ func (a *App) adminScrapePreview(c *gin.Context) {
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未配置 MetaTube 地址或 token"})
+		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
 		return
 	}
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
 	preview, err := scraper.New(cfg, a.db).Preview(ctx, movie)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadGateway, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, preview)
@@ -421,12 +421,12 @@ func (a *App) adminScrapeInspect(c *gin.Context) {
 		ID       string `json:"id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Provider == "" || req.ID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider 与 id 必填"})
+		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
 		return
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未配置 MetaTube 地址或 token"})
+		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
 		return
 	}
 	ctx, cancel := a.requestContext(c)
@@ -434,7 +434,7 @@ func (a *App) adminScrapeInspect(c *gin.Context) {
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
 	info, err := client.MovieInfo(ctx, req.Provider, req.ID, true)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadGateway, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, a.buildInspect(cfg, movie, info))
@@ -452,16 +452,16 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 		Overwrite *bool  `json:"overwrite"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Provider == "" || req.ID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider 与 id 必填"})
+		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
 		return
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "尚未配置 MetaTube 地址或 token"})
+		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
 		return
 	}
 	if !a.claimNFO("scrape") {
-		c.JSON(http.StatusConflict, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		apiError(c, http.StatusConflict, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return
 	}
 	defer a.releaseNFO("scrape")
@@ -482,7 +482,7 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 	a.cache.Clear()
 	if err != nil {
 		_ = a.db.SetScrapeResult(movie.ID, err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		apiError(c, http.StatusBadGateway, err.Error())
 		return
 	}
 	slog.Info("单条刮削完成", "movie_id", movie.ID, "provider", req.Provider, "id", req.ID,
@@ -507,12 +507,12 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 	switch kind {
 	case "primary", "thumb", "backdrop":
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported image kind"})
+		apiError(c, http.StatusBadRequest, "unsupported image kind")
 		return
 	}
 	provider, id := c.Query("provider"), c.Query("id")
 	if provider == "" || id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider 与 id 必填"})
+		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
 		return
 	}
 	// 同一张缩略图在一次预览里会被反复要（切候选、重开抽屉），
@@ -571,12 +571,12 @@ const (
 func (a *App) movieParam(c *gin.Context) (store.Movie, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return store.Movie{}, false
 	}
 	movie, err := a.db.Movie(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		apiError(c, http.StatusNotFound, "not found")
 		return store.Movie{}, false
 	}
 	return movie, true
@@ -588,7 +588,7 @@ func (a *App) adminScrapeCandidates(c *gin.Context) {
 	onlyMissing := c.DefaultQuery("only_missing", "true") != "false"
 	total, err := a.db.CountMoviesForScrape(libraryID, onlyMissing)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"total": total, "library_id": libraryID, "only_missing": onlyMissing})
@@ -645,7 +645,7 @@ func (a *App) scraperFor(cfg scraper.Config) *scraper.Scraper {
 // 保证「占用与释放」在同一个栈上，goroutine 起不来也不会把通道永久锁死。
 func (a *App) startScrapeTask(c *gin.Context, kind string, total int) bool {
 	if !a.beginScrape(kind, total) {
-		c.JSON(http.StatusConflict, gin.H{"error": errScrapeBusy.Error()})
+		apiError(c, http.StatusConflict, errScrapeBusy.Error())
 		return false
 	}
 	return true

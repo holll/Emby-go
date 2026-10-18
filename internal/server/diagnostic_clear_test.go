@@ -143,7 +143,7 @@ func TestDiagnosticClearDeleteFailurePreservesGeneration(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		w := diagnosticClearRequest(a, diagnosticClearToken)
 		diagnosticClearAssertHTTP(t, w, http.StatusInternalServerError)
-		if w.Body.String() != `{"error":"probe history clear failed"}` {
+		if w.Body.String() != `{"code":"INTERNAL","error":"probe history clear failed"}` {
 			t.Fatalf("unexpected public clear error: %q", w.Body.String())
 		}
 		for _, secret := range []string{"canary", "DELETE", "api_probe", "SQL", "sqlite", "trigger"} {

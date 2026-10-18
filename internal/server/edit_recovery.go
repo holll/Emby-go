@@ -121,32 +121,32 @@ func (a *App) indexEditedNFO(m store.Movie, path, digest string) (string, string
 func (a *App) adminRecoverEdit(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "not found"})
+		apiError(c, 404, "not found")
 		return
 	}
 	var req struct {
 		Digest string `json:"nfo_sha256"`
 	}
 	if c.ShouldBindJSON(&req) != nil {
-		c.JSON(400, gin.H{"error": "invalid json"})
+		apiError(c, 400, "invalid json")
 		return
 	}
 	b, err := hex.DecodeString(req.Digest)
 	if err != nil || len(b) != sha256.Size {
-		c.JSON(400, gin.H{"error": "nfo_sha256 required"})
+		apiError(c, 400, "nfo_sha256 required")
 		return
 	}
 	if !a.claimNFO("edit") {
-		c.JSON(409, gin.H{"error": a.nfoBusyOwner() + "正在进行中，请稍后再试"})
+		apiError(c, 409, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return
 	}
 	defer a.releaseNFO("edit")
 	m, err := a.db.Movie(id)
 	if err != nil {
 		if store.NotFound(err) {
-			c.JSON(404, gin.H{"error": "not found"})
+			apiError(c, 404, "not found")
 		} else {
-			c.JSON(503, gin.H{"error": "索引暂不可用，请稍后重试"})
+			apiError(c, 503, "索引暂不可用，请稍后重试")
 		}
 		return
 	}
@@ -167,7 +167,7 @@ func (a *App) adminRecoverEdit(c *gin.Context) {
 func (a *App) adminEditRecoveryList(c *gin.Context) {
 	failures, err := a.db.EditFailures(time.Now())
 	if err != nil {
-		c.JSON(503, gin.H{"error": "索引恢复列表暂不可用，请稍后重试"})
+		apiError(c, 503, "索引恢复列表暂不可用，请稍后重试")
 		return
 	}
 	stale := 0

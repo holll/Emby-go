@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；396 个 Test 函数（server 31.5s / store 11.6s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；398 个 Test 函数（server 31.2s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 82/82 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39052879140（`45c1344`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -245,8 +245,8 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
-| 73 | 契约基线：`API-CONTRACT.md`、关键路由/错误信封契约测试、未知路由 `NOT_FOUND`、admin 组 `no-store` 先于鉴权 | ✅ 本地完成 | 管理面 400/404/500 仍有只带 `error` 的旧响应（批次 74） |
-| 74 | 管理面错误码补齐（纯增量） | 计划 | 需逐端点补 `code` 并加断言，不改既有人类可读文本 |
+| 73 | 契约基线：`API-CONTRACT.md`、关键路由/错误信封契约测试、未知路由 `NOT_FOUND`、admin 组 `no-store` 先于鉴权 | ✅ 本地完成 | 管理面旧响应当时仍只带 `error`（已于批次 74 补齐） |
+| 74 | 管理面错误码补齐（纯增量）：`/api/*` 统一 `apiError`，139 处旧响应补 `INVALID_REQUEST`/`NOT_FOUND`/`CONFLICT`/`PRECONDITION_REQUIRED`/`INTERNAL`/`UNAVAILABLE`；契约测试补 400 用例 | ✅ 本地完成 | Emby 兼容端点少数错误仍只带 `error`（批次 76 统一）；专用 `code`（`SCAN_BUSY` 等）保持不变 |
 | 75 | 弃用机制 | 计划 | v2 内只登记不删除 |
 | 76 | 兼容回归：旧客户端抓包与字段抽检 | 计划 | 需部署环境/真机 |
 

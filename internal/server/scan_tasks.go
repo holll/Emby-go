@@ -189,7 +189,7 @@ func (a *App) adminSubmitScan(c *gin.Context) {
 	}
 	libraryID, err := strconv.ParseInt(c.Query("library_id"), 10, 64)
 	if err != nil && c.Query("library_id") != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "library_id 非法"})
+		apiError(c, http.StatusBadRequest, "library_id 非法")
 		return
 	}
 	taskID := a.startTask("scan")
@@ -232,7 +232,7 @@ func (a *App) runAsyncScan(id, libraryID int64) {
 func (a *App) adminScanTaskStatus(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": errScanTaskNotFound.Error()})
+		apiError(c, http.StatusNotFound, errScanTaskNotFound.Error())
 		return
 	}
 	task, err := a.scanTaskByID(id)

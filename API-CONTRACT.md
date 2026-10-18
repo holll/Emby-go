@@ -37,6 +37,7 @@
 
 | HTTP | code | 语义 |
 |---|---|---|
+| 400 | `INVALID_REQUEST` | 通用参数/请求体不合法（批次 74 起覆盖 `/api/*`） |
 | 400 | `IDEMPOTENCY_KEY_TOO_LONG` | 幂等键超过 128 字符 |
 | 400 | `SCHEDULED_PRECONDITION_REQUIRED` | 条件更新缺前置 |
 | 400 | `SCHEDULED_CONFIG_CHANGED` | 计划任务并发修改 |
@@ -44,15 +45,22 @@
 | 403 | `SETUP_CODE_INVALID` | 初始化验证码错误 |
 | 403 | `INIT_SOURCE_DENIED` | 初始化来源不在白名单 |
 | 404 | `NOT_FOUND` / `TASK_NOT_FOUND` | 资源或任务不存在 |
+| 409 | `CONFLICT` | 通用状态冲突（资源被占用/重复操作） |
 | 409 | `SCAN_BUSY` | 扫描进行中 |
 | 409 | `NFO_CHANGED` | 手工编辑与磁盘 NFO 冲突 |
 | 413 | `BODY_TOO_LARGE` | 请求体超过端点预算 |
 | 429 | `AUTH_RATE_LIMITED` | 登录/初始化失败过多 |
 | 429 | `TASK_CAPACITY` | 异步任务表已满 |
 | 503 | `AUTH_UNAVAILABLE` | 凭据存储不可用（可重试） |
+| 503 | `UNAVAILABLE` | 通用服务不可用（可重试） |
 | 502 | `UPSTREAM_UNAVAILABLE` | 播放源/上游不可用 |
+| 428 | `PRECONDITION_REQUIRED` | 实例尚未初始化 |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | 上传/请求类型不支持 |
+| 500 | `INTERNAL` | 未归类内部错误（不回显内部细节） |
 
-管理面旧端点仍有只带 `error` 的 400/404/500；批次 74 会补齐 `code`（纯增量），在此之前客户端应对缺失 `code` 做兜底。
+自批次 74 起，`/api/*` 的 400/404/409/428/500/502/503 都由统一 helper 补通用 `code`（`INVALID_REQUEST` / `NOT_FOUND` / `CONFLICT` / `PRECONDITION_REQUIRED` / `INTERNAL` / `UPSTREAM_UNAVAILABLE` / `UNAVAILABLE`），端点有更精确语义时保留专用 `code`（如 `SCAN_BUSY`）。
+
+未闭合：Emby 兼容端点的少数错误仍可能只带 `error`（例如详情/列表读失败的 500、部分 404），批次 76 协议审计时统一；在此之前客户端对缺失 `code` 做兜底。
 
 ## 4. 稳定字段（Emby 浏览主链路）
 
