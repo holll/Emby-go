@@ -1038,17 +1038,22 @@ func (s *Store) Movie(id int64) (Movie, error) {
 }
 
 func (s *Store) SearchFiltered(userID, libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
+	return s.SearchFilteredVisible(userID, libraryID, nil, term, years, genre, unplayed, sortBy, desc, limit, offset)
+}
+
+// SearchFilteredVisible 与 SearchFiltered 相同，并按用户可见媒体库集合过滤（nil=不限制）。
+func (s *Store) SearchFilteredVisible(userID, libraryID int64, visible []int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+	return s.search(userID, libraryID, visible, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
 func (s *Store) SearchScoped(userID, libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(userID, libraryID, nil, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(1, libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(1, libraryID, nil, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
 }
 
 // AdminQuery 管理端列表（媒体墙）的查询条件。
@@ -1073,13 +1078,19 @@ type AdminQuery struct {
 	Offset     int
 }
 
+// SearchScopedVisible 与 SearchScoped 相同，但额外限制用户可见媒体库集合
+// （nil=不限制；空切片=无可见库，返回空结果）。用于非管理员的多用户可见性。
+func (s *Store) SearchScopedVisible(userID, libraryID int64, visible []int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+	return s.search(userID, libraryID, visible, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+}
+
 // SearchAdmin 供管理端列表使用。
 func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
 	userID := q.UserID
 	if userID <= 0 {
 		userID = 1
 	}
-	return s.search(userID, q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
+	return s.search(userID, q.LibraryID, nil, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
 		false, false, q.SortBy, q.Desc, q.Limit, q.Offset)
 }
 
@@ -1124,7 +1135,7 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 	return out, rows.Err()
 }
 
-func (s *Store) search(userID, libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	where := []string{}
 	args := []any{}
 	switch status {
@@ -1146,6 +1157,17 @@ func (s *Store) search(userID, libraryID int64, term, status, years, genre, tags
 	if libraryID > 0 {
 		where = append(where, "library_id=?")
 		args = append(args, libraryID)
+	} else if visible != nil {
+		if len(visible) == 0 {
+			where = append(where, "1=0")
+		} else {
+			ph := make([]string, len(visible))
+			for i, id := range visible {
+				ph[i] = "?"
+				args = append(args, id)
+			}
+			where = append(where, "library_id IN ("+strings.Join(ph, ",")+")")
+		}
 	}
 	if collection == "*" {
 		where = append(where, "COALESCE(collection,'') <> ''")
@@ -1487,11 +1509,27 @@ func (s *Store) Actors(movieID int64) ([]ActorRef, error) {
 
 // Latest 返回库内最近入库的可见影片（按入库倒序）。
 func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
+	return s.LatestVisible(libraryID, nil, limit, offset)
+}
+
+// LatestVisible 与 Latest 相同，并按用户可见媒体库集合过滤（nil=不限制）。
+func (s *Store) LatestVisible(libraryID int64, visible []int64, limit, offset int) ([]Movie, error) {
 	query := "SELECT " + movieCols + " FROM movies WHERE status IN ('success','manual')"
 	args := []any{}
 	if libraryID > 0 {
 		query += " AND library_id=?"
 		args = append(args, libraryID)
+	} else if visible != nil {
+		if len(visible) == 0 {
+			query += " AND 1=0"
+		} else {
+			ph := make([]string, len(visible))
+			for i, id := range visible {
+				ph[i] = "?"
+				args = append(args, id)
+			}
+			query += " AND library_id IN (" + strings.Join(ph, ",") + ")"
+		}
 	}
 	query += " ORDER BY id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -1514,16 +1552,34 @@ func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
 // Resumed 返回有播放进度且未隐藏续播的可见影片（按标题排序，与列表口径一致），
 // 供「继续观看」直接分页，避免全量载入后在内存里过滤。
 func (s *Store) Resumed(userID int64, limit, offset int) ([]Movie, int, error) {
+	return s.ResumedVisible(userID, nil, limit, offset)
+}
+
+// ResumedVisible 与 Resumed 相同，并按用户可见媒体库集合过滤（nil=不限制）。
+func (s *Store) ResumedVisible(userID int64, visible []int64, limit, offset int) ([]Movie, int, error) {
 	if userID <= 0 {
 		userID = 1
 	}
-	const cond = ` FROM movies JOIN userdata u ON u.movie_id=movies.id
+	cond := ` FROM movies JOIN userdata u ON u.movie_id=movies.id
 		WHERE u.user_id=? AND movies.status IN ('success','manual') AND u.position_ticks>0 AND COALESCE(u.hide_from_resume,0)=0`
+	args := []any{userID}
+	if visible != nil {
+		if len(visible) == 0 {
+			cond += " AND 1=0"
+		} else {
+			ph := make([]string, len(visible))
+			for i, id := range visible {
+				ph[i] = "?"
+				args = append(args, id)
+			}
+			cond += " AND movies.library_id IN (" + strings.Join(ph, ",") + ")"
+		}
+	}
 	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*)"+cond, userID).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*)"+cond, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query("SELECT "+movieCols+cond+" ORDER BY movies.title, movies.id LIMIT ? OFFSET ?", userID, limit, offset)
+	rows, err := s.db.Query("SELECT "+movieCols+cond+" ORDER BY movies.title, movies.id LIMIT ? OFFSET ?", append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}

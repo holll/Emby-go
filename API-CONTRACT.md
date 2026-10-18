@@ -90,7 +90,7 @@
 - `GET /api/admin/login-events?user_id=&limit=` → 登录审计（失败登录 `user_id=0`，不归因具体账户）。
 - `GET /api/admin/playback-events?user_id=&limit=` → 播放事件（含 `movie_title`/`user_name` 快照；用户删除后快照仍在）。
 - `POST /api/auth/password`（需登录）→ 204，改密后撤销该账户全部会话。
-- 可见性：媒体库按用户授权（`user_libraries`，默认无授权）；管理员不受限。Emby 数据只认本人。
+- 可见性（批次 87 起强制）：媒体库按用户授权（`user_libraries`，默认无授权）；未授权库的列表为空、详情/PlaybackInfo/流/代理/播放 404；管理员不受限。Emby 数据只认本人；图片端点保持匿名（已批准兼容边界）。
 
 ## 5. 变更规则（v2）
 

@@ -346,7 +346,7 @@ func (a *App) movieImageInfo(m store.Movie) []gin.H {
 
 func (a *App) playback(c *gin.Context) {
 	movie, sourcePath, id, ok := a.resolvePlaybackTarget(c.Param("id"))
-	if !ok || !movie.IsVisible() || (movie.SourceProtocol != "http" && movie.SourceProtocol != "https") {
+	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) || (movie.SourceProtocol != "http" && movie.SourceProtocol != "https") {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -1002,7 +1002,7 @@ func randomSessionID() string {
 
 func (a *App) stream(c *gin.Context) {
 	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
-	if !ok || !movie.IsVisible() {
+	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -1038,7 +1038,7 @@ var streamClient = outbound.NewClient(outbound.Options{
 // Emby 客户端仍走 /stream 的 302 直拉（服务端零带宽），此端点只服务网页播放器。
 func (a *App) proxyStream(c *gin.Context) {
 	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
-	if !ok || !movie.IsVisible() {
+	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -1128,7 +1128,7 @@ func (a *App) playing(c *gin.Context) {
 		return
 	}
 	movie, _, _, ok := a.resolvePlaybackTarget(req.ItemId)
-	if !ok || !movie.IsVisible() {
+	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -1168,7 +1168,7 @@ func (a *App) playing(c *gin.Context) {
 			return
 		}
 	} else {
-		a.cache.Delete("item:" + a.db.Version("g:version") + ":" + strconv.FormatInt(id, 10))
+		a.cache.Delete("item:" + a.db.Version("g:version") + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + strconv.FormatInt(id, 10))
 	}
 	c.Status(http.StatusNoContent)
 }

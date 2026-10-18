@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；424 个 Test 函数（server 38.0s / store 16.4s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；425 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -260,7 +260,8 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 83 | DB-05 列表宽投影/深分页量化：50k 宽/窄投影与 OFFSET 20000 计时、`BenchmarkSearchAdminWidePage200`；结论暂不投影/不设 OFFSET 硬上限 | ✅ 本地完成 | 真实 50k 库与冷缓存未测；JSON 编码体积未单独计量 |
 | 84 | 多用户基座（迁移 7）：`users` 表、token/API key 绑定 `user_id`、按 `users` 登录与管理员判定、初始管理员回退与管理员 API 路径 | ✅ 本地完成 | 媒体库可见性未按用户限制；Emby 多用户仅同一账户 |
 | 85 | 按用户隔离播放数据（迁移 8）：`userdata` 重建为 `(user_id,movie_id)`、`playback_sessions.user_id`、`login_events` 登录审计（成功归户、失败记 id=0）；Emby UI 数据只认本人 | ✅ 本地完成 | 管理员跨用户查看只有数据库层，尚无 API/UI |
-| 86 | 多用户管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`（默认无授权）、管理员只读审计 API（登录/播放记录）、自助改密并撤销会话；删除用户保留审计 | ✅ 本地完成 | 可见性尚未在浏览/流/详情路径强制（批次 87）；前端管理页待批次 88；审计表无独立清理任务（写入时按 90 天/5 万条裁剪） |
+| 86 | 多用户管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`（默认无授权）、管理员只读审计 API（登录/播放记录）、自助改密并撤销会话；删除用户保留审计 | ✅ 本地完成 | 前端管理页待批次 88；审计表无独立清理任务（写入时按 90 天/5 万条裁剪） |
+| 87 | 可见性强制：`viewerLibraries` 统一范围；`/Views`、`/Items`、搜索、续播、最新、计数按授权库过滤；详情/PlaybackInfo/流/代理/播放上报未授权库 404；详情与列表缓存键带用户与授权指纹（修掉跨用户缓存泄漏） | ✅ 本地完成 | 图片端点仍匿名（D02 已批准的兼容边界）；管理员只读审计，不代改 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。
 
@@ -273,7 +274,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 84 | 用户模型基座：迁移 7 建 `users` 表并从 `administrators` 复制 id=1；`access_tokens`/`api_keys` 增 `user_id`；登录改为按用户校验、会话绑定用户；`/api/admin/*` 增加 `requireAdmin`（403 `ADMIN_REQUIRED`）；`/Users/{id}` 支持已存在用户 | ✅ 本地完成 | `userdata`/播放会话仍是单用户结构，普通用户暂时看到与管理员相同的播放数据；Emby 端点仍只认 `Users/1` 的数据；无用户管理 UI/API |
 | 85 | 按用户隔离播放数据：迁移 8 重建 `userdata` 为 `(user_id, movie_id)`、播放会话带 `user_id`、新增 `login_events`；store 增加 `DataUser`/`DataForUser`/`WriteIndexed*ForUser`/`RecordPlaybackEvent.UserID`；服务端一律按当前登录用户读写 | ✅ 本地完成 | 旧行归 user 1；Emby `/Users/{uid}` 仅允许当前用户 id（管理员代看留批次 86）；未做跨用户列表 API |
 | 86 | 管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`、管理员只读审计 API（登录/播放记录）、自助改密撤销会话；删除用户保留审计 | ✅ 本地完成 | 可见性尚未在浏览/流/详情路径强制；前端页待 88 |
-| 87 | 可见性强制：非管理员只能看到被授权的媒体库（默认无授权），浏览/列表/搜索/详情/播放/图片路径统一校验；管理员不受限 | 待做 | 管理员代改不开放（只读审计）；Emby 跨用户读仍禁止 |
+| 87 | 可见性强制：非管理员只能看到被授权的媒体库（默认无授权）；浏览/列表/搜索/续播/最新/计数按授权过滤；详情/PlaybackInfo/流/代理/播放 404；缓存键带用户与授权指纹 | ✅ 本地完成 | 图片端点保持匿名（D02 兼容边界）；Emby 跨用户读仍禁止 |
 | 88 | Web 管理 UI：用户列表/创建/改密/删除/媒体库授权、登录与播放活动记录页；非管理员隐藏入口；普通用户设置页可自助改密 | 待做 | 真机与读屏复测 |
 
 ## 10. 多用户设计决策（批次 84；批次 86 补充）
