@@ -331,12 +331,14 @@ test('遮罩层级决定 Esc 目标，Tab 在顶层遮罩循环并恢复触发�
   active = closeBtn;
   const inside = { key: 'Tab', shiftKey: false, prevented: false, preventDefault() { this.prevented = true; } };
   box.overlayTrapTab(inside);
-  assert.equal(inside.prevented, false, '遮罩内正常 Tab 不拦截');
+  assert.equal(inside.prevented, true, '受控顺序：遮罩内 Tab 也由脚本推进');
+  assert.equal(log.at(-1), 'player-second', 'Tab 从首项前进到第二项');
 
+  active = secondBtn; // 真实浏览器里 focus() 已把焦点移到第二项
   const shift = { key: 'Tab', shiftKey: true, prevented: false, preventDefault() { this.prevented = true; } };
   box.overlayTrapTab(shift);
   assert.equal(shift.prevented, true);
-  assert.equal(log.at(-1), 'player-second', 'Shift+Tab 从首项回绕到末项');
+  assert.equal(log.at(-1), 'player-close', 'Shift+Tab 从第二项回退到首项');
 });
 
 function recoveryPanel() {

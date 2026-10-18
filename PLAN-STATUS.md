@@ -15,7 +15,7 @@
 | `go test ./...` | 16 包全绿；405 个 Test 函数（server 32.7s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 83/83 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
-| CI | 已实跑通过：run 39085877063（`2150352`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
+| CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
 | 生产放行 | **否**。部署级人工验收（A01/A04/A06/A08/A10/A11/A12/A14）未执行；D01–D12 已全部批准并落地，公网门禁另需按 D04 配置 `setup_code`/来源白名单/可信代理与 TLS |
 
 ## 1. 审查 35 项状态
@@ -50,7 +50,7 @@
 | FE-04 | 遮罩焦点生命周期缺失 | ◐ | 批次 46 | 统一遮罩栈：z-index 顺序决定 Esc、Tab 在顶层遮罩循环、打开入栈/关闭恢复触发焦点、遮罩容器与 dialog 角色/tabindex；inert 与真实读屏未做 |
 | FE-05 | 网络错误被当登出/任务结束 | ◐ | 2,19,22,23,26 | 401 才清凭据；三条 GET 已单飞+代次+退避；POST/设置/登录无预算；无持久 task_id |
 | FE-06 | 小字对比度不足 | ◐ | 18 | --dim 38%→60%，静态断言 6.31–7.37:1；非渲染器，未覆盖渐变/图片/像素采样 |
-| FE-07 | 全幅播放层覆盖动作 | ○ | — | 待 elementFromPoint 与触屏复核；命中区/z-index 未改 |
+| FE-07 | 全幅播放层覆盖动作 | ◐ | 78 | Chromium 1280×800 + 390×844 触屏模拟：播放层打开时卡片命中区 `elementFromPoint` 落在层内、点 stage 不关闭、背景点击/触摸关闭、关闭后命中区恢复、详情播放同样覆盖；`overlayTrapTab` 改受控循环（Tab/Shift+Tab 不再落回 body）；真机触屏未验 |
 | FE-08 | 后置同选择器覆盖移动规则 | ○ | — | 基础/断点顺序未调整；小屏计算样式未测；R3 |
 | FE-09 | 登录重 render 丢输入 | ◐ | 批次 44 | 保留节点，错误/忙碌只做局部更新；失败聚焦密码；初始化密码策略提示。真实浏览器、密码管理器、读屏未验 |
 | FE-10 | 筛选缺标签、开关空 label | ◐ | 45 | 筛选/排序/媒体库控件补可访问名称、筛选与库 Tab 补 aria-pressed、编辑展开补 aria-expanded、计划任务开关补名称；a11y tree 与真实读屏未验 |
@@ -160,7 +160,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 | 阶段 | 判断 | 说明 |
 |---|---|---|
-| R0 基线 | ◐ | 测试/vet/race 基线与 CI 已建并在 GitHub 实跑通过（run 39085877063）；A09 本机备份恢复演练通过（批次 56）；生产拓扑、观测、异地备份未做 |
+| R0 基线 | ◐ | 测试/vet/race 基线与 CI 已建并在 GitHub 实跑通过（run 39086840621）；A09 本机备份恢复演练通过（批次 56）；生产拓扑、观测、异地备份未做 |
 | R1 认证 | ◐ | BE-01 会话期限/撤销全部（批次 64）、BE-02 风险接受关闭、D03 key 摘要迁移（批次 66）已落地；BE-03/06 仍局部；A01/A02 自动部分已过，其余部署级项未执行 |
 | R1-D 部署门禁 | ◐ | BE-05 批次 41、BE-09 批次 42 已建默认收紧；D04 已批并落地初始化验证码/来源白名单/可信代理（批次 65）；D05 历史凭据审计完成（批次 68，上线前轮换为部署动作）；TLS 仍由部署侧承担；未过则不得公网暴露 |
 | R1-N 正确性 | ◐（最大进展） | DB-09、DB-03 多写路径、DB-02 播放会话/事件（批次 51）、FE-01/02/13 阶段 1/14 子项 |
@@ -250,5 +250,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 75 | 弃用机制：`internal/server/deprecation.go` 登记表 + RFC 8594/8288 弃用头；首个登记 `POST /api/admin/scan`（Sunset 2027-04-01）；Web 扫描迁移到 `POST /api/admin/tasks/scan` | ✅ 本地完成 | v2 内只登记不删除；旧同步入口仍可用；移除需 Sunset 且升 v3 |
 | 76 | 协议抽检（不依赖抓包）：Emby 兼容端点 41 处错误补 `code`；`emby_compat_test.go` 覆盖 System/User/Views/Items 形状、分页边界、容忍未知参数、404/400 信封、图片 404 空 body；修复评分接受但不回显的问题（新增 `userDataDTO`，`Likes` 按 bool 回显） | ✅ 本地完成 | 旧客户端抓包与真机走查（A12 的抓包部分）仍需用户提供设备/部署环境 |
 | 77 | 前端独立项（FE-15 部分）：计划任务单次提交、cron 校验 latest-wins、服务器时区明示 | ✅ 本地完成 | 真实触屏/跨时区设备走查仍待部署或真机 |
+| 78 | FE-07 复核与焦点循环修复：Playwright `elementFromPoint`/触屏/背景关闭/命中区恢复；`overlayTrapTab` 改受控循环，修复播放器内 Tab 落到 body | ✅ 本地完成 | 真机触屏与真实读屏仍未验 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。

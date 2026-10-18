@@ -746,7 +746,7 @@ function overlayFocusables(selector) {
   if (!overlay || typeof overlay.querySelectorAll !== 'function') return [];
   return Array.from(overlay.querySelectorAll(
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-  )).filter(element => !element.hidden);
+  )).filter(element => !element.hidden && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0));
 }
 
 function overlayContains(overlay, element) {
@@ -799,14 +799,17 @@ function overlayTrapTab(event) {
     if (overlay && typeof overlay.focus === 'function') overlay.focus();
     return;
   }
-  const first = items[0], last = items[items.length - 1];
+  // 受控顺序循环：不依赖浏览器对「几乎不可聚焦」元素的自然 Tab 顺序，
+  // 避免焦点落到 body 或播放器内部控件后逃出顶层遮罩（FE-07）。
+  event.preventDefault();
   const active = document.activeElement;
-  const inside = active === overlay || overlayContains(overlay, active);
-  if (event.shiftKey) {
-    if (!inside || active === first) { event.preventDefault(); last.focus(); }
-  } else if (!inside || active === last) {
-    event.preventDefault(); first.focus();
+  const index = items.indexOf(active);
+  if (index === -1) {
+    items[event.shiftKey ? items.length - 1 : 0].focus();
+    return;
   }
+  const next = (index + (event.shiftKey ? -1 : 1) + items.length) % items.length;
+  items[next].focus();
 }
 /* 遮罩焦点结束 */
 
