@@ -37,7 +37,7 @@
 | DB-01 | 迁移吞错且缺版本台账 | ◐ | 1 | 台账/校验和/同事务 DDL/未知结构拒绝已实现；支持版本仅 1，无真实历史 fixture；空间不足/硬退出/WAL 备份/恢复演练未做，**不得标完成** |
 | DB-02 | 播放计数读改写竞争 | ◐ | 51 | 批次 51 完成：迁移 2 建 `playback_sessions`/`playback_events`（会话键=PlaySessionId，缺失回退 `item:<id>`），`last_event_seq` 单调序号；`RecordPlaybackEvent` 单事务写会话+事件+userdata，stopped 仅 `stopped=0→1` 原子 +1，重复 Stopped/重放/重启后重放幂等，停止后迟到 Progress 忽略；事件表保留最近 2 万条。剩余：无 PlaySessionId 的旧客户端需先发 Playing 重开才能再计一次；无观看时长统计与按会话查询 API；`SavePlayback` 仍被旧测试/夹具使用 |
 | DB-03 | 业务提交与缓存版本分离 | ◐ | 9-15,24,25,27,34 | 已覆盖 metadata/删除/清理/manual/相似/图片/userdata/设置/played/头像；播放进度、Stopped/心跳、扫描检查点未合并；跨进程版本镜像未做 |
-| DB-04 | JSON 筛选与包含搜索 | ○ | — | 未引 FTS5/关系表；`%term%`/JSON 包含/演员 EXISTS 原样；R4/A15 |
+| DB-04 | JSON 筛选与包含搜索 | ◐ | 81 | 已量化不引入 FTS5/关系表：5k 库 SQL 层 1–3ms；50k 行（复制行）标题 `%term%` 14.8ms、COUNT 18.4ms、深页 4.0ms；Go 层 `BenchmarkSearch*` 3.8–6.5ms/次（5k，含 100 行解码）；结论 `%term%`/JSON/演员 EXISTS 原语义保留，50k 真实库或延迟超预算再评估 FTS5 trigram/feature 表 |
 | DB-05 | COUNT/宽投影/深 OFFSET | ◐ | 80 | 批次 80 建部分索引 `idx_movies_visible_title`/`idx_movies_visible_library_title` 并在迁移 6 末尾 `ANALYZE`；实测 5,000 部库：全局首页 1.57→0.05ms、深页 OFFSET 2000 3.08→0.16ms、单库 0.05ms，`EXPLAIN` 无临时排序；COUNT 仍走 `idx_movies_status`；轻量投影、keyset/深 OFFSET 上限未做 |
 | DB-06 | 演员反向索引缺口 | ◐ | 80 | 批次 80 建 `idx_movie_actors_actor_movie(actor_name,movie_id)`；种子实验（200 演员 / 9,950 关系）`ActorsMissingAvatar` 9.01→0.96ms；`MoviesByActor` 计划不变（movies 驱动，2.2ms），仍靠主键探测；未在真实刮削库测写放大 |
 | DB-07 | context 与锁/池/WAL 观测 | ○ | — | QueryContext/BeginTx、DB.Stats、busy/WAL 指标均无；单写队列未决 |
@@ -253,5 +253,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 78 | FE-07 复核与焦点循环修复：Playwright `elementFromPoint`/触屏/背景关闭/命中区恢复；`overlayTrapTab` 改受控循环，修复播放器内 Tab 落到 body | ✅ 本地完成 | 真机触屏与真实读屏仍未验 |
 | 79 | FE-11 30 页 DOM/内存基线 + 图片宽度预算：媒体墙/详情 `srcset` 与 `maxWidth`，详情海报尺寸属性；实测 3,100 卡 DOM 74,533、堆 9.5MB | ✅ 本地完成 | 真机、低端机与 5k 以上库未测；未做窗口化 |
 | 80 | DB-05/06 二级索引：演员反向索引 + 可见影片标题部分索引，迁移 6 内置 `ANALYZE`；EXPLAIN/计时证据 | ✅ 本地完成 | 轻量投影/keyset 未做；写放大与大库冷缓存未测 |
+| 81 | DB-04 搜索量化：新增 `BenchmarkSearch*` 固定 5k 基准（标题/类型/演员/深页）+ 50k 行扫描测量，结论暂不引入 FTS5/关系表 | ✅ 本地完成 | FTS5 语义回归、中文分词、写入放大与真实 50k 库未测 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。
