@@ -112,3 +112,15 @@ func BenchmarkSearchDeepOffset(b *testing.B) {
 		}
 	}
 }
+
+// DB-05：宽投影列表页的固定基准（200 行 × movieCols）。用于观察 movieCols
+// 增列、排序/索引或 ANALYZE 变化时的回退，不改变线上语义。
+func BenchmarkSearchAdminWidePage200(b *testing.B) {
+	s := searchBenchFixture(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := s.SearchAdmin(AdminQuery{Limit: 200}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
