@@ -1457,3 +1457,12 @@ test('探测文件成功但版本刷新失败保持错误面板，不生成成�
     if (announced) { assert.equal(env.toasts[0][1], 'error'); assert.match(env.toasts[0][0], /刷新未确认/); }
   }
 });
+
+test('图片请求带宽度预算与 1x/2x srcset（FE-11）', () => {
+  // 媒体墙：200/400 两档；详情海报 120/240；详情背景 540/1080；详情海报带尺寸避免 CLS。
+  assert.match(source, /posterBase \? `\$\{posterBase\}\?maxWidth=200 1x, \$\{posterBase\}\?maxWidth=400 2x` : ''/);
+  assert.match(source, /class="detail-poster" width="104" height="156"/);
+  assert.match(source, /\?maxWidth=120 1x, \$\{posterBase\}\?maxWidth=240 2x/);
+  assert.match(source, /\?maxWidth=540 1x, \$\{backdropBase\}\?maxWidth=1080 2x/);
+  assert.match(source, /class="detail-backdrop" src="\$\{esc\(backdrop\)\}"\$\{backdropSrcset \? ` srcset=/);
+});

@@ -295,11 +295,13 @@ function wallCard(item, ud) {
   const st = item.Status || item.status || '';
   const title = item.Title || '';
   const playable = st === 'success' || st === 'manual';
-  // 海报格子最宽约 185px（.wall 的 minmax(148px,1fr)），2x 屏取 360 已经够清晰。
-  // 不带 maxWidth 会拉原图（约 56KB/张 × 每页 100 张），服务端虽支持按需缩略
-  // （带 LRU 缓存 + 并发限流 + 失败回退原图），前端不请求就等于白搭。
-  const poster = item.PosterPath ? `/Items/${item.id}/Images/Primary?maxWidth=360`
-    : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb?maxWidth=360` : '');
+  // 海报格子最宽约 185px（.wall 的 minmax(148px,1fr)）；按 1x/2x 取 200/400，
+  // 避免 1x 屏也拉 360 的缩略图。不带 maxWidth 会拉原图（约 56KB/张 × 每页 100 张），
+  // 服务端虽支持按需缩略（LRU 缓存 + 并发限流 + 失败回退原图），前端不请求就等于白搭。
+  const posterBase = item.PosterPath ? `/Items/${item.id}/Images/Primary`
+    : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb` : '');
+  const poster = posterBase ? `${posterBase}?maxWidth=360` : '';
+  const posterSrcset = posterBase ? `${posterBase}?maxWidth=200 1x, ${posterBase}?maxWidth=400 2x` : '';
   const sub = [numberUnlessInTitle(title, item.Number), item.Year, item.OriginalTitle].filter(Boolean).join(' · ')
     || (item.source_protocol || item.SourceProtocol || '');
   const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
@@ -316,7 +318,7 @@ function wallCard(item, ud) {
     (item.AdditionalParts || []).length ? `<span class="wall-badge multi">CD×${(item.AdditionalParts || []).length + 1}</span>` : ''
   ].join('');
   const body = poster
-    ? `<img loading="lazy" src="${esc(poster)}" alt="">`
+    ? `<img loading="lazy" src="${esc(poster)}"${posterSrcset ? ` srcset="${esc(posterSrcset)}"` : ''} alt="">`
     : `<span class="wall-path" title="${esc(item.source_path)}">${esc(item.source_path || title || '—')}</span>`;
   const label = title || String(item.source_path || '').split(/[\\/]/).pop() || '—';
   return `
@@ -836,8 +838,14 @@ async function openDetail(item) {
   const title = m.Title || String(item.id);
   const st = m.Status || '';
   const playable = st === 'success' || st === 'manual';
-  const poster = m.PosterPath ? `/Items/${m.id}/Images/Primary` : '';
-  const backdrop = m.BackdropPath ? `/Items/${m.id}/Images/Backdrop` : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : poster);
+  // 详情海报渲染 104px 宽，背景铺满抽屉；按 1x/2x 取 120/240 与 540/1080，避免拉原图。
+  const posterBase = m.PosterPath ? `/Items/${m.id}/Images/Primary` : '';
+  const poster = posterBase ? `${posterBase}?maxWidth=240` : '';
+  const posterSrcset = posterBase ? `${posterBase}?maxWidth=120 1x, ${posterBase}?maxWidth=240 2x` : '';
+  const backdropBase = m.BackdropPath ? `/Items/${m.id}/Images/Backdrop`
+    : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : posterBase);
+  const backdrop = backdropBase ? `${backdropBase}?maxWidth=1080` : '';
+  const backdropSrcset = backdropBase ? `${backdropBase}?maxWidth=540 1x, ${backdropBase}?maxWidth=1080 2x` : '';
   const head = [numberUnlessInTitle(title, m.Number), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
   const actors = data.actors || [];
   const lockedFields = data.locked_fields || [];
@@ -845,10 +853,10 @@ async function openDetail(item) {
 
   detailDrawer.innerHTML = `
     <div class="detail-hero">
-      ${backdrop ? `<img class="detail-backdrop" src="${esc(backdrop)}" alt="">` : ''}
+      ${backdrop ? `<img class="detail-backdrop" src="${esc(backdrop)}"${backdropSrcset ? ` srcset="${esc(backdropSrcset)}"` : ''} alt="">` : ''}
       <button id="detail-close" class="icon-btn detail-close" title="关闭 (Esc)">✕</button>
       <div class="detail-hero-body">
-        ${poster ? `<img class="detail-poster" src="${esc(poster)}" alt="">` : ''}
+        ${poster ? `<img class="detail-poster" width="104" height="156" src="${esc(poster)}"${posterSrcset ? ` srcset="${esc(posterSrcset)}"` : ''} alt="">` : ''}
         <div class="detail-hero-text">
           <h2>${esc(title)}</h2>
           <p class="detail-sub">${esc(head || '—')}</p>

@@ -13,7 +13,7 @@
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
 | `go test ./...` | 16 包全绿；405 个 Test 函数（server 32.7s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
-| `node --test internal/server/web_test.cjs` | 83/83 通过 |
+| `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
 | 生产放行 | **否**。部署级人工验收（A01/A04/A06/A08/A10/A11/A12/A14）未执行；D01–D12 已全部批准并落地，公网门禁另需按 D04 配置 `setup_code`/来源白名单/可信代理与 TLS |
@@ -54,7 +54,7 @@
 | FE-08 | 后置同选择器覆盖移动规则 | ○ | — | 基础/断点顺序未调整；小屏计算样式未测；R3 |
 | FE-09 | 登录重 render 丢输入 | ◐ | 批次 44 | 保留节点，错误/忙碌只做局部更新；失败聚焦密码；初始化密码策略提示。真实浏览器、密码管理器、读屏未验 |
 | FE-10 | 筛选缺标签、开关空 label | ◐ | 45 | 筛选/排序/媒体库控件补可访问名称、筛选与库 Tab 补 aria-pressed、编辑展开补 aria-expanded、计划任务开关补名称；a11y tree 与真实读屏未验 |
-| FE-11 | 每页 100 追加 DOM | ○ | — | 30 页 DOM/内存未测；maxWidth/srcset 未加；R4 |
+| FE-11 | 每页 100 追加 DOM | ◐ | 79 | 30 页实测（5000 部库）：3,100 卡 / 74,533 DOM 节点 / JS 堆 9.5MB / 总加载 29.9s，无控制台错误；结论暂不回收/窗口化（5,000 卡预估 ~12 万节点），5k 以上再评估「加载更多」；图片预算：墙上限 360→`srcset` 200/400，详情海报 240（1x 120）、背景 1080（1x 540），详情海报加 `width/height` 防 CLS；真机与低端机未测 |
 | FE-12 | boot 串行、概览拉整页 | ◐ | 22,23 | 已去 boot 裸 probe/scan 首读；聚合计数、按需加载、CWV 未做；R4 |
 | FE-13 | NFO 落盘后读库/重扫失败 | ◐ | 4,13,26,33,36 | saved/indexed/warnings 已实现；无持久操作意图/启动对账（R3）；文件与 DB 非联合事务 |
 | FE-14 | 编辑重建 params 丢参数 | ◐ | 6,8 | 条件更新已做；toggle/delete 仍非条件；未知扩展键不保留；无草稿持久化 |
@@ -251,5 +251,6 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 76 | 协议抽检（不依赖抓包）：Emby 兼容端点 41 处错误补 `code`；`emby_compat_test.go` 覆盖 System/User/Views/Items 形状、分页边界、容忍未知参数、404/400 信封、图片 404 空 body；修复评分接受但不回显的问题（新增 `userDataDTO`，`Likes` 按 bool 回显） | ✅ 本地完成 | 旧客户端抓包与真机走查（A12 的抓包部分）仍需用户提供设备/部署环境 |
 | 77 | 前端独立项（FE-15 部分）：计划任务单次提交、cron 校验 latest-wins、服务器时区明示 | ✅ 本地完成 | 真实触屏/跨时区设备走查仍待部署或真机 |
 | 78 | FE-07 复核与焦点循环修复：Playwright `elementFromPoint`/触屏/背景关闭/命中区恢复；`overlayTrapTab` 改受控循环，修复播放器内 Tab 落到 body | ✅ 本地完成 | 真机触屏与真实读屏仍未验 |
+| 79 | FE-11 30 页 DOM/内存基线 + 图片宽度预算：媒体墙/详情 `srcset` 与 `maxWidth`，详情海报尺寸属性；实测 3,100 卡 DOM 74,533、堆 9.5MB | ✅ 本地完成 | 真机、低端机与 5k 以上库未测；未做窗口化 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。
