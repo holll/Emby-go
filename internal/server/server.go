@@ -390,7 +390,7 @@ func (a *App) routes() {
 	r.GET("/api/admin/scrape/image", a.adminScrapeImage)
 
 	// noStore 必须先于 requireAuth：鉴权失败会 Abort，后面的中间件不再执行。
-	admin := r.Group("/api/admin", noStore, a.requireAuth)
+	admin := r.Group("/api/admin", noStore, a.requireAuth, a.requireAdmin)
 	admin.GET("/libraries", a.adminLibraries)
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)

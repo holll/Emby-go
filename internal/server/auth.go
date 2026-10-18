@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"math"
 	"net/http"
 	"net/netip"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"emby-go/internal/store"
 )
 
 // setAdminName / currentAdminName 保护 adminName：初始化与登录会写，其它 handler 并发读。
@@ -64,21 +67,42 @@ func requestToken(c *gin.Context) string {
 // authOK always consults the authoritative store. Never read or populate
 // credential positive caches: an in-flight refill could resurrect a revoked key.
 // A successful check only authorizes this request, not future requests or streams.
-func (a *App) authOK(c *gin.Context) (bool, error) {
+func (a *App) authOK(c *gin.Context) (store.User, bool, error) {
 	token := requestToken(c)
 	if token == "" {
-		return false, nil
+		return store.User{}, false, nil
 	}
 	// D01：登录会话带过期时间与滑动续期；API key 走独立表、不参与过期。
-	valid, err := a.db.ValidateAccessToken(token, time.Now(), a.sessionTTL)
-	if err != nil || valid {
-		return valid, err
+	userID, valid, err := a.db.ValidateAccessTokenUser(token, time.Now(), a.sessionTTL)
+	if err != nil {
+		return store.User{}, false, err
 	}
-	return a.db.HasAPIKey(token)
+	if !valid {
+		userID, valid, err = a.db.APIKeyUser(token)
+		if err != nil || !valid {
+			return store.User{}, false, err
+		}
+	}
+	u, err := a.db.UserByID(userID)
+	if errors.Is(err, store.ErrUserNotFound) && userID == 1 {
+		// 兼容旧库/旧测试夹具：users 行缺失但会话属于初始管理员时，按旧
+		// administrators 表恢复管理员身份（正常迁移时 users 行已复制）；
+		// 连 administrators 都没有（纯夹具库）则按空库管理员处理。
+		if name, nameErr := a.db.AdministratorName(); nameErr == nil && name != "" {
+			return store.User{ID: 1, Name: name, IsAdmin: true}, true, nil
+		}
+		if n, countErr := a.db.CountUsers(); countErr == nil && n == 0 {
+			return store.User{ID: 1, Name: a.currentAdminName(), IsAdmin: true}, true, nil
+		}
+	}
+	if err != nil {
+		return store.User{}, false, err
+	}
+	return u, true, nil
 }
 
 func (a *App) requireAuth(c *gin.Context) {
-	valid, err := a.authOK(c)
+	u, valid, err := a.authOK(c)
 	if err != nil {
 		// Do not expose DB diagnostics or turn an outage into a logout/401.
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
@@ -88,6 +112,29 @@ func (a *App) requireAuth(c *gin.Context) {
 	}
 	if !valid {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "AUTH_INVALID"})
+		return
+	}
+	c.Set(currentUserKey, u)
+	c.Next()
+}
+
+const currentUserKey = "currentUser"
+
+// currentUser 返回 requireAuth 解析出的账户；无鉴权上下文时 ok=false。
+func currentUser(c *gin.Context) (store.User, bool) {
+	v, ok := c.Get(currentUserKey)
+	if !ok {
+		return store.User{}, false
+	}
+	u, ok := v.(store.User)
+	return u, ok
+}
+
+// requireAdmin 仅允许管理员访问管理接口（挂在 requireAuth 之后）。
+func (a *App) requireAdmin(c *gin.Context) {
+	u, ok := currentUser(c)
+	if !ok || !u.IsAdmin {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "需要管理员权限", "code": "ADMIN_REQUIRED"})
 		return
 	}
 	c.Next()
@@ -242,7 +289,7 @@ func (a *App) authenticate(c *gin.Context) {
 		apiError(c, http.StatusPreconditionRequired, "管理员尚未初始化")
 		return
 	}
-	valid, err := a.db.AuthenticateAdministrator(username, req.Pw)
+	user, valid, err := a.db.AuthenticateUser(username, req.Pw)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
@@ -258,16 +305,18 @@ func (a *App) authenticate(c *gin.Context) {
 		apiError(c, http.StatusInternalServerError, "生成访问令牌失败")
 		return
 	}
-	a.setAdminName(username)
+	if user.IsAdmin {
+		a.setAdminName(user.Name)
+	}
 	token := hex.EncodeToString(b)
-	if err := a.db.SaveAccessTokenExpiring(token, a.sessionExpiry(time.Now())); err != nil {
+	if err := a.db.SaveAccessTokenForUser(token, user.ID, a.sessionExpiry(time.Now())); err != nil {
 		apiError(c, http.StatusInternalServerError, "保存访问令牌失败")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"AccessToken": token,
 		"ServerId":    a.serverID,
-		"User":        a.userDto(),
+		"User":        a.userDtoFor(user),
 	})
 }
 
@@ -277,14 +326,22 @@ func (a *App) authenticate(c *gin.Context) {
 // 是**非 Option** 字段——返回 {} 会让整个登录响应解析失败（登录直接不可用）。
 // 这里按真实 Emby 的形状给一份完整策略，本服务是单管理员，故 IsAdministrator 恒为 true。
 func (a *App) userDto() gin.H {
+	u, err := a.db.UserByID(1)
+	if err != nil {
+		u = store.User{ID: 1, Name: a.currentAdminName(), IsAdmin: true}
+	}
+	return a.userDtoFor(u)
+}
+
+func (a *App) userDtoFor(u store.User) gin.H {
 	return gin.H{
-		"Id": "1", "Name": a.currentAdminName(), "ServerName": a.serverName,
+		"Id": strconv.FormatInt(u.ID, 10), "Name": u.Name, "ServerName": a.serverName,
 		"ServerId": a.serverID, "HasPassword": true,
 		"HasConfiguredPassword": true, "HasConfiguredEasyPassword": false,
 		"EnableAutoLogin": false, "LastLoginDate": "", "LastActivityDate": "",
 		"Configuration": gin.H{},
 		"Policy": gin.H{
-			"IsAdministrator": true, "IsHidden": false, "IsDisabled": false,
+			"IsAdministrator": u.IsAdmin, "IsHidden": false, "IsDisabled": false,
 			"MaxActiveSessions": 0,
 			// 播放/下载能力：客户端据此决定是否允许直接播放与转码。
 			"EnableMediaPlayback":             true,
@@ -320,21 +377,46 @@ func (a *App) userDto() gin.H {
 }
 
 func (a *App) me(c *gin.Context) {
-	c.JSON(http.StatusOK, a.userDto())
+	u, ok := currentUser(c)
+	if !ok {
+		apiError(c, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	c.JSON(http.StatusOK, a.userDtoFor(u))
 }
 
 // userByID 处理 GET /Users/{uid}：tsukimi 登录后立刻调它读 Policy.IsAdministrator。
 func (a *App) userByID(c *gin.Context) {
-	if !a.validUser(c) {
+	u, ok := a.userByIDParam(c)
+	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, a.userDto())
+	c.JSON(http.StatusOK, a.userDtoFor(u))
+}
+
+func (a *App) userByIDParam(c *gin.Context) (store.User, bool) {
+	id, err := strconv.ParseInt(c.Param("uid"), 10, 64)
+	if err != nil {
+		apiError(c, http.StatusNotFound, "user not found")
+		return store.User{}, false
+	}
+	u, err := a.db.UserByID(id)
+	if errors.Is(err, store.ErrUserNotFound) && id == 1 {
+		if name, nameErr := a.db.AdministratorName(); nameErr == nil && name != "" {
+			return store.User{ID: 1, Name: name, IsAdmin: true}, true
+		}
+		if n, countErr := a.db.CountUsers(); countErr == nil && n == 0 {
+			return store.User{ID: 1, Name: a.currentAdminName(), IsAdmin: true}, true
+		}
+	}
+	if err != nil {
+		apiError(c, http.StatusNotFound, "user not found")
+		return store.User{}, false
+	}
+	return u, true
 }
 
 func (a *App) validUser(c *gin.Context) bool {
-	if c.Param("uid") != "1" {
-		apiError(c, http.StatusNotFound, "user not found")
-		return false
-	}
-	return true
+	_, ok := a.userByIDParam(c)
+	return ok
 }

@@ -122,8 +122,8 @@ func baselineChecksum() string {
 // migrationAddedColumns 是后续迁移在 baseline 表上新增的列：校验只放行这些已知定义，
 // 其它未备案列仍然按漂移失败处理。
 var migrationAddedColumns = map[string]map[string]string{
-	"access_tokens": {"expires_at": "INTEGER"},
-	"api_keys":      {"key_hash": "TEXT", "key_prefix": "TEXT"},
+	"access_tokens": {"expires_at": "INTEGER", "user_id": "INTEGER"},
+	"api_keys":      {"key_hash": "TEXT", "key_prefix": "TEXT", "user_id": "INTEGER"},
 }
 
 func validateBaseline(db schemaDB) error {
@@ -626,6 +626,42 @@ func applyMigration6(tx *sql.Tx) error {
 	return nil
 }
 
+const usersMigrationVersion = 7
+
+// migration7Statements 引入多用户（批次 84）：
+//   - users 表从原单管理员 administrators 复制 id=1，保留管理员标记；
+//   - access_tokens/api_keys 增加 user_id，默认 1，旧行自动归管理员；
+//   - administrators 表暂时保留以支持回退，代码不再写入。
+//
+// userdata 仍是单用户结构；按用户隔离在后续批次重建（需要新主键）。
+var migration7Statements = []string{
+	`CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		is_admin INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`,
+	`INSERT OR IGNORE INTO users(id,name,password_hash,is_admin,created_at,updated_at)
+	 SELECT id,username,password_hash,1,created_at,created_at FROM administrators WHERE id=1`,
+	`ALTER TABLE access_tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE api_keys ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
+}
+
+func migration7Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration7Statements, "\n"))))
+}
+
+func applyMigration7(tx *sql.Tx) error {
+	for _, statement := range migration7Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration %d: %w", usersMigrationVersion, err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -678,6 +714,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case usersMigrationVersion:
+			if checksum != migration7Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -719,6 +760,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[usersMigrationVersion] {
+		if err := applyMigration7(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -751,6 +797,11 @@ func (s *Store) migrate() error {
 	if !applied[secondaryIndexMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", secondaryIndexMigrationVersion, migration6Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", secondaryIndexMigrationVersion, err)
+		}
+	}
+	if !applied[usersMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", usersMigrationVersion, migration7Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", usersMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；415 个 Test 函数（server 32.7s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；420 个 Test 函数（server 34.0s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -260,3 +260,23 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 83 | DB-05 列表宽投影/深分页量化：50k 宽/窄投影与 OFFSET 20000 计时、`BenchmarkSearchAdminWidePage200`；结论暂不投影/不设 OFFSET 硬上限 | ✅ 本地完成 | 真实 50k 库与冷缓存未测；JSON 编码体积未单独计量 |
 
 门禁：`go test ./internal/server -run TestAPIContract -count=1` 必须通过；路由或错误信封变更同批更新 `API-CONTRACT.md`。
+
+## 9. 多用户施工（批次 84 起）
+
+目标：在保留单管理员兼容的前提下引入普通用户；管理员可管理用户，普通用户只能读写自己的播放数据，且不能创建 API 密钥（D02 已批）。
+
+| 批次 | 主题 | 状态 | 边界 |
+|---|---|---|---|
+| 84 | 用户模型基座：迁移 7 建 `users` 表并从 `administrators` 复制 id=1；`access_tokens`/`api_keys` 增 `user_id`；登录改为按用户校验、会话绑定用户；`/api/admin/*` 增加 `requireAdmin`（403 `ADMIN_REQUIRED`）；`/Users/{id}` 支持已存在用户 | ✅ 本地完成 | `userdata`/播放会话仍是单用户结构，普通用户暂时看到与管理员相同的播放数据；Emby 端点仍只认 `Users/1` 的数据；无用户管理 UI/API |
+| 85 | 按用户隔离播放数据：重建 `userdata` 为 `(user_id, movie_id)` 主键、播放会话/事件带 `user_id`；读写按当前用户 | 待做 | 需要迁移旧行到 user 1，并更新索引、播放计数、收藏/评分/已看过滤 |
+| 86 | Emby 用户面：`/Users` 列表、`Users/{id}/Items` 等按当前用户过滤；普通用户只能访问自己的 id；管理端用户 CRUD API | 待做 | 管理员查看他人数据的产品语义待定 |
+| 87 | Web 管理 UI：用户列表/创建/改密/停用/删除；非管理员隐藏管理入口与 API 密钥创建 | 待做 | 真机与读屏复测 |
+
+## 10. 多用户设计决策（批次 84）
+
+- **账户**：`users(id INTEGER PRIMARY KEY, name UNIQUE, password_hash, is_admin, created_at, updated_at)`；id=1 为初始管理员，迁移从旧 `administrators` 复制，旧表保留以支持二进制回退。
+- **会话**：`access_tokens.user_id` 默认 1；登录成功后会话绑定账户，`requireAuth` 把 `store.User` 放入请求上下文。
+- **API 密钥**：`api_keys.user_id` 默认 1；`APIKeyUser` 解析所属账户；仅管理员可创建（D02）。旧密钥归管理员。
+- **管理员边界**：`/api/admin/*` 统一 `noStore → requireAuth → requireAdmin`；非管理员返回 403 `ADMIN_REQUIRED`，不再默认“任何 token 都是管理员”。
+- **兼容**：users 行缺失且会话属于 id=1 时，回退旧 `administrators`（或空库夹具）识别为管理员，避免升级瞬间把旧管理员锁在门外；该回退在 85/86 完成后应删除。
+- **未决**：普通用户是否可见全部媒体库/合集；管理员能否代看/代改他人播放数据；密码策略（沿用 ≥9 字符）；用户禁用（批次 87 实现为 `disabled` 列还是删除待定）。

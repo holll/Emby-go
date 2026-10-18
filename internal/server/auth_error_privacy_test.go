@@ -55,8 +55,8 @@ func TestAuthenticationPasswordReadFailureIsPrivateAndRecoverable(t *testing.T) 
 	}
 	defer db.Close()
 	// COUNT(id=1) remains valid, but the later password read cannot Scan NULL.
-	if _, err := db.Exec(`ALTER TABLE administrators RENAME TO private_auth_original;
-CREATE VIEW administrators AS SELECT id,username,NULL AS password_hash,created_at FROM private_auth_original;`); err != nil {
+	if _, err := db.Exec(`ALTER TABLE users RENAME TO private_auth_original;
+CREATE VIEW users AS SELECT id,name,NULL AS password_hash,is_admin,created_at,updated_at FROM private_auth_original;`); err != nil {
 		t.Fatal(err)
 	}
 	h := a.Handler()
@@ -66,7 +66,7 @@ CREATE VIEW administrators AS SELECT id,username,NULL AS password_hash,created_a
 	if err := db.QueryRow("SELECT COUNT(*) FROM access_tokens").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("tokens=%d err=%v", count, err)
 	}
-	if _, err := db.Exec(`DROP VIEW administrators; ALTER TABLE private_auth_original RENAME TO administrators;`); err != nil {
+	if _, err := db.Exec(`DROP VIEW users; ALTER TABLE private_auth_original RENAME TO users;`); err != nil {
 		t.Fatal(err)
 	}
 	w = authPrivacyRequest(h, "POST", "/Users/AuthenticateByName")
@@ -137,7 +137,7 @@ func TestAuthenticationWriteFailuresRemainPrivate(t *testing.T) {
 			status := 500
 			message := "保存访问令牌失败"
 			if initializing {
-				table = "administrators"
+				table = "users"
 				route = "/api/auth/initialize"
 				status = 409
 				message = "初始化失败，请更换账号后重试"

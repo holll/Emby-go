@@ -41,7 +41,8 @@
 | 400 | `IDEMPOTENCY_KEY_TOO_LONG` | 幂等键超过 128 字符 |
 | 400 | `SCHEDULED_PRECONDITION_REQUIRED` | 条件更新缺前置 |
 | 400 | `SCHEDULED_CONFIG_CHANGED` | 计划任务并发修改 |
-| 401 | `AUTH_INVALID` | 凭据缺失/无效/过期 |
+| 401 | `AUTH_INVALID` |
+| 403 | `ADMIN_REQUIRED`（非管理员访问 `/api/admin/*`）、`SETUP_CODE_INVALID`/`INIT_SOURCE_DENIED`（初始化） | 凭据缺失/无效/过期 |
 | 403 | `SETUP_CODE_INVALID` | 初始化验证码错误 |
 | 403 | `INIT_SOURCE_DENIED` | 初始化来源不在白名单 |
 | 404 | `NOT_FOUND` / `TASK_NOT_FOUND` | 资源或任务不存在 |

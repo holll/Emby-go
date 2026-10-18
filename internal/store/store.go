@@ -228,86 +228,59 @@ func passwordHash(password string) (string, error) {
 
 func (s *Store) HasAdministrator() (bool, error) {
 	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM administrators WHERE id=1").Scan(&count); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin=1").Scan(&count); err != nil {
 		return false, err
 	}
-	return count == 1, nil
+	return count > 0, nil
 }
 
+// InitializeAdministrator 创建 id=1 的初始管理员。批次 84 起写入 users 表；
+// administrators 同步写一份，供回退到旧二进制时仍可登录。
 func (s *Store) InitializeAdministrator(username, password string) error {
 	hash, err := passwordHash(password)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec("INSERT INTO administrators(id,username,password_hash,created_at) VALUES(1,?,?,?)", username, hash, time.Now().UTC().Format(time.RFC3339))
-	return err
+	now := time.Now().UTC().Format(time.RFC3339)
+	return s.writeTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec("INSERT INTO users(id,name,password_hash,is_admin,created_at,updated_at) VALUES(1,?,?,1,?,?)", username, hash, now, now); err != nil {
+			return err
+		}
+		_, err := tx.Exec("INSERT OR IGNORE INTO administrators(id,username,password_hash,created_at) VALUES(1,?,?,?)", username, hash, now)
+		return err
+	})
 }
 
 func (s *Store) AuthenticateAdministrator(username, password string) (bool, error) {
-	var stored string
-	if err := s.db.QueryRow("SELECT password_hash FROM administrators WHERE id=1 AND username=?", username).Scan(&stored); err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
+	u, ok, err := s.AuthenticateUser(username, password)
+	if err != nil {
 		return false, err
 	}
-	return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil, nil
+	return ok && u.IsAdmin, nil
 }
 
 func (s *Store) AdministratorName() (string, error) {
 	var username string
-	err := s.db.QueryRow("SELECT username FROM administrators WHERE id=1").Scan(&username)
+	err := s.db.QueryRow("SELECT name FROM users WHERE id=1").Scan(&username)
 	return username, err
 }
 
 func (s *Store) SaveAccessToken(token string) error {
-	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at) VALUES(?,?)", token, time.Now().UTC().Format(time.RFC3339))
-	return err
+	return s.SaveAccessTokenForUser(token, 1, time.Time{})
 }
 
 // SaveAccessTokenExpiring 保存登录会话并写入过期时间；expiresAt 为零值时不过期。
 // 与 SaveAccessToken 共存：后者服务于历史/测试夹具（NULL=不过期）。
 func (s *Store) SaveAccessTokenExpiring(token string, expiresAt time.Time) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	if expiresAt.IsZero() {
-		_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at) VALUES(?,?,NULL)", token, now)
-		return err
-	}
-	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at) VALUES(?,?,?)", token, now, expiresAt.Unix())
-	return err
+	return s.SaveAccessTokenForUser(token, 1, expiresAt)
 }
 
 // ValidateAccessToken 校验会话是否有效：无行=false；过期=删除并 false；
 // 剩余不足 ttl-24h 时滑动续期（写失败不影响本次认证，避免把续期故障放大成 401）。
 // expires_at 为 NULL（TTL=0 或无法回填的旧行）时视为不过期。
 func (s *Store) ValidateAccessToken(token string, now time.Time, ttl time.Duration) (bool, error) {
-	var expires sql.NullInt64
-	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token=?", token).Scan(&expires); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	if !expires.Valid {
-		return true, nil
-	}
-	expiry := time.Unix(expires.Int64, 0)
-	if !now.Before(expiry) {
-		if _, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", token); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	if ttl > 0 {
-		threshold := ttl - 24*time.Hour
-		if threshold < 0 {
-			threshold = 0
-		}
-		if expiry.Sub(now) < threshold {
-			_, _ = s.db.Exec("UPDATE access_tokens SET expires_at=? WHERE token=?", now.Add(ttl).Unix(), token)
-		}
-	}
-	return true, nil
+	_, valid, err := s.ValidateAccessTokenUser(token, now, ttl)
+	return valid, err
 }
 
 // RevokeAllAccessTokens 让所有登录会话立即失效；API 密钥不在删除范围内。
@@ -368,6 +341,10 @@ func (s *Store) APIKeys() ([]APIKey, error) {
 }
 
 func (s *Store) CreateAPIKey(name string) (APIKey, error) {
+	return s.CreateAPIKeyForUser(name, 1)
+}
+
+func (s *Store) CreateAPIKeyForUser(name string, userID int64) (APIKey, error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return APIKey{}, err
@@ -375,7 +352,7 @@ func (s *Store) CreateAPIKey(name string) (APIKey, error) {
 	key := hex.EncodeToString(buf)
 	hash := apiKeyHash(key)
 	v := APIKey{ID: hash, Key: key, KeyPrefix: key[:12], Name: strings.TrimSpace(name), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	_, err := s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at) VALUES(?,?,?,?,?)", hash, hash, v.KeyPrefix, v.Name, v.CreatedAt)
+	_, err := s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at,user_id) VALUES(?,?,?,?,?,?)", hash, hash, v.KeyPrefix, v.Name, v.CreatedAt, userID)
 	return v, err
 }
 
