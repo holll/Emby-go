@@ -20,6 +20,7 @@ const (
 // 此时同片多次播放依赖客户端先发 start 重开会话；有 PlaySessionId 时按会话隔离。
 type PlaybackEvent struct {
 	SessionKey    string
+	UserID        int64
 	MovieID       int64
 	DeviceID      string
 	Kind          PlaybackKind
@@ -49,22 +50,26 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 		now = time.Now()
 	}
 	nowText := now.UTC().Format(time.RFC3339)
+	userID := ev.UserID
+	if userID <= 0 {
+		userID = 1
+	}
 	var out PlaybackResult
 	err := s.writeTx(func(tx *sql.Tx) error {
 		switch ev.Kind {
 		case PlaybackStopped:
 			var seq int64
-			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped,stopped_at)
-				VALUES(?,?,?,?,1,?,1,?)
+			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,user_id,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped,stopped_at)
+				VALUES(?,?,?,?,?,1,?,1,?)
 				ON CONFLICT(session_key) DO UPDATE SET stopped=1,
 					last_event_seq=playback_sessions.last_event_seq+1,
 					position_ticks=excluded.position_ticks, device_id=excluded.device_id, stopped_at=excluded.stopped_at
 				WHERE playback_sessions.stopped=0
 				RETURNING last_event_seq`,
-				key, ev.MovieID, ev.DeviceID, nowText, ev.PositionTicks, nowText).Scan(&seq)
+				key, userID, ev.MovieID, ev.DeviceID, nowText, ev.PositionTicks, nowText).Scan(&seq)
 			if errors.Is(err, sql.ErrNoRows) {
 				// 同一会话重复停止（含客户端重试）：幂等，不计数、不写事件。
-				return tx.QueryRow(`SELECT COALESCE(play_count,0) FROM userdata WHERE movie_id=?`, ev.MovieID).Scan(&out.PlayCount)
+				return tx.QueryRow(`SELECT COALESCE(play_count,0) FROM userdata WHERE user_id=? AND movie_id=?`, userID, ev.MovieID).Scan(&out.PlayCount)
 			}
 			if err != nil {
 				return err
@@ -73,11 +78,11 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 				key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO userdata(movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
-				VALUES(?,?,1,?,?)
-				ON CONFLICT(movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,
+			if _, err := tx.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
+				VALUES(?,?,?,1,?,?)
+				ON CONFLICT(user_id,movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,
 					play_count=userdata.play_count+1, last_played_at=excluded.last_played_at, last_stopped_ticks=excluded.last_stopped_ticks`,
-				ev.MovieID, ev.PositionTicks, nowText, ev.PositionTicks); err != nil {
+				userID, ev.MovieID, ev.PositionTicks, nowText, ev.PositionTicks); err != nil {
 				return err
 			}
 			// 事件表只用于审计/排障（序列号复检），保留最近 2 万条即可，
@@ -86,18 +91,18 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 				return err
 			}
 			out.Counted = true
-			return tx.QueryRow(`SELECT play_count FROM userdata WHERE movie_id=?`, ev.MovieID).Scan(&out.PlayCount)
+			return tx.QueryRow(`SELECT play_count FROM userdata WHERE user_id=? AND movie_id=?`, userID, ev.MovieID).Scan(&out.PlayCount)
 		case PlaybackStart, PlaybackProgress:
 			var seq int64
-			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped)
-				VALUES(?,?,?,?,1,?,0)
+			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,user_id,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped)
+				VALUES(?,?,?,?,?,1,?,0)
 				ON CONFLICT(session_key) DO UPDATE SET last_event_seq=playback_sessions.last_event_seq+1,
 					position_ticks=excluded.position_ticks, device_id=excluded.device_id,
 					started_at=CASE WHEN ?='start' THEN excluded.started_at ELSE playback_sessions.started_at END,
 					stopped=CASE WHEN ?='start' THEN 0 ELSE playback_sessions.stopped END
 				WHERE ?='start' OR playback_sessions.stopped=0
 				RETURNING last_event_seq`,
-				key, ev.MovieID, ev.DeviceID, nowText, ev.PositionTicks, string(ev.Kind), string(ev.Kind), string(ev.Kind)).Scan(&seq)
+				key, userID, ev.MovieID, ev.DeviceID, nowText, ev.PositionTicks, string(ev.Kind), string(ev.Kind), string(ev.Kind)).Scan(&seq)
 			if errors.Is(err, sql.ErrNoRows) {
 				// 停止后的迟到 Progress：忽略，不复活会话、不覆盖停止标记。
 				return nil
@@ -109,9 +114,9 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 				key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO userdata(movie_id,position_ticks,last_played_at) VALUES(?,?,?)
-				ON CONFLICT(movie_id) DO UPDATE SET position_ticks=excluded.position_ticks, last_played_at=excluded.last_played_at`,
-				ev.MovieID, ev.PositionTicks, nowText); err != nil {
+			if _, err := tx.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,last_played_at) VALUES(?,?,?,?)
+				ON CONFLICT(user_id,movie_id) DO UPDATE SET position_ticks=excluded.position_ticks, last_played_at=excluded.last_played_at`,
+				userID, ev.MovieID, ev.PositionTicks, nowText); err != nil {
 				return err
 			}
 			return nil

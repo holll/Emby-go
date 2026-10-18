@@ -5,6 +5,13 @@ import "database/sql"
 // SetIndexedPlayed changes only the explicit played flag, never playback counters
 // or position. The actual visible movie's library and global version commit with it.
 func (s *Store) SetIndexedPlayed(id int64, played bool) error {
+	return s.SetIndexedPlayedForUser(1, id, played)
+}
+
+func (s *Store) SetIndexedPlayedForUser(userID, id int64, played bool) error {
+	if userID <= 0 {
+		userID = 1
+	}
 	var version int64
 	err := s.writeTx(func(tx *sql.Tx) error {
 		var err error
@@ -16,8 +23,8 @@ func (s *Store) SetIndexedPlayed(id int64, played bool) error {
 		if err := tx.QueryRow("SELECT library_id FROM movies WHERE id=? AND status IN ('success','manual')", id).Scan(&libraryID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO userdata(movie_id,played) VALUES(?,?)
-			ON CONFLICT(movie_id) DO UPDATE SET played=excluded.played`, id, b2i(played)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO userdata(user_id,movie_id,played) VALUES(?,?,?)
+			ON CONFLICT(user_id,movie_id) DO UPDATE SET played=excluded.played`, userID, id, b2i(played)); err != nil {
 			return err
 		}
 		if libraryID.Valid {

@@ -59,7 +59,7 @@ func (a *App) favoriteItem(c *gin.Context, favorite bool) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	data, err := a.db.SetIndexedFavoriteData(id, favorite)
+	data, err := a.db.SetIndexedFavoriteDataForUser(a.currentUserID(c), id, favorite)
 	if err != nil {
 		userDataWriteError(c, err)
 		return
@@ -84,7 +84,7 @@ func (a *App) rateItem(c *gin.Context, likes int) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	data, err := a.db.SetIndexedLikesData(id, likes)
+	data, err := a.db.SetIndexedLikesDataForUser(a.currentUserID(c), id, likes)
 	if err != nil {
 		userDataWriteError(c, err)
 		return
@@ -121,7 +121,7 @@ func (a *App) hideFromResume(c *gin.Context) {
 		return
 	}
 	hide := strings.EqualFold(c.Query("Hide"), "true")
-	data, err := a.db.SetIndexedHideFromResumeData(id, hide)
+	data, err := a.db.SetIndexedHideFromResumeDataForUser(a.currentUserID(c), id, hide)
 	if err != nil {
 		userDataWriteError(c, err)
 		return

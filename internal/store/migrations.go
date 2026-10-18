@@ -124,6 +124,13 @@ func baselineChecksum() string {
 var migrationAddedColumns = map[string]map[string]string{
 	"access_tokens": {"expires_at": "INTEGER", "user_id": "INTEGER"},
 	"api_keys":      {"key_hash": "TEXT", "key_prefix": "TEXT", "user_id": "INTEGER"},
+	"userdata":      {"user_id": "INTEGER"},
+}
+
+// migrationRebuiltTables 记录迁移中整表重建、主键/唯一约束与原基线不同的表。
+// 这些表仍做列类型、默认值与外键比对，但主键序号与唯一约束以迁移后为准。
+var migrationRebuiltTables = map[string]struct{}{
+	"userdata": {},
 }
 
 func validateBaseline(db schemaDB) error {
@@ -141,6 +148,7 @@ func validateBaseline(db schemaDB) error {
 	}
 	tables := append(append([]string(nil), baselineTables...), "schema_migrations")
 	for _, table := range tables {
+		_, rebuilt := migrationRebuiltTables[table]
 		want, err := tableColumns(reference, table)
 		if err != nil {
 			return err
@@ -148,6 +156,20 @@ func validateBaseline(db schemaDB) error {
 		got, err := tableColumns(db, table)
 		if err != nil {
 			return err
+		}
+		if rebuilt {
+			// 重建表按迁移后定义为准：主键序号与 NOT NULL（movie_id 由隐式主键
+			// 改为显式 NOT NULL）都会变，仍比对类型与默认值，并跳过唯一约束。
+			for name, column := range got {
+				column.PrimaryKey = 0
+				column.NotNull = 0
+				got[name] = column
+			}
+			for name, column := range want {
+				column.PrimaryKey = 0
+				column.NotNull = 0
+				want[name] = column
+			}
 		}
 		for name, wantType := range migrationAddedColumns[table] {
 			column, ok := got[name]
@@ -170,6 +192,9 @@ func validateBaseline(db schemaDB) error {
 		}
 		if !reflect.DeepEqual(gotFK, wantFK) {
 			return fmt.Errorf("schema drift in table %s (foreign keys)", table)
+		}
+		if rebuilt {
+			continue
 		}
 		wantUnique, err := uniqueConstraints(reference, table)
 		if err != nil {
@@ -490,6 +515,55 @@ func applyMigration2(tx *sql.Tx) error {
 	return nil
 }
 
+// userdataMigrationVersion 8：userdata 重建为 (user_id, movie_id) 复合主键，
+// playback_sessions 增 user_id，新增 login_events 登录审计表。
+const userdataMigrationVersion = 8
+
+var migration8Statements = []string{
+	`CREATE TABLE userdata_new (
+		user_id INTEGER NOT NULL DEFAULT 1,
+		movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+		position_ticks INTEGER DEFAULT 0,
+		play_count INTEGER DEFAULT 0,
+		played INTEGER DEFAULT 0,
+		last_played_at TEXT,
+		last_stopped_ticks INTEGER DEFAULT -1,
+		is_favorite INTEGER NOT NULL DEFAULT 0,
+		likes INTEGER NOT NULL DEFAULT 0,
+		hide_from_resume INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(user_id, movie_id)
+	)`,
+	`INSERT INTO userdata_new(user_id,movie_id,position_ticks,play_count,played,last_played_at,last_stopped_ticks,is_favorite,likes,hide_from_resume)
+		SELECT 1,movie_id,position_ticks,play_count,played,last_played_at,last_stopped_ticks,is_favorite,likes,hide_from_resume FROM userdata`,
+	`DROP TABLE userdata`,
+	`ALTER TABLE userdata_new RENAME TO userdata`,
+	`CREATE INDEX IF NOT EXISTS idx_userdata_user_movie ON userdata(user_id, movie_id)`,
+	`ALTER TABLE playback_sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
+	`CREATE INDEX IF NOT EXISTS idx_playback_sessions_user_started ON playback_sessions(user_id, started_at)`,
+	`CREATE TABLE IF NOT EXISTS login_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER,
+		name TEXT NOT NULL,
+		ip TEXT,
+		success INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_login_events_created ON login_events(created_at)`,
+}
+
+func migration8Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration8Statements, "\n"))))
+}
+
+func applyMigration8(tx *sql.Tx) error {
+	for _, statement := range migration8Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("迁移 8 失败: %w", err)
+		}
+	}
+	return nil
+}
+
 const sessionExpiryMigrationVersion = 3
 
 // migration3Statements 给登录会话加过期时间（unix 秒，NULL=不过期）。
@@ -719,6 +793,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case userdataMigrationVersion:
+			if checksum != migration8Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -765,6 +844,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[userdataMigrationVersion] {
+		if err := applyMigration8(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -802,6 +886,11 @@ func (s *Store) migrate() error {
 	if !applied[usersMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", usersMigrationVersion, migration7Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", usersMigrationVersion, err)
+		}
+	}
+	if !applied[userdataMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", userdataMigrationVersion, migration8Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", userdataMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

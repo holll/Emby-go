@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/netip"
@@ -128,6 +129,14 @@ func currentUser(c *gin.Context) (store.User, bool) {
 	}
 	u, ok := v.(store.User)
 	return u, ok
+}
+
+// currentUserID 返回当前账户 id；未鉴权上下文（公开图片等）回退初始管理员。
+func (a *App) currentUserID(c *gin.Context) int64 {
+	if u, ok := currentUser(c); ok && u.ID > 0 {
+		return u.ID
+	}
+	return 1
 }
 
 // requireAdmin 仅允许管理员访问管理接口（挂在 requireAuth 之后）。
@@ -296,10 +305,16 @@ func (a *App) authenticate(c *gin.Context) {
 	}
 	if !valid {
 		a.authLimiter.recordFailure(c.ClientIP(), username)
+		if err := a.db.RecordLoginEvent(0, username, c.ClientIP(), false, time.Now()); err != nil {
+			slog.Warn("记录失败登录失败", "error", err)
+		}
 		apiError(c, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
 	a.authLimiter.reset(c.ClientIP(), username)
+	if err := a.db.RecordLoginEvent(user.ID, user.Name, c.ClientIP(), true, time.Now()); err != nil {
+		slog.Warn("记录登录审计失败", "error", err)
+	}
 	b := make([]byte, 24)
 	if _, err = rand.Read(b); err != nil {
 		apiError(c, http.StatusInternalServerError, "生成访问令牌失败")
@@ -410,6 +425,10 @@ func (a *App) userByIDParam(c *gin.Context) (store.User, bool) {
 		}
 	}
 	if err != nil {
+		apiError(c, http.StatusNotFound, "user not found")
+		return store.User{}, false
+	}
+	if me, ok := currentUser(c); ok && me.ID != u.ID {
 		apiError(c, http.StatusNotFound, "user not found")
 		return store.User{}, false
 	}

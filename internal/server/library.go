@@ -323,14 +323,15 @@ func (a *App) cachedCoverRatio(path string) float64 {
 
 // cachedUnplayed 未播数量（Views 每次都统计，按库 + 全局版本号缓存）。
 // 版本号一变（扫描/刮削/标记已看）自动失效，TTL 再兜一层。
-func (a *App) cachedUnplayed(libraryID int64) int {
-	key := "unplayed:" + a.db.Version("g:version") + ":" + strconv.FormatInt(libraryID, 10)
+func (a *App) cachedUnplayed(c *gin.Context, libraryID int64) int {
+	userID := a.currentUserID(c)
+	key := "unplayed:" + a.db.Version("g:version") + ":" + strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(libraryID, 10)
 	if raw, ok := a.imgMeta.Get(key); ok {
 		if count, err := strconv.Atoi(string(raw)); err == nil {
 			return count
 		}
 	}
-	count, err := a.db.UnplayedInLibrary(libraryID)
+	count, err := a.db.UnplayedInLibraryUser(userID, libraryID)
 	if err != nil {
 		return 0
 	}
@@ -385,8 +386,8 @@ func zeroUserData() gin.H {
 
 // collectionFolderDTO 把内部媒体库渲染为 Emby 的 CollectionFolder（电影库）BaseItemDto。
 // Id 用外部命名空间（libraryIDBase+内部id），与影片 id 全局不冲突。
-func (a *App) collectionFolderDTO(l store.Library) gin.H {
-	unplayed := a.cachedUnplayed(l.ID)
+func (a *App) collectionFolderDTO(c *gin.Context, l store.Library) gin.H {
+	unplayed := a.cachedUnplayed(c, l.ID)
 	item := gin.H{
 		"Id":                   externalLibraryID(l.ID),
 		"Name":                 l.Name,
@@ -460,7 +461,7 @@ func (a *App) boxsetItemFrom(name string, stat store.CollectionStat) gin.H {
 }
 
 func (a *App) counts(c *gin.Context) {
-	_, total, err := a.db.SearchFiltered(0, "", "", "", false, "title", false, 1, 0)
+	_, total, err := a.db.SearchFiltered(a.currentUserID(c), 0, "", "", "", false, "title", false, 1, 0)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -496,7 +497,7 @@ func (a *App) resume(c *gin.Context) {
 	if limit < 1 || limit > 1000 {
 		limit = 30
 	}
-	movies, total, err := a.db.Resumed(limit, start)
+	movies, total, err := a.db.Resumed(a.currentUserID(c), limit, start)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -678,7 +679,7 @@ func (a *App) views(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(libs))
 	for _, l := range libs {
-		out = append(out, a.collectionFolderDTO(l))
+		out = append(out, a.collectionFolderDTO(c, l))
 	}
 	// 有合集（NFO <set>）时追加「合集」媒体库视图（CollectionType=boxsets）。
 	if collections := a.cachedCollections(); len(collections) > 0 {
@@ -985,7 +986,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		person := joinEntityNames(c, "Person", "Person", "PersonIds")
 		unplayed := strings.Contains(strings.ToLower(c.Query("Filters")), "isunplayed")
 		favorite := strings.Contains(strings.ToLower(c.Query("Filters")), "isfavorite")
-		ms, total, e := a.db.SearchScoped(0, collection, c.Query("SearchTerm"), c.Query("Years"), genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
+		ms, total, e := a.db.SearchScoped(a.currentUserID(c), 0, collection, c.Query("SearchTerm"), c.Query("Years"), genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
 		if e != nil {
 			itemDataUnavailable(c)
 			return
@@ -1027,7 +1028,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		respondMediaJSON(c, b)
 		return
 	}
-	ms, total, e := a.db.SearchScoped(lib, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
+	ms, total, e := a.db.SearchScoped(a.currentUserID(c), lib, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
 	if e != nil {
 		itemDataUnavailable(c)
 		return
@@ -1339,7 +1340,7 @@ func (a *App) item(c *gin.Context) {
 			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
-		c.JSON(http.StatusOK, a.collectionFolderDTO(lib))
+		c.JSON(http.StatusOK, a.collectionFolderDTO(c, lib))
 		return
 	}
 	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
@@ -1353,7 +1354,7 @@ func (a *App) item(c *gin.Context) {
 		apiError(c, 404, "not found")
 		return
 	}
-	d, _ := a.db.Data(id)
+	d, _ := a.db.DataUser(a.currentUserID(c), id)
 	b, _ := json.Marshal(a.embyItemDetail(m, d, nil))
 	a.cache.Set(key, b, time.Hour)
 	respondMediaJSON(c, b)

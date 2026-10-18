@@ -161,7 +161,7 @@ func TestUserDataSnapshotsRuntimeAndLegacyMissingDefaults(t *testing.T) {
 	if err != nil || missing != (UserData{}) {
 		t.Fatalf("legacy missing=%+v err=%v", missing, err)
 	}
-	if _, err := readUserData(f.s.db, -999); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := readUserData(f.s.db, 1, -999); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("strict missing=%v", err)
 	}
 	for _, op := range snapshotSettings {

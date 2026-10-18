@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；420 个 Test 函数（server 34.0s / store 12.7s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；422 个 Test 函数（server 34.5s / store 14.1s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 84/84 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -268,7 +268,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
 | 84 | 用户模型基座：迁移 7 建 `users` 表并从 `administrators` 复制 id=1；`access_tokens`/`api_keys` 增 `user_id`；登录改为按用户校验、会话绑定用户；`/api/admin/*` 增加 `requireAdmin`（403 `ADMIN_REQUIRED`）；`/Users/{id}` 支持已存在用户 | ✅ 本地完成 | `userdata`/播放会话仍是单用户结构，普通用户暂时看到与管理员相同的播放数据；Emby 端点仍只认 `Users/1` 的数据；无用户管理 UI/API |
-| 85 | 按用户隔离播放数据：重建 `userdata` 为 `(user_id, movie_id)` 主键、播放会话/事件带 `user_id`；读写按当前用户 | 待做 | 需要迁移旧行到 user 1，并更新索引、播放计数、收藏/评分/已看过滤 |
+| 85 | 按用户隔离播放数据：迁移 8 重建 `userdata` 为 `(user_id, movie_id)`、播放会话带 `user_id`、新增 `login_events`；store 增加 `DataUser`/`DataForUser`/`WriteIndexed*ForUser`/`RecordPlaybackEvent.UserID`；服务端一律按当前登录用户读写 | ✅ 本地完成 | 旧行归 user 1；Emby `/Users/{uid}` 仅允许当前用户 id（管理员代看留批次 86）；未做跨用户列表 API |
 | 86 | Emby 用户面：`/Users` 列表、`Users/{id}/Items` 等按当前用户过滤；普通用户只能访问自己的 id；管理端用户 CRUD API | 待做 | 管理员查看他人数据的产品语义待定 |
 | 87 | Web 管理 UI：用户列表/创建/改密/停用/删除；非管理员隐藏管理入口与 API 密钥创建 | 待做 | 真机与读屏复测 |
 

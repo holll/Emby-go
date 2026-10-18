@@ -1037,18 +1037,18 @@ func (s *Store) Movie(id int64) (Movie, error) {
 	return movieScan(row)
 }
 
-func (s *Store) SearchFiltered(libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
+func (s *Store) SearchFiltered(userID, libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+	return s.search(userID, libraryID, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
-func (s *Store) SearchScoped(libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+func (s *Store) SearchScoped(userID, libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+	return s.search(userID, libraryID, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(1, libraryID, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
 }
 
 // AdminQuery 管理端列表（媒体墙）的查询条件。
@@ -1057,6 +1057,7 @@ func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc boo
 // 位置参数在调用点极易错位。全部过滤与分页都在 SQL 层完成，
 // 避免先分页再过滤导致每页条数与总数失真。
 type AdminQuery struct {
+	UserID     int64  // 0 = 初始管理员
 	LibraryID  int64  // 0 = 全部媒体库
 	Term       string // 标题/番号/原名模糊匹配
 	Status     string // "" = 可播放+手动录入
@@ -1074,7 +1075,11 @@ type AdminQuery struct {
 
 // SearchAdmin 供管理端列表使用。
 func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
-	return s.search(q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
+	userID := q.UserID
+	if userID <= 0 {
+		userID = 1
+	}
+	return s.search(userID, q.LibraryID, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
 		false, false, q.SortBy, q.Desc, q.Limit, q.Offset)
 }
 
@@ -1119,7 +1124,7 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 	return out, rows.Err()
 }
 
-func (s *Store) search(libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+func (s *Store) search(userID, libraryID int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	where := []string{}
 	args := []any{}
 	switch status {
@@ -1197,11 +1202,16 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 			where = append(where, "("+strings.Join(clauses, " OR ")+")")
 		}
 	}
+	if userID <= 0 {
+		userID = 1
+	}
 	if unplayed {
-		where = append(where, "NOT EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.played=1)")
+		where = append(where, "NOT EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.user_id=? AND userdata.played=1)")
+		args = append(args, userID)
 	}
 	if favorite {
-		where = append(where, "EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.is_favorite=1)")
+		where = append(where, "EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.user_id=? AND userdata.is_favorite=1)")
+		args = append(args, userID)
 	}
 	// status=StatusAll 时可能一条过滤条件都没有（此时 where 为空），
 	// 必须整段省掉 WHERE，否则会拼出 "SELECT ... FROM movies WHERE " 的残缺 SQL。
@@ -1243,7 +1253,12 @@ func (s *Store) search(libraryID int64, term, status, years, genre, tags, studio
 	return out, total, rows.Err()
 }
 func (s *Store) Data(id int64) (UserData, error) {
-	d, err := readUserData(s.db, id)
+	return s.DataUser(1, id)
+}
+
+// DataUser 读取指定账户的 UserData；账户缺省按初始管理员（1）处理。
+func (s *Store) DataUser(userID, id int64) (UserData, error) {
+	d, err := readUserData(s.db, userID, id)
 	if err == sql.ErrNoRows {
 		return UserData{}, nil
 	}
@@ -1252,10 +1267,18 @@ func (s *Store) Data(id int64) (UserData, error) {
 
 // DataFor 批量读取多部影片的 UserData；大列表按参数预算分块，共享方法内快照。
 func (s *Store) DataFor(ids []int64) (map[int64]UserData, error) {
+	return s.DataForUser(1, ids)
+}
+
+// DataForUser 批量读取指定账户的 UserData。
+func (s *Store) DataForUser(userID int64, ids []int64) (map[int64]UserData, error) {
+	if userID <= 0 {
+		userID = 1
+	}
 	out := make(map[int64]UserData, len(ids))
 	err := s.readIDBatches(ids, func(q batchQueryer, marks string, args []any) error {
 		rows, err := q.Query(`SELECT movie_id,position_ticks,play_count,played,COALESCE(last_played_at,''),COALESCE(last_stopped_ticks,-1),
-   COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE movie_id IN (`+marks+`)`, args...)
+   COALESCE(is_favorite,0),COALESCE(likes,0),COALESCE(hide_from_resume,0) FROM userdata WHERE user_id=? AND movie_id IN (`+marks+`)`, append([]any{userID}, args...)...)
 		if err != nil {
 			return err
 		}
@@ -1356,9 +1379,9 @@ func b2i(v bool) int {
 // SavePlayback 只写播放相关列。播放上报与各 setter 各写各的列，
 // 避免「读整行→改一列→写回整行」时用旧值覆盖并发的收藏/评分变更。
 func (s *Store) SavePlayback(id int64, positionTicks, playCount int64, lastPlayedAt string, stoppedTicks int64) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
-		VALUES(?,?,?,?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,
+	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
+		VALUES(1,?,?,?,?,?)
+		ON CONFLICT(user_id,movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,
 		last_played_at=excluded.last_played_at,last_stopped_ticks=excluded.last_stopped_ticks`,
 		id, positionTicks, playCount, lastPlayedAt, stoppedTicks)
 	return err
@@ -1366,29 +1389,29 @@ func (s *Store) SavePlayback(id int64, positionTicks, playCount int64, lastPlaye
 
 // SetPlayed 只更新已播标记。
 func (s *Store) SetPlayed(id int64, played bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,played) VALUES(?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET played=excluded.played`, id, b2i(played))
+	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,played) VALUES(1,?,?)
+		ON CONFLICT(user_id,movie_id) DO UPDATE SET played=excluded.played`, id, b2i(played))
 	return err
 }
 
 // SetFavorite 收藏/取消收藏。
 func (s *Store) SetFavorite(id int64, favorite bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,is_favorite) VALUES(?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET is_favorite=excluded.is_favorite`, id, b2i(favorite))
+	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,is_favorite) VALUES(1,?,?)
+		ON CONFLICT(user_id,movie_id) DO UPDATE SET is_favorite=excluded.is_favorite`, id, b2i(favorite))
 	return err
 }
 
 // SetLikes 个人评分：1 赞 / -1 踩 / 0 清除。
 func (s *Store) SetLikes(id int64, likes int) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,likes) VALUES(?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET likes=excluded.likes`, id, likes)
+	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,likes) VALUES(1,?,?)
+		ON CONFLICT(user_id,movie_id) DO UPDATE SET likes=excluded.likes`, id, likes)
 	return err
 }
 
 // SetHideFromResume 隐藏/恢复续播。
 func (s *Store) SetHideFromResume(id int64, hidden bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(movie_id,hide_from_resume) VALUES(?,?)
-		ON CONFLICT(movie_id) DO UPDATE SET hide_from_resume=excluded.hide_from_resume`, id, b2i(hidden))
+	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,hide_from_resume) VALUES(1,?,?)
+		ON CONFLICT(user_id,movie_id) DO UPDATE SET hide_from_resume=excluded.hide_from_resume`, id, b2i(hidden))
 	return err
 }
 func (s *Store) Probe(method, path, query, body string) error {
@@ -1490,14 +1513,17 @@ func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
 
 // Resumed 返回有播放进度且未隐藏续播的可见影片（按标题排序，与列表口径一致），
 // 供「继续观看」直接分页，避免全量载入后在内存里过滤。
-func (s *Store) Resumed(limit, offset int) ([]Movie, int, error) {
+func (s *Store) Resumed(userID int64, limit, offset int) ([]Movie, int, error) {
+	if userID <= 0 {
+		userID = 1
+	}
 	const cond = ` FROM movies JOIN userdata u ON u.movie_id=movies.id
-		WHERE movies.status IN ('success','manual') AND u.position_ticks>0 AND COALESCE(u.hide_from_resume,0)=0`
+		WHERE u.user_id=? AND movies.status IN ('success','manual') AND u.position_ticks>0 AND COALESCE(u.hide_from_resume,0)=0`
 	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*)" + cond).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*)"+cond, userID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query("SELECT "+movieCols+cond+" ORDER BY movies.title, movies.id LIMIT ? OFFSET ?", limit, offset)
+	rows, err := s.db.Query("SELECT "+movieCols+cond+" ORDER BY movies.title, movies.id LIMIT ? OFFSET ?", userID, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1896,9 +1922,17 @@ func (s *Store) CollectionSummary(collection string) (count int, genres []string
 
 // UnplayedInLibrary 统计库内可见且未标记已播的影片数。
 func (s *Store) UnplayedInLibrary(libraryID int64) (int, error) {
+	return s.UnplayedInLibraryUser(1, libraryID)
+}
+
+// UnplayedInLibraryUser 统计指定账户未看的影片数。
+func (s *Store) UnplayedInLibraryUser(userID, libraryID int64) (int, error) {
+	if userID <= 0 {
+		userID = 1
+	}
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM movies WHERE library_id=? AND status IN ('success','manual')
-		AND NOT EXISTS (SELECT 1 FROM userdata u WHERE u.movie_id=movies.id AND u.played=1)`, libraryID).Scan(&count)
+		AND NOT EXISTS (SELECT 1 FROM userdata u WHERE u.movie_id=movies.id AND u.user_id=? AND u.played=1)`, libraryID, userID).Scan(&count)
 	return count, err
 }
 

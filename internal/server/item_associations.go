@@ -10,7 +10,7 @@ import (
 // Read errors must not become successful DTOs containing default user data or
 // empty actors. Callers must return before serializing or caching on !ok.
 func (a *App) itemDataFor(c *gin.Context, ids []int64) (map[int64]store.UserData, bool) {
-	data, err := a.db.DataFor(ids)
+	data, err := a.db.DataForUser(a.currentUserID(c), ids)
 	if err != nil {
 		itemDataUnavailable(c)
 		return nil, false

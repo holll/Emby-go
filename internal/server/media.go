@@ -1147,6 +1147,7 @@ func (a *App) playing(c *gin.Context) {
 	isStopped := kind == store.PlaybackStopped
 	if _, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
 		SessionKey:    req.PlaySessionId,
+		UserID:        a.currentUserID(c),
 		MovieID:       id,
 		DeviceID:      req.DeviceId,
 		Kind:          kind,
@@ -1186,7 +1187,7 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	if err := a.db.SetIndexedPlayed(id, played); err != nil {
+	if err := a.db.SetIndexedPlayedForUser(a.currentUserID(c), id, played); err != nil {
 		userDataWriteError(c, err)
 		return
 	}
