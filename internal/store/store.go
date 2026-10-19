@@ -506,6 +506,13 @@ func parseStrings(v string) []string {
 	return out
 }
 
+// Analyze 刷新 SQLite 查询规划统计信息。大库批量增删后统计信息会过期，
+// 周期性调用可避免查询退化为全表扫描（迁移 6/11 末尾也各跑一次）。
+func (s *Store) Analyze() error {
+	_, err := s.db.Exec("ANALYZE")
+	return err
+}
+
 func (s *Store) Version(key string) string {
 	if key == "g:version" {
 		return strconv.FormatInt(s.gversion.Load(), 10)

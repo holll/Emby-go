@@ -96,11 +96,10 @@ func (a *App) image(c *gin.Context) {
 }
 
 const (
-	// imageMaxAge 图片响应的客户端缓存时长。图片只在刮削/上传后变化，
-	// 变化时 ETag（文件 mtime）与 URL 上的 tag 都会变，客户端自然会取新图；
-	// 取 5 分钟而非常量级长缓存：管理端海报墙的 URL 不带 tag，
-	// 太长会让重刮后的新海报在浏览器里长时间不更新。到期后靠 ETag 走 304，成本极低。
-	imageMaxAge = 5 * time.Minute
+	// imageMaxAge 图片响应的客户端/边缘缓存时长。图片只在刮削/上传后变化，
+	// 变化时 ETag（文件 mtime）会变；取 24 小时让 Cloudflare 边缘与浏览器
+	// 长时间命中，重刮后的新图最迟一天生效（需要立刻生效时刷新 URL）。
+	imageMaxAge = 24 * time.Hour
 	// imageMetaTTL 图片元信息（影片图片路径、演员头像路径）的进程内缓存时长。
 	imageMetaTTL = time.Minute
 	// imageThumbTTL 缩略图字节的进程内缓存时长。

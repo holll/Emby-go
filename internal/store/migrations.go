@@ -830,6 +830,32 @@ func applyMigration7(tx *sql.Tx) error {
 	return nil
 }
 
+const statsIndexMigrationVersion = 11
+
+// migration11Statements 补两类高频查询的索引并刷新统计信息：
+//   - userdata(movie_id)：删库/删片时按 movie_id 级联删除，缺索引会全表扫；
+//   - login_events(user_id, created_at)：管理端按用户查最近登录事件；
+//   - ANALYZE：让新索引在既有大库上立即被查询规划器选中（统计信息缺失时
+//     SQLite 仍可能选 idx_movies_status 再临时排序）。
+var migration11Statements = []string{
+	`CREATE INDEX IF NOT EXISTS idx_userdata_movie ON userdata(movie_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_login_events_user_created ON login_events(user_id, created_at)`,
+	`ANALYZE`,
+}
+
+func migration11Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration11Statements, "\n"))))
+}
+
+func applyMigration11(tx *sql.Tx) error {
+	for _, statement := range migration11Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("schema migration %d: %w", statsIndexMigrationVersion, err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -902,6 +928,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case statsIndexMigrationVersion:
+			if checksum != migration11Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -963,6 +994,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[statsIndexMigrationVersion] {
+		if err := applyMigration11(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -1015,6 +1051,11 @@ func (s *Store) migrate() error {
 	if !applied[playbackIsolationMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", playbackIsolationMigrationVersion, migration10Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", playbackIsolationMigrationVersion, err)
+		}
+	}
+	if !applied[statsIndexMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", statsIndexMigrationVersion, migration11Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", statsIndexMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

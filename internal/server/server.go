@@ -98,8 +98,11 @@ type App struct {
 	shutdownOnce sync.Once      // BeginShutdown 幂等
 	closeOnce    sync.Once      // Close 幂等
 	workerWG     sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
-	schedMu      sync.Mutex
-	schedDone    context.Context // scheduler.Stop 返回的完成信号（BeginShutdown 写入）
+	// 周期性统计信息维护（ANALYZE）。analyzeStats 可替换以便测试观察调用。
+	maintenanceOnce sync.Once
+	analyzeStats    func() error
+	schedMu         sync.Mutex
+	schedDone       context.Context // scheduler.Stop 返回的完成信号（BeginShutdown 写入）
 
 	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
 	sched *scheduler.Scheduler
@@ -167,6 +170,7 @@ func New(cfg config.Config) (*App, error) {
 	if cfg.SetupCode == "" {
 		slog.Warn("未设置 setup_code：首次初始化前请只监听回环/内网，或通过反向代理限制来源")
 	}
+	app.startMaintenance()
 	return app, nil
 }
 
@@ -202,6 +206,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	}
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
+	a.analyzeStats = db.Analyze
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
 		a.serverName = "Emby-go"

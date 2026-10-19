@@ -141,8 +141,8 @@ func TestMigrationRejectsUnknownOrModifiedLedger(t *testing.T) {
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=7",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=8",
 		"UPDATE schema_migrations SET checksum='tampered' WHERE version=9",
-		"UPDATE schema_migrations SET checksum='tampered' WHERE version=10",
-		"INSERT INTO schema_migrations VALUES(11,'future','t0')",
+		"UPDATE schema_migrations SET checksum='tampered' WHERE version=11",
+		"INSERT INTO schema_migrations VALUES(12,'future','t0')",
 	} {
 		t.Run(statement, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "check.db")
