@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；439 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；442 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 86/86 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | go / vuln / web 三 job；批次 89 的 push 已触发，最近一次全绿见仓库 Actions；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -298,6 +298,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
+| 96 | Redis 降为可选：未配置 `redis_addr` 或连接失败时回退进程内缓存（容量 4096 条）并告警；`adminSettings` 返回真实 `cache`/`redis_online`（不再写死 redis/true）；README/config.example 与部署说明同步 | ✅ 本地完成 | 内存兜底无跨实例共享、重启失效；多实例仍需外部缓存；缓存故障切换无指标 |
 | 95 | 删除硬编码 user 1 的用户数据 API（`Data/DataFor/SavePlayback/SetPlayed/SetFavorite/SetLikes/SetHideFromResume`），改 `DataUser/DataForUser/SavePlaybackForUser` 与 `SetIndexed*ForUser`；`authOK` 账户缺失按 401 fail-closed，移除 `administrators` 旧行回退；新增删除用户 token 失效与旧口令拒绝测试 | ✅ 本地完成 | 旧 `SaveAccessToken`/`CreateAPIKey` 仍是 user 1 包装（服务端已走 ForUser）；回退旧二进制仍读 administrators |
 | 94 | 全量 schema 校验：参考库跑完迁移 1–11 后逐表比对列/类型/默认值/主键/外键/唯一/CHECK，索引按语义签名（列序/排序/唯一/部分谓词）；备份 CLI 加固：只读 DSN + busy_timeout、暂存目录成功后才发布、`PRAGMA integrity_check` 失败即删、NFO 落盘 fsync | ✅ 本地完成 | 崩溃残留 `.tmp` 目录不自动清理；备份保留期外的异地副本仍靠部署侧 |
 | 93 | `userdata(movie_id)`、`login_events(user_id,created_at)` 索引（迁移 11，末尾 ANALYZE）；周期性 ANALYZE（启动一次 + 每 7 天，随进程退出 join）；图片缓存 TTL 5 分钟→24 小时（配合 Cloudflare） | ✅ 本地完成 | 真实 20k 删库基准与索引写放大未测；ANALYZE 周期是固定 7 天，不感知写入量 |

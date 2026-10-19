@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,15 +23,20 @@ import (
 	"emby-go/internal/store"
 )
 
+// defaultMemoryCacheEntries 是内存兜底缓存容量（条目数）。
+const defaultMemoryCacheEntries = 4096
+
 type App struct {
-	cfg        config.Config
-	db         *store.Store
-	router     *gin.Engine
-	cache      cache.Cache
-	adminMu    sync.RWMutex // 保护 adminName：初始化/登录写，其它 handler 并发读
-	adminName  string
-	serverID   string
-	serverName string
+	cfg          config.Config
+	db           *store.Store
+	router       *gin.Engine
+	cache        cache.Cache
+	cacheBackend string
+	cacheOnline  bool
+	adminMu      sync.RWMutex // 保护 adminName：初始化/登录写，其它 handler 并发读
+	adminName    string
+	serverID     string
+	serverName   string
 	// sessionTTL 是登录会话有效期（0=不过期），来自配置 session_ttl_days。
 	sessionTTL time.Duration
 	// initAllow 限制首次初始化来源；为空表示不限制。
@@ -157,10 +161,11 @@ type nfoCacheEntry struct {
 	neg     bool
 }
 
-// New 强制 Redis 为缓存后端：redis_addr 必填，连接失败拒绝启动。
+// New 按配置选择缓存后端：配置 redis_addr 且可用时用 Redis，
+// 未配置或连接失败时回退进程内缓存（单实例语义，多实例不共享、重启失效）。
 func New(cfg config.Config) (*App, error) {
 	if cfg.RedisAddr == "" {
-		return nil, errors.New("缺少 redis_addr：Redis 为必选缓存后端")
+		slog.Warn("未配置 redis_addr：使用进程内缓存（多实例不共享、重启失效）")
 	}
 	app, err := newApp(cfg, nil)
 	if err != nil {
@@ -180,21 +185,28 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	cacheBackend, cacheOnline := "memory", false
 	if cacheStore == nil {
-		namespace, err := db.CacheNamespace()
-		if err != nil {
-			db.Close()
-			return nil, err
+		if cfg.RedisAddr == "" {
+			cacheStore = cache.NewMemory(defaultMemoryCacheEntries)
+		} else {
+			namespace, err := db.CacheNamespace()
+			if err != nil {
+				db.Close()
+				return nil, err
+			}
+			redisCache := cache.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, namespace)
+			if err := redisCache.Ping(); err != nil {
+				slog.Warn("Redis 不可用，回退进程内缓存", "addr", cfg.RedisAddr, "error", err)
+				cacheStore = cache.NewMemory(defaultMemoryCacheEntries)
+			} else {
+				cacheStore = redisCache
+				cacheBackend, cacheOnline = "redis", true
+			}
 		}
-		redisCache := cache.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, namespace)
-		if err := redisCache.Ping(); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("redis 连接失败(%s): %w", cfg.RedisAddr, err)
-		}
-		cacheStore = redisCache
 	}
 	a := &App{
-		cfg: cfg, db: db, cache: cacheStore,
+		cfg: cfg, db: db, cache: cacheStore, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
 		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),

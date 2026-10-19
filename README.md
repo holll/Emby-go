@@ -4,7 +4,7 @@
 
 - 元数据真源 = **现成 NFO**（`<title>/<genre>/<studio>/<actor>/<set>` 等）；可选内置 MetaTube 刮削与翻译补全
 - 媒体只支持 `http(s)://` 的 `.strm`；播放走 **302 直拉**（服务端零带宽，不转码）
-- 单二进制、单端口；**需 Redis 缓存**（`redis_addr` 必填，连接失败拒绝启动）；内置深色 Web 管理后台
+- 单二进制、单端口；Redis 缓存可选（未配置或连接失败回退进程内缓存，仅单实例安全）；内置深色 Web 管理后台
 - 兼容端点覆盖：认证、媒体库/影片墙、详情、图片、合集(BoxSet)、进度/续播、搜索/过滤等 Emby 客户端浏览主链路
 
 ## 快速开始
@@ -123,7 +123,7 @@ debug: false              # true 时增加安全请求元数据；不输出请�
 db_path: "emby-go.db"     # SQLite 文件
 server_name: "Emby-go"    # 对外站名
 server_id: ""             # 留空自动生成稳定 UUID
-redis_addr: "127.0.0.1:6379"   # Redis 必选缓存后端
+redis_addr: "127.0.0.1:6379"   # 可选：留空或不可达时回退进程内缓存
 redis_password: ""
 redis_db: 0
 session_ttl_days: 30      # 登录会话有效期（天），0=不过期；使用中自动续期
@@ -133,14 +133,14 @@ setup_code: ""            # 首次初始化验证码（公网/共享环境必填
 server_domains: []        # 前端“服务器域名切换”候选
 ```
 
-`server_id` 会写入配置文件以保持稳定；`redis_addr` 必填，连接失败将拒绝启动。
+`server_id` 会写入配置文件以保持稳定；`redis_addr` 可选，未配置或连接失败时回退进程内缓存（重启失效、多实例不共享）。
 
 ### 公网部署（D04 门禁）
 
 - **TLS 由反向代理终止**：本服务不内置 TLS。建议只监听回环（如 `port` 绑定 127.0.0.1），由 Nginx/Caddy 对外提供 https。
 - **初始化保护**：公网暴露前设置 `setup_code`（初始化必须携带），或配置 `initialize_allow_from` 限定来源 CIDR。
 - **代理头**：默认不信任 `X-Forwarded-For`；只有配置 `trusted_proxies` 后限流/日志才使用代理提供的真实 IP。
-- **单实例**：SQLite 与 Redis 为单一事实源，不要多实例共享同一 SQLite 文件；Redis 必选且失败拒绝启动。
+- **单实例**：SQLite 为唯一事实源，不要多实例共享同一 SQLite 文件；Redis 可选，内存兜底仅单实例安全。
 - **放行条件**：A03（未认证 401 不泄露）、A14（超大请求体 413）与 D01（会话期限）均已本地通过；公网启用仍需完成 PLAN-STATUS §3 的剩余人工项与备份/恢复演练。
 
 ## 备份与恢复（D11）

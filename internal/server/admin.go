@@ -690,10 +690,10 @@ func (a *App) adminSettings(c *gin.Context) {
 		"listen":       a.cfg.Addr(),
 		"db_path":      a.cfg.DBPath,
 		"debug":        a.cfg.Debug,
-		"cache":        "redis",
+		"cache":        a.cacheBackend,
 		"redis_addr":   a.cfg.RedisAddr,
 		"redis_db":     a.cfg.RedisDB,
-		"redis_online": true,
+		"redis_online": a.cacheOnline,
 		// D01：0 表示登录会话永不过期。
 		"session_ttl_days": a.cfg.SessionTTLDays,
 		// DB-10：启动回填进度，大库预热期间给运维一个可见口径。
