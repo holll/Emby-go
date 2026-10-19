@@ -1,0 +1,30 @@
+# 单实例部署（D04：单写者 + 可选 Redis）。
+#   mkdir -p data && cp config.example.yaml data/config.yaml
+#   docker compose -f deploy/docker-compose.yml up -d --build
+services:
+  emby-go:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: emby-go:local
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./data:/data
+      # 媒体库目录（按需追加只读挂载）
+      # - /srv/media:/media:ro
+    environment:
+      TZ: Asia/Shanghai
+    # 需要 Redis 时启用下面的 redis 服务并把 config.yaml 的 redis_addr 指向 redis:6379；
+    # 留空则自动使用进程内内存缓存。
+    # depends_on: [redis]
+
+  redis:
+    # 可选：docker compose --profile redis up -d
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./redis-data:/data

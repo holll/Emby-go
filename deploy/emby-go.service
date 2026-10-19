@@ -1,0 +1,28 @@
+# /etc/systemd/system/emby-go.service
+# 安装：install -m0755 emby-go /usr/local/bin/；配置文件 /etc/emby-go/config.yaml；
+# 数据目录 /var/lib/emby-go（SQLite/WAL、NFO 索引可放这里）。
+# 停止时二进制自带上限 15s 有界关闭；systemd 宽限 30s 足够。
+[Unit]
+Description=Emby-go media server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=emby
+Group=emby
+WorkingDirectory=/var/lib/emby-go
+ExecStart=/usr/local/bin/emby-go -c /etc/emby-go/config.yaml
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+# 加固：只允许写数据目录与运行时目录（WAL/temp）
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/emby-go /run/emby-go
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

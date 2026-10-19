@@ -298,6 +298,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
+| 99 | 部署样例：`deploy/Dockerfile`（多阶段、distroless 非 root、`-X main.version`）、`deploy/docker-compose.yml`（Redis 可选 profile）、`deploy/emby-go.service`（30s 停止宽限 + 加固）；README 增部署段 | ✅ 本地完成 | 未在 CI 构建镜像（无 Docker job）；未做 compose/systemd 实机演练 |
 | 98 | 安全响应头（nosniff/DENY/no-referrer/Permissions-Policy）+ CSP `Report-Only`（script-src self、img/media 放行 http(s)/blob）；迁移 13 `admin_audit_events` 记录管理员 POST/PUT/PATCH/DELETE（GET 不记），90 天/5 万条裁剪，`GET /api/admin/audit-events` 只读查询 | ✅ 本地完成 | CSP 尚无 report 收集端，违规只进浏览器控制台；审计无 UI；审计在响应后同步写库（失败仅日志） |
 | 97 | 登录会话摘要化：迁移 12 把 `access_tokens.token` 原地改写为 SHA-256 摘要（无需 DDL，旧会话升级后仍有效），读写/撤销/过期全部按摘要匹配；`isTokenHash` 识别 64 位 hex 防重复摘要 | ✅ 本地完成 | 迁移后回退旧二进制将无法识别会话（需重新登录）；摘要无盐但输入为 192 位随机值 |
 | 96 | Redis 降为可选：未配置 `redis_addr` 或连接失败时回退进程内缓存（容量 4096 条）并告警；`adminSettings` 返回真实 `cache`/`redis_online`（不再写死 redis/true）；README/config.example 与部署说明同步 | ✅ 本地完成 | 内存兜底无跨实例共享、重启失效；多实例仍需外部缓存；缓存故障切换无指标 |

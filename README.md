@@ -154,6 +154,16 @@ go run ./cmd/embybackup -db ./data/emby.db -out /backups/emby -retain 7
 - 恢复：停止服务 → 用备份的 `db.sqlite` 覆盖数据库、把 `nfo/lib-<id>/` 覆盖回对应媒体库 → 启动后重新扫描；恢复后按 D05 轮换管理员密码、撤销全部会话与 API 密钥。
 - 契约：RPO 24h / RTO 1h；Redis 不备份；备份不含管理员密码明文（D03 摘要化后数据库内只有密钥摘要）。
 
+## 部署样例
+
+`deploy/` 提供可直接改用的样例（单实例、SQLite、Redis 可选）：
+
+- `deploy/Dockerfile`：多阶段构建静态二进制，distroless 非 root 运行，`/data` 挂配置与数据库。
+- `deploy/docker-compose.yml`：`mkdir -p deploy/data && cp config.example.yaml deploy/data/config.yaml` 后 `docker compose -f deploy/docker-compose.yml up -d --build`；Redis 用 `--profile redis` 可选启用。
+- `deploy/emby-go.service`：systemd 单元，含 `TimeoutStopSec=30s`（大于进程内 15s 有界关闭）与 `ProtectSystem=strict` 等加固。
+
+配置项（含 `setup_code`、`initialize_allow_from`、`trusted_proxies`）见 `config.example.yaml` 与「公网部署」一节。
+
 ## 开发
 
 ```bash
