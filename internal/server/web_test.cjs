@@ -1496,3 +1496,24 @@ test('活动记录是独立侧边栏页面（批次 89）', () => {
   const settingsBody = source.slice(source.indexOf('async function pageSettings()'), source.indexOf('async function pageSettings()') + 1200);
   assert.doesNotMatch(settingsBody, /login-events|playback-events/);
 });
+
+test('P1 修复：路由收起浮层、hover 控件可聚焦、筛选重绘还原焦点', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
+  // P1-7：page() 入口收起所有浮层，函数按层级关闭。
+  assert.match(appSource, /async function page\(name\) \{\n  \/\/ 浮层属于来源页上下文/);
+  assert.match(appSource, /closeOverlaysForNavigation\(\);/);
+  const navClose = appSource.slice(appSource.indexOf('function closeOverlaysForNavigation'), appSource.indexOf('function closeOverlaysForNavigation') + 500);
+  for (const selector of ['#scrape-overlay', '#player-overlay', '#detail-overlay']) {
+    assert.ok(navClose.includes(selector), `导航收起缺少 ${selector}`);
+  }
+  // P1-8：键盘焦点进入卡片时显示操作按钮与播放层。
+  assert.match(css, /\.wall-card:focus-within \.wall-actions \{ opacity: 1; \}/);
+  assert.match(css, /\.wall-card:focus-within \.wall-play \{ opacity: 1; \}/);
+  // P1-9：重绘前记录触发控件，重绘后还原焦点。
+  assert.match(appSource, /let pendingWallFocus = '';/);
+  assert.match(appSource, /pendingWallFocus = '\[data-status="/);
+  assert.match(appSource, /pendingWallFocus = '\[data-lib="/);
+  assert.match(appSource, /pendingWallFocus = '#item-sort';/);
+  assert.match(appSource, /const target = document\.querySelector\(pendingWallFocus\);/);
+});

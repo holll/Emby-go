@@ -688,10 +688,10 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
 .wall-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.12); }
 .wall-progress i { display: block; height: 100%; background: var(--accent); box-shadow: 0 0 8px var(--blue-glow); }
 .wall-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s ease; }
-.wall-card:hover .wall-actions { opacity: 1; }
+.wall-card:hover .wall-actions, .wall-card:focus-within .wall-actions { opacity: 1; }
 .wall-play { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transition: opacity 0.15s ease; background: rgba(0, 0, 0, 0.28); border: 0; padding: 0; cursor: pointer; }
 .wall-play svg { width: 40px; height: 40px; color: #fff; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6)); }
-.wall-card:hover .wall-play { opacity: 1; }
+.wall-card:hover .wall-play, .wall-card:focus-within .wall-play { opacity: 1; }
 .wall-meta { display: grid; gap: 2px; }
 .wall-title {
   all: unset; cursor: pointer; display: block;

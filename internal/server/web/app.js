@@ -344,6 +344,8 @@ function wallCard(item, ud) {
 }
 
 const WALL_PAGE_SIZE = 100;
+// 筛选后整页重绘会丢焦点；记录触发控件选择器，重绘后还原（P1-9）。
+let pendingWallFocus = '';
 let wallState = null;
 let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索/筛选作废的过期响应
 
@@ -423,6 +425,11 @@ async function pageItems() {
       <div id="wall-more" class="wall-more"></div>
       <p class="hint">点击海报打开详情抽屉（抽屉内可播放、刮削、探测、编辑元数据）；海报上的播放图标为快捷播放。非 http(s) 源的 .strm 在扫描时直接跳过，不会出现在这里。</p>
     </section>`;
+  if (typeof pendingWallFocus !== 'undefined' && pendingWallFocus) {
+    const target = document.querySelector(pendingWallFocus);
+    if (target && typeof target.focus === 'function') target.focus();
+    pendingWallFocus = '';
+  }
 
   // 离散筛选（状态/库/排序）压入历史，浏览器前进/后退可逐步回退到上一个筛选组合。
   // 始终保留 hash，否则一次筛选就会让「刷新」离开媒体墙页。
@@ -437,6 +444,7 @@ async function pageItems() {
     qs.delete('search');
     // 选中状态时清掉旧的 scrape 参数（早期书签可能两个都在）。
     qs.delete('scrape');
+    pendingWallFocus = '[data-status="' + (qs.get('status') || '') + '"]';
     pushQuery(qs);
     refreshPage(pageItems, gen);
   }));
@@ -445,6 +453,7 @@ async function pageItems() {
     const qs = new URLSearchParams(location.search);
     const value = button.dataset.lib;
     if (value) qs.set('library_id', value); else qs.delete('library_id');
+    pendingWallFocus = '[data-lib="' + (qs.get('library_id') || '') + '"]';
     pushQuery(qs);
     refreshPage(pageItems, gen);
   }));
@@ -452,6 +461,7 @@ async function pageItems() {
   if (libSelect) libSelect.addEventListener('change', () => {
     const qs = new URLSearchParams(location.search);
     if (libSelect.value) qs.set('library_id', libSelect.value); else qs.delete('library_id');
+    pendingWallFocus = '#item-lib';
     pushQuery(qs);
     refreshPage(pageItems, gen);
   });
@@ -472,6 +482,7 @@ async function pageItems() {
     const q = new URLSearchParams(location.search);
     q.set('sort', sortSelect.value);
     q.delete('order');
+    pendingWallFocus = '#item-sort';
     pushQuery(q);
     refreshPage(pageItems, gen);
   });
@@ -743,6 +754,13 @@ function overlayVisible(selector) {
 
 function topOverlaySelector() {
   return OVERLAY_LAYERS.find(overlayVisible) || '';
+}
+
+// 路由切换时按层级从上到下收起浮层，避免播放器/详情跨页残留。
+function closeOverlaysForNavigation() {
+  if (overlayVisible('#scrape-overlay')) closeScrapePreview();
+  if (overlayVisible('#player-overlay')) closePlayer();
+  if (overlayVisible('#detail-overlay')) closeDetail();
 }
 
 function overlayFocusables(selector) {
@@ -2082,6 +2100,8 @@ const pages = {
 let pageGen = 0;
 
 async function page(name) {
+  // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
+  if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
   stopProbePolling();
   // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
