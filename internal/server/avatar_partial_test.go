@@ -22,6 +22,7 @@ import (
 
 func TestAvatarPartialWriteReachesTaskAndProgress(t *testing.T) {
 	a, _, _ := authorityApp(t)
+	seedOwner(t, a)
 	root := t.TempDir()
 	lib, err := a.db.AddLibrary("L", root)
 	if err != nil {

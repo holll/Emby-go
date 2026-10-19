@@ -82,7 +82,7 @@ CREATE TRIGGER fail_user_api AFTER UPDATE ON userdata BEGIN INSERT INTO fixture_
 				if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil || body["ItemId"] != fmt.Sprint(f.victim) || body["PlayCount"] != float64(3) || body["PlaybackPositionTicks"] != float64(120) {
 					t.Fatalf("retry status=%d body=%s", w.Code, w.Body.String())
 				}
-				data, err := f.a.db.Data(f.victim)
+				data, err := f.a.db.DataUser(1, f.victim)
 				if err != nil || (op == 0 && !data.IsFavorite) || (op == 1 && data.Likes != 1) || (op == 2 && !data.HideFromResume) {
 					t.Fatalf("setting not saved: %+v err=%v", data, err)
 				}
@@ -125,7 +125,7 @@ func TestUserSettingsAliasesAndValues(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("%s status=%d body=%s", route.name, w.Code, w.Body.String())
 		}
-		data, err := f.a.db.Data(f.victim)
+		data, err := f.a.db.DataUser(1, f.victim)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +178,7 @@ func TestUserSettingsAliasesAndValues(t *testing.T) {
 
 func TestUserSettingsConcurrentVisibilityGuard(t *testing.T) {
 	f, g := newCacheReadFixture(t, nil)
-	before, err := f.a.db.Data(f.victim)
+	before, err := f.a.db.DataUser(1, f.victim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestUserSettingsConcurrentVisibilityGuard(t *testing.T) {
 	}
 	published := f.a.db.Version("g:version")
 	joinCacheRead(t, g, done)
-	after, err := f.a.db.Data(f.victim)
+	after, err := f.a.db.DataUser(1, f.victim)
 	if w.Code != 404 || err != nil || after != before || f.a.db.Version("g:version") != published {
 		t.Fatalf("hidden concurrent setting status=%d data=%+v err=%v version=%s want=%s", w.Code, after, err, f.a.db.Version("g:version"), published)
 	}

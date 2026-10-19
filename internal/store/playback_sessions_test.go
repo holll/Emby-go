@@ -51,7 +51,7 @@ func TestRecordPlaybackStoppedIsIdempotentPerSession(t *testing.T) {
 	if !third.Counted || third.PlayCount != 2 {
 		t.Fatalf("second session not counted: %+v", third)
 	}
-	d, err := s.Data(id)
+	d, err := s.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestRecordPlaybackStaleProgressDoesNotResurrectSession(t *testing.T) {
 		t.Fatal("stale progress reported counted")
 	}
 	record(t, s, id, "s1", PlaybackStopped, 30) // 仍幂等
-	d, err := s.Data(id)
+	d, err := s.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestRecordPlaybackConcurrentStopsCountOnce(t *testing.T) {
 	if yes != 1 {
 		t.Fatalf("counted %d times, want 1", yes)
 	}
-	d, err := s.Data(id)
+	d, err := s.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)
 	}

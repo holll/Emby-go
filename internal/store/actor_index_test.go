@@ -93,7 +93,7 @@ func TestIndexedActorAvatarMultiLibraryAndCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := f.s.Data(f.victim)
+	data, err := f.s.DataUser(1, f.victim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestIndexedActorAvatarMultiLibraryAndCompatibility(t *testing.T) {
 		if e != nil || fmt.Sprint(current) != fmt.Sprint(movie) {
 			t.Fatalf("movie changed %v", e)
 		}
-		currentData, e := f.s.Data(f.victim)
+		currentData, e := f.s.DataUser(1, f.victim)
 		if e != nil || currentData != data {
 			t.Fatalf("userdata changed %v", e)
 		}

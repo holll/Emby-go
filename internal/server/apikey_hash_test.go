@@ -10,6 +10,7 @@ import (
 
 func TestAPIKeyListHidesPlaintext(t *testing.T) {
 	a, _, _ := authorityApp(t)
+	seedOwner(t, a)
 	const token = "fixture-session"
 	if err := a.db.SaveAccessToken(token); err != nil {
 		t.Fatal(err)

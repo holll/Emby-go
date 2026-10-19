@@ -30,13 +30,13 @@ func TestIndexedUserSettingsValuesAndProtection(t *testing.T) {
 			f := newIndexedDeleteFixture(t)
 			movie, _ := f.s.Movie(f.victim)
 			survivor, _ := f.s.Movie(f.survivor)
-			otherData, _ := f.s.Data(f.survivor)
+			otherData, _ := f.s.DataUser(1, f.survivor)
 			if fresh {
 				if _, err := f.s.db.Exec("DELETE FROM userdata WHERE movie_id=?", f.victim); err != nil {
 					t.Fatal(err)
 				}
 			}
-			expected, _ := f.s.Data(f.victim)
+			expected, _ := f.s.DataUser(1, f.victim)
 			if fresh {
 				expected.StoppedTicks = -1
 			}
@@ -59,14 +59,14 @@ func TestIndexedUserSettingsValuesAndProtection(t *testing.T) {
 					t.Fatalf("step%d: %v", i, err)
 				}
 				step.change(&expected)
-				got, err := f.s.Data(f.victim)
+				got, err := f.s.DataUser(1, f.victim)
 				if err != nil || got != expected {
 					t.Fatalf("step%d data=%+v want=%+v err=%v", i, got, expected, err)
 				}
 				assertIndexedDeleteVersions(t, f, before, true)
 				current, _ := f.s.Movie(f.victim)
 				other, _ := f.s.Movie(f.survivor)
-				data, _ := f.s.Data(f.survivor)
+				data, _ := f.s.DataUser(1, f.survivor)
 				if !reflect.DeepEqual(movie, current) || !reflect.DeepEqual(survivor, other) || data != otherData {
 					t.Fatal("unrelated metadata/user data changed")
 				}
@@ -210,7 +210,7 @@ func TestIndexedUserSettingsActualLibrary(t *testing.T) {
 
 func TestIndexedUserSettingsConcurrentFieldsAndLegacy(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
-	beforeData, _ := f.s.Data(f.victim)
+	beforeData, _ := f.s.DataUser(1, f.victim)
 	before := indexedDeleteVersions(t, f)
 	start := make(chan struct{})
 	results := make(chan error, 3)
@@ -227,7 +227,7 @@ func TestIndexedUserSettingsConcurrentFieldsAndLegacy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := f.s.Data(f.victim)
+	got, err := f.s.DataUser(1, f.victim)
 	beforeData.IsFavorite = true
 	beforeData.Likes = -1
 	beforeData.HideFromResume = true
@@ -247,13 +247,5 @@ func TestIndexedUserSettingsConcurrentFieldsAndLegacy(t *testing.T) {
 	if storedVersion(t, f.s, fmt.Sprintf("lib:%d:version", f.other)) != before[2] || f.s.Version("g:version") != storedVersion(t, f.s, "g:version") {
 		t.Fatal("concurrent version domains/mirror diverged")
 	}
-	legacyVersion := f.s.Version("g:version")
-	for _, err := range []error{f.s.SetFavorite(f.victim, false), f.s.SetLikes(f.victim, 0), f.s.SetHideFromResume(f.victim, false)} {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if f.s.Version("g:version") != legacyVersion {
-		t.Fatal("legacy setters changed version contract")
-	}
+
 }

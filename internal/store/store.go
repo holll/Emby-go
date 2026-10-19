@@ -1296,9 +1296,6 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 	}
 	return out, total, rows.Err()
 }
-func (s *Store) Data(id int64) (UserData, error) {
-	return s.DataUser(1, id)
-}
 
 // DataUser 读取指定账户的 UserData；账户缺省按初始管理员（1）处理。
 func (s *Store) DataUser(userID, id int64) (UserData, error) {
@@ -1307,11 +1304,6 @@ func (s *Store) DataUser(userID, id int64) (UserData, error) {
 		return UserData{}, nil
 	}
 	return d, err
-}
-
-// DataFor 批量读取多部影片的 UserData；大列表按参数预算分块，共享方法内快照。
-func (s *Store) DataFor(ids []int64) (map[int64]UserData, error) {
-	return s.DataForUser(1, ids)
 }
 
 // DataForUser 批量读取指定账户的 UserData。
@@ -1420,44 +1412,21 @@ func b2i(v bool) int {
 	return 0
 }
 
-// SavePlayback 只写播放相关列。播放上报与各 setter 各写各的列，
+// SavePlaybackForUser 只写指定账户的播放相关列。播放上报与各 setter 各写各的列，
 // 避免「读整行→改一列→写回整行」时用旧值覆盖并发的收藏/评分变更。
-func (s *Store) SavePlayback(id int64, positionTicks, playCount int64, lastPlayedAt string, stoppedTicks int64) error {
+// 服务端播放上报走 RecordPlaybackEvent 的会话/事件事务；此方法供导入与测试播种。
+func (s *Store) SavePlaybackForUser(userID, id, positionTicks, playCount int64, lastPlayedAt string, stoppedTicks int64) error {
+	if userID <= 0 {
+		userID = 1
+	}
 	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
-		VALUES(1,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(user_id,movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,
 		last_played_at=excluded.last_played_at,last_stopped_ticks=excluded.last_stopped_ticks`,
-		id, positionTicks, playCount, lastPlayedAt, stoppedTicks)
+		userID, id, positionTicks, playCount, lastPlayedAt, stoppedTicks)
 	return err
 }
 
-// SetPlayed 只更新已播标记。
-func (s *Store) SetPlayed(id int64, played bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,played) VALUES(1,?,?)
-		ON CONFLICT(user_id,movie_id) DO UPDATE SET played=excluded.played`, id, b2i(played))
-	return err
-}
-
-// SetFavorite 收藏/取消收藏。
-func (s *Store) SetFavorite(id int64, favorite bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,is_favorite) VALUES(1,?,?)
-		ON CONFLICT(user_id,movie_id) DO UPDATE SET is_favorite=excluded.is_favorite`, id, b2i(favorite))
-	return err
-}
-
-// SetLikes 个人评分：1 赞 / -1 踩 / 0 清除。
-func (s *Store) SetLikes(id int64, likes int) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,likes) VALUES(1,?,?)
-		ON CONFLICT(user_id,movie_id) DO UPDATE SET likes=excluded.likes`, id, likes)
-	return err
-}
-
-// SetHideFromResume 隐藏/恢复续播。
-func (s *Store) SetHideFromResume(id int64, hidden bool) error {
-	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,hide_from_resume) VALUES(1,?,?)
-		ON CONFLICT(user_id,movie_id) DO UPDATE SET hide_from_resume=excluded.hide_from_resume`, id, b2i(hidden))
-	return err
-}
 func (s *Store) Probe(method, path, query, body string) error {
 	return s.writeTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec("INSERT INTO api_probe(method,path,query,body_preview,created_at) VALUES(?,?,?,?,?)", method, path, query, body, time.Now().UTC().Format(time.RFC3339)); err != nil {

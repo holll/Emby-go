@@ -80,7 +80,7 @@ func TestDeleteIndexedLibrarySuccessAndMissing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.s.SavePlayback(second, 300, 2, "second-time", 11); err != nil {
+			if err := f.s.SavePlaybackForUser(1, second, 300, 2, "second-time", 11); err != nil {
 				t.Fatal(err)
 			}
 			otherLibrary := libraryDeleteRows(t, f.s, "SELECT * FROM libraries WHERE id=?", f.other)

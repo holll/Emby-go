@@ -85,16 +85,9 @@ func (a *App) authOK(c *gin.Context) (store.User, bool, error) {
 		}
 	}
 	u, err := a.db.UserByID(userID)
-	if errors.Is(err, store.ErrUserNotFound) && userID == 1 {
-		// 兼容旧库/旧测试夹具：users 行缺失但会话属于初始管理员时，按旧
-		// administrators 表恢复管理员身份（正常迁移时 users 行已复制）；
-		// 连 administrators 都没有（纯夹具库）则按空库管理员处理。
-		if name, nameErr := a.db.AdministratorName(); nameErr == nil && name != "" {
-			return store.User{ID: 1, Name: name, IsAdmin: true}, true, nil
-		}
-		if n, countErr := a.db.CountUsers(); countErr == nil && n == 0 {
-			return store.User{ID: 1, Name: a.currentAdminName(), IsAdmin: true}, true, nil
-		}
+	if errors.Is(err, store.ErrUserNotFound) {
+		// 凭据有效但账户已不存在：按未授权处理，不回落旧口令/旧管理员。
+		return store.User{}, false, nil
 	}
 	if err != nil {
 		return store.User{}, false, err

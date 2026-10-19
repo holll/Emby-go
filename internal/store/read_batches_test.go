@@ -13,7 +13,7 @@ func TestBatchReadsLargeAndDuplicateIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := indexSnapshot(t, f.s)
-	expectedData, err := f.s.DataFor([]int64{f.victim, f.survivor})
+	expectedData, err := f.s.DataForUser(1, []int64{f.victim, f.survivor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestBatchReadsLargeAndDuplicateIDs(t *testing.T) {
 		ids = append(ids, i)
 	}
 	ids = append(ids, f.victim, f.survivor, f.victim)
-	gotData, err := f.s.DataFor(ids)
+	gotData, err := f.s.DataForUser(1, ids)
 	if err != nil || !reflect.DeepEqual(gotData, expectedData) {
 		t.Fatalf("data=%v err=%v", gotData, err)
 	}
@@ -42,7 +42,7 @@ func TestBatchReadsLargeAndDuplicateIDs(t *testing.T) {
 		t.Fatal("read changed business/version snapshot")
 	}
 	f.s.Close()
-	if d, err := f.s.DataFor(nil); err != nil || d == nil || len(d) != 0 {
+	if d, err := f.s.DataForUser(1, nil); err != nil || d == nil || len(d) != 0 {
 		t.Fatalf("empty data=%v err=%v", d, err)
 	}
 	if a, err := f.s.ActorsFor([]int64{}); err != nil || a == nil || len(a) != 0 {
@@ -139,14 +139,14 @@ CREATE VIEW movie_actors AS SELECT movie_id,CASE WHEN movie_id=%d THEN NULL ELSE
 				if _, err := f.s.db.Exec("UPDATE userdata SET position_ticks='private-bad-ticks' WHERE movie_id=?", f.survivor); err != nil {
 					t.Fatal(err)
 				}
-				got, err := f.s.DataFor(ids)
+				got, err := f.s.DataForUser(1, ids)
 				if err == nil || got != nil {
 					t.Fatalf("partial data map=%v err=%v", got, err)
 				}
 				if _, err := f.s.db.Exec("UPDATE userdata SET position_ticks=120 WHERE movie_id=?", f.survivor); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := f.s.DataFor(ids); err != nil {
+				if _, err := f.s.DataForUser(1, ids); err != nil {
 					t.Fatal(err)
 				}
 			}

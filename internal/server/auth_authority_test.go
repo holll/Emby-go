@@ -92,6 +92,7 @@ func TestAuthConsultsStoreAfterCredentialDeletion(t *testing.T) {
 	for _, kind := range []string{"session", "key"} {
 		t.Run(kind, func(t *testing.T) {
 			a, legacy, path := authorityApp(t)
+			seedOwner(t, a)
 			token := "fixture-session"
 			if kind == "session" {
 				if err := a.db.SaveAccessToken(token); err != nil {
@@ -176,6 +177,7 @@ func TestAuthDatabaseFailureIsUnavailable(t *testing.T) {
 
 func TestAuthPreservesCredentialTransports(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
+	seedOwner(t, a)
 	const token = "fixture-valid-session"
 	if err := a.db.SaveAccessToken(token); err != nil {
 		t.Fatal(err)
@@ -213,6 +215,7 @@ func TestAuthPreservesCredentialTransports(t *testing.T) {
 
 func TestAuthRevocationAllowsOnlyAlreadyAuthorizedRequest(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
+	seedOwner(t, a)
 	key, err := a.db.CreateAPIKey("revocation fixture")
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +260,7 @@ func TestAuthRevocationAllowsOnlyAlreadyAuthorizedRequest(t *testing.T) {
 
 func TestAuthPreservesPriorityAndHistoricalSessions(t *testing.T) {
 	a, legacy, path := authorityApp(t)
+	seedOwner(t, a)
 	const token = "fixture-historical-session"
 	if err := a.db.SaveAccessToken(token); err != nil {
 		t.Fatal(err)

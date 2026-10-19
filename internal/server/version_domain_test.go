@@ -72,7 +72,7 @@ func TestReadYourWritesAfterMutations(t *testing.T) {
 	bumped(version, "rating")
 	// 详情 UserData 不暴露 Likes；写入本身由 userdata_atomic_test 断言，
 	// 这里只验证版本推进后详情仍可读且不会回退到旧版本缓存。
-	if data, err := f.a.db.Data(id); err != nil || data.Likes != 1 {
+	if data, err := f.a.db.DataUser(1, id); err != nil || data.Likes != 1 {
 		t.Fatalf("rating write lost: %+v err=%v", data, err)
 	}
 	read(detailPath)

@@ -172,6 +172,7 @@ func TestDiagnosticAPIKeyBusinessEvents(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	a, _, path := authorityApp(t)
+	seedOwner(t, a)
 	// A short legacy fixture key must not be printed in full by prefix logging.
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
 	if err != nil {

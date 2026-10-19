@@ -23,6 +23,7 @@ func logoutRequest(a *App, method, path, token string) *httptest.ResponseRecorde
 
 func TestLogoutRevokesOnlyCurrentSessionOnAllAliases(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
+	seedOwner(t, a)
 	const other = "fixture-other-session"
 	if err := a.db.SaveAccessToken(other); err != nil {
 		t.Fatal(err)
@@ -60,6 +61,7 @@ func TestLogoutRevokesOnlyCurrentSessionOnAllAliases(t *testing.T) {
 
 func TestLogoutPreservesAPIKey(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
+	seedOwner(t, a)
 	key, err := a.db.CreateAPIKey("fixture key")
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +82,7 @@ func TestLogoutPreservesAPIKey(t *testing.T) {
 
 func TestLogoutWriteFailureDoesNotReportSuccess(t *testing.T) {
 	a, legacy, path := authorityApp(t)
+	seedOwner(t, a)
 	const token = "fixture-session-secret"
 	if err := a.db.SaveAccessToken(token); err != nil {
 		t.Fatal(err)
@@ -125,6 +128,7 @@ func TestLogoutWriteFailureDoesNotReportSuccess(t *testing.T) {
 
 func TestLogoutPersistsAcrossReopen(t *testing.T) {
 	a, legacy, path := authorityApp(t)
+	seedOwner(t, a)
 	const revoked, other = "fixture-revoked-session", "fixture-retained-session"
 	for _, token := range []string{revoked, other} {
 		if err := a.db.SaveAccessToken(token); err != nil {

@@ -52,6 +52,7 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			root := t.TempDir()
 			a, media := detailTestApp(t, root, "<movie><title>Old</title><num>ABF-018</num></movie>")
+			seedOwner(t, a)
 			canceled := fault == "canceled_index"
 			if canceled {
 				writeFile(t, filepath.Join(media, "ABF-019.strm"), "https://media.test/b.mp4")

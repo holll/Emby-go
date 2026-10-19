@@ -13,10 +13,10 @@ func TestExplicitPlayedAtomicAPI(t *testing.T) {
 				f := newAdminDeleteFixture(t)
 				h := f.a.Handler()
 				// Ensure both operations actually change the stored flag.
-				if err := f.a.db.SetPlayed(f.victim, method == "DELETE"); err != nil {
+				if err := f.a.db.SetIndexedPlayedForUser(1, f.victim, method == "DELETE"); err != nil {
 					t.Fatal(err)
 				}
-				beforeData, err := f.a.db.Data(f.victim)
+				beforeData, err := f.a.db.DataUser(1, f.victim)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -62,7 +62,7 @@ CREATE TRIGGER fail_played_api AFTER UPDATE ON userdata BEGIN INSERT INTO played
 					}
 					expected := beforeData
 					expected.Played = method == "POST"
-					got, err := f.a.db.Data(f.victim)
+					got, err := f.a.db.DataUser(1, f.victim)
 					if err != nil || got != expected {
 						t.Fatalf("data=%+v expected=%+v err=%v", got, expected, err)
 					}

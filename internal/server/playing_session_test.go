@@ -53,7 +53,7 @@ func TestPlaybackSessionsCountIndependently(t *testing.T) {
 	reportPlayback(t, a, id, "/Stopped", "session-1", 120)
 	reportPlayback(t, a, id, "", "session-2", 0)
 	reportPlayback(t, a, id, "/Stopped", "session-2", 120)
-	d, err := a.db.Data(id)
+	d, err := a.db.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestPlaybackSessionsCountIndependently(t *testing.T) {
 	}
 	// 重放同一 stopped 事件仍幂等。
 	reportPlayback(t, a, id, "/Stopped", "session-2", 120)
-	if d, _ = a.db.Data(id); d.PlayCount != 2 {
+	if d, _ = a.db.DataUser(1, id); d.PlayCount != 2 {
 		t.Fatalf("replayed stop changed count=%d", d.PlayCount)
 	}
 }
@@ -76,7 +76,7 @@ func TestPlaybackStaleProgressCannotUnstop(t *testing.T) {
 	reportPlayback(t, a, id, "/Stopped", "stale", 100)
 	reportPlayback(t, a, id, "/Progress", "stale", 10) // 迟到
 	reportPlayback(t, a, id, "/Stopped", "stale", 100)
-	d, err := a.db.Data(id)
+	d, err := a.db.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)
 	}

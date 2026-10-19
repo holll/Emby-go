@@ -33,7 +33,7 @@ func TestIndexedPlayedValuesAndDomains(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				expected, err := f.s.Data(f.victim)
+				expected, err := f.s.DataUser(1, f.victim)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -41,29 +41,25 @@ func TestIndexedPlayedValuesAndDomains(t *testing.T) {
 					expected.StoppedTicks = -1
 				}
 				movie, _ := f.s.Movie(f.victim)
-				other, _ := f.s.Data(f.survivor)
+				other, _ := f.s.DataUser(1, f.survivor)
 				for _, played := range []bool{true, true, false, false} {
 					versions := indexedDeleteVersions(t, f)
 					if err := f.s.SetIndexedPlayed(f.victim, played); err != nil {
 						t.Fatal(err)
 					}
 					expected.Played = played
-					got, err := f.s.Data(f.victim)
+					got, err := f.s.DataUser(1, f.victim)
 					if err != nil || got != expected {
 						t.Fatalf("got=%+v expected=%+v err=%v", got, expected, err)
 					}
 					assertIndexedDeleteVersions(t, f, versions, true)
 					current, _ := f.s.Movie(f.victim)
-					data, _ := f.s.Data(f.survivor)
+					data, _ := f.s.DataUser(1, f.survivor)
 					if !reflect.DeepEqual(movie, current) || data != other {
 						t.Fatal("unrelated state changed")
 					}
 				}
-				snapshot := indexedDeleteVersions(t, f)
-				if err := f.s.SetPlayed(f.victim, true); err != nil {
-					t.Fatal(err)
-				}
-				assertIndexedDeleteVersions(t, f, snapshot, false)
+
 			})
 		}
 	}

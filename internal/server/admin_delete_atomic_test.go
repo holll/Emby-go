@@ -24,6 +24,7 @@ type adminDeleteFixture struct {
 func newAdminDeleteFixture(t *testing.T) adminDeleteFixture {
 	t.Helper()
 	a, _, path := authorityApp(t)
+	seedOwner(t, a)
 	a.startupWG.Wait()
 	fixture, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
 	if err != nil {
@@ -52,7 +53,7 @@ func newAdminDeleteFixture(t *testing.T) adminDeleteFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := a.db.SavePlayback(id, 120, 3, "fixture", 99); err != nil {
+		if err := a.db.SavePlaybackForUser(1, id, 120, 3, "fixture", 99); err != nil {
 			t.Fatal(err)
 		}
 		if target {

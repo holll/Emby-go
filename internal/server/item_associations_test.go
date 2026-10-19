@@ -49,7 +49,7 @@ func TestItemAssociationErrorsDoNotReturnOrCacheDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, id := range []int64{f.victim, f.survivor} {
-				if err := f.a.db.SetFavorite(id, true); err != nil {
+				if _, err := f.a.db.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 					t.Fatal(err)
 				}
 			}

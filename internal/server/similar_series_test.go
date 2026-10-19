@@ -23,6 +23,7 @@ func TestSimilarSeriesComesFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedOwner(t, app)
 	t.Cleanup(app.Close)
 	lib, err := app.db.AddLibrary("AV", "/tmp/similar-series")
 	if err != nil {
@@ -74,6 +75,7 @@ func TestSimilarTierOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedOwner(t, app)
 	t.Cleanup(app.Close)
 	lib, err := app.db.AddLibrary("AV", "/tmp/similar-tiers")
 	if err != nil {

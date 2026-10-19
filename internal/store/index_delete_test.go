@@ -40,7 +40,7 @@ func newIndexedDeleteFixture(t *testing.T) indexedDeleteFixture {
 			t.Fatal(err)
 		}
 		*item.id = id
-		if err := s.SavePlayback(id, 120, 3, "fixture-time", 99); err != nil {
+		if err := s.SavePlaybackForUser(1, id, 120, 3, "fixture-time", 99); err != nil {
 			t.Fatal(err)
 		}
 	}

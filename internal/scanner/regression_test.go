@@ -31,10 +31,10 @@ func TestScanUnavailableRootPreservesUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetFavorite(id, true); err != nil {
+	if _, err := s.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePlayback(id, 123, 2, "2026-10-16T00:00:00Z", 123); err != nil {
+	if err := s.SavePlaybackForUser(1, id, 123, 2, "2026-10-16T00:00:00Z", 123); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(media, media+"-offline"); err != nil {
@@ -46,7 +46,7 @@ func TestScanUnavailableRootPreservesUserData(t *testing.T) {
 	if _, err := s.Movie(id); err != nil {
 		t.Fatalf("不得误删影片: %v", err)
 	}
-	data, err := s.Data(id)
+	data, err := s.DataUser(1, id)
 	if err != nil || !data.IsFavorite || data.PositionTicks != 123 || data.PlayCount != 2 {
 		t.Fatalf("用户记录必须保留: %+v, %v", data, err)
 	}

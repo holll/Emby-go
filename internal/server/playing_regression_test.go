@@ -58,7 +58,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 					if w.Code != http.StatusNoContent {
 						t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 					}
-					d, err := a.db.Data(id)
+					d, err := a.db.DataUser(1, id)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -84,7 +84,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 						}
 					}
 				}
-				before, _ := a.db.Data(id)
+				before, _ := a.db.DataUser(1, id)
 				version := a.db.Version("g:version")
 				for _, invalid := range []string{virtualPartID(id, 1), virtualPartID(id, 3), "part-999999-2", "part-invalid-2"} {
 					w := httptest.NewRecorder()
@@ -94,7 +94,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 						t.Fatalf("invalid %s status=%d", invalid, w.Code)
 					}
 				}
-				after, _ := a.db.Data(id)
+				after, _ := a.db.DataUser(1, id)
 				if after != before || a.db.Version("g:version") != version {
 					t.Fatal("invalid part modified userdata or version")
 				}

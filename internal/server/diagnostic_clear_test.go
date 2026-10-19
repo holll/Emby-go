@@ -21,6 +21,7 @@ const diagnosticClearToken = "diagnostic-clear-session"
 func diagnosticClearFixture(t *testing.T) (*App, *sql.DB) {
 	t.Helper()
 	a, db, _ := probeRetryFixture(t)
+	seedOwner(t, a)
 	if err := a.db.SaveAccessToken(diagnosticClearToken); err != nil {
 		t.Fatal(err)
 	}

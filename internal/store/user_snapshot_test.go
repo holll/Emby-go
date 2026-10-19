@@ -36,7 +36,7 @@ func TestUserDataSnapshotsCommittedAndDetached(t *testing.T) {
 			if !op.check(got) || got.PositionTicks != 600000000 || got.PlayCount != 3 || got.LastPlayedAt != "fixture-time" || got.StoppedTicks != 99 || got.PlayedPercentage != 50 {
 				t.Fatalf("snapshot=%+v", got)
 			}
-			persisted, err := f.s.Data(f.victim)
+			persisted, err := f.s.DataUser(1, f.victim)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -157,7 +157,7 @@ func TestUserDataSnapshotsRuntimeAndLegacyMissingDefaults(t *testing.T) {
 		})
 	}
 	f := newIndexedDeleteFixture(t)
-	missing, err := f.s.Data(-999)
+	missing, err := f.s.DataUser(1, -999)
 	if err != nil || missing != (UserData{}) {
 		t.Fatalf("legacy missing=%+v err=%v", missing, err)
 	}
