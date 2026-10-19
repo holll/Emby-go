@@ -45,7 +45,7 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 		t.Fatalf("renew session rejected: ok=%v err=%v", ok, err)
 	}
 	var renewed int64
-	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token='renew'").Scan(&renewed); err != nil {
+	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token=?", tokenHash("renew")).Scan(&renewed); err != nil {
 		t.Fatal(err)
 	}
 	if renewed < now.Add(29*24*time.Hour).Unix() {
@@ -61,7 +61,7 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 		t.Fatalf("stable session rejected: ok=%v err=%v", ok, err)
 	}
 	var stable int64
-	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token='stable'").Scan(&stable); err != nil {
+	if err := s.db.QueryRow("SELECT expires_at FROM access_tokens WHERE token=?", tokenHash("stable")).Scan(&stable); err != nil {
 		t.Fatal(err)
 	}
 	if stable != stableExpiry.Unix() {
@@ -127,5 +127,65 @@ func TestMigrationBackfillsLegacySessionExpiry(t *testing.T) {
 	}
 	if want := created.Add(30 * 24 * time.Hour).Unix(); expires != want {
 		t.Fatalf("backfilled expiry=%d want=%d", expires, want)
+	}
+}
+
+func TestAccessTokensStoredAsDigest(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "digest.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const token = "plain-session-token"
+	if err := s.SaveAccessToken(token); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.db.QueryRow("SELECT token FROM access_tokens").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == token || !isTokenHash(stored) || stored != tokenHash(token) {
+		t.Fatalf("session not hashed: %q", stored)
+	}
+	if ok, err := s.ValidateAccessToken(token, time.Now(), 0); err != nil || !ok {
+		t.Fatalf("hashed session rejected: %v %v", ok, err)
+	}
+	if err := s.DeleteAccessToken(token); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.HasAccessToken(token); ok {
+		t.Fatal("session not revoked")
+	}
+}
+
+func TestMigration12HashesLegacySessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-token.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacy = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := s.db.Exec("INSERT INTO access_tokens(token,created_at,expires_at,user_id) VALUES(?,'2026-01-01T00:00:00Z',NULL,1)", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("DELETE FROM schema_migrations WHERE version=?", tokenHashMigrationVersion); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var stored string
+	if err := reopened.db.QueryRow("SELECT token FROM access_tokens").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != tokenHash(legacy) {
+		t.Fatalf("legacy session not hashed: %q", stored)
+	}
+	if ok, err := reopened.ValidateAccessToken(legacy, time.Now(), 0); err != nil || !ok {
+		t.Fatalf("legacy session unusable after migration: %v %v", ok, err)
 	}
 }

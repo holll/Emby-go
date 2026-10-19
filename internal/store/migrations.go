@@ -122,6 +122,44 @@ func baselineChecksum() string {
 // validateSchema 用「空库跑完全部迁移」的参考 schema 校验磁盘结构：
 // 列/类型/默认值/主键/外键/唯一约束/CHECK/索引都必须一致。缺列、错类型、
 // 多余列或索引漂移一律拒绝启动，而不是把错误拖到业务查询。
+// 批次 97：登录会话只存 SHA-256 摘要（D03/P1）。旧行在迁移里原地改写；
+// 摘要与明文都是 hex，迁移后行值固定 64 位。没有 DDL，参考库为空表时空跑。
+const tokenHashMigrationVersion = 12
+
+func migration12Checksum() string {
+	sum := sha256.Sum256([]byte("token-hash-v1"))
+	return fmt.Sprintf("%x", sum)
+}
+
+func applyMigration12(tx *sql.Tx) error {
+	rows, err := tx.Query("SELECT token FROM access_tokens")
+	if err != nil {
+		return fmt.Errorf("迁移 12 读取会话: %w", err)
+	}
+	var legacy []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			rows.Close()
+			return fmt.Errorf("迁移 12 读取会话: %w", err)
+		}
+		if !isTokenHash(token) {
+			legacy = append(legacy, token)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("迁移 12 读取会话: %w", err)
+	}
+	rows.Close()
+	for _, token := range legacy {
+		if _, err := tx.Exec("UPDATE OR REPLACE access_tokens SET token=? WHERE token=?", tokenHash(token), token); err != nil {
+			return fmt.Errorf("迁移 12 摘要会话: %w", err)
+		}
+	}
+	return nil
+}
+
 func validateSchema(db schemaDB) error {
 	reference, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -139,7 +177,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11,
+		applyMigration10, applyMigration11, applyMigration12,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1064,6 +1102,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case tokenHashMigrationVersion:
+			if checksum != migration12Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1130,6 +1173,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[tokenHashMigrationVersion] {
+		if err := applyMigration12(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1187,6 +1235,11 @@ func (s *Store) migrate() error {
 	if !applied[statsIndexMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", statsIndexMigrationVersion, migration11Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", statsIndexMigrationVersion, err)
+		}
+	}
+	if !applied[tokenHashMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", tokenHashMigrationVersion, migration12Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", tokenHashMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

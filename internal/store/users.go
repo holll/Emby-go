@@ -233,11 +233,12 @@ func (s *Store) DeleteUser(id int64) error {
 // SaveAccessTokenForUser 保存带账户绑定的登录会话；expiresAt 为零值时不过期。
 func (s *Store) SaveAccessTokenForUser(token string, userID int64, expiresAt time.Time) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	digest := tokenHash(token)
 	if expiresAt.IsZero() {
-		_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at,user_id) VALUES(?,?,NULL,?)", token, now, userID)
+		_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at,user_id) VALUES(?,?,NULL,?)", digest, now, userID)
 		return err
 	}
-	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at,user_id) VALUES(?,?,?,?)", token, now, expiresAt.Unix(), userID)
+	_, err := s.db.Exec("INSERT OR IGNORE INTO access_tokens(token,created_at,expires_at,user_id) VALUES(?,?,?,?)", digest, now, expiresAt.Unix(), userID)
 	return err
 }
 
@@ -245,7 +246,8 @@ func (s *Store) SaveAccessTokenForUser(token string, userID int64, expiresAt tim
 func (s *Store) ValidateAccessTokenUser(token string, now time.Time, ttl time.Duration) (int64, bool, error) {
 	var expires sql.NullInt64
 	var userID int64
-	if err := s.db.QueryRow("SELECT expires_at,user_id FROM access_tokens WHERE token=?", token).Scan(&expires, &userID); err != nil {
+	digest := tokenHash(token)
+	if err := s.db.QueryRow("SELECT expires_at,user_id FROM access_tokens WHERE token=?", digest).Scan(&expires, &userID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, false, nil
 		}
@@ -256,7 +258,7 @@ func (s *Store) ValidateAccessTokenUser(token string, now time.Time, ttl time.Du
 	}
 	expiry := time.Unix(expires.Int64, 0)
 	if !now.Before(expiry) {
-		if _, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", token); err != nil {
+		if _, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", digest); err != nil {
 			return 0, false, err
 		}
 		return 0, false, nil
@@ -267,7 +269,7 @@ func (s *Store) ValidateAccessTokenUser(token string, now time.Time, ttl time.Du
 			threshold = 0
 		}
 		if expiry.Sub(now) < threshold {
-			_, _ = s.db.Exec("UPDATE access_tokens SET expires_at=? WHERE token=?", now.Add(ttl).Unix(), token)
+			_, _ = s.db.Exec("UPDATE access_tokens SET expires_at=? WHERE token=?", now.Add(ttl).Unix(), digest)
 		}
 	}
 	return userID, true, nil

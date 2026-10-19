@@ -295,13 +295,33 @@ func (s *Store) RevokeAllAccessTokens() (int64, error) {
 // DeleteAccessToken revokes only the supplied login session. It is idempotent
 // at the store boundary and never deletes API keys or other sessions.
 func (s *Store) DeleteAccessToken(token string) error {
-	_, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", token)
+	_, err := s.db.Exec("DELETE FROM access_tokens WHERE token=?", tokenHash(token))
 	return err
+}
+
+// tokenHash 是登录会话落库前的 SHA-256 摘要（D03/P1：库里不存明文凭据）。
+// 会话值本身是 24 字节随机数的 48 位 hex，摘要后固定 64 位 hex。
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// isTokenHash 判断行内值是否已是摘要（兼容迁移前的明文行）。
+func isTokenHash(v string) bool {
+	if len(v) != 64 {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) HasAccessToken(token string) (bool, error) {
 	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM access_tokens WHERE token=?", token).Scan(&count); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM access_tokens WHERE token=?", tokenHash(token)).Scan(&count); err != nil {
 		return false, err
 	}
 	return count == 1, nil

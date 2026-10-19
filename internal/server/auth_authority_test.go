@@ -1,7 +1,9 @@
 package server
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +39,12 @@ func (c *legacyCredentialCache) Set(key string, value []byte, ttl time.Duration)
 		c.calls.Add(1)
 	}
 	c.Cache.Set(key, value, ttl)
+}
+
+// sessionDigest 复算登录会话落库摘要（服务端不再存明文）。
+func sessionDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func authorityApp(t *testing.T) (*App, *legacyCredentialCache, string) {
@@ -114,7 +122,7 @@ func TestAuthConsultsStoreAfterCredentialDeletion(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = fixture.Exec("DELETE FROM access_tokens WHERE token=?", token)
+				_, err = fixture.Exec("DELETE FROM access_tokens WHERE token=?", sessionDigest(token))
 				fixture.Close()
 				if err != nil {
 					t.Fatal(err)
@@ -269,7 +277,7 @@ func TestAuthPreservesPriorityAndHistoricalSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fixture.Exec("UPDATE access_tokens SET created_at=datetime('now','-30 days') WHERE token=?", token)
+	_, err = fixture.Exec("UPDATE access_tokens SET created_at=datetime('now','-30 days') WHERE token=?", sessionDigest(token))
 	fixture.Close()
 	if err != nil {
 		t.Fatal(err)
