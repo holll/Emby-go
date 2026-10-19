@@ -782,6 +782,10 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	if len(m.AdditionalParts) > 0 {
 		v["PartCount"] = len(m.AdditionalParts) + 1
 	}
+	// Emby 客户端用 CollectionIds 渲染“所属合集”；缺失时部分客户端会退化为列出全部合集。
+	if m.Collection != "" {
+		v["CollectionIds"] = []string{boxsetID(m.Collection)}
+	}
 	if m.OriginalTitle != "" {
 		v["OriginalTitle"] = m.OriginalTitle
 	}

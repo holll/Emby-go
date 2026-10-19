@@ -63,7 +63,7 @@ func compatFixture(t *testing.T) (*httptest.Server, string) {
 	if err != nil || len(libs) == 0 {
 		t.Fatalf("读取媒体库失败: %v", err)
 	}
-	nfo := `<movie><title>Contract Movie</title><year>2024</year></movie>`
+	nfo := `<movie><title>Contract Movie</title><year>2024</year><set><name>Contract Collection</name></set></movie>`
 	if err := os.WriteFile(filepath.Join(libs[0].Path, "Test Movie (2020).nfo"), []byte(nfo), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -223,5 +223,36 @@ func TestEmbyNotFoundAndPayloadEnvelope(t *testing.T) {
 	// 图片端点对缺失资源返回空 404（浏览器 <img> 场景，不套 JSON 信封）。
 	if status, _ := embyDo(t, ts, http.MethodGet, "/Items/1/Images/Nope", "", ""); status != http.StatusNotFound {
 		t.Errorf("未知图片类型应 404，得到 %d", status)
+	}
+}
+
+// 影片 DTO 必须给出 CollectionIds（Emby 客户端据此渲染“所属合集”）。
+func TestEmbyCollectionIdsExposeBoxset(t *testing.T) {
+	ts, token := compatFixture(t)
+	status, raw := embyDo(t, ts, http.MethodGet, "/Items?Recursive=true&IncludeItemTypes=Movie&Limit=1", token, "")
+	if status != http.StatusOK {
+		t.Fatalf("列表: %d %s", status, raw)
+	}
+	var list struct {
+		Items []struct {
+			Id string `json:"Id"`
+		} `json:"Items"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil || len(list.Items) == 0 {
+		t.Fatalf("列表无影片: %v %s", err, raw)
+	}
+	status, raw = embyDo(t, ts, http.MethodGet, "/Items/"+list.Items[0].Id, token, "")
+	if status != http.StatusOK {
+		t.Fatalf("详情: %d %s", status, raw)
+	}
+	var item struct {
+		CollectionIds []string `json:"CollectionIds"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatal(err)
+	}
+	want := boxsetID("Contract Collection")
+	if len(item.CollectionIds) != 1 || item.CollectionIds[0] != want {
+		t.Fatalf("CollectionIds=%v want=[%s] body=%s", item.CollectionIds, want, raw)
 	}
 }

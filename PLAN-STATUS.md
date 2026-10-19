@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；426 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；427 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 86/86 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | go / vuln / web 三 job；批次 89 的 push 已触发，最近一次全绿见仓库 Actions；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -278,6 +278,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 88 | Web 管理 UI：用户列表/创建/改密/删除/媒体库授权、登录与播放活动记录页；非管理员隐藏入口；普通用户设置页可自助改密 | ✅ 本地完成 | 真机与读屏复测 |
 | 89 | 活动记录从设置页拆为独立侧边栏页面：新增 `activity` 导航/页面（登录+播放审计、刷新）；设置页不再请求审计 | ✅ 本地完成 | 与批次 88 同属 UI 调整，自动截图/真机待补 |
 | 90 | 架构复审 P0：播放会话按用户隔离（迁移 10 重建 sessions 为 (user_id,session_key) 主键、events 增 user_id，修跨用户同 PlaySessionId 互相停止/计数） | ✅ 本地完成 | 真实多客户端撞 key 复现、生产迁移演练 |
+| 91 | 生产反馈：影片/列表 DTO 增 `CollectionIds`（Emby 客户端“所属合集”标准字段），避免客户端因缺字段列出全部合集 | ✅ 本地完成 | 需部署生产后由客户端复测；真实客户端抓包未做 |
 
 ## 10. 多用户设计决策（批次 84；批次 86 补充）
 
