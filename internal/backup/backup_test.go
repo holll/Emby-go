@@ -124,3 +124,72 @@ func TestRunRequiresPathsAndSkipsOfflineLibraries(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunRejectsCorruptSourceWithoutLeavingFiles(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "bad.db")
+	if err := os.WriteFile(dbPath, []byte("definitely not sqlite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(root, "backups")
+	if _, err := Run(Options{DBPath: dbPath, OutDir: outDir, Now: time.Unix(0, 0)}); err == nil {
+		t.Fatal("损坏的源库不应备份成功")
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("失败备份留下了产物: %v", entries)
+	}
+}
+
+func TestRunSnapshotUnderConcurrentWritesIsIntact(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "live.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := db.Exec("INSERT INTO t(v) VALUES(?)", "row"); err != nil {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	outDir := filepath.Join(root, "backups")
+	for i := 0; i < 3; i++ {
+		result, err := Run(Options{DBPath: dbPath, OutDir: outDir, Now: time.Unix(int64(100+i), 0)})
+		if err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("并发写期间备份失败: %v", err)
+		}
+		snapshot, err := sql.Open("sqlite", result.Database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var verdict string
+		if err := snapshot.QueryRow("PRAGMA integrity_check").Scan(&verdict); err != nil || verdict != "ok" {
+			snapshot.Close()
+			t.Fatalf("快照完整性检查: verdict=%q err=%v", verdict, err)
+		}
+		snapshot.Close()
+	}
+	close(stop)
+	<-done
+}

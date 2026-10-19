@@ -43,26 +43,51 @@ func Run(opts Options) (Result, error) {
 		now = time.Now()
 	}
 	dir := filepath.Join(opts.OutDir, now.UTC().Format("20060102T150405Z"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 先在隐藏暂存目录写完，成功后再改名：失败或崩溃不会留下半份备份，
+	// 也不会覆盖同名时间戳下已有的完整备份。
+	stage := filepath.Join(opts.OutDir, "."+now.UTC().Format("20060102T150405Z")+".tmp")
+	if err := os.RemoveAll(stage); err != nil {
+		return Result{}, fmt.Errorf("backup: clean staging: %w", err)
+	}
+	if err := os.MkdirAll(stage, 0o755); err != nil {
 		return Result{}, fmt.Errorf("backup: %w", err)
 	}
-	db, err := sql.Open("sqlite", opts.DBPath)
+	committed := false
+	defer func() {
+		if !committed {
+			os.RemoveAll(stage)
+		}
+	}()
+	// 只读打开源库：备份不应有机会改写业务库；busy_timeout 给在线写入让路。
+	db, err := sql.Open("sqlite", readonlyDSN(opts.DBPath))
 	if err != nil {
 		return Result{}, fmt.Errorf("backup: open db: %w", err)
 	}
 	defer db.Close()
-	dest := filepath.Join(dir, "db.sqlite")
+	db.SetMaxOpenConns(1)
+	dest := filepath.Join(stage, "db.sqlite")
 	if _, err := db.Exec("VACUUM INTO ?", dest); err != nil {
 		return Result{}, fmt.Errorf("backup: snapshot: %w", err)
 	}
-	result := Result{Dir: dir, Database: dest, FinishedAt: now.UTC()}
+	if err := checkSnapshot(dest); err != nil {
+		return Result{}, err
+	}
+	result := Result{Dir: dir, Database: filepath.Join(dir, "db.sqlite"), FinishedAt: now.UTC()}
 	if opts.NFORoot {
-		count, err := copyNFO(db, filepath.Join(dir, "nfo"))
+		count, err := copyNFO(db, filepath.Join(stage, "nfo"))
 		if err != nil {
 			return Result{}, err
 		}
 		result.NFOCount = count
 	}
+	if err := os.RemoveAll(dir); err != nil {
+		return Result{}, fmt.Errorf("backup: replace: %w", err)
+	}
+	if err := os.Rename(stage, dir); err != nil {
+		return Result{}, fmt.Errorf("backup: publish: %w", err)
+	}
+	committed = true
+	// 先发布再清理旧份，保留策略才会把本次备份计入份数。
 	if opts.Retain > 0 {
 		pruned, err := prune(opts.OutDir, opts.Retain)
 		if err != nil {
@@ -71,6 +96,38 @@ func Run(opts Options) (Result, error) {
 		result.Pruned = pruned
 	}
 	return result, nil
+}
+
+// readonlyDSN 只开放读事务，并用 busy_timeout 等待在线写入者。
+func readonlyDSN(path string) string {
+	return "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+}
+
+// checkSnapshot 校验快照完整性；半成品或损坏的备份不允许发布。
+func checkSnapshot(path string) error {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return fmt.Errorf("backup: verify snapshot: %w", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("backup: verify snapshot: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var verdict string
+		if err := rows.Scan(&verdict); err != nil {
+			return fmt.Errorf("backup: verify snapshot: %w", err)
+		}
+		if verdict != "ok" {
+			return fmt.Errorf("backup: integrity check failed: %s", verdict)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("backup: verify snapshot: %w", err)
+	}
+	return nil
 }
 
 // copyNFO 按库复制 .nfo 文件，保持库内相对路径；任何读写错误都让备份失败，
@@ -141,6 +198,10 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
 		out.Close()
 		return err
 	}

@@ -119,21 +119,10 @@ func baselineChecksum() string {
 // Validate against an isolated canonical schema instead of maintaining a second
 // hand-written list of expected columns. Column order may differ in legacy DBs.
 // Unknown/malformed structures fail closed rather than earning a migration stamp.
-// migrationAddedColumns 是后续迁移在 baseline 表上新增的列：校验只放行这些已知定义，
-// 其它未备案列仍然按漂移失败处理。
-var migrationAddedColumns = map[string]map[string]string{
-	"access_tokens": {"expires_at": "INTEGER", "user_id": "INTEGER"},
-	"api_keys":      {"key_hash": "TEXT", "key_prefix": "TEXT", "user_id": "INTEGER"},
-	"userdata":      {"user_id": "INTEGER"},
-}
-
-// migrationRebuiltTables 记录迁移中整表重建、主键/唯一约束与原基线不同的表。
-// 这些表仍做列类型、默认值与外键比对，但主键序号与唯一约束以迁移后为准。
-var migrationRebuiltTables = map[string]struct{}{
-	"userdata": {},
-}
-
-func validateBaseline(db schemaDB) error {
+// validateSchema 用「空库跑完全部迁移」的参考 schema 校验磁盘结构：
+// 列/类型/默认值/主键/外键/唯一约束/CHECK/索引都必须一致。缺列、错类型、
+// 多余列或索引漂移一律拒绝启动，而不是把错误拖到业务查询。
+func validateSchema(db schemaDB) error {
 	reference, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		return err
@@ -146,42 +135,41 @@ func validateBaseline(db schemaDB) error {
 	if _, err := reference.Exec(migrationLedgerSchema); err != nil {
 		return err
 	}
-	tables := append(append([]string(nil), baselineTables...), "schema_migrations")
+	// 与 migrate() 相同的顺序应用全部迁移；参考库为空表，数据回填不产生行。
+	migrations := []func(*sql.Tx) error{
+		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
+		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
+		applyMigration10, applyMigration11,
+	}
+	for _, apply := range migrations {
+		tx, err := reference.Begin()
+		if err != nil {
+			return fmt.Errorf("build reference schema: %w", err)
+		}
+		if err := apply(tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("build reference schema: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	tables, err := schemaTables(reference)
+	if err != nil {
+		return err
+	}
 	for _, table := range tables {
-		_, rebuilt := migrationRebuiltTables[table]
 		want, err := tableColumns(reference, table)
 		if err != nil {
 			return err
 		}
 		got, err := tableColumns(db, table)
 		if err != nil {
-			return err
-		}
-		if rebuilt {
-			// 重建表按迁移后定义为准：主键序号与 NOT NULL（movie_id 由隐式主键
-			// 改为显式 NOT NULL）都会变，仍比对类型与默认值，并跳过唯一约束。
-			for name, column := range got {
-				column.PrimaryKey = 0
-				column.NotNull = 0
-				got[name] = column
-			}
-			for name, column := range want {
-				column.PrimaryKey = 0
-				column.NotNull = 0
-				want[name] = column
-			}
-		}
-		for name, wantType := range migrationAddedColumns[table] {
-			column, ok := got[name]
-			if !ok || column.Type != wantType {
-				return fmt.Errorf("schema drift in table %s (expected migrated column %s %s)", table, name, wantType)
-			}
-			delete(got, name)
+			return fmt.Errorf("schema drift in table %s: %w", table, err)
 		}
 		if !reflect.DeepEqual(got, want) {
 			return fmt.Errorf("schema drift in table %s (columns, types, defaults or constraints)", table)
 		}
-		// Foreign key definitions are ordered by declaration, unlike column IDs.
 		wantFK, err := foreignKeys(reference, table)
 		if err != nil {
 			return err
@@ -192,9 +180,6 @@ func validateBaseline(db schemaDB) error {
 		}
 		if !reflect.DeepEqual(gotFK, wantFK) {
 			return fmt.Errorf("schema drift in table %s (foreign keys)", table)
-		}
-		if rebuilt {
-			continue
 		}
 		wantUnique, err := uniqueConstraints(reference, table)
 		if err != nil {
@@ -219,21 +204,167 @@ func validateBaseline(db schemaDB) error {
 			return fmt.Errorf("schema drift in table %s (check constraints)", table)
 		}
 	}
-	for _, statement := range baselineIndexes {
-		name := strings.Fields(statement)[5]
-		want, err := indexSignature(reference, name)
-		if err != nil {
-			return err
+	return validateIndexes(reference, db)
+}
+
+func schemaTables(db schemaDB) ([]string, error) {
+	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
 		}
-		got, err := indexSignature(db, name)
-		if err != nil {
-			return err
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+// validateIndexes 比对索引集合与语义签名：缺索引、多索引、列顺序/排序/
+// 部分索引谓词变化都会失败；引号、大小写、显式 ASC 等等价写法可通过。
+func validateIndexes(reference, db schemaDB) error {
+	want, err := indexSignatures(reference)
+	if err != nil {
+		return err
+	}
+	got, err := indexSignatures(db)
+	if err != nil {
+		return err
+	}
+	for name, wantSig := range want {
+		gotSig, ok := got[name]
+		if !ok {
+			return fmt.Errorf("schema drift: missing index %s", name)
 		}
-		if got != want {
+		if gotSig != wantSig {
 			return fmt.Errorf("schema drift in index %s", name)
 		}
 	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			return fmt.Errorf("schema drift: unexpected index %s", name)
+		}
+	}
 	return nil
+}
+
+// indexSignatures 把每个索引归一化为 table/unique/partial/列/排序/部分谓词。
+// PRAGMA 拿不到部分索引的 WHERE 谓词，因此从 sqlite_master.sql 里截取并
+// 做去引号、去空白、小写的保守归一化。
+func indexSignatures(db schemaDB) (map[string]string, error) {
+	rows, err := db.Query("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return nil, err
+	}
+	type rawIndex struct {
+		table, sqlText string
+	}
+	raw := map[string]rawIndex{}
+	for rows.Next() {
+		var name, table string
+		var sqlText sql.NullString
+		if err := rows.Scan(&name, &table, &sqlText); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		raw[name] = rawIndex{table: table, sqlText: sqlText.String}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	signatures := make(map[string]string, len(raw))
+	for name, index := range raw {
+		unique, partial, err := lookupIndexFlags(db, index.table, name)
+		if err != nil {
+			return nil, err
+		}
+		keys, err := indexKeyColumns(db, name)
+		if err != nil {
+			return nil, err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s/unique=%d/partial=%d", index.table, unique, partial)
+		for _, key := range keys {
+			b.WriteString("/" + key)
+		}
+		if partial == 1 {
+			b.WriteString("/where=" + normalizePredicate(index.sqlText))
+		}
+		signatures[name] = b.String()
+	}
+	return signatures, nil
+}
+
+func lookupIndexFlags(db schemaDB, table, name string) (unique, partial int, err error) {
+	rows, err := db.Query("PRAGMA index_list(" + quoteIdentifier(table) + ")")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var idxName, origin string
+		var u, p int
+		if err := rows.Scan(&seq, &idxName, &u, &origin, &p); err != nil {
+			return 0, 0, err
+		}
+		if idxName == name {
+			return u, p, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("schema drift: index %s not listed on table %s", name, table)
+}
+
+func indexKeyColumns(db schemaDB, name string) ([]string, error) {
+	rows, err := db.Query("PRAGMA index_xinfo(" + quoteIdentifier(name) + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var seq, cid, desc, key int
+		var column, collation sql.NullString
+		if err := rows.Scan(&seq, &cid, &column, &desc, &collation, &key); err != nil {
+			return nil, err
+		}
+		if key == 0 {
+			continue
+		}
+		if cid == -2 || !column.Valid {
+			return nil, fmt.Errorf("schema drift: expression index %s is not supported", name)
+		}
+		keys = append(keys, fmt.Sprintf("%s/%d/%s", column.String, desc, collation.String))
+	}
+	return keys, rows.Err()
+}
+
+// normalizePredicate 只用于部分索引谓词：小写、去引号、去全部空白。
+func normalizePredicate(text string) string {
+	at := strings.Index(strings.ToLower(text), " where ")
+	if at < 0 {
+		return ""
+	}
+	predicate := text[at+len(" where "):]
+	predicate = strings.ToLower(predicate)
+	predicate = strings.ReplaceAll(predicate, `"`, "")
+	var b strings.Builder
+	for _, r := range predicate {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func foreignKeys(db schemaDB, table string) ([]string, error) {
@@ -999,8 +1130,8 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
-	if err := validateBaseline(tx); err != nil {
-		return fmt.Errorf("validate schema migration 1: %w", err)
+	if err := validateSchema(tx); err != nil {
+		return fmt.Errorf("validate schema: %w", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if !applied[1] {
