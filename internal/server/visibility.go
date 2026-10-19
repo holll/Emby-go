@@ -1,6 +1,9 @@
 package server
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/store"
@@ -43,4 +46,21 @@ func (a *App) canViewLibrary(c *gin.Context, libraryID int64) bool {
 // canViewMovie 判断当前账户能否看到某部影片（按所属媒体库授权）。
 func (a *App) canViewMovie(c *gin.Context, movie store.Movie) bool {
 	return a.canViewLibrary(c, movie.LibraryID)
+}
+
+// viewerCacheKey 返回缓存键里的账户授权段：管理员固定 "all"，普通用户为已授权
+// 媒体库 id 列表（可能为空串）。与 viewerLibraries 口径一致。
+func (a *App) viewerCacheKey(c *gin.Context) (string, bool) {
+	libs, admin, ok := a.viewerLibraries(c)
+	if !ok {
+		return "", false
+	}
+	if admin {
+		return "all", true
+	}
+	parts := make([]string, len(libs))
+	for i, id := range libs {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return strings.Join(parts, ","), true
 }

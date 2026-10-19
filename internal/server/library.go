@@ -559,8 +559,14 @@ func (a *App) similar(c *gin.Context) {
 	if limit < 1 || limit > 50 {
 		limit = 12
 	}
-	// 相似度结果按 (版本,影片,limit) 短缓存，重复进入详情页直接命中。
-	simKey := "similar:" + version + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
+	// 相似度结果按 (版本,账户,授权,影片,limit) 短缓存：候选过滤依赖当前账户的
+	// 媒体库授权，不能跨账户复用。
+	grantKey, ok := a.viewerCacheKey(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return
+	}
+	simKey := "similar:" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(simKey); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -582,8 +588,9 @@ func (a *App) similar(c *gin.Context) {
 	}
 
 	type scored struct {
-		movie store.Movie
-		score int
+		movie  store.Movie
+		score  int
+		series bool
 	}
 	results := make([]scored, 0, len(candidates))
 	for _, item := range candidates {
@@ -591,13 +598,21 @@ func (a *App) similar(c *gin.Context) {
 		if !ok {
 			continue
 		}
+		// 可见性：未授权媒体库的候选不能出现在相似列表里（缓存键已按账户隔离）。
+		if !movie.IsVisible() || !a.canViewMovie(c, movie) {
+			continue
+		}
 		// 倒排分 + 非精确信号（分级/年份/番号前缀）；与 Emby 口径一致，总分 > 2 才算相似。
 		score := item.Score + similarBonus(src, movie)
 		if score > 2 {
-			results = append(results, scored{movie: movie, score: score})
+			// 同系列置顶：先按系列归属，再按得分；系列作为影片级归属比演员/标签更可靠。
+			results = append(results, scored{movie: movie, score: score, series: item.SeriesMatch || sameSeries(src, movie)})
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
+		if results[i].series != results[j].series {
+			return results[i].series
+		}
 		if results[i].score != results[j].score {
 			return results[i].score > results[j].score
 		}
@@ -662,6 +677,19 @@ func similarBonus(x, y store.Movie) int {
 		score += 4
 	}
 	return score
+}
+
+// sameSeries 判断两部影片是否同系列：NFO <set>（Collection）优先，退回 <series>。
+// 作为特征打分之外的兜底，覆盖历史库中特征尚未重建的情形。
+func sameSeries(x, y store.Movie) bool {
+	name := strings.TrimSpace(x.Collection)
+	if name == "" {
+		name = strings.TrimSpace(x.Series)
+	}
+	if name == "" {
+		return false
+	}
+	return name == strings.TrimSpace(y.Collection) || name == strings.TrimSpace(y.Series)
 }
 
 // numberPrefix 取番号开头的字母前缀（AFB-018 → ABF）；不足 2 个字母时返回空串

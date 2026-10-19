@@ -446,3 +446,4 @@ v1.5.0 已把安全与数据正确性整备完成；v2 的目标不是加功能�
 - 批次 91：影片 DTO 增 `CollectionIds`，并实现 `GET /Items/{id}/Collections`（生产反馈：客户端“所属合集”缺端点会列出全部合集）。
 
 详细台账与未决项见 [PLAN-STATUS.md](PLAN-STATUS.md) §9、§10。
+- 批次 92：相似作品同系列优先（系列标记参与排序、Collection/Series 兜底），并按当前账户媒体库授权过滤候选、缓存键加账户。

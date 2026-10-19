@@ -594,6 +594,9 @@ const (
 type ScoredMovie struct {
 	ID    int64
 	Score int
+	// SeriesMatch 表示候选与来源影片同属一个系列（NFO <set> 优先，退回 <series>）。
+	// 同系列在详情页「相似作品」中必须优先，不与演员/标签等弱信号混排。
+	SeriesMatch bool
 }
 
 // featureBuildVersion 特征构造版本：特征种类/权重变化时递增，存量库会自动重建一次。
@@ -827,6 +830,15 @@ func (s *Store) SimilarCandidates(src Movie, limit int) ([]ScoredMovie, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
+	// 同系列标记单独作为排序首位：系列特征可能因库很大被当作高频特征跳过，
+	// 但系列归属仍要参与排序（值来自来源影片的特征行）。
+	seriesValue := ""
+	for _, item := range keys {
+		if item.kind == FeatureSeries {
+			seriesValue = item.value
+			break
+		}
+	}
 	// 跳过高频特征：出现在库里 >10% 影片中的类型/标签对排序几乎没有贡献
 	//（对每个候选都是同一个常量），但它们的 posting list 最长。
 	// 实测 2 万部片、特征里含 4 个各命中 1 万部片的类型时：
@@ -849,17 +861,18 @@ func (s *Store) SimilarCandidates(src Movie, limit int) ([]ScoredMovie, error) {
 	keys = kept
 	placeholders := strings.TrimSuffix(strings.Repeat("(?,?),", len(keys)), ",")
 	// 参数顺序必须与 SQL 里的占位符顺序一致：先来源 id，再特征对，最后 limit。
-	args := make([]any, 0, len(keys)*2+2)
-	args = append(args, src.ID)
+	args := make([]any, 0, len(keys)*2+3)
+	args = append(args, seriesValue, src.ID)
 	for _, item := range keys {
 		args = append(args, item.kind, item.value)
 	}
 	args = append(args, limit)
-	query := `SELECT f.movie_id, SUM(f.weight) AS score
+	query := `SELECT f.movie_id, SUM(f.weight) AS score,
+			MAX(CASE WHEN f.kind='series' AND f.value=? THEN 1 ELSE 0 END) AS series_match
 		FROM movie_features f
 		JOIN movies m ON m.id=f.movie_id AND m.status IN ('success','manual')
 		WHERE f.movie_id<>? AND (f.kind,f.value) IN (VALUES ` + placeholders + `)
-		GROUP BY f.movie_id ORDER BY score DESC, f.movie_id LIMIT ?`
+		GROUP BY f.movie_id ORDER BY series_match DESC, score DESC, f.movie_id LIMIT ?`
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -868,9 +881,11 @@ func (s *Store) SimilarCandidates(src Movie, limit int) ([]ScoredMovie, error) {
 	var out []ScoredMovie
 	for rows.Next() {
 		var item ScoredMovie
-		if err := rows.Scan(&item.ID, &item.Score); err != nil {
+		var seriesMatch int
+		if err := rows.Scan(&item.ID, &item.Score, &seriesMatch); err != nil {
 			return nil, err
 		}
+		item.SeriesMatch = seriesMatch == 1
 		out = append(out, item)
 	}
 	return out, rows.Err()

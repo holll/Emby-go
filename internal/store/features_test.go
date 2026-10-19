@@ -188,3 +188,50 @@ func TestEnsureFeaturesBackfillsExistingMovies(t *testing.T) {
 		t.Errorf("回填后特征条数 = %d，期望 1", count)
 	}
 }
+
+// TestSimilarCandidatesMarksSeriesPriority 同系列候选必须排在更高分候选之前：
+// 系列特征权重 20，演员 8×3=24 可以超过它，但系列是影片级归属，排序优先级更高。
+func TestSimilarCandidatesMarksSeriesPriority(t *testing.T) {
+	s, libID := newFeatureStore(t)
+	actors := make([]ActorRef, 0, 8)
+	for i := 0; i < 8; i++ {
+		actors = append(actors, ActorRef{Name: "Actor " + string(rune('A'+i))})
+	}
+	src, err := s.IndexMovie(Movie{LibraryID: libID, SourcePath: "/tmp/av/src.strm", Status: "success", Title: "Src", Collection: "Series S", Genres: []string{"Drama"}}, 1, time.Now(), actors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameSeries, err := s.IndexMovie(Movie{LibraryID: libID, SourcePath: "/tmp/av/same.strm", Status: "success", Title: "Same Series", Collection: "Series S"}, 1, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actorHeavy, err := s.IndexMovie(Movie{LibraryID: libID, SourcePath: "/tmp/av/actors.strm", Status: "success", Title: "Actor Heavy", Collection: "Series T"}, 1, time.Now(), actors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cands, err := s.SimilarCandidates(Movie{ID: src, Collection: "Series S"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) < 2 {
+		t.Fatalf("候选数 = %d，期望至少 2", len(cands))
+	}
+	if cands[0].ID != sameSeries || !cands[0].SeriesMatch {
+		t.Fatalf("首位候选 = %+v，期望同系列 %d（SeriesMatch=true）", cands[0], sameSeries)
+	}
+	var found bool
+	for _, item := range cands {
+		if item.ID == actorHeavy {
+			found = true
+			if item.SeriesMatch {
+				t.Fatalf("演员重合候选 %d 不应标记同系列", actorHeavy)
+			}
+			if item.Score <= cands[0].Score {
+				t.Fatalf("演员重合候选得分 %d 应高于同系列得分 %d", item.Score, cands[0].Score)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("候选里缺少演员重合影片 %d", actorHeavy)
+	}
+}
