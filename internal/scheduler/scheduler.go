@@ -60,6 +60,11 @@ type Scheduler struct {
 	mu        sync.Mutex
 	entries   map[int64]cron.EntryID
 	schedules map[int64]cron.Schedule
+
+	// running 记录正在执行的任务 id：调度器层保证同一任务永不重入，
+	// 即使 Runner 内部的互斥检查存在 TOCTOU 窗口（到点与「立即执行」并发）。
+	runMu   sync.Mutex
+	running map[int64]bool
 }
 
 // New 创建调度器。ctx 为常驻根 context，进程退出时取消。
@@ -71,6 +76,7 @@ func New(ctx context.Context, st *store.Store, runner Runner) *Scheduler {
 		ctx:       ctx,
 		entries:   make(map[int64]cron.EntryID),
 		schedules: make(map[int64]cron.Schedule),
+		running:   make(map[int64]bool),
 		cron: cron.New(
 			cron.WithChain(cron.Recover(slogCronLogger{logger})),
 		),
@@ -132,8 +138,39 @@ func (s *Scheduler) registerLocked(t store.ScheduledTask) error {
 	return nil
 }
 
+// acquire 标记任务开始执行；同一任务已在跑时返回 false。
+func (s *Scheduler) acquire(id int64) bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.running[id] {
+		return false
+	}
+	s.running[id] = true
+	return true
+}
+
+func (s *Scheduler) release(id int64) {
+	s.runMu.Lock()
+	delete(s.running, id)
+	s.runMu.Unlock()
+}
+
 // fire 到点执行：调 Runner 并把结果写回任务行。
 func (s *Scheduler) fire(task Task) {
+	if !s.acquire(task.ID) {
+		message := "同一任务上一轮仍在执行，本次跳过"
+		if rerr := s.store.RecordScheduledResult(task.ID, StatusSkipped, message); rerr != nil {
+			slog.Warn("写入计划任务结果失败", "task_id", task.ID, "error", rerr)
+		}
+		slog.Info("计划任务跳过", "task_id", task.ID, "name", task.Name, "type", task.Type, "reason", message)
+		return
+	}
+	defer s.release(task.ID)
+	s.fireLocked(task)
+}
+
+// fireLocked 执行任务并落库；调用方已 acquire(task.ID)。
+func (s *Scheduler) fireLocked(task Task) {
 	start := time.Now()
 	err := s.runner(s.ctx, task)
 	status, message := StatusSuccess, ""
@@ -161,7 +198,11 @@ func (s *Scheduler) RunNow(id int64) error {
 	if err := Validate(stored.Cron); err != nil {
 		return fmt.Errorf("cron 表达式非法: %w", err)
 	}
-	s.fire(toTask(stored))
+	if !s.acquire(id) {
+		return ErrBusy
+	}
+	defer s.release(id)
+	s.fireLocked(toTask(stored))
 	return nil
 }
 

@@ -298,6 +298,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
+| 102 | 调度器层防重入：`Scheduler` 增 `running` 表，同一任务到点/立即执行永不并发；重叠触发记 `skipped`，`RunNow` 忙时返回 `ErrBusy`；不同任务互不阻塞（P2-10） | ✅ 本地完成 | 仍不跨进程/多实例去重；没有持久化运行中间态，重启时执行中的任务没有恢复记录 |
 | 101 | 刮削候选并发：会话内 `inspectSeq` 取号，慢回包让位给更晚点击；关闭浮层/换片后回包不写状态（P1-10） | ✅ 本地完成（VM 用例） | 未在真实慢网络下用 Metatube 双候选复现；候选按钮未做 loading 禁用 |
 | 100 | 前端 P1：路由切换自动收起播放器/刮削/详情浮层（P1-7）；卡片 `:focus-within` 显示操作与播放层（P1-8）；状态/库/排序筛选整页重绘后还原焦点到触发控件（P1-9） | ✅ 本地完成（Playwright 实测） | 仅还原焦点，不恢复滚动位置；`focus-within` 依赖现代浏览器；虚拟滚动（P1-11）仍未做 |
 | 99 | 部署样例：`deploy/Dockerfile`（多阶段、distroless 非 root、`-X main.version`）、`deploy/docker-compose.yml`（Redis 可选 profile）、`deploy/emby-go.service`（30s 停止宽限 + 加固）；README 增部署段 | ✅ 本地完成 | 未在 CI 构建镜像（无 Docker job）；未做 compose/systemd 实机演练 |

@@ -177,3 +177,81 @@ func TestPreviewAndValidate(t *testing.T) {
 		t.Error("非法表达式应返回错误")
 	}
 }
+
+// TestSchedulerSkipsOverlappingFire 验证调度器层同一任务不重入：
+// 首轮未结束时第二次触发记为 skipped，且 Runner 只被调用一次。
+func TestSchedulerSkipsOverlappingFire(t *testing.T) {
+	st := newTestStore(t)
+	task := mustCreate(t, st, store.ScheduledTask{Name: "长任务", Type: "scan", Cron: "@daily", Enabled: true})
+	started := make(chan struct{}, 4)
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	s := New(context.Background(), st, func(context.Context, Task) error {
+		calls.Add(1)
+		started <- struct{}{}
+		<-releaseFirst
+		return nil
+	})
+	defer s.Stop()
+	first := make(chan struct{})
+	go func() { s.fire(toTask(task)); close(first) }()
+	<-started
+	s.fire(toTask(task)) // 第二次必须被跳过
+	if calls.Load() != 1 {
+		t.Fatalf("Runner 调用次数 = %d, want 1", calls.Load())
+	}
+	close(releaseFirst)
+	<-first
+	stored, err := st.ScheduledTask(task.ID)
+	if err != nil {
+		t.Fatalf("ScheduledTask: %v", err)
+	}
+	if stored.LastStatus != StatusSuccess {
+		t.Fatalf("最终状态 = %q, want %q（跳过的第二次不得覆盖成功结果）", stored.LastStatus, StatusSuccess)
+	}
+}
+
+// TestRunNowRejectsWhileRunning 验证立即执行在任务运行中返回 ErrBusy。
+func TestRunNowRejectsWhileRunning(t *testing.T) {
+	st := newTestStore(t)
+	task := mustCreate(t, st, store.ScheduledTask{Name: "长任务", Type: "scan", Cron: "@daily", Enabled: true})
+	started := make(chan struct{}, 4)
+	releaseFirst := make(chan struct{})
+	s := New(context.Background(), st, func(context.Context, Task) error {
+		started <- struct{}{}
+		<-releaseFirst
+		return nil
+	})
+	defer s.Stop()
+	done := make(chan struct{})
+	go func() { s.fire(toTask(task)); close(done) }()
+	<-started
+	if err := s.RunNow(task.ID); !errors.Is(err, ErrBusy) {
+		t.Fatalf("RunNow err = %v, want ErrBusy", err)
+	}
+	close(releaseFirst)
+	<-done
+	if err := s.RunNow(task.ID); err != nil {
+		t.Fatalf("空闲后 RunNow: %v", err)
+	}
+}
+
+// TestSchedulerRunsDifferentTasksConcurrently 验证不同任务互不阻塞。
+func TestSchedulerRunsDifferentTasksConcurrently(t *testing.T) {
+	st := newTestStore(t)
+	a := mustCreate(t, st, store.ScheduledTask{Name: "A", Type: "scan", Cron: "@daily", Enabled: true})
+	b := mustCreate(t, st, store.ScheduledTask{Name: "B", Type: "probe", Cron: "@daily", Enabled: true})
+	both := make(chan struct{}, 2)
+	release := make(chan struct{})
+	s := New(context.Background(), st, func(context.Context, Task) error {
+		both <- struct{}{}
+		<-release
+		return nil
+	})
+	defer s.Stop()
+	go s.fire(toTask(a))
+	go s.fire(toTask(b))
+	<-both
+	<-both
+	close(release)
+}
