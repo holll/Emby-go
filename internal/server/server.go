@@ -98,6 +98,7 @@ type App struct {
 	probeRefillAt  time.Time
 	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
 
+	startAt      time.Time
 	ready        atomic.Bool    // readiness：收到退出信号后立即为 false
 	shutdownOnce sync.Once      // BeginShutdown 幂等
 	closeOnce    sync.Once      // Close 幂等
@@ -209,6 +210,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		cfg: cfg, db: db, cache: cacheStore, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
 		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
+		startAt:     time.Now(),
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
@@ -446,6 +448,7 @@ func (a *App) routes() {
 	admin.DELETE("/access-tokens", a.adminRevokeAllSessions)
 	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
+	admin.GET("/metrics", a.adminMetrics)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)
 	// 刮削（R4）：配置 + 批量/头像任务 + 单条预览确认 + 图片代理。
