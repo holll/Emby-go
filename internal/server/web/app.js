@@ -121,6 +121,7 @@ const META = {
   libraries: { title: '媒体库', crumb: 'Archive / Libraries' },
   items: { title: '媒体墙', crumb: 'Archive / Wall' },
   settings: { title: '设置', crumb: 'Archive / Settings' },
+  activity: { title: '活动记录', crumb: 'Archive / Activity' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
   probe: { title: '接口探针', crumb: 'Archive / Probe' }
@@ -1113,6 +1114,34 @@ function openPlayer(item) {
 }
 
 /* ---------------------------------------------------------------- 设置 */
+// 活动记录页 = 登录/播放审计（只读，管理员可见；保留 90 天且最多 5 万条）。
+async function pageActivity() {
+  const gen = pageGen;
+  if (!me || !me.is_admin) {
+    content.innerHTML = `<section class="panel">${empty('仅管理员可用', '活动记录只对管理员开放。')}</section>`;
+    return;
+  }
+  const [logins, plays] = await Promise.all([
+    api('/login-events?limit=50'), api('/playback-events?limit=50')
+  ]);
+  if (gen !== pageGen) return;
+  content.innerHTML = `
+    <section class="panel" aria-labelledby="audit-title">
+      <div class="panel-head"><h2 id="audit-title">活动记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="audit-refresh" class="btn btn-sm">刷新</button></div>
+      <h3 style="margin:12px 0 6px">登录记录</h3>
+      ${(logins.events || []).length ? `<div class="table-wrap"><table>
+        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th></tr></thead>
+        <tbody>${logins.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.name || '—')}</td><td class="mono">${esc(e.ip || '—')}</td><td>${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
+      </table></div>` : empty('暂无登录记录', '登录成功与失败都会记录。')}
+      <h3 style="margin:18px 0 6px">播放记录</h3>
+      ${(plays.events || []).length ? `<div class="table-wrap"><table>
+        <thead><tr><th>时间</th><th>账户</th><th>影片</th><th>事件</th><th>位置</th></tr></thead>
+        <tbody>${plays.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.user_name || '—')}</td><td>${esc(e.movie_title || '#' + e.movie_id)}</td><td>${esc(e.kind)}</td><td class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
+      </table></div>` : empty('暂无播放记录', '播放/进度/停止事件会记录在这里。')}
+    </section>`;
+  document.querySelector('#audit-refresh')?.addEventListener('click', () => refreshPage(pageActivity, gen));
+}
+
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
 async function pageSettings() {
   const gen = pageGen;
@@ -1120,9 +1149,8 @@ async function pageSettings() {
     renderSelfPassword();
     return;
   }
-  const [s, keyData, recovery, users, libs, logins, plays] = await Promise.all([
-    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries'),
-    api('/login-events?limit=20'), api('/playback-events?limit=20')
+  const [s, keyData, recovery, users, libs] = await Promise.all([
+    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries')
   ]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
@@ -1185,20 +1213,6 @@ async function pageSettings() {
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建用户</span></button></div>
       </form>
       <p class="hint">普通用户默认看不到任何媒体库；在行内勾选后点「保存授权」。删除用户会保留其播放与登录历史。</p>
-    </section>
-
-    <section class="panel" aria-labelledby="audit-title">
-      <div class="panel-head"><h2 id="audit-title">活动记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="audit-refresh" class="btn btn-sm">刷新</button></div>
-      <h3 style="margin:12px 0 6px">登录记录</h3>
-      ${(logins.events || []).length ? `<div class="table-wrap"><table>
-        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th></tr></thead>
-        <tbody>${logins.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.name || '—')}</td><td class="mono">${esc(e.ip || '—')}</td><td>${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
-      </table></div>` : empty('暂无登录记录', '登录成功与失败都会记录。')}
-      <h3 style="margin:18px 0 6px">播放记录</h3>
-      ${(plays.events || []).length ? `<div class="table-wrap"><table>
-        <thead><tr><th>时间</th><th>账户</th><th>影片</th><th>事件</th><th>位置</th></tr></thead>
-        <tbody>${plays.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.user_name || '—')}</td><td>${esc(e.movie_title || '#' + e.movie_id)}</td><td>${esc(e.kind)}</td><td class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
-      </table></div>` : empty('暂无播放记录', '播放/进度/停止事件会记录在这里。')}
     </section>
 
     <section class="panel" aria-labelledby="pw-title">
@@ -1298,7 +1312,6 @@ async function pageSettings() {
     try { await api('/users/' + button.dataset.userDel, { method: 'DELETE' }); toast('用户已删除'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
-  document.querySelector('#audit-refresh')?.addEventListener('click', () => refreshPage(pageSettings, gen));
   document.querySelector('#pw-form')?.addEventListener('submit', async event => {
     event.preventDefault();
     try {
@@ -2058,6 +2071,7 @@ const pages = {
   libraries: pageLibraries,
   items: pageItems,
   settings: pageSettings,
+  activity: pageActivity,
   scrape: pageScrape,
   scheduled: pageScheduled,
   probe: pageProbe

@@ -13,9 +13,9 @@
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
 | `go test ./...` | 16 包全绿；425 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
-| `node --test internal/server/web_test.cjs` | 85/85 通过 |
+| `node --test internal/server/web_test.cjs` | 86/86 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
-| CI | 已实跑通过：run 39086840621（`cc222c5`）go / vuln / web 全绿；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
+| CI | go / vuln / web 三 job；批次 89 的 push 已触发，最近一次全绿见仓库 Actions；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
 | 生产放行 | **否**。部署级人工验收（A01/A04/A06/A08/A10/A11/A12/A14）未执行；D01–D12 已全部批准并落地，公网门禁另需按 D04 配置 `setup_code`/来源白名单/可信代理与 TLS |
 
 ## 1. 审查 35 项状态
@@ -275,7 +275,8 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 85 | 按用户隔离播放数据：迁移 8 重建 `userdata` 为 `(user_id, movie_id)`、播放会话带 `user_id`、新增 `login_events`；store 增加 `DataUser`/`DataForUser`/`WriteIndexed*ForUser`/`RecordPlaybackEvent.UserID`；服务端一律按当前登录用户读写 | ✅ 本地完成 | 旧行归 user 1；Emby `/Users/{uid}` 仅允许当前用户 id（管理员代看留批次 86）；未做跨用户列表 API |
 | 86 | 管理面：用户 CRUD（创建/改名/改密/删除/管理员标记）、媒体库授权表 `user_libraries`、管理员只读审计 API（登录/播放记录）、自助改密撤销会话；删除用户保留审计 | ✅ 本地完成 | 可见性尚未在浏览/流/详情路径强制；前端页待 88 |
 | 87 | 可见性强制：非管理员只能看到被授权的媒体库（默认无授权）；浏览/列表/搜索/续播/最新/计数按授权过滤；详情/PlaybackInfo/流/代理/播放 404；缓存键带用户与授权指纹 | ✅ 本地完成 | 图片端点保持匿名（D02 兼容边界）；Emby 跨用户读仍禁止 |
-| 88 | Web 管理 UI：用户列表/创建/改密/删除/媒体库授权、登录与播放活动记录页；非管理员隐藏入口；普通用户设置页可自助改密 | 待做 | 真机与读屏复测 |
+| 88 | Web 管理 UI：用户列表/创建/改密/删除/媒体库授权、登录与播放活动记录页；非管理员隐藏入口；普通用户设置页可自助改密 | ✅ 本地完成 | 真机与读屏复测 |
+| 89 | 活动记录从设置页拆为独立侧边栏页面：新增 `activity` 导航/页面（登录+播放审计、刷新）；设置页不再请求审计 | ✅ 本地完成 | 与批次 88 同属 UI 调整，自动截图/真机待补 |
 
 ## 10. 多用户设计决策（批次 84；批次 86 补充）
 
