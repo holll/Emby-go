@@ -1558,3 +1558,13 @@ test('运行日志面板与 ffprobe 状态（生产可诊断）', async () => {
   assert.match(source, /ffprobe_error/);
   assert.match(source, /媒体信息探测/);
 });
+
+test('移动端表格：用户卡片化与日志堆叠', async () => {
+  // 用户管理在窄屏按字段堆叠（data-label），日志表改为时间/级别一行、内容独占一行。
+  const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
+  assert.match(source, /<table class="user-table">/);
+  assert.match(source, /data-label="媒体库授权"/);
+  assert.match(css, /\.user-table thead \{ display: none; \}/);
+  assert.match(css, /\.table-wrap table:not\(\.log-table\):not\(\.user-table\) \{ min-width: 560px; \}/);
+  assert.match(css, /\.log-table td:nth-child\(3\) \{ margin-top: 2px; word-break: break-word; \}/);
+});

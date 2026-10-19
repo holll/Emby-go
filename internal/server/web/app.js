@@ -1197,7 +1197,7 @@ async function pageSettings() {
         <button id="log-refresh" class="btn btn-sm">刷新</button>
       </div></div>
       <p class="hint">仅保留本进程最近 500 条运行日志（敏感字段已脱敏），不读取磁盘日志；完整日志见服务器 <code>log/</code> 目录。</p>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="log-table">
         <thead><tr><th style="width:190px">时间</th><th style="width:70px">级别</th><th>内容</th></tr></thead>
         <tbody id="log-body"></tbody>
       </table></div>
@@ -1225,14 +1225,14 @@ async function pageSettings() {
     </section>
     <section class="panel" aria-labelledby="users-title">
       <div class="panel-head"><h2 id="users-title">用户管理</h2><span class="hint" style="margin:0">共 ${esc(String((users.users || []).length))} 个账户 · 媒体库默认无授权</span></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="user-table">
         <thead><tr><th>账户</th><th>角色</th><th>最后登录</th><th>媒体库授权</th><th style="text-align:right">操作</th></tr></thead>
         <tbody>${(users.users || []).map(u => `<tr data-user-row="${u.id}">
-          <td><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? ' <span class="badge">owner</span>' : ''}</td>
-          <td>${u.is_admin ? '管理员' : '普通用户'}</td>
-          <td class="mono">${esc(u.last_login_at || '—')}</td>
-          <td><div class="chip-row">${(libs.items || []).map(l => `<label class="check"><input type="checkbox" data-user-lib="${u.id}" value="${l.Id}"${(u.library_ids || []).includes(l.Id) ? ' checked' : ''}> ${esc(l.Name)}</label>`).join('') || '—'}</div></td>
-          <td><div class="row-actions">
+          <td data-label="账户"><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? ' <span class="badge">owner</span>' : ''}</td>
+          <td data-label="角色">${u.is_admin ? '管理员' : '普通用户'}</td>
+          <td data-label="最后登录" class="mono">${esc(u.last_login_at || '—')}</td>
+          <td data-label="媒体库授权"><div class="chip-row">${(libs.items || []).map(l => `<label class="check"><input type="checkbox" data-user-lib="${u.id}" value="${l.Id}"${(u.library_ids || []).includes(l.Id) ? ' checked' : ''}> ${esc(l.Name)}</label>`).join('') || '—'}</div></td>
+          <td data-label="操作"><div class="row-actions">
             <button class="btn btn-sm" data-user-save="${u.id}">保存授权</button>
             <button class="btn btn-sm" data-user-reset="${u.id}" data-user-name="${esc(u.name)}">重置密码</button>
             <button class="icon-btn danger" data-user-del="${u.id}" title="删除用户"${u.id === 1 ? ' disabled' : ''}>${icon('trash')}</button>
