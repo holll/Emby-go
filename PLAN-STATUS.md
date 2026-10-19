@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；444 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；447 个 Test 函数（server 38.2s / store 16.2s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 86/86 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | go / vuln / web 三 job；批次 89 的 push 已触发，最近一次全绿见仓库 Actions；门禁含 gofmt、build、vet、test、三包 race、govulncheck、前端 VM |
@@ -298,6 +298,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
+| 98 | 安全响应头（nosniff/DENY/no-referrer/Permissions-Policy）+ CSP `Report-Only`（script-src self、img/media 放行 http(s)/blob）；迁移 13 `admin_audit_events` 记录管理员 POST/PUT/PATCH/DELETE（GET 不记），90 天/5 万条裁剪，`GET /api/admin/audit-events` 只读查询 | ✅ 本地完成 | CSP 尚无 report 收集端，违规只进浏览器控制台；审计无 UI；审计在响应后同步写库（失败仅日志） |
 | 97 | 登录会话摘要化：迁移 12 把 `access_tokens.token` 原地改写为 SHA-256 摘要（无需 DDL，旧会话升级后仍有效），读写/撤销/过期全部按摘要匹配；`isTokenHash` 识别 64 位 hex 防重复摘要 | ✅ 本地完成 | 迁移后回退旧二进制将无法识别会话（需重新登录）；摘要无盐但输入为 192 位随机值 |
 | 96 | Redis 降为可选：未配置 `redis_addr` 或连接失败时回退进程内缓存（容量 4096 条）并告警；`adminSettings` 返回真实 `cache`/`redis_online`（不再写死 redis/true）；README/config.example 与部署说明同步 | ✅ 本地完成 | 内存兜底无跨实例共享、重启失效；多实例仍需外部缓存；缓存故障切换无指标 |
 | 95 | 删除硬编码 user 1 的用户数据 API（`Data/DataFor/SavePlayback/SetPlayed/SetFavorite/SetLikes/SetHideFromResume`），改 `DataUser/DataForUser/SavePlaybackForUser` 与 `SetIndexed*ForUser`；`authOK` 账户缺失按 401 fail-closed，移除 `administrators` 旧行回退；新增删除用户 token 失效与旧口令拒绝测试 | ✅ 本地完成 | 旧 `SaveAccessToken`/`CreateAPIKey` 仍是 user 1 包装（服务端已走 ForUser）；回退旧二进制仍读 administrators |

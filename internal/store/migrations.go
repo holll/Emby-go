@@ -160,6 +160,35 @@ func applyMigration12(tx *sql.Tx) error {
 	return nil
 }
 
+// 批次 98：管理端写操作审计（只读查询接口）。90 天/5 万条裁剪在 store 层。
+const adminAuditMigrationVersion = 13
+
+var migration13Statements = []string{
+	`CREATE TABLE IF NOT EXISTS admin_audit_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		name TEXT NOT NULL DEFAULT '',
+		method TEXT NOT NULL,
+		path TEXT NOT NULL,
+		status INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_events(created_at)`,
+}
+
+func migration13Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration13Statements, "\n"))))
+}
+
+func applyMigration13(tx *sql.Tx) error {
+	for _, statement := range migration13Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("迁移 13 失败: %w", err)
+		}
+	}
+	return nil
+}
+
 func validateSchema(db schemaDB) error {
 	reference, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -177,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1107,6 +1136,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case adminAuditMigrationVersion:
+			if checksum != migration13Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1178,6 +1212,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[adminAuditMigrationVersion] {
+		if err := applyMigration13(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1240,6 +1279,11 @@ func (s *Store) migrate() error {
 	if !applied[tokenHashMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", tokenHashMigrationVersion, migration12Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", tokenHashMigrationVersion, err)
+		}
+	}
+	if !applied[adminAuditMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", adminAuditMigrationVersion, migration13Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", adminAuditMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

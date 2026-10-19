@@ -273,7 +273,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	} else {
 		_ = r.SetTrustedProxies(nil)
 	}
-	middlewares := []gin.HandlerFunc{requestLogger(), requestBodyLimit()}
+	middlewares := []gin.HandlerFunc{securityHeaders(), requestLogger(), requestBodyLimit()}
 	if cfg.Debug {
 		middlewares = append(middlewares, requestContentLogger())
 	}
@@ -409,7 +409,7 @@ func (a *App) routes() {
 	r.GET("/api/admin/scrape/image", a.adminScrapeImage)
 
 	// noStore 必须先于 requireAuth：鉴权失败会 Abort，后面的中间件不再执行。
-	admin := r.Group("/api/admin", noStore, a.requireAuth, a.requireAdmin)
+	admin := r.Group("/api/admin", noStore, a.requireAuth, a.requireAdmin, a.auditAdminAction)
 	admin.GET("/libraries", a.adminLibraries)
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
@@ -444,6 +444,7 @@ func (a *App) routes() {
 	admin.DELETE("/apikeys/:key", a.adminDeleteAPIKey)
 	// D01：撤销全部登录会话（API 密钥不受影响）。
 	admin.DELETE("/access-tokens", a.adminRevokeAllSessions)
+	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)
