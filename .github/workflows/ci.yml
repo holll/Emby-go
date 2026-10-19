@@ -39,7 +39,16 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./... -count=1
+        run: |
+          set -o pipefail
+          go test ./... -count=1 2>&1 | tee /tmp/test.log
+
+      # 失败时把具体测试名写进 annotations，便于在没有日志下载权限时定位。
+      - name: Test failure details
+        if: failure()
+        run: |
+          echo "::error::$(grep -m1 -E '^--- FAIL|^panic:' /tmp/test.log || echo 'go test failed')"
+          grep -E -A6 '^--- FAIL|^panic:' /tmp/test.log | head -80
 
       # 认证限流、请求预算、出站策略与播放会话计数是并发敏感路径，额外跑 race。
       - name: Race (auth/outbound/store)
