@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/cache"
 	"emby-go/internal/config"
 	"emby-go/internal/store"
 )
@@ -18,7 +19,7 @@ import (
 // TestSimilarSeriesComesFirst 详情页「相似作品」必须把同系列排在更髙分的
 // 演员/标签重合候选之前。
 func TestSimilarSeriesComesFirst(t *testing.T) {
-	app, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "similar.db")}, nil)
+	app, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "similar.db")}, cache.NewMemory(64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestSimilarSeriesComesFirst(t *testing.T) {
 // TestSimilarTierOrdering 相似作品的分层排序：同系列 > 同番号系列 > 演员重合 >
 // 仅类型/标签特征；分级/年份这类全库恒定或弱信号不再抬高名次。
 func TestSimilarTierOrdering(t *testing.T) {
-	app, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "tiers.db")}, nil)
+	app, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "tiers.db")}, cache.NewMemory(64))
 	if err != nil {
 		t.Fatal(err)
 	}
