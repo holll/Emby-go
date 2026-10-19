@@ -38,6 +38,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Coverage gate (≥70%)
+        run: |
+          go test -coverprofile=cover.out ./...
+          total=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          awk -v t="${total}" 'BEGIN { exit !(t+0 >= 70) }'
+
       - name: Test
         run: |
           set -o pipefail
