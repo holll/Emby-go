@@ -74,6 +74,7 @@
 | 视图 | `GET /Users/:uid/Views` | 库 `Id/Name/CollectionType` |
 | 列表 | `GET /Users/:uid/Items`、`GET /Items` | `Items`、`TotalRecordCount`；排序/筛选参数为可选增量 |
 | 详情 | `GET /Items/:id`、`GET /Users/:uid/Items/:id` | `Id/Name/Type/ImageTags/UserData/MediaSources` |
+| 所属合集 | `GET /Items/:id/Collections`、`GET /Users/:uid/Items/:id/Collections` | 返回包含该影片的 `BoxSet` 列表（`Items`/`TotalRecordCount`）；无合集为空数组 |
 | 图片 | `GET /Items/:id/Images/:kind[/:index]` | 匿名；ETag/缓存头有效；`CacheTag` 变化即换图 |
 | 播放信息 | `GET|POST /Items/:id/PlaybackInfo` | 单 `MediaSources`，`DirectPlay/DirectStream=true`、`Transcoding=false` |
 | 播放上报 | `POST /Sessions/Playing`、`/Progress`、`/Stopped` | 204；计数由会话+序号保证幂等 |

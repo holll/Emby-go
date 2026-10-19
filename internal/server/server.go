@@ -514,6 +514,8 @@ func (a *App) embyRoutes() []embyRoute {
 		{"GET", "/Items/:id/Images/:kind/:index", false, a.image},
 		{"GET", "/Items/:id/Images", true, a.imageInfo},
 		{"GET", "/Items/:id/Similar", true, a.similar},
+		{"GET", "/Items/:id/Collections", true, a.itemCollections},
+		{"GET", "/Users/:uid/Items/:id/Collections", true, a.itemCollections},
 		{"GET", "/Items/:id/PlaybackInfo", true, a.playback},
 		{"POST", "/Items/:id/PlaybackInfo", true, a.playback},
 		// 带用户前缀的同一端点：参考客户端（iPlay / openemby_tv / tsukimi）用的是上面那种，

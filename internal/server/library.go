@@ -1340,6 +1340,36 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	c.Data(http.StatusOK, "application/json", body)
 }
 
+// itemCollections 返回影片所属合集（Jellyfin/Emby 的 GET /Items/{id}/Collections）。
+// 生产客户端缺该端点时会退化为列出全部合集，表现为“影片属于数十个合集”。
+func (a *App) itemCollections(c *gin.Context) {
+	if c.Param("uid") != "" && !a.validUser(c) {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
+	m, err := a.db.Movie(id)
+	if err != nil || !m.IsVisible() || !a.canViewMovie(c, m) {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
+	items := make([]gin.H, 0, 1)
+	if m.Collection != "" {
+		stats, e := a.db.CollectionStats(a.collectionMinMovies())
+		if e != nil {
+			itemDataUnavailable(c)
+			return
+		}
+		if stat, ok := stats[m.Collection]; ok {
+			items = append(items, a.boxsetItemFrom(m.Collection, stat))
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
+}
+
 func (a *App) item(c *gin.Context) {
 	if c.Param("uid") != "" && !a.validUser(c) {
 		return

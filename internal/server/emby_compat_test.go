@@ -256,3 +256,61 @@ func TestEmbyCollectionIdsExposeBoxset(t *testing.T) {
 		t.Fatalf("CollectionIds=%v want=[%s] body=%s", item.CollectionIds, want, raw)
 	}
 }
+
+// GET /Items/{id}/Collections 必须只返回该片所属合集（生产反馈：缺端点时客户端
+// 会退化为列出全部合集，表现为“影片属于数十个合集”）。
+func TestEmbyItemCollectionsEndpoint(t *testing.T) {
+	a, ts, token := asyncScanFixture(t)
+	libs, err := a.db.Libraries()
+	if err != nil || len(libs) == 0 {
+		t.Fatalf("读取媒体库失败: %v", err)
+	}
+	dir := libs[0].Path
+	for _, file := range []string{"Test Movie (2020).strm", "Second Movie (2021).strm"} {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("https://example.com/video.mkv"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, nfo := range []string{"Test Movie (2020).nfo", "Second Movie (2021).nfo"} {
+		content := `<movie><title>Compatible</title><year>2024</year><set><name>Contract Collection</name></set></movie>`
+		if err := os.WriteFile(filepath.Join(dir, nfo), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, raw := embyDo(t, ts, http.MethodPost, "/api/admin/scan", token, ""); status != http.StatusOK {
+		t.Fatalf("扫描: %d %s", status, raw)
+	}
+	status, raw := embyDo(t, ts, http.MethodGet, "/Items?Recursive=true&IncludeItemTypes=Movie&Limit=10", token, "")
+	if status != http.StatusOK {
+		t.Fatalf("列表: %d %s", status, raw)
+	}
+	var list struct {
+		Items []struct {
+			Id   string `json:"Id"`
+			Name string `json:"Name"`
+		} `json:"Items"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil || len(list.Items) == 0 {
+		t.Fatalf("列表无影片: %v %s", err, raw)
+	}
+	want := boxsetID("Contract Collection")
+	for _, movie := range list.Items {
+		status, raw := embyDo(t, ts, http.MethodGet, "/Items/"+movie.Id+"/Collections", token, "")
+		if status != http.StatusOK {
+			t.Fatalf("collections %s: %d %s", movie.Id, status, raw)
+		}
+		var got struct {
+			Items []struct {
+				Id   string `json:"Id"`
+				Name string `json:"Name"`
+				Type string `json:"Type"`
+			} `json:"Items"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Items) != 1 || got.Items[0].Id != want || got.Items[0].Type != "BoxSet" {
+			t.Fatalf("collections %s = %+v want [%s]", movie.Id, got.Items, want)
+		}
+	}
+}
