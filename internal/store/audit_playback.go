@@ -19,15 +19,15 @@ func (s *Store) RecentPlaybackEvents(userID int64, limit int) ([]PlaybackAuditEv
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT e.id,COALESCE(e.session_key,''),COALESCE(s.user_id,1),COALESCE(u.name,''),
+	query := `SELECT e.id,COALESCE(e.session_key,''),e.user_id,COALESCE(u.name,''),
 		COALESCE(s.movie_id,0),COALESCE(m.title,''),e.kind,e.position_ticks,e.created_at
 		FROM playback_events e
-		LEFT JOIN playback_sessions s ON s.session_key=e.session_key
-		LEFT JOIN users u ON u.id=s.user_id
+		LEFT JOIN playback_sessions s ON s.user_id=e.user_id AND s.session_key=e.session_key
+		LEFT JOIN users u ON u.id=e.user_id
 		LEFT JOIN movies m ON m.id=s.movie_id`
 	args := []any{}
 	if userID > 0 {
-		query += ` WHERE s.user_id=?`
+		query += ` WHERE e.user_id=?`
 		args = append(args, userID)
 	}
 	query += ` ORDER BY e.id DESC LIMIT ?`

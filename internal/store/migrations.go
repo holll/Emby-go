@@ -543,6 +543,74 @@ func applyMigration9(tx *sql.Tx) error {
 	return nil
 }
 
+// 批次 90（P0）：播放会话按用户隔离。旧 schema 以客户端 PlaySessionId 为全局主键，
+// 不同用户撞同一 key 时会互相停止/覆盖计数；这里重建 sessions 为 (user_id,session_key)
+// 复合主键，并给 events 增 user_id，事件唯一键改为 (user_id,session_key,seq)。
+const playbackIsolationMigrationVersion = 10
+
+var migration10Statements = []string{
+	// 先把旧事件搬到无约束的临时表，避免重建 sessions 时外键指向旧表。
+	`CREATE TABLE playback_events_stage (
+		id INTEGER,
+		user_id INTEGER,
+		session_key TEXT,
+		seq INTEGER,
+		kind TEXT,
+		position_ticks INTEGER,
+		created_at TEXT
+	)`,
+	`INSERT INTO playback_events_stage(id,user_id,session_key,seq,kind,position_ticks,created_at)
+		SELECT e.id,COALESCE(s.user_id,1),e.session_key,e.seq,e.kind,e.position_ticks,e.created_at
+		FROM playback_events e LEFT JOIN playback_sessions s ON s.session_key=e.session_key`,
+	`DROP TABLE playback_events`,
+	`CREATE TABLE playback_sessions_new (
+		user_id INTEGER NOT NULL DEFAULT 1,
+		session_key TEXT NOT NULL,
+		movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+		device_id TEXT NOT NULL DEFAULT '',
+		started_at TEXT NOT NULL,
+		last_event_seq INTEGER NOT NULL DEFAULT 0,
+		position_ticks INTEGER NOT NULL DEFAULT 0,
+		stopped INTEGER NOT NULL DEFAULT 0,
+		stopped_at TEXT,
+		PRIMARY KEY(user_id, session_key)
+	)`,
+	`INSERT INTO playback_sessions_new(user_id,session_key,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped,stopped_at)
+		SELECT COALESCE(user_id,1),session_key,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped,stopped_at FROM playback_sessions`,
+	`DROP TABLE playback_sessions`,
+	`ALTER TABLE playback_sessions_new RENAME TO playback_sessions`,
+	`CREATE INDEX idx_playback_sessions_movie ON playback_sessions(movie_id)`,
+	`CREATE TABLE playback_events_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL DEFAULT 1,
+		session_key TEXT NOT NULL,
+		seq INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		position_ticks INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		UNIQUE(user_id, session_key, seq),
+		FOREIGN KEY(user_id, session_key) REFERENCES playback_sessions(user_id, session_key) ON DELETE CASCADE
+	)`,
+	`INSERT INTO playback_events_new(id,user_id,session_key,seq,kind,position_ticks,created_at)
+		SELECT id,COALESCE(user_id,1),session_key,seq,kind,position_ticks,created_at FROM playback_events_stage`,
+	`DROP TABLE playback_events_stage`,
+	`ALTER TABLE playback_events_new RENAME TO playback_events`,
+	`CREATE INDEX idx_playback_events_session ON playback_events(user_id, session_key, seq)`,
+}
+
+func migration10Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(migration10Statements, "\n"))))
+}
+
+func applyMigration10(tx *sql.Tx) error {
+	for _, statement := range migration10Statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("迁移 10 失败: %w", err)
+		}
+	}
+	return nil
+}
+
 const userdataMigrationVersion = 8
 
 var migration8Statements = []string{
@@ -829,6 +897,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case playbackIsolationMigrationVersion:
+			if checksum != migration10Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -885,6 +958,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[playbackIsolationMigrationVersion] {
+		if err := applyMigration10(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateBaseline(tx); err != nil {
 		return fmt.Errorf("validate schema migration 1: %w", err)
 	}
@@ -932,6 +1010,11 @@ func (s *Store) migrate() error {
 	if !applied[userLibrariesMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", userLibrariesMigrationVersion, migration9Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", userLibrariesMigrationVersion, err)
+		}
+	}
+	if !applied[playbackIsolationMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", playbackIsolationMigrationVersion, migration10Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", playbackIsolationMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

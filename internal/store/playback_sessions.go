@@ -61,7 +61,7 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 			var seq int64
 			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,user_id,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped,stopped_at)
 				VALUES(?,?,?,?,?,1,?,1,?)
-				ON CONFLICT(session_key) DO UPDATE SET stopped=1,
+				ON CONFLICT(user_id,session_key) DO UPDATE SET stopped=1,
 					last_event_seq=playback_sessions.last_event_seq+1,
 					position_ticks=excluded.position_ticks, device_id=excluded.device_id, stopped_at=excluded.stopped_at
 				WHERE playback_sessions.stopped=0
@@ -74,8 +74,8 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO playback_events(session_key,seq,kind,position_ticks,created_at) VALUES(?,?,?,?,?)`,
-				key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
+			if _, err := tx.Exec(`INSERT INTO playback_events(user_id,session_key,seq,kind,position_ticks,created_at) VALUES(?,?,?,?,?,?)`,
+				userID, key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
@@ -96,7 +96,7 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 			var seq int64
 			err := tx.QueryRow(`INSERT INTO playback_sessions(session_key,user_id,movie_id,device_id,started_at,last_event_seq,position_ticks,stopped)
 				VALUES(?,?,?,?,?,1,?,0)
-				ON CONFLICT(session_key) DO UPDATE SET last_event_seq=playback_sessions.last_event_seq+1,
+				ON CONFLICT(user_id,session_key) DO UPDATE SET last_event_seq=playback_sessions.last_event_seq+1,
 					position_ticks=excluded.position_ticks, device_id=excluded.device_id,
 					started_at=CASE WHEN ?='start' THEN excluded.started_at ELSE playback_sessions.started_at END,
 					stopped=CASE WHEN ?='start' THEN 0 ELSE playback_sessions.stopped END
@@ -110,8 +110,8 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`INSERT INTO playback_events(session_key,seq,kind,position_ticks,created_at) VALUES(?,?,?,?,?)`,
-				key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
+			if _, err := tx.Exec(`INSERT INTO playback_events(user_id,session_key,seq,kind,position_ticks,created_at) VALUES(?,?,?,?,?,?)`,
+				userID, key, seq, string(ev.Kind), ev.PositionTicks, nowText); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,last_played_at) VALUES(?,?,?,?)

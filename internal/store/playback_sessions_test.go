@@ -199,3 +199,52 @@ func TestRecordPlaybackIdempotentAcrossReopen(t *testing.T) {
 		t.Fatalf("replay after restart counted: %+v", res)
 	}
 }
+
+func recordAs(t *testing.T, s *Store, userID, id int64, key string, kind PlaybackKind, pos int64) PlaybackResult {
+	t.Helper()
+	res, err := s.RecordPlaybackEvent(PlaybackEvent{UserID: userID, SessionKey: key, MovieID: id, Kind: kind, PositionTicks: pos, Now: time.Now()})
+	if err != nil {
+		t.Fatalf("record user=%d %s %s: %v", userID, key, kind, err)
+	}
+	return res
+}
+
+// 不同用户使用同一客户端 PlaySessionId 时不得互相停止/覆盖计数（批次 90 P0）。
+func TestPlaybackSessionsIsolatedByUser(t *testing.T) {
+	s, id := newPlaybackFixture(t)
+	if _, err := s.CreateUser("viewer", "password123", false); err != nil {
+		t.Fatal(err)
+	}
+	first := recordAs(t, s, 1, id, "shared-session", PlaybackStopped, 100)
+	if !first.Counted || first.PlayCount != 1 {
+		t.Fatalf("user1 stop: %+v", first)
+	}
+	second := recordAs(t, s, 2, id, "shared-session", PlaybackStopped, 100)
+	if !second.Counted || second.PlayCount != 1 {
+		t.Fatalf("user2 same session key must count independently: %+v", second)
+	}
+	// 用户 2 重放停止仍是幂等；用户 1 的计数不受影响。
+	replay := recordAs(t, s, 2, id, "shared-session", PlaybackStopped, 100)
+	if replay.Counted || replay.PlayCount != 1 {
+		t.Fatalf("duplicate stop for user2: %+v", replay)
+	}
+	d1, err := s.DataUser(1, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, err := s.DataUser(2, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d1.PlayCount != 1 || d2.PlayCount != 1 {
+		t.Fatalf("userdata isolation: user1=%+v user2=%+v", d1, d2)
+	}
+	var events int
+	var users int
+	if err := s.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT user_id) FROM playback_events WHERE session_key=?`, "shared-session").Scan(&events, &users); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 || users != 2 {
+		t.Fatalf("events=%d users=%d, want 2/2", events, users)
+	}
+}
