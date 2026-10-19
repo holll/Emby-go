@@ -696,6 +696,8 @@ func (a *App) adminSettings(c *gin.Context) {
 		"redis_online": a.cacheOnline,
 		// D01：0 表示登录会话永不过期。
 		"session_ttl_days": a.cfg.SessionTTLDays,
+		"ffprobe_path":     a.ffprobePath,
+		"ffprobe_error":    a.ffprobeError,
 		// DB-10：启动回填进度，大库预热期间给运维一个可见口径。
 		"features_backfill": a.db.FeatureBackfillStatus(),
 	})

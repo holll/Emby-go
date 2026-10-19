@@ -1548,3 +1548,13 @@ test('刮削候选慢回包不覆盖更新的选择（P1-10）', async () => {
   await closing;
   assert.equal(state.id, 'B');
 });
+
+test('运行日志面板与 ffprobe 状态（生产可诊断）', async () => {
+  // 设置页拉取 /logs 并渲染级别筛选与刷新按钮，服务设置展示探测能力。
+  assert.match(source, /api\('\/logs\?limit=200'\)/);
+  assert.match(source, /<h2 id="logs-title">运行日志<\/h2>/);
+  assert.match(source, /id="log-refresh"/);
+  assert.match(source, /id="log-level"/);
+  assert.match(source, /ffprobe_error/);
+  assert.match(source, /媒体信息探测/);
+});

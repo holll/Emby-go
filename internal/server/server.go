@@ -33,6 +33,9 @@ type App struct {
 	cache        cache.Cache
 	cacheBackend string
 	cacheOnline  bool
+	// ffprobePath/ffprobeError 是启动自检结果，供设置页展示探测能力是否就绪。
+	ffprobePath  string
+	ffprobeError string
 	adminMu      sync.RWMutex // 保护 adminName：初始化/登录写，其它 handler 并发读
 	adminName    string
 	serverID     string
@@ -177,6 +180,7 @@ func New(cfg config.Config) (*App, error) {
 		slog.Warn("未设置 setup_code：首次初始化前请只监听回环/内网，或通过反向代理限制来源")
 	}
 	app.startMaintenance()
+	app.selfCheckFFProbe()
 	return app, nil
 }
 
@@ -449,6 +453,7 @@ func (a *App) routes() {
 	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/metrics", a.adminMetrics)
+	admin.GET("/logs", a.adminLogs)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/tasks", a.adminTasks)
 	// 刮削（R4）：配置 + 批量/头像任务 + 单条预览确认 + 图片代理。

@@ -1167,8 +1167,8 @@ async function pageSettings() {
     renderSelfPassword();
     return;
   }
-  const [s, keyData, recovery, users, libs] = await Promise.all([
-    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries')
+  const [s, keyData, recovery, users, libs, logData] = await Promise.all([
+    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries'), api('/logs?limit=200')
   ]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
@@ -1176,7 +1176,8 @@ async function pageSettings() {
     ['数据库', s.db_path],
     ['缓存后端', s.cache + (s.redis_addr ? ` · ${s.redis_addr}/${s.redis_db}` : '')],
     ['Redis 在线', s.redis_online ? '是' : '否'],
-    ['登录会话有效期', s.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : '永不过期']
+    ['登录会话有效期', s.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : '永不过期'],
+    ['媒体信息探测', s.ffprobe_error ? `不可用：${s.ffprobe_error}` : (s.ffprobe_path ? `就绪：${s.ffprobe_path}` : '未检测（需要 ffprobe）')]
   ];
   const keys = keyData.items || [];
   content.innerHTML = `
@@ -1186,6 +1187,20 @@ async function pageSettings() {
         <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
       </table></div>
       <p class="hint">配置修改后需重启服务生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
+    </section>
+
+    <section class="panel" aria-labelledby="logs-title">
+      <div class="panel-head"><h2 id="logs-title">运行日志</h2><div class="row-actions">
+        <select id="log-level" aria-label="日志级别筛选">
+          <option value="">全部级别</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option>
+        </select>
+        <button id="log-refresh" class="btn btn-sm">刷新</button>
+      </div></div>
+      <p class="hint">仅保留本进程最近 500 条运行日志（敏感字段已脱敏），不读取磁盘日志；完整日志见服务器 <code>log/</code> 目录。</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:190px">时间</th><th style="width:70px">级别</th><th>内容</th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table></div>
     </section>
 
     <section class="panel">
@@ -1281,6 +1296,19 @@ async function pageSettings() {
     }
     catch (e) { toast(e.message, 'error'); }
   });
+  const renderLogs = (items) => {
+    const body = document.querySelector('#log-body');
+    if (!body) return;
+    const level = document.querySelector('#log-level').value;
+    const rows = (items || []).filter(item => !level || String(item.level).toUpperCase() === level);
+    body.innerHTML = rows.map(item => `<tr><td class="mono">${esc(item.time)}</td><td class="mono">${esc(item.level)}</td><td class="mono">${esc(item.message)}</td></tr>`).join('') || '<tr><td colspan="3">暂无日志</td></tr>';
+  };
+  renderLogs(logData.items);
+  document.querySelector('#log-refresh').addEventListener('click', async () => {
+    try { renderLogs((await api('/logs?limit=200')).items); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+  document.querySelector('#log-level').addEventListener('change', () => renderLogs(logData.items));
   const logoutAll = document.querySelector('#logout-all');
   if (logoutAll) logoutAll.addEventListener('click', async () => {
     if (!confirm('退出全部登录会话？其它设备需要重新登录，API 密钥不受影响。')) return;

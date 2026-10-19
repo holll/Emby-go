@@ -156,6 +156,26 @@ func (a *App) prepareProbe(req probeRequest) (probePlan, error) {
 }
 
 // adminProbeMedia 启动媒体信息探测任务（异步执行，进度走 /probe/media/progress）。
+// selfCheckFFProbe 启动时解析并验证 ffprobe，结果供设置页展示。
+// 不阻断启动：探测是显式任务，缺 ffprobe 时其他功能仍可用。
+func (a *App) selfCheckFFProbe() {
+	path, err := probe.LookPath(a.cfg.FFProbePath)
+	if err != nil {
+		a.ffprobeError = err.Error()
+		slog.Warn("ffprobe 不可用：媒体信息探测将失败", "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.rootCtx, 5*time.Second)
+	defer cancel()
+	if err := probe.Verify(ctx, path); err != nil {
+		a.ffprobeError = err.Error()
+		slog.Warn("ffprobe 自检失败：媒体信息探测将失败", "ffprobe", path, "error", err)
+		return
+	}
+	a.ffprobePath = path
+	slog.Info("ffprobe 就绪", "ffprobe", path)
+}
+
 func (a *App) adminProbeMedia(c *gin.Context) {
 	var req probeRequest
 	if c.Request.ContentLength > 0 {

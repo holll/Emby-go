@@ -158,11 +158,15 @@ go run ./cmd/embybackup -db ./data/emby.db -out /backups/emby -retain 7
 
 `deploy/` 提供可直接改用的样例（单实例、SQLite、Redis 可选）：
 
-- `deploy/Dockerfile`：多阶段构建静态二进制，distroless 非 root 运行，`/data` 挂配置与数据库。
+- `deploy/Dockerfile`：多阶段构建静态二进制，运行层为 Alpine + `ffmpeg`（提供 `ffprobe`），非 root 运行，`/data` 挂配置与数据库。
 - `deploy/docker-compose.yml`：`mkdir -p deploy/data && cp config.example.yaml deploy/data/config.yaml` 后 `docker compose -f deploy/docker-compose.yml up -d --build`；Redis 用 `--profile redis` 可选启用。
 - `deploy/emby-go.service`：systemd 单元，含 `TimeoutStopSec=30s`（大于进程内 15s 有界关闭）与 `ProtectSystem=strict` 等加固。
 
 配置项（含 `setup_code`、`initialize_allow_from`、`trusted_proxies`）见 `config.example.yaml` 与「公网部署」一节。
+
+### 探测媒体信息失败
+
+探测依赖宿主机上的 `ffprobe`（Docker 镜像已内置）。设置页「媒体信息探测」会显示解析结果与失败原因；「运行日志」面板可查看最近 500 条脱敏日志（完整日志在 `log/app-*.log`）。常见原因：未安装 ffmpeg、`ffprobe_path` 配置错误、`.strm` 指向的远端链接无法被服务器访问。
 
 ## 开发
 

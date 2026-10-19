@@ -8,7 +8,6 @@ package logging
 import (
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,11 +110,8 @@ var current *Loggers
 func Setup(debug bool) *Loggers {
 	app := NewDailyWriter(Dir, "app", os.Stderr)
 	request := NewDailyWriter(Dir, "request", os.Stdout)
-	level := slog.LevelInfo
-	if debug {
-		level = slog.LevelDebug
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(app, &slog.HandlerOptions{Level: level})))
+	// 环形缓冲保留最近日志，供管理端 WebUI 的运行日志面板查询。
+	SetupTo(app, debug)
 	current = &Loggers{app: app, request: request}
 	return current
 }

@@ -12,7 +12,7 @@
 |---|---|
 | `go build ./...` | 通过（Go 1.27.2，go.mod 声明 1.27.0） |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 16 包全绿；451 个 Test 函数（server 约 40s / store 约 17s）；3 个实时验收用例未设 env 时跳过 |
+| `go test ./...` | 16 包全绿；456 个 Test 函数（server 约 40s / store 约 17s）；3 个实时验收用例未设 env 时跳过 |
 | `node --test internal/server/web_test.cjs` | 88/88 通过 |
 | 测试形态 | httptest + 内存库为主；真实浏览器（Playwright 三引擎）与真实二进制冒烟已做；仍无真实 Emby 客户端、生产库、真机 |
 | CI | go / vuln / web 三 job；run `39263674365` 全绿（go/vuln/web）；门禁含 gofmt、build、vet、test、覆盖率 ≥70%、三包 race、govulncheck、前端 VM |
