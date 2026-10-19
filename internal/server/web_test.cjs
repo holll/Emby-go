@@ -1517,3 +1517,34 @@ test('P1 修复：路由收起浮层、hover 控件可聚焦、筛选重绘还�
   assert.match(appSource, /pendingWallFocus = '#item-sort';/);
   assert.match(appSource, /const target = document\.querySelector\(pendingWallFocus\);/);
 });
+
+test('刮削候选慢回包不覆盖更新的选择（P1-10）', async () => {
+  const resolvers = new Map();
+  let renders = 0;
+  const box = sandbox({
+    scrapeState: null,
+    renderScrapePreview() { renders++; },
+    document: { querySelector: () => ({ innerHTML: '' }) },
+    api: (path, options) => new Promise(resolve => { resolvers.set(JSON.parse(options.body).id, resolve); })
+  });
+  vm.runInContext(section('async function loadScrapeInspect(', 'function renderScrapePreview()'), box);
+  const state = { movieId: 7, preview: {}, inspect: null, provider: '', id: '', inspectSeq: 0 };
+  box.scrapeState = state;
+  const slow = box.loadScrapeInspect('p', 'A');
+  const fast = box.loadScrapeInspect('p', 'B');
+  // 后点的 B 先回，慢的 A 后回也不能覆盖。
+  resolvers.get('B')({ title: 'B' });
+  await fast;
+  assert.equal(state.id, 'B');
+  resolvers.get('A')({ title: 'A' });
+  await slow;
+  assert.equal(state.id, 'B', '慢候选不得覆盖新选择');
+  assert.equal(state.inspect.title, 'B');
+  assert.equal(renders, 1, '只有最新回包触发重绘');
+  // 关闭浮层后回包也不写状态。
+  const closing = box.loadScrapeInspect('p', 'C');
+  box.scrapeState = null;
+  resolvers.get('C')({ title: 'C' });
+  await closing;
+  assert.equal(state.id, 'B');
+});

@@ -1694,7 +1694,8 @@ async function openScrapePreview(item) {
   body.innerHTML = '<p class="hint">正在搜索候选…</p>';
   // 捕获本次会话的状态对象：await 期间浮层可能被关掉（scrapeState 置 null）
   // 或换成另一条影片，回写时必须认这个对象、而不是认全局变量。
-  const state = { movieId: item.id, preview: null, inspect: null, provider: '', id: '' };
+  // inspectSeq 只增不减：慢回包必须让位给更晚的点击（P1-10）。
+  const state = { movieId: item.id, preview: null, inspect: null, provider: '', id: '', inspectSeq: 0 };
   scrapeState = state;
   try {
     const preview = await api(`/items/${item.id}/scrape/preview`);
@@ -1715,12 +1716,15 @@ async function openScrapePreview(item) {
 async function loadScrapeInspect(provider, id) {
   const state = scrapeState;
   if (!state) return; // 浮层已关闭，不必也无法渲染
+  // 同一会话内每次点击取号；只有最后一次点击的回包可以写状态与重绘。
+  // 慢候选先发出、后返回时不得覆盖用户已经选中的新候选。
+  const seq = ++state.inspectSeq;
   const body = document.querySelector('#scrape-body');
   body.innerHTML = '<p class="hint">正在读取详情…</p>';
   const inspect = await api(`/items/${state.movieId}/scrape/inspect`, {
     method: 'POST', body: JSON.stringify({ provider, id })
   });
-  if (scrapeState !== state) return; // 等待期间被关闭或切到了另一条
+  if (scrapeState !== state || seq !== state.inspectSeq) return; // 已关闭、已换片或已被更新的点击取代
   state.inspect = inspect;
   state.provider = provider;
   state.id = id;
