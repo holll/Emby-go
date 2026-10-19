@@ -571,7 +571,8 @@ func (a *App) similar(c *gin.Context) {
 		c.Data(200, "application/json", b)
 		return
 	}
-	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列）。
+	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列），
+	// 这里再按可解释的层级与影片级信号重排，见 similarTier。
 	candidates, err := a.db.SimilarCandidates(src, similarPoolSize(limit))
 	if err != nil {
 		itemDataUnavailable(c)
@@ -586,11 +587,28 @@ func (a *App) similar(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
+	srcActors, err := a.db.Actors(src.ID)
+	if err != nil {
+		itemDataUnavailable(c)
+		return
+	}
+	srcActorSet := make(map[string]bool, len(srcActors))
+	for _, actor := range srcActors {
+		srcActorSet[strings.ToLower(actor.Name)] = true
+	}
+	candidateActors, err := a.db.ActorsFor(candidateIDs)
+	if err != nil {
+		itemDataUnavailable(c)
+		return
+	}
 
 	type scored struct {
-		movie  store.Movie
-		score  int
-		series bool
+		movie    store.Movie
+		tier     int
+		actors   int
+		score    int
+		yearDiff int
+		prefix   bool
 	}
 	results := make([]scored, 0, len(candidates))
 	for _, item := range candidates {
@@ -602,19 +620,38 @@ func (a *App) similar(c *gin.Context) {
 		if !movie.IsVisible() || !a.canViewMovie(c, movie) {
 			continue
 		}
-		// 倒排分 + 非精确信号（分级/年份/番号前缀）；与 Emby 口径一致，总分 > 2 才算相似。
-		score := item.Score + similarBonus(src, movie)
-		if score > 2 {
-			// 同系列置顶：先按系列归属，再按得分；系列作为影片级归属比演员/标签更可靠。
-			results = append(results, scored{movie: movie, score: score, series: item.SeriesMatch || sameSeries(src, movie)})
+		shared := sharedActorCount(srcActorSet, candidateActors[movie.ID])
+		tier, ok := similarTier(src, movie, item.SeriesMatch, shared, item.Score)
+		if !ok {
+			continue
 		}
+		yearDiff := 0
+		if src.Year > 0 && movie.Year > 0 {
+			yearDiff = src.Year - movie.Year
+			if yearDiff < 0 {
+				yearDiff = -yearDiff
+			}
+		}
+		results = append(results, scored{
+			movie: movie, tier: tier, actors: shared, score: item.Score,
+			yearDiff: yearDiff, prefix: sameNumberSeries(src, movie),
+		})
 	}
 	sort.Slice(results, func(i, j int) bool {
-		if results[i].series != results[j].series {
-			return results[i].series
+		if results[i].tier != results[j].tier {
+			return results[i].tier < results[j].tier
+		}
+		if results[i].actors != results[j].actors {
+			return results[i].actors > results[j].actors
 		}
 		if results[i].score != results[j].score {
 			return results[i].score > results[j].score
+		}
+		if results[i].yearDiff != results[j].yearDiff {
+			return results[i].yearDiff < results[j].yearDiff
+		}
+		if results[i].prefix != results[j].prefix {
+			return results[i].prefix
 		}
 		return results[i].movie.Title < results[j].movie.Title
 	})
@@ -651,32 +688,37 @@ func similarPoolSize(limit int) int {
 	return pool
 }
 
-// similarBonus 非倒排信号的分值，沿用 Emby 3.5.2 的权重：
-// 同分级 +10；年代差 <5 年 +4、<10 年 +2；番号前缀相同（≥2 个字母，如 ABF）+4。
+// similarFeatureThreshold 仅靠类型/标签/厂商/导演特征入选的最低分。
+// 类型权重 10，因此到达该阈值通常意味着至少一个非高频特征重合；
+// 分级（官方分级）这类全库恒定字段不再参与打分。
+const similarFeatureThreshold = 10
+
+// similarTier 把候选分为可解释的相关层级（数字越小越相关）：
 //
-// 这些信号要么全库恒定（分级），要么过于宽泛（前缀），所以只用来在候选内部微调排序，
-// 不参与倒排候选的召回——否则「只有分级相同」的影片会全部涌进相似列表。
-func similarBonus(x, y store.Movie) int {
-	score := 0
-	if x.OfficialRating != "" && x.OfficialRating == y.OfficialRating {
-		score += 10
+//	0 同系列（NFO <set> 优先，退回 <series>）
+//	1 同番号前缀（≥3 个字母，如 ZOZO）
+//	2 共同演员 ≥2
+//	3 共同演员 1 且同厂牌/片商/工作室
+//	4 共同演员 1
+//	5 仅类型/标签等特征重合（分数 ≥ similarFeatureThreshold）
+//
+// 全部不满足则丢弃。分级优先于分数：系列/番号系列是影片级归属，比演员、类型更可靠。
+func similarTier(src, cand store.Movie, seriesMatch bool, sharedActors, featureScore int) (int, bool) {
+	switch {
+	case seriesMatch || sameSeries(src, cand):
+		return 0, true
+	case sameNumberSeries(src, cand):
+		return 1, true
+	case sharedActors >= 2:
+		return 2, true
+	case sharedActors == 1 && sameBrand(src, cand):
+		return 3, true
+	case sharedActors == 1:
+		return 4, true
+	case featureScore >= similarFeatureThreshold:
+		return 5, true
 	}
-	if x.Year > 0 && y.Year > 0 {
-		diff := x.Year - y.Year
-		if diff < 0 {
-			diff = -diff
-		}
-		switch {
-		case diff < 5:
-			score += 4
-		case diff < 10:
-			score += 2
-		}
-	}
-	if prefix := numberPrefix(x.Number); prefix != "" && prefix == numberPrefix(y.Number) {
-		score += 4
-	}
-	return score
+	return 0, false
 }
 
 // sameSeries 判断两部影片是否同系列：NFO <set>（Collection）优先，退回 <series>。
@@ -690,6 +732,45 @@ func sameSeries(x, y store.Movie) bool {
 		return false
 	}
 	return name == strings.TrimSpace(y.Collection) || name == strings.TrimSpace(y.Series)
+}
+
+// sharedActorCount 统计候选与来源影片的共同演员数（姓名大小写不敏感）。
+func sharedActorCount(src map[string]bool, cand []store.ActorRef) int {
+	count := 0
+	for _, actor := range cand {
+		if src[strings.ToLower(actor.Name)] {
+			count++
+		}
+	}
+	return count
+}
+
+// sameBrand 判断两部影片是否同一厂牌/片商/工作室（只用于演员重合后的细分）。
+func sameBrand(x, y store.Movie) bool {
+	if x.Maker != "" && x.Maker == y.Maker {
+		return true
+	}
+	if x.Label != "" && x.Label == y.Label {
+		return true
+	}
+	for _, studio := range x.Studios {
+		if studio == "" {
+			continue
+		}
+		for _, other := range y.Studios {
+			if studio == other {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sameNumberSeries 判断番号是否同一系列：前缀至少 3 个字母（ZOZO-226/ZOZO-225）。
+// 单字母或双字母前缀过于宽泛，不作为系列信号。
+func sameNumberSeries(x, y store.Movie) bool {
+	prefix := numberPrefix(x.Number)
+	return len(prefix) >= 3 && prefix == numberPrefix(y.Number)
 }
 
 // numberPrefix 取番号开头的字母前缀（AFB-018 → ABF）；不足 2 个字母时返回空串

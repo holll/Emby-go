@@ -125,3 +125,19 @@ Warning: 299 - "deprecated endpoint; use POST /api/admin/tasks/scan"
 - 契约测试：`go test ./internal/server -run 'TestAPIContract|TestEmbyCompat' -count=1`。
 - 关键路由清单在 `api_contract_test.go` 中硬编码；新增/删除路由必须同批更新测试与本文件。
 - 契约测试与 CI（`.github/workflows/ci.yml`）同批跑；未通过不得打 tag。
+
+## 相似作品排序（`GET /Items/{id}/Similar`）
+
+候选先由 `movie_features` 倒排召回（跳过全库 >10% 的高频特征），再按可解释层级排序，数字越小越相关：
+
+| 层级 | 条件 |
+|---|---|
+| 0 | 同系列：NFO `<set>` 优先，退回 `<series>`（特征标记或字段比对） |
+| 1 | 同番号前缀，≥3 个字母（如 `ZOZO-226` / `ZOZO-225`） |
+| 2 | 共同演员 ≥ 2 |
+| 3 | 共同演员 1，且厂牌/片商/工作室相同 |
+| 4 | 共同演员 1 |
+| 5 | 仅类型/标签/厂商/导演特征重合，特征分 ≥ 10 |
+
+同层内依次按：共同演员数降序 → 特征分降序 → 年份差升序 → 番号前缀 → 标题。
+全库恒定的官方分级不参与打分；年份、番号前缀只作同层细分。结果只含当前账户有权限的媒体库。
