@@ -64,6 +64,7 @@ func (a *App) favoriteItem(c *gin.Context, favorite bool) {
 		userDataWriteError(c, err)
 		return
 	}
+	a.notifyMovieDataWebhook(c, "item.rate", movie, userDataDTO(data))
 	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }
 
@@ -89,6 +90,11 @@ func (a *App) rateItem(c *gin.Context, likes int) {
 		userDataWriteError(c, err)
 		return
 	}
+	name := "item.rate"
+	if likes == 0 {
+		name = "item.unrate"
+	}
+	a.notifyMovieDataWebhook(c, name, movie, userDataDTO(data))
 	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }
 

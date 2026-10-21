@@ -448,7 +448,8 @@ func (a *App) adminDelete(c *gin.Context) {
 		apiError(c, 404, "not found")
 		return
 	}
-	if err = a.db.DeleteIndexedMovie(id); err != nil {
+	movie, err := a.db.DeleteIndexedMovieSnapshot(id)
+	if err != nil {
 		if store.NotFound(err) {
 			apiError(c, 404, "not found")
 			return
@@ -457,6 +458,7 @@ func (a *App) adminDelete(c *gin.Context) {
 		return
 	}
 	a.cache.Clear()
+	a.notifyMovieDeleted(c, movie)
 	c.Status(http.StatusNoContent)
 }
 
@@ -682,6 +684,7 @@ func (a *App) adminImage(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "image saved but index update failed", "code": "IMAGE_INDEX_FAILED", "saved": true, "indexed": false})
 		return
 	}
+	a.notifyIndexedUpdate(c, id)
 	c.JSON(200, gin.H{"status": "success", "path": dest})
 }
 

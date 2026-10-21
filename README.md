@@ -9,28 +9,37 @@
 
 ## 快速开始
 
-### 构建
+先读 [快速上手：从本地启动到 Emby 浏览与播放](<docs/quickstart.md>)，其中包含前置条件、最短操作路径、API 调用、预期结果与常见错误。内容按当前源码核实；未执行真实实例验证，不承诺给定媒体源可播放。
+
+**前置条件**：源码构建需满足 [go.mod](<go.mod#L3>) 的 Go 1.27.0 要求；准备可读的测试媒体库（同名 NFO + HTTP(S) `.strm`），并为配置、SQLite 和日志提供写权限。Redis 可选，`ffprobe` 仅在媒体信息探测时需要。
+
+### 构建与配置
 
 ```bash
 go build -o metatube ./cmd/metatube
+# 仅在 config.yaml 不存在时复制，避免覆盖私人配置
+if [ ! -e config.yaml ]; then cp config.example.yaml config.yaml; fi
 ```
 
-### 运行
+编辑私有配置后再启动：使用未占用的测试数据库，最短路径可设 `redis_addr: ""`；为首次初始化设置自己的随机 `setup_code`，并按实际来源限制 `initialize_allow_from`。详细字段见 [配置示例](<config.example.yaml>)；其中“Redis 必选”的旧注释与当前内存回退实现不一致。
+
+> **监听安全**：`port` 只接受数字，实际监听全部网卡（`:<port>`），当前没有 `listen` 配置项，也不能通过 `port` 绑定回环。请在隔离环境或已有防火墙限制的环境中首次启动；仅访问 `127.0.0.1` 不代表端口仅本机可达。
+
+### 运行与首次使用
 
 ```bash
-# 默认读取 ./config.yaml；也可用 -c 指定其它配置文件
-./metatube
-./metatube -c /etc/emby-go/config.yaml
-./metatube -version
+./metatube -c ./config.yaml
+# 可另行查看版本，不启动服务
+# ./metatube -version
 ```
 
-`config.yaml` 属本地私人配置（已在 .gitignore 中，不入库）；首次使用复制示例并修改：
+不带 `-c` 时，配置路径按 `EMBY_CONFIG` → 当前目录默认配置选择。相对数据库路径基于进程启动目录；私人配置由 [.gitignore](<.gitignore>) 忽略，不要直接用示例文件运行（启动可能回写 `server_id`）。
 
-```bash
-cp config.example.yaml config.yaml
-```
+1. 同机浏览器打开 `http://127.0.0.1:18080/`（使用你配置的端口），创建管理员并登录。账号至少 3 个字符、密码至少 9 个字符；已初始化的实例直接登录。
+2. 后台「媒体库」登记服务器上的绝对目录路径，点击该库扫描，等待进度完成。异步提交返回 202 只表示接受任务，不是入库成功。
+3. 在「媒体墙」检查成功影片，再用 Emby 客户端连接同一服务地址。直接播放返回 302 到源站，不转码；客户端仍需能访问源站并支持其编码。
 
-监听端口在配置文件的 `port`（或 `listen`）中设置，命令行只负责选择配置文件。浏览器打开 `http://127.0.0.1:<port>` 走初始化向导（创建管理员账号）。
+缺少 NFO 或解析失败的 HTTP(S) 条目进入待补录，不会出现在 Emby 可见影片列表。检查 `/healthz` 得到 200 只表示服务接纳请求，不代表媒体可播放。
 
 ### 目录约定
 
@@ -109,11 +118,12 @@ Emby 兼容 API 同时注册在根路径与 `/emby` 前缀下：
 后台「管理员 API 密钥」创建后，可用密钥直接调用全部管理与 Emby 接口（全权、长期有效）：
 
 ```bash
-curl -H "X-Emby-Token: <key>" http://<host>:18080/Users/1/Views
-# 或 http://<host>:18080/Users/1/Views?api_key=<key>
+# <user-id> 取对应账号登录响应的 User.Id，不要假定为 1；优先用头传凭据
+curl -H "X-Emby-Token: <key>" 'http://<host>:18080/Users/<user-id>/Views'
+# /emby 前缀也可用；完整登录与动态取 ID 示例见快速上手
 ```
 
-> **权限边界（D02 已确认）**：当前为永久单用户版本，API 密钥即管理员凭据，泄露等于交出管理面；请只发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。图片端点保持匿名以兼容浏览器 `<img>`/客户端，不因持有密钥而收窄。
+> **权限边界**：当前实现已有多用户与媒体库授权，普通用户默认无库授权，不能访问管理接口。API 密钥仍是长期管理员全权凭据，泄露等于交出管理面；只发给可信管理员脚本。图片端点保持匿名公开以兼容浏览器 `<img>`/客户端，不因多用户授权或持有密钥而收窄；图片不具备与影片详情相同的私密性。
 
 ## 配置（config.yaml）
 
@@ -135,9 +145,49 @@ server_domains: []        # 前端“服务器域名切换”候选
 
 `server_id` 会写入配置文件以保持稳定；`redis_addr` 可选，未配置或连接失败时回退进程内缓存（重启失效、多实例不共享）。
 
+### 日志最大保存天数
+
+管理员可在 **设置 → 日志保存期限** 中设置 0–3650 天：`0` 不自动清理（默认），建议 7–30 天。非零保存需要确认不可撤销删除，会立即清理现有过期的 app/request 日志，之后启动与跨日写入时检查；配置存入数据库，保存即生效、重启保留。按文件名日期计算且包含今天，不递归、不删其它文件或符号链接；不会改变内存运行日志面板。清理失败会明确提示，不影响正常日志输出。部署需重建并运行新二进制后刷新后台。详见 [日志保留指南](<docs/log-retention.md>)。
+
+### Webhook：联动 SmartStrm 删除远端目录
+
+默认不发送通知。推荐管理员在 **管理后台 → 设置 → Webhook** 中编辑：启用、接收地址、13 类事件订阅、JSON/form 编码、超时及允许内网。保存后立即生效并存入数据库，重启保留；无需手改 YAML。含 token 的地址只写不回显，留空保留，显式清除需同时关闭通知。保存不会试发通知；开启删除订阅需确认整目录删除风险。详见 [WebUI 配置指南](<docs/webhook-webui.md>)。
+
+以下 YAML 仅作首次启动/尚未保存后台配置时的后备值；后台保存后以数据库为准，修改 YAML 不会覆盖已有后台设置：
+
+```yaml
+webhook:
+  enabled: false
+  url: ""                   # SmartStrm 的 /webhook/<token> 或 /webhook/emby/<token>
+  timeout_seconds: 5        # 1–30 秒，0 使用默认 5 秒
+  allow_private: false      # 本机/内网 SmartStrm 需显式改为 true
+```
+
+缺省订阅仍只有删除事件：仅管理员通过后台/API **明确删除单部影片且数据库提交成功**，才发送 `item.deleted`，`Item.Path` 为该条目原始本地 `.strm` 绝对路径。扫描自动清理、重建及删除媒体库不会发送删除事件。
+
+也可显式订阅播放、用户、个人状态及人工影片更新事件。下例**替换**默认删除订阅，不会发送删除命令：
+
+```yaml
+webhook:
+  enabled: true
+  url: "https://receiver.example/webhook"
+  events: [playback.start, playback.stop, user.authenticated, user.logout, item.rate, item.unrate, item.markplayed, item.markunplayed, item.updated]
+  format: json              # 部分 Emby 接收器使用 form：data=<JSON>
+  timeout_seconds: 5
+  allow_private: false
+```
+
+事件包含 Emby 风格的 `Event`、`Date`、`Server`、`Item` 及按需 `User` / `Session` / `PlaybackInfo`，不发送登录 token、密码或 STRM 内容直链；并非 Emby 插件所有事件/字段的完整实现。`playback.progress` 可选但高频，通知同步限时，订阅会增加播放上报延迟。详见[通用事件及格式指南](<docs/webhook-events.md>)。
+
+> **危险：SmartStrm 收到 `.strm` 路径后会去掉文件名，映射并删除远端整个文件夹，可能包含其它影片。** 请先用独立测试目录，核对其 `strm_in_emby`、`storage_path_map`、`storage`、`allowed_prefix` 和删除同步开关；不要用真实收藏试发通知。Emby-go 不直接删除本地 STRM/NFO，但配置的接收端会产生真实远端删除。
+
+发送为提交后单次、同步、限时的 best-effort 通知，无重试或持久队列；失败不撤销本地删除，仍返回 204，通过 `X-Webhook-Status: failed`、后台提示及脱敏日志告知。`sent` 仅表示接收端确认，不保证远端最终状态；超时也可能已经删除，**不要盲目重发**。配置 URL 中的 token 是敏感凭据，不要提交或分享。
+
+完整路径映射、事件 JSON、状态与安全测试步骤见 [Webhook / SmartStrm 联动指南](<docs/webhook-smartstrm.md>)。
+
 ### 公网部署（D04 门禁）
 
-- **TLS 由反向代理终止**：本服务不内置 TLS。建议只监听回环（如 `port` 绑定 127.0.0.1），由 Nginx/Caddy 对外提供 https。
+- **TLS 由反向代理终止**：本服务不内置 TLS。当前 `port` 只能设置数字且绑定全部网卡，不能用它绑定回环；由防火墙/网络隔离限制后端端口，再由 Nginx/Caddy 对外提供 https，不要误以为访问回环地址就限制了监听范围。
 - **初始化保护**：公网暴露前设置 `setup_code`（初始化必须携带），或配置 `initialize_allow_from` 限定来源 CIDR。
 - **代理头**：默认不信任 `X-Forwarded-For`；只有配置 `trusted_proxies` 后限流/日志才使用代理提供的真实 IP。
 - **单实例**：SQLite 为唯一事实源，不要多实例共享同一 SQLite 文件；Redis 可选，内存兜底仅单实例安全。
@@ -197,4 +247,4 @@ git push origin v1.0.0
 
 ## 范围与不做
 
-单用户、仅 `http(s)-strm` 直拉播放；不做转码/HLS/多用户/直播音乐/通用刮削器插件（内置 MetaTube 适配器不在此列，见 `dev-plan.md` Roadmap）。
+当前支持管理员与普通用户、按媒体库授权；仅 `http(s)-strm` 直拉播放，不做转码/HLS/直播音乐/通用刮削器插件（内置 MetaTube 适配器不在此列）。权限与图片公开边界见 [快速上手](<docs/quickstart.md>) 和 [API 契约](<API-CONTRACT.md#L89-L96>)。

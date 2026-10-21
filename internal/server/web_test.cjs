@@ -548,6 +548,7 @@ async function wallKeyboardFixture() {
     openPlayer: item => calls.push(['play', item.id]),
     probeItem: id => calls.push(['probe', id]),
     confirm: () => true, toast() {}, STATUS_TEXT: {}, refreshPage() {} });
+  vm.runInContext(section('async function deleteIndexedItem(', 'const STATUS_TEXT ='), box);
   vm.runInContext(section('async function pageItems()', '// reloadWall'), box);
   await box.pageItems();
   box.wallState.items = [{ id: 7 }];
@@ -558,6 +559,28 @@ function wallKey(target, key, extra = {}) {
   return { target, key, defaultPrevented: false,
     preventDefault() { this.defaultPrevented = true; }, ...extra };
 }
+
+test('删除响应保留204兼容，Webhook失败或跳过不得提示远端删除成功', async () => {
+  for (const status of [null, 'disabled', 'failed', 'skipped', 'sent']) {
+    const calls = [], notices = [];
+    const box = sandbox({ token: 'fixture', FormData: class {},
+      fetch: async (url, options) => { calls.push([url, options.method]); return { ok: true, status: 204, headers: { get: () => status } }; },
+      toast: (message, kind) => notices.push([message, kind]) });
+    vm.runInContext(section('async function api(', 'const STATUS_TEXT ='), box);
+    const result = await box.api('/items/7', { method: 'DELETE' });
+    if (status === null) assert.equal(result, null);
+    else assert.equal(result.webhook_status, status);
+    calls.length = 0;
+    await box.deleteIndexedItem(7);
+    assert.deepEqual(calls, [['/api/admin/items/7', 'DELETE']], '只删除一次，不重试发送');
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0][1], ['failed', 'skipped'].includes(status) ? 'error' : 'ok');
+    if (status === 'failed') assert.match(notices[0][0], /索引已删除.*通知失败.*不要重复删除/);
+    if (status === 'sent') assert.match(notices[0][0], /接收端已确认.*核对远端/);
+  }
+  assert.ok(!source.includes('仅删除数据库索引，不删除源文件。继续？'));
+  assert.match(source, /confirm\('删除该影片索引？.*远端整个目录.*无法撤销/);
+});
 
 test('媒体卡片不再整体充当按钮：模板无 role=button/tabindex，标题是独立按钮', () => {
   const src = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
@@ -1567,4 +1590,163 @@ test('移动端表格：用户卡片化与日志堆叠', async () => {
   assert.match(css, /\.user-table thead \{ display: none; \}/);
   assert.match(css, /\.table-wrap table:not\(\.log-table\):not\(\.user-table\) \{ min-width: 560px; \}/);
   assert.match(css, /\.log-table td:nth-child\(3\) \{ margin-top: 2px; word-break: break-word; \}/);
+});
+
+const webhookUI = fs.readFileSync(path.join(__dirname, 'web/webhook-settings.js'), 'utf8');
+const webhookConfig = (tag = '"cfg-1"') => ({ enabled: false, url_configured: true,
+  events: ['item.rate'], format: 'json', timeout_seconds: 5, allow_private: false, config_etag: tag });
+function webhookPanel(api) {
+  const ids = ['form', 'fields', 'save', 'reload', 'status', 'enabled', 'private', 'format', 'timeout', 'url', 'url-state', 'clear', 'confirm'];
+  const nodes = Object.fromEntries(ids.map(id => [id, { value: '', checked: false, disabled: false, textContent: '', listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute(k, v) { this[k] = v; }, focus() { this.focused = true; } }]));
+  const names = [...webhookUI.matchAll(/\['((?:item|playback|user)\.[a-z]+)',/g)].map(m => m[1]);
+  const events = names.map(name => ({ dataset: { whEvent: name }, checked: false }));
+  const calls = [], prompts = [];
+  const host = { isConnected: true, innerHTML: '', querySelector: s => nodes[s.slice(4)], querySelectorAll: () => events };
+  let active = true, confirms = true;
+  const box = sandbox({ confirm: text => { prompts.push(text); return confirms; } });
+  vm.runInContext(webhookUI, box);
+  const mounted = box.mountWebhookSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
+  return { nodes, events, calls, host, mounted, prompts, leave() { active = false; host.isConnected = false; },
+    confirm(value) { confirms = value; }, submit: () => nodes.form.listeners.submit({ preventDefault() {} }), reload: () => nodes.reload.listeners.click() };
+}
+
+test('Webhook设置加载不回显地址，保存完整订阅及If-Match，成功后清空秘密输入', async () => {
+  const p = webhookPanel(async (path, options) => {
+    assert.equal(path, '/webhook/settings');
+    return options ? { ...webhookConfig('"cfg-2"'), enabled: true, events: ['playback.stop'], format: 'form', timeout_seconds: 12, allow_private: true } : webhookConfig();
+  });
+  await p.mounted;
+  assert.equal(p.events.length, 13);
+  assert.equal(p.nodes.url.value, '');
+  assert.match(p.nodes['url-state'].textContent, /已保存地址.*不回显/);
+  assert.equal(p.nodes.save.disabled, false);
+  p.nodes.enabled.checked = true; p.nodes.private.checked = true;
+  p.nodes.url.value = 'https://receiver.example/private-token-canary'; p.nodes.format.value = 'form'; p.nodes.timeout.value = '12';
+  for (const e of p.events) e.checked = e.dataset.whEvent === 'playback.stop';
+  await p.submit();
+  assert.equal(p.calls.length, 2, '只GET一次与PUT一次，不试发、不重载整页');
+  const options = p.calls[1][1], body = JSON.parse(options.body);
+  assert.equal(options.method, 'PUT'); assert.equal(options.headers['If-Match'], '"cfg-1"');
+  assert.deepEqual(body.events, ['playback.stop']); assert.equal(body.url, 'https://receiver.example/private-token-canary');
+  assert.equal(body.format, 'form'); assert.equal(body.timeout_seconds, 12); assert.equal(body.allow_private, true);
+  assert.equal(p.nodes.url.value, ''); assert.equal(p.nodes.confirm.checked, false);
+  assert.ok(!p.host.innerHTML.includes('private-token-canary'));
+  assert.match(p.nodes.status.textContent, /即时生效.*重启保留.*未发送测试通知/);
+  await p.submit(); assert.equal(p.calls[2][1].headers['If-Match'], '"cfg-2"');
+  assert.equal(JSON.parse(p.calls[2][1].body).url, '', '下一次留空保留，不填充旧URL');
+});
+
+test('Webhook设置读取失败只能显式重载；保存503保留草稿而不自动重试', async () => {
+  let step = 0;
+  const p = webhookPanel(async () => { if (++step !== 2) throw Object.assign(Error('network'), { status: 503 }); return webhookConfig(); });
+  await p.mounted; assert.equal(p.nodes.save.disabled, true); assert.equal(p.nodes.status.role, 'alert');
+  await p.reload(); assert.equal(p.nodes.save.disabled, false);
+  p.nodes.url.value = 'https://receiver.example/draft';
+  await p.submit(); assert.equal(p.calls.length, 3); assert.equal(p.nodes.url.value, 'https://receiver.example/draft');
+  assert.equal(p.nodes.save.disabled, false); assert.match(p.nodes.status.textContent, /保存未确认.*输入已保留/);
+});
+
+test('Webhook设置412保留草稿并禁旧重提，显式确认重新加载才获取新令牌', async () => {
+  let gets = 0;
+  const p = webhookPanel(async (_, options) => {
+    if (options) throw Object.assign(Error('conflict'), { status: 412 });
+    return webhookConfig(++gets === 1 ? '"old"' : '"new"');
+  });
+  await p.mounted; p.nodes.url.value = 'https://receiver.example/unsaved';
+  await p.submit(); assert.equal(p.nodes.save.disabled, true); assert.equal(p.nodes.url.value, 'https://receiver.example/unsaved');
+  assert.match(p.nodes.status.textContent, /草稿已保留.*不会自动覆盖/);
+  await p.submit(); assert.equal(p.calls.length, 2);
+  p.confirm(false); await p.reload(); assert.equal(p.calls.length, 2); assert.equal(p.nodes.url.value, 'https://receiver.example/unsaved');
+  p.confirm(true); await p.reload(); assert.equal(p.nodes.url.value, ''); assert.equal(p.nodes.save.disabled, false);
+  await p.submit(); assert.equal(p.calls[3][1].headers['If-Match'], '"new"');
+});
+
+test('Webhook设置阻止空事件、坏超时及危险清除；启用删除必须明确确认', async () => {
+  const p = webhookPanel(async () => webhookConfig()); await p.mounted;
+  p.events.forEach(e => { e.checked = false; }); await p.submit(); assert.equal(p.calls.length, 1);
+  p.events.find(e => e.dataset.whEvent === 'item.deleted').checked = true;
+  p.nodes.timeout.value = '0'; await p.submit(); assert.equal(p.calls.length, 1);
+  p.nodes.timeout.value = '5'; p.nodes.enabled.checked = true; p.nodes.clear.checked = true;
+  await p.submit(); assert.equal(p.calls.length, 1);
+  p.nodes.clear.checked = false; await p.submit(); assert.equal(p.calls.length, 1); assert.equal(p.nodes.confirm.focused, true);
+  p.nodes.confirm.checked = true; await p.submit();
+  assert.equal(p.calls.length, 2); assert.equal(JSON.parse(p.calls[1][1].body).confirm_delete, true);
+  assert.equal(p.nodes.confirm.checked, false, '每次保存都重新确认');
+});
+
+test('Webhook设置在途提交单次，切页后迟到读取或保存不能覆盖新页面', async () => {
+  let resolve;
+  const p = webhookPanel(() => new Promise(r => { resolve = r; }));
+  p.leave(); resolve(webhookConfig()); await p.mounted;
+  assert.equal(p.nodes.timeout.value, ''); assert.equal(p.nodes.save.disabled, true);
+  let finish;
+  const q = webhookPanel(async (_, opts) => opts ? new Promise(r => { finish = r; }) : webhookConfig());
+  await q.mounted; q.nodes.url.value = 'https://receiver.example/draft';
+  const saving = q.submit(); await q.submit(); assert.equal(q.calls.length, 2);
+  q.leave(); finish(webhookConfig('"new"')); await saving;
+  assert.equal(q.nodes.url.value, 'https://receiver.example/draft');
+  assert.equal(q.nodes.status.textContent, '正在保存；不会发送测试通知…');
+});
+
+test('Webhook设置独立资源在app之前加载，管理员设置挂载且不会请求真实试发接口', () => {
+  assert.ok(html.indexOf('/web/webhook-settings.js') < html.indexOf('/web/app.js'));
+  const settings = section('async function pageSettings()', 'async function pageScrape()');
+  assert.match(settings, /if \(!me \|\| !me\.is_admin\)/);
+  assert.match(settings, /id="webhook-settings"/);
+  assert.match(settings, /mountWebhookSettings\(webhookHost, api, \(\) => gen === pageGen && webhookHost.isConnected\)/);
+  assert.match(webhookUI, /type="password".*autocomplete="new-password"/);
+  assert.ok(!webhookUI.includes('localStorage'));
+  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 2, '只提供读设置与保存设置');
+});
+
+
+const logSettingsUI = fs.readFileSync(path.join(__dirname, 'web/log-settings.js'), 'utf8');
+function logPanel(api) {
+  const nodes = Object.fromEntries(['form','fields','save','reload','status','days','confirm'].map(id => [id, { value: '', disabled: false, checked: false, textContent: '', setAttribute(k,v) { this[k]=v; } }]));
+  const host = { isConnected: true, innerHTML: '', querySelector: s => nodes[s.slice(4)] };
+  const calls = []; let active = true, confirmed = true;
+  const box = sandbox({ confirm: () => confirmed }); vm.runInContext(logSettingsUI, box);
+  const mounted = box.mountLogSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
+  return { nodes, host, calls, mounted, submit: () => nodes.form.onsubmit({ preventDefault() {} }), reload: () => nodes.reload.onclick(), confirm: x => { confirmed=x; }, leave() { active=false;host.isConnected=false; } };
+}
+const logConfig = (days=0) => ({ retention_days: days, max_days:3650, config_etag: `"lr1-${days}"` });
+
+test('日志期限默认不清理，非零保存须确认并带If-Match，成功及部分清理提示分离', async () => {
+  let warning = false;
+  const p = logPanel(async (path, options) => { assert.equal(path,'/logs/settings'); return options ? { ...logConfig(JSON.parse(options.body).retention_days), cleanup_warning: warning } : logConfig(); });
+  await p.mounted;assert.equal(p.nodes.days.value,'0');assert.equal(p.nodes.save.disabled,false);
+  for (const value of ['', '-1','3651','1.5']) { p.nodes.days.value=value;await p.submit(); }
+  p.nodes.days.value='7';await p.submit();assert.equal(p.calls.length,1,'未确认不提交删除');
+  p.nodes.confirm.checked=true;await p.submit();
+  assert.equal(p.calls.length,2);assert.equal(p.calls[1][1].headers['If-Match'],'"lr1-0"');assert.equal(p.calls[1][1].method,'PUT');
+  assert.deepEqual(JSON.parse(p.calls[1][1].body),{retention_days:7,confirm_cleanup:true});assert.equal(p.nodes.confirm.checked,false);
+  p.nodes.confirm.checked=true;p.nodes.days.oninput();assert.equal(p.nodes.confirm.checked,false,'改天数重新确认');
+  warning=true;p.nodes.confirm.checked=true;await p.submit();assert.match(p.nodes.status.textContent,/已保存.*未能清理/);assert.equal(p.nodes.status.role,'alert');
+  p.nodes.days.value='0';await p.submit();assert.equal(JSON.parse(p.calls[3][1].body).retention_days,0);
+});
+
+test('日志期限读取失败禁保存，503保留草稿，412仅显式重载才解除', async () => {
+  let failGet=true, mode=503;
+  const p=logPanel(async (_,opts)=>{if(!opts){if(failGet)throw Error('network');return logConfig();}throw Object.assign(Error('save failed'),{status:mode});});
+  await p.mounted;assert.equal(p.nodes.save.disabled,true);failGet=false;await p.reload();
+  p.nodes.days.value='30';p.nodes.confirm.checked=true;await p.submit();assert.equal(p.nodes.days.value,'30');assert.equal(p.nodes.save.disabled,false);
+  mode=412;await p.submit();assert.equal(p.nodes.save.disabled,true);assert.equal(p.nodes.days.value,'30');
+  const n=p.calls.length;await p.submit();assert.equal(p.calls.length,n);p.confirm(false);await p.reload();assert.equal(p.calls.length,n);
+  p.confirm(true);await p.reload();assert.equal(p.nodes.days.value,'0');assert.equal(p.nodes.save.disabled,false);
+});
+
+test('日志期限单次在途保存与导航晚回隔离', async () => {
+  let finish;
+  const p=logPanel(async (_,opts)=>opts?new Promise(r=>{finish=r;}):logConfig());await p.mounted;
+  p.nodes.days.value='7';p.nodes.confirm.checked=true;const pending=p.submit();await p.submit();assert.equal(p.calls.length,2);
+  p.leave();finish(logConfig(7));await pending;assert.equal(p.nodes.confirm.checked,true,'旧响应不改已离开页面');
+  let resolve;const q=logPanel(()=>new Promise(r=>{resolve=r;}));q.leave();resolve(logConfig(30));await q.mounted;assert.equal(q.nodes.days.value,'');
+});
+
+test('日志期限嵌入资源先加载，管理员设置挂载且不提供任意路径输入', () => {
+  assert.ok(html.indexOf('/web/log-settings.js')>=0 && html.indexOf('/web/log-settings.js')<html.indexOf('/web/app.js'));
+  assert.match(source,/mountLogSettings\(logHost, api, \(\) => gen === pageGen && logHost.isConnected\)/);
+  assert.match(logSettingsUI,/app-YYYY-MM-DD.log/);assert.match(logSettingsUI,/无法撤销/);
+  assert.equal((logSettingsUI.match(/apiRequest\('/g)||[]).length,2);
 });

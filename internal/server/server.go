@@ -21,18 +21,27 @@ import (
 	"emby-go/internal/metatube"
 	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
+	"emby-go/internal/webhook"
 )
 
 // defaultMemoryCacheEntries 是内存兜底缓存容量（条目数）。
 const defaultMemoryCacheEntries = 4096
 
 type App struct {
-	cfg          config.Config
-	db           *store.Store
-	router       *gin.Engine
-	cache        cache.Cache
-	cacheBackend string
-	cacheOnline  bool
+	cfg               config.Config
+	db                *store.Store
+	router            *gin.Engine
+	cache             cache.Cache
+	webhook           *webhook.Sender
+	webhookMu         sync.RWMutex // immutable sender/config snapshots; never held during HTTP delivery
+	webhookUpdateMu   sync.Mutex   // serialize persistent saves with shutdown
+	webhookConfig     config.WebhookConfig
+	webhookClosed     bool
+	logRetentionMu    sync.Mutex
+	logRetentionDays  int
+	applyLogRetention func(int) error
+	cacheBackend      string
+	cacheOnline       bool
 	// ffprobePath/ffprobeError 是启动自检结果，供设置页展示探测能力是否就绪。
 	ffprobePath  string
 	ffprobeError string
@@ -190,6 +199,27 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	retentionDays, err := loadLogRetention(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	effectiveWebhook, err := loadWebhookConfig(db, cfg.Webhook)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	notifier, err := webhook.New(effectiveWebhook)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	notifierOwned := false
+	defer func() {
+		if !notifierOwned {
+			notifier.Close()
+		}
+	}()
 	cacheBackend, cacheOnline := "memory", false
 	if cacheStore == nil {
 		if cfg.RedisAddr == "" {
@@ -211,7 +241,8 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		}
 	}
 	a := &App{
-		cfg: cfg, db: db, cache: cacheStore, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
+		cfg: cfg, db: db, cache: cacheStore, webhook: notifier, webhookConfig: effectiveWebhook, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
+		logRetentionDays: retentionDays, applyLogRetention: logging.SetRetentionDays,
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
 		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
 		startAt:     time.Now(),
@@ -303,6 +334,10 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		defer a.startupWG.Done()
 		a.checkScrapeBackend()
 	}()
+	if err := a.applyLogRetention(retentionDays); err != nil {
+		slog.Warn("历史日志清理未完成，将在下个日志日重试")
+	}
+	notifierOwned = true
 	return a, nil
 }
 
@@ -374,6 +409,7 @@ func (a *App) Close() {
 	a.closeOnce.Do(func() {
 		a.BeginShutdown()
 		a.startupWG.Wait()
+		a.closeWebhook()
 		a.db.Close()
 	})
 }
@@ -400,6 +436,8 @@ func (a *App) routes() {
 	r.HEAD("/favicon.ico", a.favicon)
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
+	r.GET("/web/webhook-settings.js", a.webAsset)
+	r.GET("/web/log-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/health", a.health)
@@ -454,7 +492,11 @@ func (a *App) routes() {
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/metrics", a.adminMetrics)
 	admin.GET("/logs", a.adminLogs)
+	admin.GET("/logs/settings", a.adminLogSettings)
+	admin.PUT("/logs/settings", a.adminSaveLogSettings)
 	admin.GET("/settings", a.adminSettings)
+	admin.GET("/webhook/settings", a.adminWebhookSettings)
+	admin.PUT("/webhook/settings", a.adminSaveWebhookSettings)
 	admin.GET("/tasks", a.adminTasks)
 	// 刮削（R4）：配置 + 批量/头像任务 + 单条预览确认 + 图片代理。
 	admin.GET("/scrape/settings", a.adminScrapeSettings)

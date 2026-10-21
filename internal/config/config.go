@@ -1,9 +1,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +50,93 @@ type Config struct {
 	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测超时（秒），默认 90
 	ProbeConcurrency int    `yaml:"probe_concurrency"`     // 并发探测数，默认 2
 
+	// Webhook 为显式订阅的 Emby 风格事件通知；默认仅管理删除影片，扫描与删库不得触发删除通知。
+	Webhook WebhookConfig `yaml:"webhook"`
+
 	path string // 配置文件来源路径（非 yaml 字段），供写回使用
+}
+
+// WebhookConfig describes a best-effort, synchronous post-commit notification.
+// Disabled is the safe default: SmartStrm maps a .strm path to deletion of a remote folder.
+// URL may contain a secret token and must never be logged or included in errors.
+type WebhookConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	URL            string `yaml:"url"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	AllowPrivate   bool   `yaml:"allow_private"`
+	// Empty preserves the original deletion-only subscription. Wildcards are forbidden.
+	Events []string `yaml:"events"`
+	// Empty/json preserves SmartStrm; form wraps JSON in the Emby-style data field.
+	Format string `yaml:"format"`
+}
+
+// UnmarshalYAML prevents YAML type errors from quoting a secret webhook value.
+func (c *WebhookConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain WebhookConfig
+	value := plain(*c)
+	if err := node.Decode(&value); err != nil {
+		return errors.New("webhook: invalid configuration")
+	}
+	*c = WebhookConfig(value)
+	return nil
+}
+
+// Timeout returns the total request budget, including all response body reads.
+// Call Validate before using a non-default configuration.
+func (c WebhookConfig) Timeout() time.Duration {
+	seconds := c.TimeoutSeconds
+	if seconds == 0 {
+		seconds = 5
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// ValidWebhookEvent reports membership in the fixed subscription allowlist.
+// Do not accept wildcard or prefix matches: new events must be explicitly opted in.
+func ValidWebhookEvent(event string) bool {
+	switch event {
+	case "item.deleted", "item.updated", "item.markplayed", "item.markunplayed", "item.rate", "item.unrate",
+		"playback.start", "playback.progress", "playback.stop", "playback.pause", "playback.unpause",
+		"user.authenticated", "user.logout":
+		return true
+	default:
+		return false
+	}
+}
+
+// Validate performs offline validation without contacting the receiver. DNS and
+// address policy are additionally enforced at send time by internal/outbound.
+func (c WebhookConfig) Validate() error {
+	if c.Format != "" && c.Format != "json" && c.Format != "form" {
+		return errors.New("webhook: invalid format configuration")
+	}
+	for _, event := range c.Events {
+		if !ValidWebhookEvent(event) {
+			return errors.New("webhook: invalid events configuration")
+		}
+	}
+	if c.TimeoutSeconds < 0 || c.TimeoutSeconds > 30 {
+		return errors.New("webhook: timeout_seconds must be between 1 and 30 (0 uses default)")
+	}
+	if !c.Enabled {
+		return nil
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Opaque != "" || u.User != nil || strings.Contains(c.URL, "#") {
+		return errors.New("webhook: invalid URL")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("webhook: invalid URL")
+		}
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	ip := net.ParseIP(host)
+	if !c.AllowPrivate && (host == "localhost" || strings.HasSuffix(host, ".localhost") || (ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()))) {
+		return errors.New("webhook: private destination requires allow_private")
+	}
+	return nil
 }
 
 // 探测相关默认值：超时给足远程直链建连+读取的时间；并发压低避免把网盘/代理打爆。
@@ -95,7 +185,7 @@ func (c Config) Addr() string {
 
 // Redis 为必选缓存后端：服务启动时即连接并 Ping，连不上直接拒绝启动。
 func Load(path string) (Config, error) {
-	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", SessionTTLDays: defaultSessionTTLDays, path: path}
+	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", SessionTTLDays: defaultSessionTTLDays, Webhook: WebhookConfig{TimeoutSeconds: 5}, path: path}
 	if path == "" {
 		return cfg, nil
 	}
@@ -109,6 +199,12 @@ func Load(path string) (Config, error) {
 	if cfg.Port <= 0 {
 		cfg.Port = 18080
 	}
+	if cfg.Webhook.TimeoutSeconds == 0 {
+		cfg.Webhook.TimeoutSeconds = 5
+	}
+	// Webhook semantics are validated by the server after resolving its persistent
+	// WebUI override. YAML syntax/types still fail here; stale fallback values must
+	// not prevent startup when an authoritative database override is present.
 	cfg.path = path
 	return cfg, nil
 }

@@ -152,6 +152,9 @@ func (a *App) logout(c *gin.Context) {
 		return
 	}
 	// Exec returns only after the autocommit delete completes successfully.
+	if user, ok := currentUser(c); ok {
+		a.notifyUserWebhook(c, "user.logout", user)
+	}
 	c.Status(http.StatusNoContent)
 }
 
@@ -321,6 +324,7 @@ func (a *App) authenticate(c *gin.Context) {
 		apiError(c, http.StatusInternalServerError, "保存访问令牌失败")
 		return
 	}
+	a.notifyUserWebhook(c, "user.authenticated", user)
 	c.JSON(http.StatusOK, gin.H{
 		"AccessToken": token,
 		"ServerId":    a.serverID,

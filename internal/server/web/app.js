@@ -80,7 +80,24 @@ async function api(path, options = {}) {
     error.code = code;
     throw error;
   }
-  return response.status === 204 ? null : response.json();
+  if (response.status === 204) {
+    const webhookStatus = response.headers?.get?.('X-Webhook-Status');
+    return webhookStatus ? { webhook_status: webhookStatus } : null;
+  }
+  return response.json();
+}
+
+async function deleteIndexedItem(id) {
+  const result = await api('/items/' + id, { method: 'DELETE' });
+  if (result?.webhook_status === 'failed') {
+    toast('索引已删除，但删除联动通知失败；请人工核对远端，不要重复删除。', 'error');
+  } else if (result?.webhook_status === 'skipped') {
+    toast('索引已删除，但源路径不符合通知条件，未发送删除联动。', 'error');
+  } else if (result?.webhook_status === 'sent') {
+    toast('索引已删除；接收端已确认通知，请以接收端日志核对远端结果。', 'ok');
+  } else {
+    toast('已删除索引', 'ok');
+  }
 }
 
 const STATUS_TEXT = {
@@ -332,7 +349,7 @@ function wallCard(item, ud) {
         <div class="wall-actions">
           <button class="icon-btn" data-probe="${item.id}" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
           <button class="icon-btn" data-reread="${item.id}" title="重读 .strm 与 NFO">${icon('refresh')}</button>
-          <button class="icon-btn danger" data-delete="${item.id}" title="删除索引（不删文件）">${icon('trash')}</button>
+          <button class="icon-btn danger" data-delete="${item.id}" title="删除索引（启用 Webhook 时可能联动删除远端目录）">${icon('trash')}</button>
         </div>
         ${playable ? `<button class="wall-play" data-quickplay="${item.id}" title="直接播放">${icon('play')}</button>` : ''}
       </div>
@@ -515,8 +532,8 @@ async function pageItems() {
     const remove = event.target.closest('[data-delete]');
     if (remove) {
       event.stopPropagation();
-      if (!confirm('仅删除数据库索引，不删除源文件。继续？')) return;
-      try { await api('/items/' + remove.dataset.delete, { method: 'DELETE' }); toast('已删除索引', 'ok'); refreshPage(pageItems, gen); }
+      if (!confirm('删除该影片索引？如已启用删除 Webhook，接收端可能同时删除远端整个目录，且无法撤销。继续？')) return;
+      try { await deleteIndexedItem(remove.dataset.delete); refreshPage(pageItems, gen); }
       catch (e) { toast(e.message, 'error'); }
       return;
     }
@@ -1186,8 +1203,11 @@ async function pageSettings() {
       <div class="table-wrap"><table>
         <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
       </table></div>
-      <p class="hint">配置修改后需重启服务生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
+      <p class="hint">上述启动配置修改后需重启服务；下方 Webhook 和日志期限保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
     </section>
+
+    <section id="webhook-settings" class="panel" aria-labelledby="webhook-title"></section>
+    <section id="log-settings" class="panel" aria-labelledby="log-settings-title"></section>
 
     <section class="panel" aria-labelledby="logs-title">
       <div class="panel-head"><h2 id="logs-title">运行日志</h2><div class="row-actions">
@@ -1285,6 +1305,10 @@ async function pageSettings() {
       </form>
       <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即管理员凭据，请勿外泄；删除前先确认使用方。</p>
     </section>`;
+  const logHost = document.querySelector('#log-settings');
+  void mountLogSettings(logHost, api, () => gen === pageGen && logHost.isConnected);
+  const webhookHost = document.querySelector('#webhook-settings');
+  void mountWebhookSettings(webhookHost, api, () => gen === pageGen && webhookHost.isConnected);
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();

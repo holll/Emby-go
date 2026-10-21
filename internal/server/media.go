@@ -1121,6 +1121,8 @@ func (a *App) playing(c *gin.Context) {
 		PositionTicks int64  `json:"PositionTicks"`
 		PlaySessionId string `json:"PlaySessionId"`
 		DeviceId      string `json:"DeviceId"`
+		EventName     string `json:"EventName"`
+		IsPaused      bool   `json:"IsPaused"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		apiError(c, http.StatusBadRequest, "invalid playback payload")
@@ -1144,7 +1146,7 @@ func (a *App) playing(c *gin.Context) {
 		kind = store.PlaybackStopped
 	}
 	isStopped := kind == store.PlaybackStopped
-	if _, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
+	result, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
 		SessionKey:    req.PlaySessionId,
 		UserID:        a.currentUserID(c),
 		MovieID:       id,
@@ -1152,9 +1154,15 @@ func (a *App) playing(c *gin.Context) {
 		Kind:          kind,
 		PositionTicks: req.PositionTicks,
 		Now:           time.Now(),
-	}); err != nil {
+	})
+	if err != nil {
 		apiError(c, 500, err.Error())
 		return
+	}
+	// The playback transaction has committed. A later cache-version failure must
+	// not suppress an accepted stop that cannot be replayed as a new event.
+	if result.Accepted {
+		a.notifyPlaybackWebhook(c, movie, kind, req.EventName, req.PlaySessionId, req.DeviceId, req.PositionTicks, req.IsPaused)
 	}
 	// 进度心跳（Progress）几秒一次，若每次都 BumpVersion，列表/实体/详情/相似缓存
 	// （key 含 g:version）会被反复打掉，等于没有缓存。进度本身只影响进度条，
@@ -1190,6 +1198,11 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		userDataWriteError(c, err)
 		return
 	}
+	name := "item.markunplayed"
+	if played {
+		name = "item.markplayed"
+	}
+	a.notifyMovieDataWebhook(c, name, movie, map[string]any{"Played": played})
 	c.Status(http.StatusNoContent)
 }
 

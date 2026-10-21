@@ -66,6 +66,7 @@ func (a *App) finishEditedNFO(c *gin.Context, m store.Movie, path, expectedDiges
 	if err := a.db.ClearEditFailure(m.ID); err != nil {
 		slog.Warn("清除索引失败待恢复项失败", "movie_id", m.ID, "error", err)
 	}
+	a.notifyIndexedUpdate(c, m.ID)
 	c.JSON(http.StatusOK, gin.H{"status": "success", "saved": true, "indexed": true,
 		"manual_status": "saved", "warnings": []gin.H{}})
 }

@@ -32,11 +32,24 @@ type DailyWriter struct {
 	day    string // 当前已打开文件对应的日期
 	file   *os.File
 	failed string // 最近一次失败的日期：同一天内不再重试，避免反复告警刷屏
+
+	retentionDays int
+	purgedDay     string
+	warnedDay     string
+	dirIdentity   os.FileInfo // first observed real directory; never accept a replacement root
 }
 
 // NewDailyWriter 创建双写 writer；console 为控制台出口，一般为 os.Stdout 或 os.Stderr。
 func NewDailyWriter(dir, prefix string, console io.Writer) *DailyWriter {
-	return &DailyWriter{dir: dir, prefix: prefix, console: console, now: time.Now}
+	// Pin relative directories to their intended location, including for cleanup.
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	w := &DailyWriter{dir: dir, prefix: prefix, console: console, now: time.Now}
+	if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+		w.dirIdentity = info
+	}
+	return w
 }
 
 // Write 先写控制台、再写文件。控制台始终写；文件出错只降级告警，
@@ -50,7 +63,8 @@ func (w *DailyWriter) Write(p []byte) (int, error) {
 }
 
 func (w *DailyWriter) writeFile(p []byte) {
-	day := w.now().Format(dailyLayout)
+	now := w.now()
+	day := now.Format(dailyLayout)
 	if w.failed == day {
 		return
 	}
@@ -60,6 +74,10 @@ func (w *DailyWriter) writeFile(p []byte) {
 			fmt.Fprintf(w.console, "[warn] 日志文件不可写，已降级为仅控制台输出: %v\n", err)
 			return
 		}
+	}
+	// Rotation must precede cleanup so yesterday's file is no longer active.
+	if w.retentionDays > 0 && w.purgedDay != day {
+		_ = w.purgeLocked(now)
 	}
 	if _, err := w.file.Write(p); err != nil {
 		_ = w.file.Close()
@@ -73,6 +91,11 @@ func (w *DailyWriter) writeFile(p []byte) {
 func (w *DailyWriter) open(day string) error {
 	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		return err
+	}
+	if w.dirIdentity == nil {
+		if info, err := os.Lstat(w.dir); err == nil && info.IsDir() {
+			w.dirIdentity = info
+		}
 	}
 	f, err := os.OpenFile(filepath.Join(w.dir, w.prefix+"-"+day+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -103,11 +126,16 @@ type Loggers struct {
 	request *DailyWriter
 }
 
-var current *Loggers
+var (
+	currentMu sync.RWMutex
+	current   *Loggers
+)
 
 // Setup 初始化日志：slog 默认处理器改为「程序日志双写」。
 // debug 为真时 slog 级别降到 Debug（复用现有 debug 开关，不新增配置项）。
 func Setup(debug bool) *Loggers {
+	currentMu.Lock()
+	defer currentMu.Unlock()
 	app := NewDailyWriter(Dir, "app", os.Stderr)
 	request := NewDailyWriter(Dir, "request", os.Stdout)
 	// 环形缓冲保留最近日志，供管理端 WebUI 的运行日志面板查询。
@@ -118,6 +146,8 @@ func Setup(debug bool) *Loggers {
 
 // AppWriter 返回程序运行日志出口；未调用 Setup 时退化为 stderr。
 func AppWriter() io.Writer {
+	currentMu.RLock()
+	defer currentMu.RUnlock()
 	if current != nil {
 		return current.app
 	}
@@ -127,6 +157,8 @@ func AppWriter() io.Writer {
 // RequestWriter 返回网络请求日志出口；未调用 Setup 时退化为 stdout
 // （测试直接构造 App 不经过 Setup，此时行为与改造前一致）。
 func RequestWriter() io.Writer {
+	currentMu.RLock()
+	defer currentMu.RUnlock()
 	if current != nil {
 		return current.request
 	}

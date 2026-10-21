@@ -50,6 +50,28 @@ setup_code: ""
 #     url: "https://emby.example.com/emby"
 server_domains: []
 
+# ---- 可订阅的 Emby 风格 webhook（默认关闭）----
+# events 缺省/空列表只订阅 item.deleted，兼容旧配置；其它事件必须显式列出，不支持 *。
+# 支持 item.deleted/item.updated/item.markplayed/item.markunplayed/item.rate/item.unrate，
+# playback.start/playback.progress/playback.stop/playback.pause/playback.unpause，
+# user.authenticated/user.logout。显式列表替换默认值；重复允许，未知值拒绝启动。
+# playback.progress 高频且同步发送，请谨慎订阅；不重试、不持久化。
+# item.deleted 仅显式管理删除影片时发送，扫描/删库绝不发送删除通知。
+# Date 与 Timestamp 同为 RFC3339 时间；用户事件无媒体条目时 Item 为 {}（保持值类型 API）。
+# User/Session/PlaybackInfo 按需提供，不包含访问令牌或 STRM 内容 URL。
+# URL 可能包含密钥，切勿输出到日志。启用前核对 SmartStrm 的路径映射和允许范围！
+# SmartStrm 会把原始本地 .strm 路径映射为远端整个文件夹删除，可能影响同目录其它影片。
+# 2xx 仅表示接收确认，不证明远端删除完成；ignored/未启用响应会报告失败。
+# 推荐在管理后台 → 设置 → Webhook 配置，保存即时生效并持久化到数据库。
+# 本段仅为没有后台配置时的启动后备值；已有后台配置不会被 YAML 覆盖。
+webhook:
+  enabled: false
+  events: []               # 空时仅 item.deleted；例 [item.updated, playback.start, user.logout]
+  format: json             # json 兼容 SmartStrm；form 为 urlencoded 的 data=<JSON>，用于部分 Emby 接收器
+  url: ""                  # http(s)；禁止 userinfo 与 fragment
+  timeout_seconds: 5       # 1..30 秒，0 使用默认 5；包含响应体读取
+  allow_private: false     # 访问私网/回环需显式开启；仍遵循统一出站安全策略
+
 # ---- 媒体信息探测（与扫库相互独立）----
 # 媒体墙「探测媒体信息」按钮 / POST /api/admin/probe/media 调用系统 ffprobe 读取
 # 真实码率、分辨率、编码等参数。

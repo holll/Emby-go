@@ -32,6 +32,8 @@ type PlaybackEvent struct {
 type PlaybackResult struct {
 	PlayCount int64
 	Counted   bool
+	// Accepted distinguishes committed events from ignored duplicate stops/late progress.
+	Accepted bool
 }
 
 // RecordPlaybackEvent 在单事务内应用一次播放上报：
@@ -90,6 +92,7 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 			if _, err := tx.Exec(`DELETE FROM playback_events WHERE id NOT IN (SELECT id FROM playback_events ORDER BY id DESC LIMIT 20000)`); err != nil {
 				return err
 			}
+			out.Accepted = true
 			out.Counted = true
 			return tx.QueryRow(`SELECT play_count FROM userdata WHERE user_id=? AND movie_id=?`, userID, ev.MovieID).Scan(&out.PlayCount)
 		case PlaybackStart, PlaybackProgress:
@@ -119,6 +122,7 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 				userID, ev.MovieID, ev.PositionTicks, nowText); err != nil {
 				return err
 			}
+			out.Accepted = true
 			return nil
 		default:
 			return fmt.Errorf("unknown playback event kind %q", ev.Kind)

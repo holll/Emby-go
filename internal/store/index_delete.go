@@ -9,6 +9,17 @@ import (
 // version in the same transaction. No match returns sql.ErrNoRows, without a bump.
 // Legacy DeleteMovie intentionally retains its separate, unversioned contract.
 func (s *Store) DeleteIndexedMovie(id int64) error {
+	_, err := s.DeleteIndexedMovieSnapshot(id)
+	return err
+}
+
+// DeleteIndexedMovieSnapshot returns ID, library ID, title and source path of
+// the committed deleted row (other Movie fields are not populated). Capturing
+// the path with DELETE RETURNING avoids notifying about a stale pre-read movie.
+// Errors (including COMMIT failure) always return a zero snapshot.
+func (s *Store) DeleteIndexedMovieSnapshot(id int64) (Movie, error) {
+	var movie Movie
+	movie.ID = id
 	var version int64
 	err := s.writeTx(func(tx *sql.Tx) error {
 		var err error
@@ -18,19 +29,20 @@ func (s *Store) DeleteIndexedMovie(id int64) error {
 			return err
 		}
 		var libraryID sql.NullInt64
-		if err := tx.QueryRow("DELETE FROM movies WHERE id=? RETURNING library_id", id).Scan(&libraryID); err != nil {
+		if err := tx.QueryRow("DELETE FROM movies WHERE id=? RETURNING library_id,source_path,COALESCE(title,'')", id).Scan(&libraryID, &movie.SourcePath, &movie.Title); err != nil {
 			return err
 		}
 		if libraryID.Valid {
+			movie.LibraryID = libraryID.Int64
 			return bumpLibraryVersionTx(tx, libraryID.Int64)
 		}
 		return nil
 	})
 	if err != nil {
-		return err
+		return Movie{}, err
 	}
 	s.publishVersion(version)
-	return nil
+	return movie, nil
 }
 
 // DeleteIndexedLibrary only deletes database records, never files on disk.
