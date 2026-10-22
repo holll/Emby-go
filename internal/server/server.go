@@ -289,7 +289,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		}
 	}
 	// Framework debug redirect output can contain raw URLs outside middleware.
-	// App debug uses the sanitized metadata logger below, never Gin's raw debug.
+	// App debug is selected per instance below, not via Gin's global debug mode.
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	// 不信任任何代理头：限流与日志按 TCP 对端 IP 计数，X-Forwarded-For 可被伪造。
@@ -310,12 +310,10 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	} else {
 		_ = r.SetTrustedProxies(nil)
 	}
-	middlewares := []gin.HandlerFunc{securityHeaders(), requestLogger(), requestBodyLimit()}
 	if cfg.Debug {
-		middlewares = append(middlewares, requestContentLogger())
+		slog.Warn("debug 原始请求日志已开启：密码、token、Cookie、请求体将写入 request 日志，请仅临时排障使用")
 	}
-	// 不转储panic值或请求；它们可能包含凭据。仍保留固定故障事件和500。
-	middlewares = append(middlewares, requestRecoveryTo(logging.AppWriter()))
+	middlewares := append([]gin.HandlerFunc{securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter())...)
 	r.Use(middlewares...)
 	a.router = r
 	a.routes()
