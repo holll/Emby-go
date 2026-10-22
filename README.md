@@ -41,6 +41,19 @@ if [ ! -e config.yaml ]; then cp config.example.yaml config.yaml; fi
 
 缺少 NFO 或解析失败的 HTTP(S) 条目进入待补录，不会出现在 Emby 可见影片列表。检查 `/healthz` 得到 200 只表示服务接纳请求，不代表媒体可播放。
 
+### 查询真实程序版本
+
+```bash
+curl -fsS http://127.0.0.1:18080/api/version
+# {"product":"Emby-go","version":"v1.4.4-ad21a94","commit":"ad21a94...","build_time":"2026-10-22T05:00:00Z"}
+```
+
+上述为格式示例。`GET /api/version` 公开且返回 `Cache-Control: no-store`，不需要登录；只返回构建信息，不包含配置、路径或凭据。正式发布的 `version` 为 **完整标签（含 v）+ `-` + 7 位 Git 提交号**，`commit` 为完整提交号，`build_time` 为 UTC RFC3339 时间。命令行 `-version` 和后台左下角使用同一构建版本。
+
+[发布工作流](<.github/workflows/release.yml>) 在构建所有平台时通过 `-ldflags` 注入 `main.version`、`main.commit`、`main.buildTime`，并在发布前实际执行 Linux 二进制校验 `-version` 输出。直接执行普通 `go build` 未注入时返回 `dev` / `none` / `unknown`，不会伪造发布版本或在运行时读取服务器的 Git 目录。旧二进制不会自动获得此接口，需要升级到包含该改动的新构建。
+
+Emby 客户端使用的 `/System/Info` 和 `/System/Info/Public` 的 `Version` 仍是 **协议兼容版本** `4.9.5.0`，不改成程序发布版本，以免影响客户端能力协商。
+
 ### 目录约定
 
 每个条目形如：

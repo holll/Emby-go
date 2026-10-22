@@ -442,6 +442,7 @@ func (a *App) routes() {
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/health", a.health)
 	r.GET("/healthz", a.health)
+	r.GET("/api/version", noStore, a.buildInfo)
 	r.GET("/api/auth/status", noStore, a.authStatus)
 	r.POST("/api/auth/initialize", noStore, a.initialize)
 	auth := r.Group("/api/auth", noStore, a.requireAuth)

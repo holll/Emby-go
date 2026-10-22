@@ -57,8 +57,10 @@ func main() {
 	logs := logging.Setup(cfg.Debug)
 	defer logs.Close()
 
-	// 运行期版本号转发给 server 包，供管理页外壳（左下角）渲染。
+	// 将同一份构建信息用于真实版本 API、管理页和命令行；不改 Emby 能力版本。
 	server.BuildVersion = version
+	server.BuildCommit = commit
+	server.BuildTime = buildTime
 
 	app, err := server.New(cfg)
 	if err != nil {

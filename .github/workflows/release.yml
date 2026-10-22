@@ -24,8 +24,12 @@ jobs:
 
       - name: Build binaries
         run: |
+          set -euo pipefail
           mkdir -p dist
-          version="${GITHUB_REF_NAME#v}"
+          # 以实际 checkout 的提交为准（附注标签也会解析到提交），保留标签的 v 前缀。
+          commit="$(git rev-parse HEAD)"
+          version="${GITHUB_REF_NAME}-${commit:0:7}"
+          build_time="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           for target in "linux/amd64/emby-go-linux-amd64" \
                          "linux/arm64/emby-go-linux-arm64" \
                          "windows/amd64/emby-go-windows-amd64.exe" \
@@ -38,9 +42,14 @@ jobs:
             echo ">> ${goos}/${goarch} -> dist/${name}"
             CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build \
               -trimpath \
-              -ldflags "-s -w -X main.version=${version}" \
+              -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.buildTime=${build_time}" \
               -o "dist/${name}" ./cmd/metatube
           done
+          # 发布前实际执行本机目标，避免 ldflags 名称写错而静默产出 dev 版本。
+          expected="Emby-go ${version} (commit ${commit}, built ${build_time})"
+          actual="$(./dist/emby-go-linux-amd64 -version)"
+          test "${actual}" = "${expected}"
+          printf '%s\n' "${actual}"
 
       - name: Upload binaries to release
         uses: softprops/action-gh-release@v2
