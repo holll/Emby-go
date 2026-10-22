@@ -207,15 +207,22 @@ test('登录失败只更新错误提示，保留已输入账号密码', async ()
 });
 
 test('初始化可携带 setup_code，未填写时不下发空字段', async () => {
-  const withCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123', Code: 'setup-code' },
-    () => ({ ok: true, status: 204, json: async () => ({}) }));
+  let jsonReads = 0;
+  const initialized = () => ({ ok: true, status: 204, json: async () => { jsonReads++; throw new Error('204 has no JSON'); } });
+  const withCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123', Code: 'setup-code' }, initialized);
   await withCode.box.submit({ preventDefault() {}, target: {} }, true);
   assert.equal(JSON.parse(withCode.calls[0].options.body).Code, 'setup-code');
 
-  const withoutCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123' },
-    () => ({ ok: true, status: 204, json: async () => ({}) }));
+  const withoutCode = loginForm({ mode: 'initialize', Username: 'admin', Pw: 'secret123', confirm: 'secret123' }, initialized);
   await withoutCode.box.submit({ preventDefault() {}, target: {} }, true);
   assert.equal('Code' in JSON.parse(withoutCode.calls[0].options.body), false);
+  assert.equal(jsonReads, 0, '初始化204不读取JSON');
+  for (const env of [withCode, withoutCode]) {
+    assert.deepEqual(env.stored, []);
+    assert.deepEqual(env.redirects, []);
+    assert.equal(vm.runInContext('mode', env.box), 'login');
+    assert.match(env.rootNode.innerHTML, /欢迎回来/);
+  }
 });
 
 test('初始化两次密码不一致时不发请求、保留输入并聚焦密码', async () => {
@@ -234,6 +241,55 @@ test('登录成功保存 token 并跳转管理后台', async () => {
   await env.box.submit({ preventDefault() {}, target: {} }, false);
   assert.deepEqual(env.stored, [['emby_token', 'tok-1']]);
   assert.deepEqual(env.redirects, ['/admin']);
+});
+
+test('登录非空token保留原始首尾空白，不擅自规范化凭据', async () => {
+  const original = '  tok-1  ';
+  const env = loginForm({ Username: 'admin', Pw: 'secret123' },
+    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: original }) }));
+  await env.box.submit({ preventDefault() {}, target: {} }, false);
+  assert.deepEqual(env.stored, [['emby_token', original]]);
+  assert.equal(vm.runInContext('token', env.box), original);
+  assert.deepEqual(env.redirects, ['/admin']);
+});
+
+for (const [label, body] of [
+  ['null', null], ['array', []], ['missing', {}],
+  ['empty', { AccessToken: '' }], ['whitespace', { AccessToken: '  \t' }],
+  ['number', { AccessToken: 42 }], ['object', { AccessToken: {} }], ['token-array', { AccessToken: [] }]
+]) {
+  test(`登录畸形成功响应 ${label} 不污染凭据、不跳转且保留表单`, async () => {
+    const env = loginForm({ Username: 'admin', Pw: 'secret123' },
+      () => ({ ok: true, status: 200, json: async () => body }));
+    vm.runInContext("token = 'previous-token'", env.box);
+    await env.box.submit({ preventDefault() {}, target: {} }, false);
+    assert.deepEqual(env.stored, []);
+    assert.equal(vm.runInContext('token', env.box), 'previous-token');
+    assert.deepEqual(env.redirects, []);
+    assert.match(env.errorNode.textContent, /登录响应无效/);
+    assert.equal(env.button.disabled, false);
+    assert.equal(env.rootNode.innerHTML, '');
+    assert.equal(env.box.document.querySelector('#auth-user').value, 'admin');
+    assert.equal(env.box.document.querySelector('#auth-pw').value, 'secret123');
+    assert.equal(env.calls.length, 1, '不自动重放登录POST');
+  });
+}
+
+test('登录2xx无效JSON按协议错误提示，不存凭据或重放POST', async () => {
+  const env = loginForm({ Username: 'admin', Pw: 'secret123' },
+    () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('parser detail'); } }));
+  vm.runInContext("token = 'previous-token'", env.box);
+  await env.box.submit({ preventDefault() {}, target: {} }, false);
+  assert.deepEqual(env.stored, []);
+  assert.equal(vm.runInContext('token', env.box), 'previous-token');
+  assert.deepEqual(env.redirects, []);
+  assert.match(env.errorNode.textContent, /登录响应无效/);
+  assert.doesNotMatch(env.errorNode.textContent, /parser detail/);
+  assert.equal(env.button.disabled, false);
+  assert.equal(env.rootNode.innerHTML, '');
+  assert.equal(env.box.document.querySelector('#auth-user').value, 'admin');
+  assert.equal(env.box.document.querySelector('#auth-pw').value, 'secret123');
+  assert.equal(env.calls.length, 1);
 });
 
 test('筛选、计划任务与编辑展开暴露可访问名称和状态', () => {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -312,25 +313,62 @@ func SaveFileInfo(path string, meta FileInfoMeta, details *StreamDetails) error 
 	if err != nil {
 		return err
 	}
-	block := renderFileInfo(meta, details)
 	text := string(raw)
-	if start := strings.Index(text, "<fileinfo"); start >= 0 {
-		if rel := strings.Index(text[start:], "</fileinfo>"); rel >= 0 {
-			end := start + rel + len("</fileinfo>")
-			// 匹配从 "<fileinfo" 起，不含它所在行的缩进；若不一并吃掉，
-			// 新块自带的缩进会与残留缩进叠加（<fileinfo> 被顶到 4 空格）。
-			lineStart := start
-			for lineStart > 0 && (text[lineStart-1] == ' ' || text[lineStart-1] == '\t') {
-				lineStart--
-			}
-			return writeFileAtomic(path, text[:lineStart]+block+text[end:])
-		}
+	elements, closing, root, err := directElements(text)
+	if err != nil {
+		return err
 	}
-	index := strings.LastIndex(text, "</movie>")
-	if index < 0 {
+	if root.Space != "" || root.Local != "movie" || !strings.HasPrefix(text[closing:], "</movie") {
 		return errors.New("nfo: 未找到 </movie>，无法写入流信息")
 	}
-	return writeFileAtomic(path, text[:index]+block+"\n"+text[index:])
+	if err := rejectFileInfoOutsideText(text); err != nil {
+		return err
+	}
+	block := renderFileInfo(meta, details)
+	for _, element := range elements {
+		if element.name.Space != "" || element.name.Local != "fileinfo" {
+			continue
+		}
+		// XML offsets select only the direct node, including self-closing nodes;
+		// comments, CDATA and nested/namespace extensions remain byte-identical.
+		lineStart := element.start
+		for lineStart > 0 && (text[lineStart-1] == ' ' || text[lineStart-1] == '\t') {
+			lineStart--
+		}
+		return writeFileAtomic(path, text[:lineStart]+block+text[element.end:])
+	}
+	return writeFileAtomic(path, text[:closing]+block+"\n"+text[closing:])
+}
+
+// rejectFileInfoOutsideText narrows this writer's validation without changing
+// directElements' other callers. XML decoder permits root-external CharData;
+// accept only XML whitespace there, plus a single leading UTF-8 BOM. Parsing
+// does not reserialize or alter the original byte offsets used for replacement.
+func rejectFileInfoOutsideText(text string) error {
+	text = strings.TrimPrefix(text, "\ufeff")
+	decoder := xml.NewDecoder(strings.NewReader(text))
+	depth := 0
+	for {
+		start := int(decoder.InputOffset())
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && (strings.Trim(string(token), " \t\r\n") != "" ||
+				strings.HasPrefix(text[start:int(decoder.InputOffset())], "<![CDATA[")) {
+				return errors.New("nfo: 根元素外存在无效文本，拒绝改写")
+			}
+		}
+	}
 }
 
 // renderFileInfo 按 Metatube/Kodi 的既有缩进风格（2 空格逐层）渲染 <fileinfo> 块。

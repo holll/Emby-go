@@ -1954,6 +1954,73 @@ func (s *Store) CollectionStats(minMovies int) (map[string]CollectionStat, error
 	return out, nil
 }
 
+// CollectionStatsVisible aggregates only granted libraries. nil means unrestricted;
+// a non-nil empty slice means no access. Apply the threshold after scoping so
+// private members cannot make an otherwise absent collection appear.
+func (s *Store) CollectionStatsVisible(minMovies int, libraryID int64, visible []int64) (map[string]CollectionStat, error) {
+	where := "status IN ('success','manual') AND COALESCE(collection,'')<>''"
+	args := []any{}
+	if libraryID > 0 {
+		where += " AND library_id=?"
+		args = append(args, libraryID)
+	}
+	if visible != nil {
+		if len(visible) == 0 {
+			return map[string]CollectionStat{}, nil
+		}
+		marks := make([]string, len(visible))
+		for i, id := range visible {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		where += " AND library_id IN (" + strings.Join(marks, ",") + ")"
+	}
+	rows, err := s.db.Query("SELECT collection, poster_path, genres FROM movies WHERE "+where+" ORDER BY id DESC", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]CollectionStat)
+	genres := make(map[string]map[string]struct{})
+	for rows.Next() {
+		var name, poster, raw string
+		if err := rows.Scan(&name, &poster, &raw); err != nil {
+			return nil, err
+		}
+		stat := out[name]
+		stat.Count++
+		if stat.Poster == "" {
+			stat.Poster = poster
+		}
+		out[name] = stat
+		if genres[name] == nil {
+			genres[name] = make(map[string]struct{})
+		}
+		for _, g := range parseStrings(raw) {
+			if g = strings.TrimSpace(g); g != "" {
+				genres[name][g] = struct{}{}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if minMovies < 1 {
+		minMovies = 1
+	}
+	for name, stat := range out {
+		if stat.Count < minMovies {
+			delete(out, name)
+			continue
+		}
+		for g := range genres[name] {
+			stat.Genres = append(stat.Genres, g)
+		}
+		out[name] = stat
+	}
+	return out, nil
+}
+
 // CollectionSummary 返回合集内可见影片数与该合集聚合出的流派（去重）。
 func (s *Store) CollectionSummary(collection string) (count int, genres []string, err error) {
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM movies

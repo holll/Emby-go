@@ -98,7 +98,14 @@ async function submit(event, initializing) {
       render('login', '初始化完成，请使用新账户登录');
       return;
     }
-    token = (await response.json()).AccessToken;
+    let result;
+    try { result = await response.json(); }
+    catch { throw new Error('登录响应无效，请重试或检查服务状态'); }
+    if (!result || typeof result !== 'object' || Array.isArray(result) ||
+        typeof result.AccessToken !== 'string' || !result.AccessToken.trim()) {
+      throw new Error('登录响应无效，请重试或检查服务状态');
+    }
+    token = result.AccessToken;
     localStorage.setItem('emby_token', token);
     window.location.replace('/admin');
   } catch (error) {

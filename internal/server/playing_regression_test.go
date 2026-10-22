@@ -47,7 +47,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 				stopped := strings.HasSuffix(strings.ToLower(event), "stopped")
 				for i := 0; i < 2; i++ {
 					before := a.db.Version("g:version")
-					key := "item:" + before + ":1:" + fmt.Sprint(id)
+					key := movieDetailCacheKey(before, 1, fmt.Sprint(id))
 					a.cache.Set(key, []byte("stale"), time.Hour)
 					req := httptest.NewRequest(http.MethodPost, "/Sessions/"+event, strings.NewReader(fmt.Sprintf(`{"ItemId":%q,"PositionTicks":123}`, rawID)))
 					w := httptest.NewRecorder()

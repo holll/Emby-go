@@ -1175,7 +1175,7 @@ func (a *App) playing(c *gin.Context) {
 			return
 		}
 	} else {
-		a.cache.Delete("item:" + a.db.Version("g:version") + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + strconv.FormatInt(id, 10))
+		a.cache.Delete(movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), strconv.FormatInt(id, 10)))
 	}
 	c.Status(http.StatusNoContent)
 }

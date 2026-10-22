@@ -127,6 +127,15 @@ const libraryIDBase int64 = 1_000_000_000_000
 
 func externalLibraryID(id int64) string { return strconv.FormatInt(libraryIDBase+id, 10) }
 
+// Isolate responses created before Movie.ParentId used resolvable external IDs.
+// Redis may survive a binary restart; media-content versions alone do not change
+// when the DTO contract changes. Keep other cache families and DB versions intact.
+const movieDTOCacheRevision = "parent-v1"
+
+func movieDetailCacheKey(version string, userID int64, id string) string {
+	return "item:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(userID, 10) + ":" + id
+}
+
 // parseLibraryExternal 判断一个数值 id 是否落在媒体库外部 id 区间；命中返回内部库 id。
 // 区间外的数值视为普通影片/旧内部库 id（兼容旧客户端把库 id 直接当 ParentId）。
 func parseLibraryExternal(num int64) (int64, bool) {
@@ -410,7 +419,7 @@ func (a *App) collectionFolderDTO(c *gin.Context, l store.Library) gin.H {
 }
 
 // boxsetFolderDTO 返回「合集」媒体库文件夹项（Views / 详情共用）。
-func (a *App) boxsetFolderDTO(collections []string) gin.H {
+func (a *App) boxsetFolderDTO(collections map[string]store.CollectionStat) gin.H {
 	item := gin.H{
 		"Id": boxsetViewID, "Name": "合集", "Type": "CollectionFolder",
 		"CollectionType": "boxsets", "ServerId": a.serverID,
@@ -418,26 +427,19 @@ func (a *App) boxsetFolderDTO(collections []string) gin.H {
 		"BackdropImageTags": []string{},
 		"UserData":          gin.H{"UnplayedItemCount": len(collections), "PlaybackPositionTicks": 0, "IsFavorite": false, "Played": false},
 	}
-	for _, name := range collections {
-		if poster, _ := a.db.CollectionPoster(name); poster != "" {
+	names := make([]string, 0, len(collections))
+	for name := range collections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if poster := collections[name].Poster; poster != "" {
 			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 			item["PrimaryImageAspectRatio"] = artRatio(poster)
 			break
 		}
 	}
 	return item
-}
-
-// boxsetItemDTO 返回单个合集（BoxSet）的 BaseItemDto。
-// 影片数不足最低阈值的合集视为不存在，返回 nil（调用方回 404）——
-// 否则客户端仍能通过旧 id 直接翻开一个列表里已经看不到的合集。
-func (a *App) boxsetItemDTO(name string) gin.H {
-	count, genres, _ := a.db.CollectionSummary(name)
-	if count < a.collectionMinMovies() {
-		return nil
-	}
-	poster, _ := a.db.CollectionPoster(name)
-	return a.boxsetItemFrom(name, store.CollectionStat{Count: count, Poster: poster, Genres: genres})
 }
 
 // boxsetItemFrom 用已取回的聚合信息渲染 BoxSet DTO（列表页批量取数时复用）。
@@ -471,7 +473,10 @@ func (a *App) counts(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
-	collections := a.cachedCollections()
+	collections, ok := a.collectionStats(c, 0)
+	if !ok {
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"MovieCount": total, "SeriesCount": 0, "EpisodeCount": 0, "GameCount": 0,
 		"ArtistCount": 0, "ProgramCount": 0, "GameSystemCount": 0, "TrailerCount": 0,
@@ -566,7 +571,7 @@ func (a *App) similar(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
-	simKey := "similar:" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
+	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(simKey); ok {
 		c.Data(200, "application/json", b)
 		return
@@ -813,7 +818,11 @@ func (a *App) views(c *gin.Context) {
 		out = append(out, a.collectionFolderDTO(c, l))
 	}
 	// 有合集（NFO <set>）时追加「合集」媒体库视图（CollectionType=boxsets）。
-	if collections := a.cachedCollections(); len(collections) > 0 {
+	collections, ok := a.collectionStats(c, 0)
+	if !ok {
+		return
+	}
+	if len(collections) > 0 {
 		out = append(out, a.boxsetFolderDTO(collections))
 	}
 	c.JSON(200, gin.H{"Items": out, "TotalRecordCount": len(out)})
@@ -879,7 +888,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	v := gin.H{
 		"Id": id, "Name": m.Title, "SortName": sortName,
 		"Type": "Movie", "MediaType": "Video", "IsFolder": false,
-		"ParentId":  strconv.FormatInt(m.LibraryID, 10),
+		"ParentId":  externalLibraryID(m.LibraryID),
 		"ServerId":  a.serverID,
 		"Container": m.SourceContainer,
 		"CanDelete": false, "CanDownload": false, "SupportsSync": false,
@@ -891,7 +900,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	if len(m.AdditionalParts) > 0 {
 		v["PartCount"] = len(m.AdditionalParts) + 1
 	}
-	// Emby 客户端用 CollectionIds 渲染“所属合集”；缺失时部分客户端会退化为列出全部合集。
+	// 保留现有合成合集 ID；本地归属不等同于精确 Ids 查询，也不推断客户端回退行为。
 	if m.Collection != "" {
 		v["CollectionIds"] = []string{boxsetID(m.Collection)}
 	}
@@ -1071,9 +1080,14 @@ func (a *App) suggestions(c *gin.Context) {
 // 依据 IncludeItemTypes 区分「影片列表」与「流派/标签/制片商/演员实体列表」，
 // 不支持的类型（如 Series/Episode）返回空结果而非错把影片当该类型返回。
 func (a *App) itemsQuery(c *gin.Context) {
-	parentRaw := c.Query("ParentId")
+	parentRaw := strings.TrimSpace(c.Query("ParentId"))
 	lib, collection := parseParentScope(parentRaw)
 	isBoxsetView := parentRaw == boxsetViewID
+	// Unknown parents must not turn a scoped child query into a global list.
+	if lib < 0 || (parentRaw != "" && parentRaw != "0" && lib == 0 && collection == "") {
+		a.emptyItems(c)
+		return
+	}
 
 	start, _ := strconv.Atoi(c.DefaultQuery("StartIndex", "0"))
 	if start < 0 {
@@ -1126,7 +1140,15 @@ func (a *App) itemsQuery(c *gin.Context) {
 	// 合集媒体库（boxset view）或某个合集内部：以实体之外均按盒集/成员处理。
 	if isBoxsetView || (collection != "" && collection != "*") {
 		if isBoxsetView {
+			if len(include) > 0 && !boxsetWanted {
+				a.emptyItems(c)
+				return
+			}
 			a.boxsetListResponse(c, start, limit, c.Query("SearchTerm"))
+			return
+		}
+		if len(include) > 0 && !movieWanted {
+			a.emptyItems(c)
 			return
 		}
 		// 打开某个合集：列出其成员影片。
@@ -1149,7 +1171,14 @@ func (a *App) itemsQuery(c *gin.Context) {
 	}
 
 	// 根级或媒体库上下文：请求 BoxSet 类型时给出合集列表。
-	if boxsetWanted && len(virtual) == 0 && lib == 0 && !movieWanted {
+	if boxsetWanted && len(virtual) == 0 && !movieWanted {
+		// Small numeric item ids identify movies, not synthetic BoxSets. Keep
+		// legacy numeric library parents for movie browsing, but never interpret
+		// a movie id as a request for every collection in its coincident library.
+		if n, err := strconv.ParseInt(parentRaw, 10, 64); err == nil && n > 0 && n < libraryIDBase {
+			a.emptyItems(c)
+			return
+		}
 		a.boxsetListResponse(c, start, limit, c.Query("SearchTerm"))
 		return
 	}
@@ -1184,7 +1213,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 		grantKey = strings.Join(parts, ",")
 	}
-	key := strings.Join([]string{a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return
@@ -1311,15 +1340,53 @@ func movieIDs(ms []store.Movie) []int64 {
 }
 
 // boxsetListResponse 分页返回「合集」媒体库的 BoxSet 列表。
-func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
-	stats, err := a.db.CollectionStats(a.collectionMinMovies())
+func (a *App) collectionStats(c *gin.Context, libraryID int64) (map[string]store.CollectionStat, bool) {
+	visible, admin, ok := a.viewerLibraries(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return nil, false
+	}
+	if !admin && visible == nil {
+		visible = []int64{}
+	}
+	stats, err := a.db.CollectionStatsVisible(a.collectionMinMovies(), libraryID, visible)
 	if err != nil {
 		itemDataUnavailable(c)
+		return nil, false
+	}
+	return stats, true
+}
+
+func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
+	for _, kind := range splitQueryTypes(c.Query("ExcludeItemTypes")) {
+		if kind == "BoxSet" {
+			a.emptyItems(c)
+			return
+		}
+	}
+	lib, _ := parseParentScope(c.Query("ParentId"))
+	stats, ok := a.collectionStats(c, lib)
+	if !ok {
 		return
 	}
 	term = strings.ToLower(strings.TrimSpace(term))
+	ids, hasIDs := c.GetQueryArray("Ids")
+	// GetQueryArray treats an explicitly empty value as absent. An empty
+	// ownership lookup must stay empty, never expand into every collection.
+	if _, present := c.Request.URL.Query()["Ids"]; present {
+		hasIDs = true
+	}
+	wanted := make(map[string]bool)
+	for _, values := range ids {
+		for _, id := range strings.Split(values, ",") {
+			wanted[strings.TrimSpace(id)] = true
+		}
+	}
 	names := make([]string, 0, len(stats))
 	for name := range stats {
+		if hasIDs && !wanted[boxsetID(name)] {
+			continue
+		}
 		if term == "" || strings.Contains(strings.ToLower(name), term) {
 			names = append(names, name)
 		}
@@ -1449,8 +1516,9 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	c.Data(http.StatusOK, "application/json", body)
 }
 
-// itemCollections 返回影片所属合集（Jellyfin/Emby 的 GET /Items/{id}/Collections）。
-// 生产客户端缺该端点时会退化为列出全部合集，表现为“影片属于数十个合集”。
+// itemCollections returns only the movie's own collection. Keep this endpoint
+// and GET /Items?IncludeItemTypes=BoxSet&Ids=... consistent; the latter must
+// never widen an ownership lookup into the complete collection catalogue.
 func (a *App) itemCollections(c *gin.Context) {
 	if c.Param("uid") != "" && !a.validUser(c) {
 		return
@@ -1467,9 +1535,8 @@ func (a *App) itemCollections(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, 1)
 	if m.Collection != "" {
-		stats, e := a.db.CollectionStats(a.collectionMinMovies())
-		if e != nil {
-			itemDataUnavailable(c)
+		stats, ok := a.collectionStats(c, 0)
+		if !ok {
 			return
 		}
 		if stat, ok := stats[m.Collection]; ok {
@@ -1486,7 +1553,11 @@ func (a *App) item(c *gin.Context) {
 	rawID := c.Param("id")
 	// 合集媒体库文件夹本身（Id="boxsets"）。
 	if rawID == boxsetViewID {
-		c.JSON(http.StatusOK, a.boxsetFolderDTO(a.cachedCollections()))
+		collections, ok := a.collectionStats(c, 0)
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, a.boxsetFolderDTO(collections))
 		return
 	}
 	id, err := strconv.ParseInt(rawID, 10, 64)
@@ -1502,8 +1573,12 @@ func (a *App) item(c *gin.Context) {
 		}
 		// 单个合集（boxset:<b64>）。
 		if name, ok := parseBoxsetID(rawID); ok {
-			if item := a.boxsetItemDTO(name); item != nil {
-				c.JSON(http.StatusOK, item)
+			stats, ok := a.collectionStats(c, 0)
+			if !ok {
+				return
+			}
+			if stat, exists := stats[name]; exists {
+				c.JSON(http.StatusOK, a.boxsetItemFrom(name, stat))
 				return
 			}
 			apiError(c, http.StatusNotFound, "not found")
@@ -1541,7 +1616,7 @@ func (a *App) item(c *gin.Context) {
 		return
 	}
 	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
-	key := "item:" + a.db.Version("g:version") + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + rawID
+	key := movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), rawID)
 	if b, ok := a.cache.Get(key); ok {
 		respondMediaJSON(c, b)
 		return

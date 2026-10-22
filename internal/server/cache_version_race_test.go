@@ -184,7 +184,9 @@ func TestCacheVersionRaceSimilarSourceSnapshot(t *testing.T) {
 	r.GET("/similar/:id", f.a.similar)
 	url := "/similar/" + strconv.FormatInt(f.victim, 10) + "?Limit=1"
 	beforeVersion := f.a.db.Version("g:version")
-	key := func(version string) string { return fmt.Sprintf("similar:%s:1:all:%d:1", version, f.victim) }
+	key := func(version string) string {
+		return fmt.Sprintf("similar:%s:%s:1:all:%d:1", movieDTOCacheRevision, version, f.victim)
+	}
 	oldResponse := httptest.NewRecorder()
 	done := make(chan struct{})
 	t.Cleanup(func() { joinCacheRead(t, g, done) })

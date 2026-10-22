@@ -1,10 +1,12 @@
 package server
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,8 +14,9 @@ import (
 	"emby-go/internal/logging"
 )
 
-// Only route templates and validated, explicitly allowed scalar query values are
-// diagnostics. Headers, bodies and arbitrary errors are never log payloads.
+// Diagnostics contain route templates with validated uid/id parameters and an
+// explicit scalar query allowlist. Other parameters (notably API keys), headers,
+// bodies and arbitrary errors are never log payloads.
 func requestLogger() gin.HandlerFunc { return requestLoggerTo(logging.RequestWriter()) }
 func requestLoggerTo(w io.Writer) gin.HandlerFunc {
 	logger := gin.LoggerWithConfig(gin.LoggerConfig{Output: w, Skip: skipRequestLog, Formatter: requestLogFormatter})
@@ -43,9 +46,88 @@ func diagnosticMethod(method string) string {
 }
 func diagnosticRoute(c *gin.Context) string {
 	if path := c.FullPath(); path != "" {
-		return path
+		parts := strings.Split(path, "/")
+		for i, part := range parts {
+			switch part {
+			case ":uid":
+				if value := c.Param("uid"); diagnosticIDNumber(value) {
+					parts[i] = value
+				}
+			case ":id":
+				if value := c.Param("id"); diagnosticItemID(value) {
+					parts[i] = value
+				}
+			}
+		}
+		return strings.Join(parts, "/")
 	}
 	return unmatchedDiagnosticPath(c.Request.URL.Path)
+}
+
+// Match the application's identifier shapes, not arbitrary path text. Limits
+// bound log growth, and keeping unknown formats templated avoids logging pasted
+// secrets or legacy free-form names. This never rewrites the actual request.
+func diagnosticIDNumber(value string) bool {
+	if len(value) == 0 || len(value) > 19 {
+		return false
+	}
+	for _, c := range value {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(value, 10, 63)
+	return err == nil
+}
+
+func diagnosticItemID(value string) bool {
+	if diagnosticIDNumber(value) || value == "boxsets" {
+		return true
+	}
+	if strings.HasPrefix(value, "part-") {
+		parts := strings.Split(value, "-")
+		return len(parts) == 3 && diagnosticIDNumber(parts[1]) && diagnosticIDNumber(parts[2])
+	}
+	prefix, encoded, ok := strings.Cut(value, ":")
+	if !ok || encoded == "" || len(encoded) > 512 {
+		return false
+	}
+	switch prefix {
+	case "boxset", "genre", "tag", "studio", "person":
+		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+		return err == nil && base64.RawURLEncoding.EncodeToString(decoded) == encoded
+	}
+	return false
+}
+
+func diagnosticItemIDs(value string) bool {
+	if value == "" || len(value) > 2048 {
+		return false
+	}
+	ids := strings.Split(value, ",")
+	if len(ids) > 32 {
+		return false
+	}
+	for _, id := range ids {
+		if !diagnosticItemID(id) {
+			return false
+		}
+	}
+	return true
+}
+
+func diagnosticItemTypes(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, kind := range strings.Split(value, ",") {
+		switch kind {
+		case "Movie", "BoxSet", "CollectionFolder", "Folder", "Series", "Season", "Episode":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Unknown path segments may themselves be credentials. Retain only a fixed
@@ -88,7 +170,25 @@ func redactedRequestQuery(raw string) string {
 				value = entries[0]
 			}
 			safe.Set(key, value)
-		case "limit", "startindex", "maxwidth", "maxheight", "width", "height", "quality", "mediasourceid":
+		case "userid", "itemid", "parentid", "mediasourceid":
+			value := "[REDACTED]"
+			if len(entries) == 1 && ((name == "userid" && diagnosticIDNumber(entries[0])) || (name != "userid" && diagnosticItemID(entries[0]))) {
+				value = entries[0]
+			}
+			safe.Set(key, value)
+		case "ids":
+			value := "[REDACTED]"
+			if len(entries) == 1 && diagnosticItemIDs(entries[0]) {
+				value = entries[0]
+			}
+			safe.Set(key, value)
+		case "includeitemtypes", "excludeitemtypes":
+			value := "[REDACTED]"
+			if len(entries) == 1 && diagnosticItemTypes(entries[0]) {
+				value = entries[0]
+			}
+			safe.Set(key, value)
+		case "limit", "startindex", "maxwidth", "maxheight", "width", "height", "quality":
 			value := "[REDACTED]"
 			if len(entries) == 1 && diagnosticNumber(entries[0]) {
 				value = entries[0]

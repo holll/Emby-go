@@ -1,6 +1,47 @@
 package store
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestCollectionStatsVisibleScopesAllMetadata(t *testing.T) {
+	s, lib := newFeatureStore(t)
+	other, err := s.AddLibrary("private", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []Movie{
+		{LibraryID: lib, SourcePath: "/tmp/visible/a.strm", Status: "success", Title: "A", Collection: "Shared", PosterPath: "visible.jpg", Genres: []string{"Public"}},
+		{LibraryID: other.ID, SourcePath: "/tmp/private/b.strm", Status: "success", Title: "B", Collection: "Shared", PosterPath: "private.jpg", Genres: []string{"Secret"}},
+		{LibraryID: other.ID, SourcePath: "/tmp/private/c.strm", Status: "success", Title: "C", Collection: "Private"},
+	} {
+		upsertFixtureMovie(t, s, m.LibraryID, m)
+	}
+	stats, err := s.CollectionStatsVisible(1, 0, []int64{lib})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 1 || stats["Shared"].Count != 1 || stats["Shared"].Poster != "visible.jpg" || !reflect.DeepEqual(stats["Shared"].Genres, []string{"Public"}) {
+		t.Fatalf("scoped stats leaked metadata: %+v", stats)
+	}
+	stats, err = s.CollectionStatsVisible(2, 0, []int64{lib})
+	if err != nil || len(stats) != 0 {
+		t.Fatalf("threshold must apply after grants: %+v %v", stats, err)
+	}
+	stats, err = s.CollectionStatsVisible(1, 0, []int64{})
+	if err != nil || len(stats) != 0 {
+		t.Fatalf("no grants: %+v %v", stats, err)
+	}
+	stats, err = s.CollectionStatsVisible(1, other.ID, []int64{lib})
+	if err != nil || len(stats) != 0 {
+		t.Fatalf("library must intersect grants: %+v %v", stats, err)
+	}
+	stats, err = s.CollectionStatsVisible(2, 0, nil)
+	if err != nil || stats["Shared"].Count != 2 {
+		t.Fatalf("unrestricted stats: %+v %v", stats, err)
+	}
+}
 
 // TestCollectionsMinMovies 合集列表按最低影片数过滤：
 // 只有一部影片的 <set> 不该被当成合集（除非阈值放到 1）。

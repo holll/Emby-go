@@ -54,6 +54,13 @@ func requestToken(c *gin.Context) string {
 		if authorization == "" {
 			authorization = c.GetHeader("Authorization")
 		}
+		// Emby clients may place Token first; remove only a known scheme before
+		// parsing parameters. Keep legacy scheme-less headers and source priority.
+		authorization = strings.TrimSpace(authorization)
+		if i := strings.IndexAny(authorization, " \t"); i >= 0 &&
+			(strings.EqualFold(authorization[:i], "Emby") || strings.EqualFold(authorization[:i], "MediaBrowser")) {
+			authorization = strings.TrimSpace(authorization[i+1:])
+		}
 		for _, part := range strings.Split(authorization, ",") {
 			key, value, found := strings.Cut(strings.TrimSpace(part), "=")
 			if found && strings.EqualFold(key, "Token") {
