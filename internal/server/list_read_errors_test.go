@@ -35,6 +35,9 @@ func TestListPrimaryReadFailuresArePrivateAndRecoverable(t *testing.T) {
 			h := f.a.Handler()
 			similar := fmt.Sprintf("/Items/%d/Similar", f.victim)
 			routes := []string{"/Items", "/Items/Counts", "/Users/1/Items/Resume", "/Users/1/Items/Latest", "/Users/1/Suggestions", similar}
+			if fault == "movies_query" || fault == "movies_scan" {
+				routes = append(routes, fmt.Sprintf("/Items?IncludeItemTypes=BoxSet&ListItemIds=%d", f.victim))
+			}
 			if fault == "movies_query" {
 				routes = append(routes, "/Items?ParentId=boxsets&IncludeItemTypes=BoxSet", "/Items?ParentId="+url.QueryEscape(boxsetID("Fixture collection")), "/Genres", "/Items?IncludeItemTypes=Tag", "/Items?IncludeItemTypes=Studio", "/Items?IncludeItemTypes=Person")
 			}

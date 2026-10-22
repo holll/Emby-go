@@ -1369,6 +1369,53 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	if !ok {
 		return
 	}
+	// ListItemIds identifies member movies, unlike Ids (the BoxSets themselves).
+	// Resolve ownership separately so counts, metadata and the size threshold
+	// remain based on all visible members of each collection.
+	members, hasMembers := c.Request.URL.Query()["ListItemIds"]
+	memberCollections := make(map[string]bool)
+	if hasMembers {
+		visible, admin, ok := a.viewerLibraries(c)
+		if !ok {
+			itemDataUnavailable(c)
+			return
+		}
+		allowed := make(map[int64]bool, len(visible))
+		for _, id := range visible {
+			allowed[id] = true
+		}
+		seen := make(map[int64]bool)
+		var movieIDs []int64
+		for _, values := range members {
+			for _, raw := range strings.Split(values, ",") {
+				raw = strings.TrimSpace(raw)
+				id, err := strconv.ParseInt(raw, 10, 64)
+				if err == nil && id > 0 && !strings.HasPrefix(raw, "+") && !seen[id] {
+					seen[id] = true
+					movieIDs = append(movieIDs, id)
+				}
+			}
+		}
+		// Bound SQL placeholders for large member lists and avoid N+1 lookups.
+		for len(movieIDs) > 0 {
+			n := len(movieIDs)
+			if n > 500 {
+				n = 500
+			}
+			movies, err := a.db.MoviesByIDs(movieIDs[:n])
+			if err != nil {
+				itemDataUnavailable(c)
+				return
+			}
+			for _, movie := range movies {
+				if movie.IsVisible() && (admin || allowed[movie.LibraryID]) &&
+					(lib == 0 || movie.LibraryID == lib) && movie.Collection != "" {
+					memberCollections[movie.Collection] = true
+				}
+			}
+			movieIDs = movieIDs[n:]
+		}
+	}
 	term = strings.ToLower(strings.TrimSpace(term))
 	ids, hasIDs := c.GetQueryArray("Ids")
 	// GetQueryArray treats an explicitly empty value as absent. An empty
@@ -1384,6 +1431,9 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	}
 	names := make([]string, 0, len(stats))
 	for name := range stats {
+		if hasMembers && !memberCollections[name] {
+			continue
+		}
 		if hasIDs && !wanted[boxsetID(name)] {
 			continue
 		}
