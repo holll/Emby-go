@@ -122,7 +122,8 @@ func (a *App) adminRotateAPIKey(c *gin.Context) {
 		})
 		return
 	}
-	rotated, err := a.db.RotateAPIKey(authenticated, stable, expectedVersion)
+	proof, _ := currentUser(c)
+	rotated, err := a.db.RotateAPIKeyForRequest(authenticated, proof, stable, expectedVersion)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrAPIKeyNotFound):

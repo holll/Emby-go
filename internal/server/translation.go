@@ -371,6 +371,9 @@ func (a *App) adminTranslationRun(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	cfg, total, err := a.prepareTranslation(req)
 	if err != nil {
 		translationAPIError(c, err)
@@ -434,6 +437,9 @@ func (a *App) adminTranslationCancel(c *gin.Context) {
 	}
 	if req.TaskID != nil && *req.TaskID <= 0 {
 		apiError(c, http.StatusBadRequest, "invalid task_id")
+		return
+	}
+	if !a.admitAdminOperation(c) {
 		return
 	}
 	a.translation.mu.Lock()

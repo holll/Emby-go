@@ -152,6 +152,9 @@ func (a *App) adminUnlockAuth(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "账户凭据已变更，请重新登录", "code": "AUTH_INVALID"})
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	if !a.authGuard.Unlock(targetType, value) {
 		apiError(c, http.StatusBadRequest, "target 不合法")
 		return

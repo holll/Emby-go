@@ -191,6 +191,10 @@ func (a *App) adminScrapeProgress(c *gin.Context) {
 }
 
 func (a *App) adminScrapeCancel(c *gin.Context) {
+	if !a.admitAdminOperation(c) {
+		return
+	}
+
 	a.scrapeTaskMu.Lock()
 	cancel, running := a.scrapeCancel, a.scrapeStatus.Running
 	a.scrapeTaskMu.Unlock()
@@ -226,6 +230,9 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 	onlyMissing := true
 	if req.OnlyMissing != nil {
 		onlyMissing = *req.OnlyMissing
+	}
+	if !a.admitAdminOperation(c) {
+		return
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
@@ -321,6 +328,9 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 	}
 	if value := c.Query("library_id"); value != "" && req.LibraryID == 0 {
 		req.LibraryID, _ = strconv.ParseInt(value, 10, 64)
+	}
+	if !a.admitAdminOperation(c) {
+		return
 	}
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
@@ -457,6 +467,9 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Provider == "" || req.ID == "" {
 		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
+		return
+	}
+	if !a.admitAdminOperation(c) {
 		return
 	}
 	cfg := a.scrapeConfig()

@@ -210,6 +210,9 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		}
 	}
 
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	plan, err := a.prepareProbe(req)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -243,6 +246,10 @@ func (a *App) adminProbeMediaProgress(c *gin.Context) {
 
 // adminProbeMediaCancel 请求中止探测：已发出的 ffprobe 会被杀掉，未处理项直接结束。
 func (a *App) adminProbeMediaCancel(c *gin.Context) {
+	if !a.admitAdminOperation(c) {
+		return
+	}
+
 	a.probeTaskMu.Lock()
 	cancel := a.probeCancel
 	running := a.probeStatus.Running
@@ -274,6 +281,9 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 	// 本端点同样会「读全文 → 改局部 → 原子写」该片的 NFO，必须走与批量探测
 	// 同一道 nfoGate：否则与刮削/扫库/批量探测并行时会互相覆盖。
 	// 用 "probe" 身份（与批量探测同名，靠 nfoRefs 计数保证释放正确）。
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	if !a.claimNFO("probe") {
 		apiError(c, http.StatusConflict, a.nfoBusyOwner()+"正在进行中，请稍后再试")
 		return

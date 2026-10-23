@@ -176,7 +176,11 @@ func (a *App) sessionExpiry(now time.Time) time.Time {
 // adminRevokeAllSessions 撤销全部登录会话；调用方当前会话也会失效。
 // API 密钥不受影响（D02 已确认其为独立的全权凭据）。
 func (a *App) adminRevokeAllSessions(c *gin.Context) {
-	revoked, err := a.db.RevokeAllAccessTokens()
+	actor, _ := currentUser(c)
+	revoked, err := a.db.AdminRevokeAllAccessTokens(actor)
+	if a.adminPermissionError(c, err) {
+		return
+	}
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"error": "session revocation unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,

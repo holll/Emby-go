@@ -527,6 +527,9 @@ func (a *App) adminRunScheduledTask(c *gin.Context) {
 		apiError(c, http.StatusNotFound, "task not found")
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	a.workerWG.Add(1)
 	go func() {
 		defer a.workerWG.Done()

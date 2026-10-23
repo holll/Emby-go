@@ -163,6 +163,19 @@ func (s *Store) ResolveAPIKeyStableID(id string) (string, error) {
 // RotateAPIKey 在同一事务内替换摘要并递增版本。actor 必须来自刚刚的密码
 // 再认证，其 auth_generation 用于阻止再认证后账户被改密/撤权仍提交。
 func (s *Store) RotateAPIKey(actor User, publicID string, expectedVersion int64) (APIKey, error) {
+	return s.rotateAPIKey(actor, publicID, expectedVersion, nil)
+}
+
+// RotateAPIKeyForRequest binds password reauthentication to the still-live
+// interactive session in the same writer transaction as credential replacement.
+func (s *Store) RotateAPIKeyForRequest(actor, proof User, publicID string, expectedVersion int64) (APIKey, error) {
+	if actor.ID != proof.ID || !proof.requestSession {
+		return APIKey{}, ErrAdminGenerationStale
+	}
+	return s.rotateAPIKey(actor, publicID, expectedVersion, &proof)
+}
+
+func (s *Store) rotateAPIKey(actor User, publicID string, expectedVersion int64, proof *User) (APIKey, error) {
 	if actor.ID <= 0 || actor.authGeneration <= 0 || !actor.IsAdmin {
 		return APIKey{}, ErrAdminGenerationStale
 	}
@@ -175,31 +188,30 @@ func (s *Store) RotateAPIKey(actor User, publicID string, expectedVersion int64)
 		return APIKey{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	tx, err := s.db.Begin()
-	if err != nil {
-		return APIKey{}, err
-	}
-	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE api_keys SET key=?,key_hash=?,key_prefix=?,version=version+1,rotated_at=?
-		WHERE stable_id=? AND version=? AND EXISTS (
-			SELECT 1 FROM users WHERE users.id=? AND users.auth_generation=? AND users.is_admin=1
-		)`, digest, digest, prefix, now, stable, expectedVersion, actor.ID, actor.authGeneration)
-	if err != nil {
-		return APIKey{}, err
-	}
-	changed, err := res.RowsAffected()
-	if err != nil {
-		return APIKey{}, err
-	}
-	if changed != 1 {
-		return APIKey{}, s.classifyAPIKeyConflict(tx, stable, expectedVersion, actor)
-	}
-	if err := tx.Commit(); err != nil {
-		return APIKey{}, err
-	}
 	var key APIKey
-	if err := s.db.QueryRow(`SELECT COALESCE(stable_id,''),COALESCE(key_prefix,''),name,created_at,version,COALESCE(rotated_at,'')
-		FROM api_keys WHERE stable_id=?`, stable).Scan(&key.ID, &key.KeyPrefix, &key.Name, &key.CreatedAt, &key.Version, &key.RotatedAt); err != nil {
+	write := func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE api_keys SET key=?,key_hash=?,key_prefix=?,version=version+1,rotated_at=?
+   WHERE stable_id=? AND version=? AND EXISTS (
+    SELECT 1 FROM users WHERE users.id=? AND users.auth_generation=? AND users.is_admin=1
+   )`, digest, digest, prefix, now, stable, expectedVersion, actor.ID, actor.authGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return s.classifyAPIKeyConflict(tx, stable, expectedVersion, actor)
+		}
+		return tx.QueryRow(`SELECT COALESCE(stable_id,''),COALESCE(key_prefix,''),name,created_at,version,COALESCE(rotated_at,'') FROM api_keys WHERE stable_id=?`, stable).Scan(&key.ID, &key.KeyPrefix, &key.Name, &key.CreatedAt, &key.Version, &key.RotatedAt)
+	}
+	if proof != nil {
+		err = s.adminUserTx(actor.ID, write, *proof)
+	} else {
+		err = s.writeTx(write)
+	}
+	if err != nil {
 		return APIKey{}, err
 	}
 	key.ID = APIKeyPublicID(stable)

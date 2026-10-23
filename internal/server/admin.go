@@ -482,6 +482,9 @@ func (a *App) adminScan(c *gin.Context) {
 		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	taskID := a.startTask("scan")
 	result, err := a.scanLibraries(libraryID, taskID, mode, allowEmpty, marker)
 	a.finishTask(taskID, err)
@@ -508,6 +511,9 @@ func (a *App) adminReindex(c *gin.Context) {
 	}
 	if a.scanning() {
 		apiError(c, http.StatusConflict, errScanBusy.Error())
+		return
+	}
+	if !a.admitAdminOperation(c) {
 		return
 	}
 	slog.Info("开始重建索引")
@@ -914,7 +920,11 @@ func (a *App) adminCreateAPIKey(c *gin.Context) {
 		apiError(c, 400, "name required")
 		return
 	}
-	key, err := a.db.CreateAPIKeyForUser(req.Name, a.currentUserID(c))
+	actor, _ := currentUser(c)
+	key, err := a.db.AdminCreateAPIKey(actor, req.Name)
+	if a.adminPermissionError(c, err) {
+		return
+	}
 	if err != nil {
 		apiError(c, 500, err.Error())
 		return
@@ -936,7 +946,11 @@ func (a *App) adminDeleteAPIKey(c *gin.Context) {
 		}
 		expectedVersion = version
 	}
-	if err := a.db.DeleteAPIKeyByVersion(key, expectedVersion); err != nil {
+	actor, _ := currentUser(c)
+	if err := a.db.AdminDeleteAPIKey(actor, key, expectedVersion); err != nil {
+		if a.adminPermissionError(c, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, store.ErrAPIKeyNotFound):
 			apiError(c, 404, "key not found")

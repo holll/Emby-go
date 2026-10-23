@@ -219,6 +219,9 @@ func (a *App) adminSubmitScan(c *gin.Context) {
 			return
 		}
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	taskID := a.startTask("scan")
 	task, created, err := a.registerScanTask(taskID, "scan", libraryID, mode, allowEmpty, digest, key, now, marker)
 	if err != nil {
