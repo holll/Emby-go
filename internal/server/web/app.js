@@ -61,9 +61,14 @@ function debounce(fn, wait = 400) {
 }
 
 async function api(path, options = {}) {
-  const headers = { 'X-Emby-Token': token, ...(options.headers || {}) };
+  const requestToken = token;
+  const currentIdentity = () => localStorage.getItem('emby_token') === requestToken;
+  const identityError = () => Object.assign(new Error('登录身份已变更，请重新打开页面'), { status: 401, code: 'IDENTITY_CHANGED' });
+  if (!currentIdentity()) throw identityError();
+  const headers = { 'X-Emby-Token': requestToken, ...(options.headers || {}) };
   if (!(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const response = await fetch('/api/admin' + path, { ...options, headers });
+  if (!currentIdentity()) throw identityError();
   if (response.status === 401) {
     localStorage.removeItem('emby_token');
     window.location.replace('/');
@@ -75,22 +80,28 @@ async function api(path, options = {}) {
     let message = '请求失败';
     let code;
     try { const body = await response.json(); message = body.error || message; code = body.code; } catch { /* ignore */ }
+    if (!currentIdentity()) throw identityError();
     const error = new Error(message);
     error.status = response.status;
     error.code = code;
     throw error;
   }
+  const webhookStatus = response.headers?.get?.('X-Webhook-Status');
+  if (webhookStatus === 'partial') toast('部分通知未送达，业务操作已完成。', 'error');
   if (response.status === 204) {
-    const webhookStatus = response.headers?.get?.('X-Webhook-Status');
     return webhookStatus ? { webhook_status: webhookStatus } : null;
   }
-  return response.json();
+  const result = await response.json();
+  if (!currentIdentity()) throw identityError();
+  return result;
 }
 
 async function deleteIndexedItem(id) {
   const result = await api('/items/' + id, { method: 'DELETE' });
   if (result?.webhook_status === 'failed') {
     toast('索引已删除，但删除联动通知失败；请人工核对远端，不要重复删除。', 'error');
+  } else if (result?.webhook_status === 'partial') {
+    // api() 已统一提示“部分通知未送达，业务操作已完成”，这里不重复。
   } else if (result?.webhook_status === 'skipped') {
     toast('索引已删除，但源路径不符合通知条件，未发送删除联动。', 'error');
   } else if (result?.webhook_status === 'sent') {
@@ -139,8 +150,10 @@ const META = {
   items: { title: '媒体墙', crumb: 'Archive / Wall' },
   settings: { title: '设置', crumb: 'Archive / Settings' },
   activity: { title: '活动记录', crumb: 'Archive / Activity' },
+  logs: { title: '运行日志', crumb: 'Archive / Logs' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
+  translate: { title: '独立翻译', crumb: 'Archive / Translate' },
   probe: { title: '接口探针', crumb: 'Archive / Probe' }
 };
 
@@ -346,6 +359,7 @@ function wallCard(item, ud) {
         ${body}
         <div class="wall-badges">${badges}</div>
         ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
+        ${typeof me !== 'undefined' && me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${item.id}" aria-label="选择翻译：${esc(label)}">选择</label>` : ''}
         <div class="wall-actions">
           <button class="icon-btn" data-probe="${item.id}" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
           <button class="icon-btn" data-reread="${item.id}" title="重读 .strm 与 NFO">${icon('refresh')}</button>
@@ -369,7 +383,9 @@ let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索
 async function pageItems() {
   const gen = pageGen;
   const requestGen = ++wallGen; // 必须在 /libraries 之前作废同导航内的旧筛选请求
+  if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
   stopProbePolling();
+  stopLogsPolling();
   wallState = null;
   const params = new URLSearchParams(location.search);
   // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
@@ -399,6 +415,7 @@ async function pageItems() {
     entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: [], userdata: {}
   };
 
+  wallState.translateSelection = new Set();
   // 一排互斥的状态筛选：未刮削 / 需处理 互斥（合起来是全部 pending）；
   // 已刮削的片子重刮失败仍属「已刮削」，不会掉进需处理。
   const pills = [
@@ -421,22 +438,28 @@ async function pageItems() {
         <h2>媒体墙</h2>
         <div class="panel-actions">
           <span class="hint" id="wall-count" style="margin:0"></span>
-          <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
+
         </div>
       </div>
       ${libraries.length ? `<div class="filters">${libFilter}</div>` : ''}
       ${entity ? `<div class="filters"><span class="filter-chip">${esc(entity[1])}：${esc(entity[2])}
         <button class="chip-x" id="entity-clear" title="清除该筛选" aria-label="清除筛选">✕</button></span></div>` : ''}
-      <div class="filters">
-        ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
-        <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}" style="min-width:200px">
+      <div class="filters wall-toolbar">
+        <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+      </div>
+      <div class="filters wall-status-filters">
+        ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
       </div>
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
         <div class="scan-progress-bar"><i id="probe-progress-fill"></i></div>
         <small id="probe-progress-detail"></small>
       </div>
+      <details class="disclosure wall-maintenance"><summary class="disclosure-summary">批量维护与翻译</summary><div class="disclosure-body">
+<button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
+      ${typeof me !== 'undefined' && me?.is_admin ? `<div class="filters"><button type="button" class="btn" id="wall-translate-toggle" aria-expanded="false" aria-controls="wall-translate-panel">选择影片仅翻译</button><span id="wall-translate-count" role="status">已选 0 部（最多1000）</span></div><section id="wall-translate-panel" hidden>${translationWidget('wall-translate')}</section>` : ''}
+      </div></details>
       <div class="wall" id="wall"></div>
       <div id="wall-empty"></div>
       <div id="wall-more" class="wall-more"></div>
@@ -514,8 +537,36 @@ async function pageItems() {
   if (probeButton) probeButton.addEventListener('click', runProbeAll);
   // 页面恢复也走有超时/退避的观察器，不在启动阶段裸读全局进度。
   startProbePolling();
+  const batchTranslate = document.querySelector('#wall-translate');
+  if (batchTranslate && typeof me !== 'undefined' && me?.is_admin) {
+    const sourceWall = wallState;
+    let submittedWall = null;
+    mountTranslation(batchTranslate, () => {
+      submittedWall = wallGen;
+      return { movie_ids: [...sourceWall.translateSelection] };
+    }, () => wallState === sourceWall && document.querySelector('#wall-translate') === batchTranslate,
+    () => { if (wallState === sourceWall && wallGen === submittedWall) reloadWall(); });
+    document.querySelector('#wall-translate-toggle').addEventListener('click', event => {
+      const panel = document.querySelector('#wall-translate-panel');
+      panel.hidden = !panel.hidden;
+      event.currentTarget.setAttribute('aria-expanded', String(!panel.hidden));
+      document.querySelector('#wall').classList.toggle('is-selecting', !panel.hidden);
+    });
+  }
   // 事件委托：卡片按页追加，统一在容器上处理，避免每页重新绑定。
   document.querySelector('#wall').addEventListener('click', async event => {
+    const selection = event.target.closest('[data-translate-select], .wall-select');
+    if (selection) {
+      event.stopPropagation();
+      const input = selection.matches?.('input') ? selection : selection.querySelector?.('input');
+      if (!input || !wallState?.translateSelection) return;
+      if (input.checked) {
+        if (wallState.translateSelection.size >= 1000) { input.checked = false; toast('每批最多选择1000部', 'error'); return; }
+        wallState.translateSelection.add(input.dataset.translateSelect);
+      } else wallState.translateSelection.delete(input.dataset.translateSelect);
+      document.querySelector('#wall-translate-count').textContent = `已选 ${wallState.translateSelection.size} 部（最多1000）`;
+      return;
+    }
     const probe = event.target.closest('[data-probe]');
     if (probe) {
       event.stopPropagation();
@@ -569,6 +620,9 @@ function reloadWall() {
   wallState.offset = 0;
   wallState.total = 0;
   wallState.items = [];
+  wallState.translateSelection?.clear();
+  const selectedCount = document.querySelector('#wall-translate-count');
+  if (selectedCount) selectedCount.textContent = '已选 0 部（最多1000）';
   wallState.userdata = {};
   wallState.done = false;
   wallState.loading = false;
@@ -662,8 +716,10 @@ const detailOverlay = document.querySelector('#detail-overlay');
 const detailDrawer = document.querySelector('#detail-drawer');
 
 let detailGen = 0;
+let detailTranslationStop = null;
 
 function closeDetail() {
+  if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
   detailGen += 1;
   detailOverlay.hidden = true;
   detailDrawer.innerHTML = '';
@@ -784,7 +840,7 @@ function overlayFocusables(selector) {
   const overlay = document.querySelector(selector);
   if (!overlay || typeof overlay.querySelectorAll !== 'function') return [];
   return Array.from(overlay.querySelectorAll(
-    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    'button:not([disabled]), summary, [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
   )).filter(element => !element.hidden && (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0));
 }
 
@@ -853,6 +909,7 @@ function overlayTrapTab(event) {
 /* 遮罩焦点结束 */
 
 async function openDetail(item) {
+  if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
   const gen = pageGen;
   const session = ++detailGen;
   const isCurrent = () => gen === pageGen && session === detailGen;
@@ -906,12 +963,16 @@ async function openDetail(item) {
         ${playable
           ? `<button id="detail-play" class="btn btn-accent">${icon('play')}<span>播放</span></button>`
           : `<span class="hint" style="margin:0">该影片暂无可用源</span>`}
+      </div>
+      <details class="disclosure detail-maintenance"><summary class="disclosure-summary">维护与元数据编辑</summary><div class="disclosure-body">
+      <div class="detail-actions">
         <button id="detail-probe" class="btn">${icon('probe')}<span>探测媒体信息</span></button>
         <button id="detail-scrape" class="btn">${icon('search')}<span>刮削</span></button>
         <button id="detail-reread" class="btn">${icon('refresh')}<span>重读源</span></button>
         <button id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit">${icon('edit')}<span>编辑元数据</span></button>
       </div>
 
+      ${typeof me !== 'undefined' && me?.is_admin ? `<section class="detail-section"><h3>仅翻译</h3>${translationWidget('detail-translate')}</section>` : ''}
       <section class="detail-section" id="detail-edit" hidden>
         <h3>编辑元数据 <small>写入 NFO，保存后归入「手动录入」</small></h3>
         <form id="detail-edit-form" class="field-grid" aria-describedby="edit-clear-hint">
@@ -941,6 +1002,8 @@ async function openDetail(item) {
           <div id="detail-edit-recovery" class="field full" hidden></div>
         </form>
       </section>
+
+      </div></details>
 
       ${m.Plot ? `<section class="detail-section"><h3>简介</h3><p class="detail-plot">${esc(m.Plot)}</p></section>` : ''}
 
@@ -1004,6 +1067,19 @@ async function openDetail(item) {
     await probeItem(m.id);
     if (isCurrent()) openDetail(item);
   });
+  const translateRoot = document.querySelector('#detail-translate');
+  if (translateRoot && me?.is_admin) {
+    const originalWall = wallGen;
+    detailTranslationStop?.();
+    detailTranslationStop = mountTranslation(translateRoot, () => ({ movie_ids: [m.id] }),
+      () => isCurrent() && document.querySelector('#detail-translate') === translateRoot,
+      () => {
+        if (!isCurrent()) return;
+        if (wallGen === originalWall) reloadWall();
+        if (document.querySelector('#detail-edit')?.hidden !== false) openDetail(item);
+        else toast('翻译已完成；当前编辑草稿保持，请退出编辑后重新打开详情核对');
+      });
+  }
   // 单条刮削走「预览 → 人工确认」，取消则零写入零请求（需求 5j）。
   document.querySelector('#detail-scrape').addEventListener('click', () => openScrapePreview(item));
   document.querySelector('#detail-reread').addEventListener('click', async () => {
@@ -1178,14 +1254,26 @@ async function pageActivity() {
 }
 
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
+let settingsCategory = 'account';
+function mountSettingsCategories(root) {
+  const buttons = root.querySelectorAll('[data-settings-category]');
+  const panels = root.querySelectorAll('[data-settings-panel]');
+  const select = category => {
+    settingsCategory = category;
+    buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.settingsCategory === category)));
+    panels.forEach(panel => { panel.hidden = panel.dataset.settingsPanel !== category; });
+  };
+  buttons.forEach(button => button.addEventListener('click', () => select(button.dataset.settingsCategory)));
+  select(settingsCategory);
+}
 async function pageSettings() {
   const gen = pageGen;
   if (!me || !me.is_admin) {
     renderSelfPassword();
     return;
   }
-  const [s, keyData, recovery, users, libs, logData] = await Promise.all([
-    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries'), api('/logs?limit=200')
+  const [s, keyData, recovery, users, libs] = await Promise.all([
+    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries')
   ]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const fields = [
@@ -1198,51 +1286,26 @@ async function pageSettings() {
   ];
   const keys = keyData.items || [];
   content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>服务设置</h2></div>
-      <div class="table-wrap"><table>
-        <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
-      </table></div>
-      <p class="hint">上述启动配置修改后需重启服务；下方 Webhook 和日志期限保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
-    </section>
-
-    <section id="webhook-settings" class="panel" aria-labelledby="webhook-title"></section>
-    <section id="log-settings" class="panel" aria-labelledby="log-settings-title"></section>
-
-    <section class="panel" aria-labelledby="logs-title">
-      <div class="panel-head"><h2 id="logs-title">运行日志</h2><div class="row-actions">
-        <select id="log-level" aria-label="日志级别筛选">
-          <option value="">全部级别</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option>
-        </select>
-        <button id="log-refresh" class="btn btn-sm">刷新</button>
-      </div></div>
-      <p class="hint">仅保留本进程最近 500 条运行日志（敏感字段已脱敏），不读取磁盘日志；完整日志见服务器 <code>log/</code> 目录。</p>
-      <div class="table-wrap"><table class="log-table">
-        <thead><tr><th style="width:190px">时间</th><th style="width:70px">级别</th><th>内容</th></tr></thead>
-        <tbody id="log-body"></tbody>
-      </table></div>
-    </section>
-
+    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')], ['service', '服务信息']].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
+    <div class="settings-category" data-settings-panel="account">
     <section class="panel">
       <div class="panel-head"><h2>登录会话</h2></div>
       <p class="hint" style="margin:0 0 12px">退出全部会话会让本机与其它设备上的登录令牌立即失效（API 密钥不受影响）；当前页面也会回到登录页。</p>
       <button id="logout-all" class="btn btn-danger">${icon('trash')}<span>退出全部会话</span></button>
     </section>
 
-    <section class="panel">
-      <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
-      ${recovery.stale_over_7d > 0 ? `<p class="warning-block" role="alert">有 ${esc(String(recovery.stale_over_7d))} 个条目索引未完成已超过 7 天，请尽快打开对应条目处理恢复提示。</p>` : ''}
-      ${(recovery.items || []).length ? `
-        <div class="table-wrap"><table>
-          <thead><tr><th>条目</th><th>首次失败</th><th>已持续</th><th>原因</th></tr></thead>
-          <tbody>${recovery.items.map(item => `<tr>
-            <td><strong class="title">${esc(item.title || '#' + item.movie_id)}</strong></td>
-            <td class="mono">${esc(item.first_failed_at)}</td>
-            <td class="mono">${esc(String(item.age_days))} 天</td>
-            <td class="mono">${esc(item.code)}</td>
-          </tr>`).join('')}</tbody>
-        </table></div>` : empty('没有待恢复条目', '索引失败时会在这里显示；成功重新索引后自动清除。')}
+    <section class="panel" aria-labelledby="pw-title">
+      <div class="panel-head"><h2 id="pw-title">修改我的密码</h2></div>
+      <form id="pw-form" class="field-grid">
+        <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
+        <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
+      </form>
+      <p class="hint">修改后当前与其它设备的登录令牌都会失效，需要重新登录。</p>
     </section>
+    </div>
+
+    <div class="settings-category" data-settings-panel="users" hidden>
     <section class="panel" aria-labelledby="users-title">
       <div class="panel-head"><h2 id="users-title">用户管理</h2><span class="hint" style="margin:0">共 ${esc(String((users.users || []).length))} 个账户 · 媒体库默认无授权</span></div>
       <div class="table-wrap"><table class="user-table">
@@ -1268,16 +1331,6 @@ async function pageSettings() {
       <p class="hint">普通用户默认看不到任何媒体库；在行内勾选后点「保存授权」。删除用户会保留其播放与登录历史。</p>
     </section>
 
-    <section class="panel" aria-labelledby="pw-title">
-      <div class="panel-head"><h2 id="pw-title">修改我的密码</h2></div>
-      <form id="pw-form" class="field-grid">
-        <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
-        <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
-      </form>
-      <p class="hint">修改后当前与其它设备的登录令牌都会失效，需要重新登录。</p>
-    </section>
-
     <section class="panel">
       <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
       <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>
@@ -1289,22 +1342,76 @@ async function pageSettings() {
         </div></div>` : ''}
       ${keys.length ? `
         <div class="table-wrap"><table>
-          <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>版本</th><th>最近轮转</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${keys.map(item => `<tr>
             <td><strong class="title">${esc(item.name || '—')}</strong></td>
             <td class="mono">${esc(item.key_prefix || '—')}…</td>
             <td class="mono">${esc(item.created_at || '—')}</td>
+            <td class="mono">v${esc(item.version || 1)}</td>
+            <td class="mono">${esc(item.rotated_at || '—')}</td>
             <td><div class="row-actions">
+              <button class="icon-btn" data-key-rotate="${esc(item.id)}" data-version="${esc(item.version || 1)}" data-name="${esc(item.name || '')}" title="重设/轮转密钥">${icon('refresh')}</button>
               <button class="icon-btn danger" data-key-delete="${esc(item.id)}" title="删除密钥">${icon('trash')}</button>
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有管理员 API 密钥', '在下方创建后即可用 X-Emby-Token 调用全部接口。')}
+      <form id="key-rotate-form" class="field-grid" style="margin-top:18px" hidden>
+        <p class="warning-block" style="grid-column:1/-1" role="note">轮转 <strong id="key-rotate-name">该密钥</strong> 会让所有使用旧密钥的脚本/客户端立即断开；旧密钥不可找回，只能重新轮转。需要当前密码再认证。</p>
+        <div class="field"><label for="key-rotate-password">当前密码</label><input id="key-rotate-password" type="password" required autocomplete="current-password"></div>
+        <div class="field"><label for="key-rotate-reason">原因</label><input id="key-rotate-reason" type="text" maxlength="200" placeholder="如 forgotten / 泄露处置" required></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0">
+          <button class="btn btn-accent" type="submit">确认轮转（旧密钥立即失效）</button>
+          <button class="btn btn-sm" id="key-rotate-cancel" type="button">取消</button>
+        </div>
+      </form>
       <form id="apikey-form" class="field-grid" style="margin-top:18px">
         <div class="field"><label for="key-name">新建管理员密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建</span></button></div>
       </form>
       <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即管理员凭据，请勿外泄；删除前先确认使用方。</p>
-    </section>`;
+    </section>
+    </div>
+
+    <div class="settings-category" data-settings-panel="notifications" hidden>
+    <section id="webhook-settings" class="panel" aria-labelledby="webhook-title"></section>
+    </div>
+
+    <div class="settings-category" data-settings-panel="logs" hidden>
+    <section id="log-settings" class="panel" aria-labelledby="log-settings-title"></section>
+
+    <section class="panel" aria-labelledby="logs-link-title">
+      <div class="panel-head"><h2 id="logs-link-title">运行日志</h2><a class="btn btn-sm" href="#logs">打开日志页</a></div>
+      <p class="hint" style="margin:0">运行日志已迁到独立的「运行日志」页，按磁盘文件增量读取；设置页只保留日志保存期限与活动记录，不与运行日志混用。</p>
+    </section>
+    </div>
+
+    <div class="settings-category" data-settings-panel="recovery" hidden>
+    <section class="panel">
+      <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
+      ${recovery.stale_over_7d > 0 ? `<p class="warning-block" role="alert">有 ${esc(String(recovery.stale_over_7d))} 个条目索引未完成已超过 7 天，请尽快打开对应条目处理恢复提示。</p>` : ''}
+      ${(recovery.items || []).length ? `
+        <div class="table-wrap"><table>
+          <thead><tr><th>条目</th><th>首次失败</th><th>已持续</th><th>原因</th></tr></thead>
+          <tbody>${recovery.items.map(item => `<tr>
+            <td><strong class="title">${esc(item.title || '#' + item.movie_id)}</strong></td>
+            <td class="mono">${esc(item.first_failed_at)}</td>
+            <td class="mono">${esc(String(item.age_days))} 天</td>
+            <td class="mono">${esc(item.code)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : empty('没有待恢复条目', '索引失败时会在这里显示；成功重新索引后自动清除。')}
+    </section>
+    </div>
+
+    <div class="settings-category" data-settings-panel="service" hidden>
+    <section class="panel">
+      <div class="panel-head"><h2>服务设置</h2></div>
+      <div class="table-wrap"><table>
+        <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <p class="hint">上述启动配置修改后需重启服务；通知与日志期限分类中的设置保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
+    </section>
+    </div>`;
+  mountSettingsCategories(content);
   const logHost = document.querySelector('#log-settings');
   void mountLogSettings(logHost, api, () => gen === pageGen && logHost.isConnected);
   const webhookHost = document.querySelector('#webhook-settings');
@@ -1312,35 +1419,27 @@ async function pageSettings() {
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();
+    const requestIdentity = token;
     try {
       const created = await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) });
+      if (gen !== pageGen || localStorage.getItem('emby_token') !== requestIdentity) return;
       createdAPIKey = created.key || null;
+      settingsCategory = 'users';
       toast('密钥已创建');
       refreshPage(pageSettings, gen);
     }
     catch (e) { toast(e.message, 'error'); }
   });
-  const renderLogs = (items) => {
-    const body = document.querySelector('#log-body');
-    if (!body) return;
-    const level = document.querySelector('#log-level').value;
-    const rows = (items || []).filter(item => !level || String(item.level).toUpperCase() === level);
-    body.innerHTML = rows.map(item => `<tr><td class="mono">${esc(item.time)}</td><td class="mono">${esc(item.level)}</td><td class="mono">${esc(item.message)}</td></tr>`).join('') || '<tr><td colspan="3">暂无日志</td></tr>';
-  };
-  renderLogs(logData.items);
-  document.querySelector('#log-refresh').addEventListener('click', async () => {
-    try { renderLogs((await api('/logs?limit=200')).items); }
-    catch (e) { toast(e.message, 'error'); }
-  });
-  document.querySelector('#log-level').addEventListener('change', () => renderLogs(logData.items));
   const logoutAll = document.querySelector('#logout-all');
   if (logoutAll) logoutAll.addEventListener('click', async () => {
     if (!confirm('退出全部登录会话？其它设备需要重新登录，API 密钥不受影响。')) return;
     try {
       const result = await api('/access-tokens', { method: 'DELETE' });
       toast(`已退出 ${result.revoked} 个会话`, 'ok');
+      clearSessionView();
       localStorage.removeItem('emby_token');
-      setTimeout(() => window.location.replace('/'), 800);
+      token = null;
+      window.location.replace('/');
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelectorAll('[data-copy-created]').forEach(button => button.addEventListener('click', async () => {
@@ -1353,6 +1452,49 @@ async function pageSettings() {
     try { await navigator.clipboard.writeText(button.dataset.copy); toast('已复制密钥', 'ok'); }
     catch { toast('复制失败，请手动选择', 'error'); }
   }));
+  const rotateForm = document.querySelector('#key-rotate-form');
+  const rotatePassword = document.querySelector('#key-rotate-password');
+  let rotateTarget = null;
+  document.querySelectorAll('[data-key-rotate]').forEach(button => button.addEventListener('click', () => {
+    rotateTarget = { id: button.dataset.keyRotate, version: Number(button.dataset.version) || 1 };
+    document.querySelector('#key-rotate-name').textContent = button.dataset.name || '该密钥';
+    rotateForm.hidden = false;
+    rotatePassword.value = '';
+    rotatePassword.focus();
+  }));
+  document.querySelector('#key-rotate-cancel').addEventListener('click', () => {
+    rotateTarget = null;
+    rotateForm.hidden = true;
+    rotatePassword.value = '';
+  });
+  rotateForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!rotateTarget) return;
+    const stable = String(rotateTarget.id).replace(/^ak_/, '');
+    const ifMatch = `"ak-${stable}-${rotateTarget.version}"`;
+    const body = JSON.stringify({
+      current_password: rotatePassword.value,
+      reason: String(document.querySelector('#key-rotate-reason').value || '').trim()
+    });
+    const requestIdentity = token;
+    const requestGen = gen;
+    try {
+      const rotated = await api('/apikeys/' + encodeURIComponent(rotateTarget.id) + '/rotate', {
+        method: 'POST', body, headers: { 'If-Match': ifMatch }
+      });
+      if (requestGen !== pageGen || localStorage.getItem('emby_token') !== requestIdentity) return;
+      createdAPIKey = rotated.key || null;
+      toast('密钥已轮转，旧密钥已立即失效', 'ok');
+      refreshPage(pageSettings, gen);
+    } catch (e) {
+      if (e.code === 'API_KEY_VERSION_STALE') {
+        toast('密钥版本已变化，已刷新列表；请确认后重新操作', 'error');
+        refreshPage(pageSettings, gen);
+        return;
+      }
+      toast(e.message, 'error');
+    }
+  });
   document.querySelectorAll('[data-key-delete]').forEach(button => button.addEventListener('click', async () => {
     if (!confirm('删除该 API 密钥？使用它的客户端将立即失效。')) return;
     try { await api('/apikeys/' + encodeURIComponent(button.dataset.keyDelete), { method: 'DELETE' }); toast('密钥已删除', 'ok'); refreshPage(pageSettings, gen); }
@@ -1487,7 +1629,30 @@ async function pageScrape() {
 
   content.innerHTML = `
     <section class="panel">
-      <div class="panel-head"><h2>刮削配置</h2>
+      <div class="panel-head"><h2>立即刮削</h2>
+        <div class="panel-actions"><span class="hint" id="scrape-count" style="margin:0"></span></div>
+      </div>
+      <div class="filters">
+        <select id="sc-lib" aria-label="媒体库"><option value="0">全部媒体库</option>${libOptions}</select>
+        <label class="check"><input id="sc-only-missing" type="checkbox" checked> 仅处理缺失元数据的影片</label>
+        <label class="check"><input id="sc-force" type="checkbox"> 本次强制覆盖</label>
+        <button id="scrape-start" class="btn btn-accent btn-sm">${icon('film')}<span>开始刮削</span></button>
+        <button id="scrape-cancel" class="btn btn-sm">中止</button>
+        <button id="avatar-start" class="btn btn-sm">${icon('plus')}<span>补演员头像</span></button>
+      </div>
+      <div id="scrape-progress" class="probe-progress" hidden>
+        <div class="scan-progress-head"><strong id="scrape-progress-title">刮削中…</strong><span id="scrape-progress-count"></span></div>
+        <div class="scan-progress-bar"><i id="scrape-progress-fill"></i></div>
+        <small id="scrape-progress-detail"></small>
+      </div>
+      <div id="scrape-failures"></div>
+      <p class="hint">批量与定时为全自动：遇到「非番号精确命中」会跳过并标记「待人工确认」，可在媒体墙按刮削结果筛出后逐条手动处理。</p>
+    </section>
+
+    <details class="panel disclosure" id="scrape-configuration">
+      <summary class="disclosure-summary">服务连接与刮削策略（含共享翻译服务）</summary>
+      <div class="disclosure-body">
+      <div class="panel-head"><h2>服务连接与刮削策略</h2>
         <div class="panel-actions">
           <button id="test-metatube" class="btn btn-sm">${icon('probe')}<span>测试 MetaTube</span></button>
           <button id="test-translate" class="btn btn-sm">${icon('probe')}<span>测试翻译</span></button>
@@ -1511,8 +1676,9 @@ async function pageScrape() {
         <div class="field"><label>默认覆盖策略</label>
           <label class="check"><input id="sc-overwrite" type="checkbox"${settings.overwrite ? ' checked' : ''}> 强制覆盖（默认只补缺失）</label></div>
 
-        <div class="field full"><label style="color:var(--accent)">翻译（内嵌，直连自建 Deepl-Proxy）</label></div>
-        <div class="field"><label>翻译标题</label>
+        <div class="field full"><label style="color:var(--accent)">共享翻译服务（独立翻译与刮削共用连接）</label></div>
+        <p class="hint field full">以下连接也供独立翻译使用；标题/简介开关仅控制刮削内嵌翻译，不限制独立翻译任务。</p>
+        <div class="field"><label>刮削时翻译标题</label>
           <label class="check"><input id="tr-title" type="checkbox"${tr.title ? ' checked' : ''}> 译文写入 Title</label></div>
         <div class="field"><label>翻译简介</label>
           <label class="check"><input id="tr-summary" type="checkbox"${tr.summary ? ' checked' : ''}> 译文写入 Plot</label></div>
@@ -1529,28 +1695,7 @@ async function pageScrape() {
           <span class="hint" style="margin:0">保存后无需重启；密钥留空表示不修改。</span>
         </div>
       </form>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head"><h2>立即刮削</h2>
-        <div class="panel-actions"><span class="hint" id="scrape-count" style="margin:0"></span></div>
-      </div>
-      <div class="filters">
-        <select id="sc-lib" aria-label="媒体库"><option value="0">全部媒体库</option>${libOptions}</select>
-        <label class="check"><input id="sc-only-missing" type="checkbox" checked> 仅处理缺失元数据的影片</label>
-        <label class="check"><input id="sc-force" type="checkbox"> 本次强制覆盖</label>
-        <button id="scrape-start" class="btn btn-accent btn-sm">${icon('film')}<span>开始刮削</span></button>
-        <button id="scrape-cancel" class="btn btn-sm">中止</button>
-        <button id="avatar-start" class="btn btn-sm">${icon('plus')}<span>补演员头像</span></button>
-      </div>
-      <div id="scrape-progress" class="probe-progress" hidden>
-        <div class="scan-progress-head"><strong id="scrape-progress-title">刮削中…</strong><span id="scrape-progress-count"></span></div>
-        <div class="scan-progress-bar"><i id="scrape-progress-fill"></i></div>
-        <small id="scrape-progress-detail"></small>
-      </div>
-      <div id="scrape-failures"></div>
-      <p class="hint">批量与定时为全自动：遇到「非番号精确命中」会跳过并标记「待人工确认」，可在媒体墙按刮削结果筛出后逐条手动处理。</p>
-    </section>`;
+    </div></details>`;
 
   const num = id => Number(document.querySelector(id).value) || 0;
   document.querySelector('#scrape-form').addEventListener('submit', async event => {
@@ -1642,16 +1787,24 @@ function scrapeEls() {
   };
 }
 
+// 保留原有真值归一化：负 total 仍参与计算，百分比仅限制上界。
+function progressCounts(p) {
+  const total = p.total || 0;
+  const done = p.done || 0;
+  const percent = total ? Math.min(100, Math.round(done / total * 100)) : 100;
+  return { total, done, percent };
+}
+
 function renderScrapeProgress(p) {
   const el = scrapeEls();
   if (!el.panel) return;
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
   el.title.textContent = p.running ? (p.kind === 'scrape_avatars' ? '正在补演员头像' : '正在刮削') : '刮削结束';
-  const total = p.total || 0;
-  el.count.textContent = total ? `${p.done || 0}/${total}` : String(p.done || 0);
+  const { total, done, percent } = progressCounts(p);
+  el.count.textContent = total ? `${done}/${total}` : String(done);
   el.fill.classList.toggle('is-indeterminate', !total && p.running);
-  el.fill.style.width = total ? `${Math.min(100, Math.round((p.done || 0) / total * 100))}%` : '100%';
+  el.fill.style.width = `${percent}%`;
   const parts = [];
   if (p.success) parts.push(`成功 ${p.success}`);
   if (p.skipped) parts.push(`跳过 ${p.skipped}`);
@@ -1669,7 +1822,7 @@ function renderScrapeProgress(p) {
 }
 
 // 每次请求完成后才安排下一次；stop仅停止观察，不取消后台任务。
-function startProgressPolling(path, onProgress, onUnavailable, keepObserving = () => false) {
+function startProgressPolling(path, onProgress, onUnavailable, keepObserving = () => false, readProgress = api) {
   let stopped = false, timer = null, request = null, deadline = null, delay = 1500;
   function stop() {
     stopped = true;
@@ -1684,7 +1837,7 @@ function startProgressPolling(path, onProgress, onUnavailable, keepObserving = (
     request = controller;
     deadline = setTimeout(() => controller.abort(), 10000);
     try {
-      const p = await api(path, { signal: controller.signal });
+      const p = await readProgress(path, { signal: controller.signal });
       if (stopped) return;
       if (controller.signal.aborted) throw new Error('progress timeout');
       if (!p || typeof p.running !== 'boolean') throw new Error('invalid progress');
@@ -1695,7 +1848,7 @@ function startProgressPolling(path, onProgress, onUnavailable, keepObserving = (
       if (stopped) return;
       const denied = error.status === 401 || error.status === 403;
       delay = Math.min(delay * 2, 15000);
-      onUnavailable(denied ? null : delay);
+      onUnavailable(denied ? null : delay, error);
       if (denied) stopped = true;
     } finally {
       if (deadline !== null) clearTimeout(deadline);
@@ -1773,9 +1926,20 @@ async function loadScrapeInspect(provider, id) {
   const seq = ++state.inspectSeq;
   const body = document.querySelector('#scrape-body');
   body.innerHTML = '<p class="hint">正在读取详情…</p>';
-  const inspect = await api(`/items/${state.movieId}/scrape/inspect`, {
-    method: 'POST', body: JSON.stringify({ provider, id })
-  });
+  let inspect;
+  try {
+    inspect = await api(`/items/${state.movieId}/scrape/inspect`, {
+      method: 'POST', body: JSON.stringify({ provider, id })
+    });
+  } catch (error) {
+    if (scrapeState !== state || seq !== state.inspectSeq) return;
+    // 保留已选详情和候选；首次自动 inspect 失败也提供明确的原位重试。
+    if (state.inspect) renderScrapePreview();
+    else body.innerHTML = '';
+    body.insertAdjacentHTML('afterbegin', `<div role="alert"><p class="hint">读取详情失败：${esc(error.message)}</p><button id="scrape-inspect-retry" type="button" class="btn btn-sm">重试读取详情</button></div>`);
+    body.querySelector('#scrape-inspect-retry').addEventListener('click', () => { void loadScrapeInspect(provider, id); });
+    return;
+  }
   if (scrapeState !== state || seq !== state.inspectSeq) return; // 已关闭、已换片或已被更新的点击取代
   state.inspect = inspect;
   state.provider = provider;
@@ -1868,6 +2032,129 @@ function renderScrapePreview() {
   });
 }
 
+/* ------------------------------------------------------------ 独立翻译 */
+const TRANSLATE_HINT = '不重新刮削、不取图。标题来自 NFO originaltitle（缺失则跳过）；简介来自当前内容，可能已经是译文，请谨慎重复翻译。保留字段锁；失败保留原文。复用刮削设置中的翻译服务地址、密钥和目标语言，不受内嵌翻译字段开关影响。';
+const translationObservers = new Set();
+function stopTranslationPolling() {
+  translationObservers.forEach(stop => stop());
+  translationObservers.clear();
+}
+function translationFields(root) {
+  const fields = ['title', 'plot'].filter(field => root.querySelector(`[data-translate-field="${field}"]`)?.checked);
+  if (!fields.length) throw new Error('请至少选择标题或简介');
+  return fields;
+}
+function translationPayload(scope, fields, limit = 0) {
+  if (!fields.length || fields.some(field => !['title', 'plot'].includes(field))) throw new Error('翻译字段无效');
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100000) throw new Error('数量上限须为 0–100000 的整数');
+  const body = { fields, limit };
+  if (scope.movie_ids !== undefined) {
+    const ids = [...new Set(scope.movie_ids.map(Number))];
+    if (!ids.length || ids.length > 1000 || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('请选择 1–1000 部影片');
+    body.movie_ids = ids;
+  } else if (scope.library_id) {
+    const id = Number(scope.library_id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('媒体库无效');
+    body.library_id = id;
+  }
+  return body;
+}
+function translationWidget(id) {
+  return `<div id="${id}" class="translate-widget">
+    <p class="hint">${esc(TRANSLATE_HINT)}</p>
+    <div class="filters"><label class="check"><input type="checkbox" data-translate-field="title" checked> 翻译标题</label>
+      <label class="check"><input type="checkbox" data-translate-field="plot"> 翻译简介（当前内容）</label>
+      <button type="button" class="btn" data-translate-start>仅翻译</button>
+      <button type="button" class="btn" data-translate-cancel disabled>取消本任务</button>
+      <button type="button" class="btn" data-translate-refresh>重读状态</button></div>
+    <p class="hint" data-translate-progress role="status">正在确认翻译状态…</p></div>`;
+}
+// 每个挂载点独立持有任务ID/身份/页面代次；离开仅停止观察，不假定后台已取消。
+function mountTranslation(root, getScope, isScopeCurrent, onComplete = () => {}) {
+  const gen = pageGen, identity = token;
+  const current = () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity && isScopeCurrent();
+  const start = root.querySelector('[data-translate-start]');
+  const cancel = root.querySelector('[data-translate-cancel]');
+  const progress = root.querySelector('[data-translate-progress]');
+  let stop = null, taskId = null, submitted = false, busy = false, cancelling = false, observedRunning = false;
+  const halt = () => { stop?.(); stop = null; translationObservers.delete(halt); };
+  const observe = () => {
+    halt(); if (!current()) return;
+    start.disabled = true; cancel.disabled = true;
+    translationObservers.add(halt);
+    stop = startProgressPolling('/translate/status' + (taskId ? '?task_id=' + encodeURIComponent(taskId) : ''), p => {
+      if (!current()) { halt(); return; }
+      if (taskId && String(p.task_id) !== String(taskId)) { halt(); observedRunning = false; start.disabled = true; cancel.disabled = true; progress.textContent = '任务状态已被替换，请重读状态；不会取消或刷新其它任务。'; return; }
+      if (p.task_id) taskId = p.task_id;
+      observedRunning = p.running;
+      start.disabled = busy || p.running;
+      cancel.disabled = cancelling || !p.running || !taskId;
+      progress.textContent = `${p.running ? '翻译中' : p.cancelled ? '已取消' : p.finished_at ? '翻译结束' : '尚无任务'}${taskId ? ' · 任务 ' + taskId : ''} · ${p.done || 0}/${p.total || 0} · 成功 ${p.success || 0} · 失败 ${p.failed || 0} · 跳过 ${p.skipped || 0}${p.error ? ' · ' + p.error : ''}${p.index_refresh_failed ? ' · 索引刷新失败，请手动重读' : ''}${p.failures?.length ? ' · ' + p.failures.map(f => f.error || f.reason || JSON.stringify(f)).join('；') : ''}`;
+      if (!p.running && submitted) {
+        submitted = false;
+        // nochange/skipped 也可能已修复索引；仅刷新本次原scope，不宣称每条成功。
+        if (Number(p.done) > 0 || Number(p.success) > 0) onComplete(p);
+      }
+    }, (delay, error) => {
+      if (!current()) { halt(); return; }
+      start.disabled = true; cancel.disabled = true;
+      progress.textContent = error.status === 404 ? '本任务快照已被更新任务替换。请重读状态；不会刷新或取消其它任务。' : delay === null ? '状态读取受限，请重新登录或核对权限；不会重放翻译。' : `状态未知：${error.message}。只重试读取，不自动重放翻译。`;
+      if (error.status === 404) halt();
+    });
+  };
+  start.addEventListener('click', async () => {
+    if (!current() || busy || start.disabled) return;
+    let body, label;
+    try {
+      const scope = getScope();
+      body = translationPayload(scope, translationFields(root), Number(scope.limit || 0));
+      label = body.movie_ids ? `所选 ${body.movie_ids.length} 部影片` : body.library_id ? `媒体库 ${body.library_id}` : '全部媒体库';
+    } catch (error) { progress.textContent = error.message; return; }
+    if (!confirm(`仅翻译${label}的${body.fields.map(f => f === 'title' ? '标题' : '简介').join('和')}，最多 ${body.limit || '不限'} 部。\n${TRANSLATE_HINT}\n确认开始？`)) return;
+    halt(); busy = true; start.disabled = true; cancel.disabled = true;
+    try {
+      const result = await api('/translate/run', { method: 'POST', body: JSON.stringify(body) });
+      if (!current()) return;
+      if (!result?.task_id) throw new Error('服务器未提供任务ID，请重读状态核对，不要重复提交');
+      taskId = result.task_id; submitted = true;
+      progress.textContent = '翻译任务已接受，正在确认本次进度…';
+    } catch (error) {
+      if (!current()) return;
+      taskId = null; submitted = false;
+      progress.textContent = `提交结果需核对：${error.message}。不会自动重放。`;
+    } finally { busy = false; if (current()) observe(); }
+  });
+  cancel.addEventListener('click', async () => {
+    if (!current() || cancelling || cancel.disabled || !observedRunning || !taskId) return;
+    const cancellingTask = taskId;
+    cancelling = true; cancel.disabled = true;
+    try {
+      await api('/translate/cancel', { method: 'POST', body: JSON.stringify({ task_id: cancellingTask }) });
+      if (!current() || taskId !== cancellingTask) return;
+      progress.textContent = '已请求取消，等待后台确认；已成功翻译的内容保留。';
+    } catch (error) { if (current()) progress.textContent = `取消未确认：${error.message}；不会取消更新的任务。`; }
+    finally { cancelling = false; if (current()) observe(); }
+  });
+  root.querySelector('[data-translate-refresh]').addEventListener('click', () => {
+    if (busy || cancelling || !current()) return;
+    taskId = null; submitted = false; observe();
+  });
+  observe();
+  return halt;
+}
+async function pageTranslate() {
+  const gen = pageGen;
+  if (!me?.is_admin) { content.innerHTML = empty('仅管理员可运行独立翻译'); return; }
+  const libs = await api('/libraries');
+  if (gen !== pageGen) return;
+  stopTranslationPolling();
+  content.innerHTML = `<section class="panel"><h2>独立翻译任务</h2><p class="hint">以下按钮只手动执行一次，不创建自动调度。也可在<a href="#scheduled">计划任务</a>保存独立翻译配置：不勾选参与调度，随后随时点击“执行”；需要定时再明确启用。翻译服务在<a href="#scrape">刮削设置</a>配置。</p><div class="field-grid">
+    <div class="field"><label for="translate-library">范围</label><select id="translate-library"><option value="0">全部媒体库（启动前需确认）</option>${(libs.items || []).map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('')}</select></div>
+    <div class="field"><label for="translate-limit">数量上限（0 为不限）</label><input id="translate-limit" type="number" min="0" max="100000" step="1" value="0"></div></div>${translationWidget('translate-task')}</section>`;
+  const root = document.querySelector('#translate-task');
+  mountTranslation(root, () => ({ library_id: Number(document.querySelector('#translate-library').value), limit: Number(document.querySelector('#translate-limit').value) }), () => document.querySelector('#translate-task') === root);
+}
+
 /* ------------------------------------------------------------ 计划任务 */
 // 常用预设；表达式用标准 5 段（分 时 日 月 周），按服务器本地时区执行。
 const CRON_PRESETS = [
@@ -1877,7 +2164,7 @@ const CRON_PRESETS = [
   ['每周一 04:00', '0 4 * * 1'],
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
-const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测' };
+const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译' };
 const RUN_STATUS_TEXT = { success: '成功', failed: '失败', skipped: '跳过', running: '进行中' };
 
 let scheduledEditId = null; // 正在编辑的任务 id（null = 新建）
@@ -1899,10 +2186,20 @@ function runBadge(status) {
 function scheduledFormParams(kind, editing, stored, visible) {
   const params = editing && editing.type === kind ? { ...stored } : {};
   params.library_id = visible.library_id;
+  if (kind === 'scan') {
+    const mode = visible.mode ?? params.mode ?? 'full';
+    if (!['full', 'incremental'].includes(mode)) throw new Error('请选择有效的扫描模式');
+    params.mode = mode;
+  }
   if (kind === 'probe') {
     params.probe_status_contract = 'explicit-v1';
     params.status = visible.status;
     params.only_missing = visible.only_missing;
+  }
+  if (kind === 'translate') {
+    params.fields = visible.fields;
+    params.limit = visible.limit;
+    delete params.movie_ids; // 计划任务不支持固定影片ID列表。
   }
   return params;
 }
@@ -1912,7 +2209,7 @@ async function pageScheduled() {
   const [data, libs] = await Promise.all([api('/scheduled'), api('/libraries')]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const items = data.items || [];
-  const types = data.types || TASK_TYPE_TEXT;
+  const types = { ...TASK_TYPE_TEXT, ...(data.types || {}) };
   const libraries = libs.items || [];
   const editing = scheduledEditId ? items.find(item => item.id === scheduledEditId) : null;
   // 编辑时回填参数；参数在库里是 JSON 文本。
@@ -1926,45 +2223,6 @@ async function pageScheduled() {
 
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
   content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head">
-        <h2>${editing ? '编辑计划任务' : '新建计划任务'}</h2>
-        ${editing ? '<div class="panel-actions"><button id="sched-cancel" class="btn btn-sm">取消编辑</button></div>' : ''}
-      </div>
-      <p class="hint" style="margin:0 0 14px">到点自动执行，保存后立即生效（无需重启）。同一任务上一轮未结束时跳过本次并记录。</p>
-      <form id="sched-form" class="field-grid">
-        <div class="field"><label for="s-name">名称 *</label>
-          <input id="s-name" placeholder="如 夜间扫库" required value="${esc(editing ? editing.name : '')}"></div>
-        <div class="field"><label for="s-type">任务类型 *</label>
-          <select id="s-type">${Object.entries(types).map(([key, text]) =>
-            `<option value="${esc(key)}"${editing && editing.type === key ? ' selected' : ''}>${esc(text)}</option>`).join('')}</select></div>
-        <div class="field"><label for="s-cron">cron 表达式 *</label>
-          <input id="s-cron" class="mono" placeholder="0 3 * * *" required value="${esc(editing ? editing.cron : '')}"></div>
-        <div class="field" data-show="library"><label for="s-lib">媒体库</label>
-          <select id="s-lib"><option value="0">全部媒体库</option>${libOptions}</select></div>
-        <div class="field" data-show="probe"><label for="s-status">影片状态</label>
-          <select id="s-status">
-            <option value="success">可播放</option>
-            <option value="manual">手动录入</option>
-            <option value="all">全部已有 NFO 的影片</option>
-          </select></div>
-        <div class="field" data-show="probe"><label>探测范围</label>
-          <label class="check"><input id="s-only-missing" type="checkbox"> 仅未探测的条目</label></div>
-        <div class="field"><label>启用</label>
-          <label class="check"><input id="s-enabled" type="checkbox"${!editing || editing.enabled ? ' checked' : ''}> 保存后参与调度</label></div>
-        <div class="field full"><label>常用预设</label>
-          <div class="preset-row">${CRON_PRESETS.map(([text, expr]) =>
-            `<button type="button" class="btn btn-sm preset" data-cron="${esc(expr)}">${esc(text)}</button>`).join('')}</div></div>
-        <p class="hint full" id="s-preview" style="grid-column:1/-1">标准 5 段（分 时 日 月 周）或 @daily/@hourly 等描述符；按服务器本地时区执行，浏览器时区只影响展示；留空无法保存。</p>
-        <div class="form-foot" style="grid-column:1/-1">
-          ${paramsReadable ? '' : '<p role="alert">原任务参数无法读取，已禁止保存。请先由管理员核对配置，不会用空参数覆盖。</p>'}
-          ${editing && !editing.config_etag ? '<p role="alert">服务器未提供配置校验令牌，已禁止覆盖保存。请更新服务后刷新。</p>' : ''}
-          <p id="sched-conflict" role="alert" hidden></p>
-          <button id="sched-submit" class="btn btn-accent" type="submit"${paramsReadable && (!editing || editing.config_etag) ? '' : ' disabled'}>${icon('plus')}<span>${editing ? '保存修改' : '新建任务'}</span></button>
-        </div>
-      </form>
-    </section>
-
     <section class="panel">
       <div class="panel-head"><h2>已配置任务</h2>
         <div class="panel-actions"><button id="sched-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button></div>
@@ -1986,11 +2244,61 @@ async function pageScheduled() {
               <button class="icon-btn danger" data-role="del" data-id="${esc(item.id)}" title="删除">${icon('trash')}</button>
             </div></td>
           </tr>`).join('')}</tbody>
-        </table></div>` : empty('还没有计划任务', '在上方填写名称、类型与 cron 表达式后新建。')}
+        </table></div>` : empty('还没有计划任务', '展开下方“新建计划任务”配置；立即执行已有任务无需新建。')}
     </section>
 
+
+    <details class="panel disclosure" id="scheduled-editor"${editing ? ' open' : ''}>
+      <summary class="disclosure-summary">${editing ? '编辑计划任务' : '新建计划任务'}</summary>
+      <div class="disclosure-body">
+      <div class="panel-head">
+        <h2>${editing ? '编辑计划任务' : '新建计划任务'}</h2>
+        ${editing ? '<div class="panel-actions"><button id="sched-cancel" class="btn btn-sm">取消编辑</button></div>' : ''}
+      </div>
+      <p class="hint" style="margin:0 0 14px">启用后到点自动执行；也可取消“保存后参与调度”，仅保存配置后点击“执行”手动运行。新建独立翻译默认不启用自动调度。同一任务上一轮未结束时跳过本次并记录。</p>
+      <form id="sched-form" class="field-grid">
+        <div class="field"><label for="s-name">名称 *</label>
+          <input id="s-name" placeholder="如 夜间扫库" required value="${esc(editing ? editing.name : '')}"></div>
+        <div class="field"><label for="s-type">任务类型 *</label>
+          <select id="s-type">${Object.entries(types).map(([key, text]) =>
+            `<option value="${esc(key)}"${editing && editing.type === key ? ' selected' : ''}>${esc(text)}</option>`).join('')}</select></div>
+        <div class="field"><label for="s-cron">cron 表达式 *</label>
+          <input id="s-cron" class="mono" placeholder="0 3 * * *" required value="${esc(editing ? editing.cron : '')}"></div>
+        <div class="field" data-show="library"><label for="s-lib">媒体库</label>
+          <select id="s-lib"><option value="0">全部媒体库</option>${libOptions}</select></div>
+        <div class="field" data-show="scan"><label for="s-scan-mode">扫描模式</label>
+          <select id="s-scan-mode"><option value="full">全量重建（兼容旧计划）</option><option value="incremental">增量扫描（只重建变化组）</option></select>
+          <p class="hint">两种模式都会完整枚举目录。无模式的旧计划按全量执行；重建索引不使用此参数。</p></div>
+        <div class="field" data-show="probe"><label for="s-status">影片状态</label>
+          <select id="s-status">
+            <option value="success">可播放</option>
+            <option value="manual">手动录入</option>
+            <option value="all">全部已有 NFO 的影片</option>
+          </select></div>
+        <div class="field" data-show="probe"><label>探测范围</label>
+          <label class="check"><input id="s-only-missing" type="checkbox"> 仅未探测的条目</label></div>
+        <div class="field full" data-show="translate"><label>翻译字段</label>
+          <label class="check"><input id="s-translate-title" type="checkbox" checked> 标题（NFO originaltitle，缺失跳过）</label>
+          <label class="check"><input id="s-translate-plot" type="checkbox"> 简介（当前内容，可能已翻译）</label>
+          <p class="hint">${esc(TRANSLATE_HINT)}</p></div>
+        <div class="field" data-show="translate"><label for="s-translate-limit">数量上限（0 为不限）</label><input id="s-translate-limit" type="number" min="0" max="100000" step="1" value="0"></div>
+        <div class="field"><label>启用</label>
+          <label class="check"><input id="s-enabled" type="checkbox"${!editing || editing.enabled ? ' checked' : ''}> 保存后参与调度</label></div>
+        <div class="field full"><label>常用预设</label>
+          <div class="preset-row">${CRON_PRESETS.map(([text, expr]) =>
+            `<button type="button" class="btn btn-sm preset" data-cron="${esc(expr)}">${esc(text)}</button>`).join('')}</div></div>
+        <p class="hint full" id="s-preview" style="grid-column:1/-1">标准 5 段（分 时 日 月 周）或 @daily/@hourly 等描述符；按服务器本地时区执行，浏览器时区只影响展示；留空无法保存。</p>
+        <div class="form-foot" style="grid-column:1/-1">
+          ${paramsReadable ? '' : '<p role="alert">原任务参数无法读取，已禁止保存。请先由管理员核对配置，不会用空参数覆盖。</p>'}
+          ${editing && !editing.config_etag ? '<p role="alert">服务器未提供配置校验令牌，已禁止覆盖保存。请更新服务后刷新。</p>' : ''}
+          <p id="sched-conflict" role="alert" hidden></p>
+          <button id="sched-submit" class="btn btn-accent" type="submit"${paramsReadable && (!editing || editing.config_etag) ? '' : ' disabled'}>${icon('plus')}<span>${editing ? '保存修改' : '新建任务'}</span></button>
+        </div>
+      </form>
+    </div></details>
+
     <section class="panel">
-      <div class="panel-head"><h2>任务日志</h2>
+      <div class="panel-head"><h2>执行记录</h2>
         <div class="panel-actions">
           <button id="task-refresh" class="btn btn-sm">刷新</button>
           <button id="task-scan" class="btn btn-accent btn-sm">${icon('film')}<span>立即扫描</span></button>
@@ -2007,7 +2315,10 @@ async function pageScheduled() {
   function syncParams() {
     const kind = typeEl.value;
     document.querySelectorAll('[data-show="library"]').forEach(el => { el.hidden = kind === 'reindex'; });
+    document.querySelectorAll('[data-show="scan"]').forEach(el => { el.hidden = kind !== 'scan'; });
     document.querySelectorAll('[data-show="probe"]').forEach(el => { el.hidden = kind !== 'probe'; });
+    document.querySelectorAll('[data-show="translate"]').forEach(el => { el.hidden = kind !== 'translate'; });
+    if (!editing && kind === 'translate') document.querySelector('#s-enabled').checked = false;
   }
 
   // 即时校验表达式并预览后续执行时间（后端解析，与调度用同一套规则）。
@@ -2037,6 +2348,27 @@ async function pageScheduled() {
     document.querySelector('#s-only-missing').checked = params.only_missing !== false;
   } else {
     document.querySelector('#s-only-missing').checked = true;
+  }
+  if (editing?.type === 'scan') {
+    document.querySelector('#s-scan-mode').value = params.mode === undefined ? 'full' : params.mode;
+    if (!['full', 'incremental'].includes(params.mode === undefined ? 'full' : params.mode)) {
+      paramsReadable = false;
+      document.querySelector('#sched-submit').disabled = true;
+      const warning = document.querySelector('#sched-conflict');
+      warning.hidden = false; warning.textContent = '扫描模式参数无法读取，禁止用默认值覆盖。请核对原配置。';
+    }
+  }
+  if (editing?.type === 'translate') {
+    const fields = params.fields === undefined ? ['title'] : params.fields;
+    if (!Array.isArray(fields) || !fields.length || fields.some(field => !['title', 'plot'].includes(field))) paramsReadable = false;
+    document.querySelector('#s-translate-title').checked = Array.isArray(fields) && fields.includes('title');
+    document.querySelector('#s-translate-plot').checked = Array.isArray(fields) && fields.includes('plot');
+    document.querySelector('#s-translate-limit').value = String(params.limit ?? 0);
+    if (!paramsReadable) {
+      document.querySelector('#sched-submit').disabled = true;
+      const warning = document.querySelector('#sched-conflict');
+      warning.hidden = false; warning.textContent = '翻译字段参数无法读取，禁止用默认值覆盖。请核对原配置。';
+    }
   }
   syncParams();
   if (editing) checkCron();
@@ -2068,10 +2400,23 @@ async function pageScheduled() {
     const kind = typeEl.value;
     const libraryValue = document.querySelector('#s-lib').value;
     if (kind !== 'reindex' && libraryValue === '') { toast('原媒体库不可用，请明确选择媒体库', 'error'); return; }
+    let translateParams = {};
+    if (kind === 'translate') {
+      const fields = [];
+      if (document.querySelector('#s-translate-title').checked) fields.push('title');
+      if (document.querySelector('#s-translate-plot').checked) fields.push('plot');
+      try { translateParams = translationPayload({ library_id: Number(libraryValue) }, fields, Number(document.querySelector('#s-translate-limit').value)); }
+      catch (error) { toast(error.message, 'error'); return; }
+    }
+    if (kind === 'scan' && !['full', 'incremental'].includes(document.querySelector('#s-scan-mode').value)) {
+      toast('请选择有效的扫描模式', 'error'); return;
+    }
     const taskParams = scheduledFormParams(kind, editing, params, {
       library_id: Number(libraryValue) || 0,
+      mode: kind === 'scan' ? document.querySelector('#s-scan-mode').value : undefined,
       status: document.querySelector('#s-status').value,
-      only_missing: document.querySelector('#s-only-missing').checked
+      only_missing: document.querySelector('#s-only-missing').checked,
+      ...translateParams
     });
     const body = {
       name: document.querySelector('#s-name').value.trim(),
@@ -2110,8 +2455,22 @@ async function pageScheduled() {
       });
     } else if (role === 'run') {
       el.addEventListener('click', async () => {
-        try { await api(`/scheduled/${id}/run`, { method: 'POST' }); toast('已触发执行，结果见下方任务日志'); }
+        if (el.disabled) return;
+        const task = items.find(item => String(item.id) === String(id));
+        if (task?.type === 'translate') {
+          let p;
+          try {
+            p = JSON.parse(task.params || '{}');
+            if (!p || typeof p !== 'object' || Array.isArray(p)) throw new Error('invalid params');
+            translationPayload({ library_id: p.library_id }, p.fields === undefined ? ['title'] : p.fields, p.limit ?? 0);
+          } catch { toast('翻译计划参数无法确认，请先编辑核对', 'error'); return; }
+          const range = p.library_id ? `媒体库 ${p.library_id}` : '全部媒体库';
+          if (!confirm(`手动执行翻译计划「${task.name}」：${range}，字段 ${(p.fields || ['title']).join('/')}，数量 ${p.limit || '不限'}。\n${TRANSLATE_HINT}\n本次执行不改变自动调度开关。确认？`)) return;
+        }
+        el.disabled = true;
+        try { await api(`/scheduled/${id}/run`, { method: 'POST' }); toast('已触发执行，结果见下方任务日志；翻译详情可在独立翻译页查看'); }
         catch (e) { toast(e.message, 'error'); }
+        finally { el.disabled = false; }
       });
     } else if (role === 'edit') {
       el.addEventListener('click', () => { scheduledEditId = Number(id); refreshPage(pageScheduled, gen); });
@@ -2139,6 +2498,248 @@ async function pageScheduled() {
   });
 }
 
+/* ---------------------------------------------------------------- 运行日志 */
+// R4：独立磁盘日志页。数据来自 /api/admin/logs/disk（受限根 + HMAC 游标），
+// 不再混用设置页的 /logs ring 接口；所有内容走 textContent/esc，不渲染 HTML。
+let logsTimer = null;
+let logsEpoch = 0;
+let logsVisibilityHandler = null;
+
+function stopLogsPolling() {
+  if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
+  if (logsVisibilityHandler) {
+    document.removeEventListener('visibilitychange', logsVisibilityHandler);
+    logsVisibilityHandler = null;
+  }
+  logsEpoch++;
+}
+
+async function pageLogs() {
+  const gen = pageGen;
+  if (!me || !me.is_admin) {
+    content.innerHTML = `<section class="panel">${empty('仅管理员可用', '运行日志只对管理员开放。')}</section>`;
+    return;
+  }
+  stopLogsPolling();
+  const epoch = ++logsEpoch;
+  const identity = token;
+  const state = {
+    items: [], ids: new Set(), nextAfter: '', nextBefore: '', hasMoreBefore: false,
+    level: '', paused: false, backoff: 1000, loadingEarlier: false
+  };
+
+  content.innerHTML = `
+    <section class="panel" aria-labelledby="disk-logs-title">
+      <div class="panel-head"><h2 id="disk-logs-title">运行日志</h2>
+        <div class="row-actions">
+          <select id="dl-level" aria-label="日志级别筛选">
+            <option value="">全部级别</option><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option>
+          </select>
+          <button id="dl-pause" class="btn btn-sm" type="button">暂停</button>
+          <button id="dl-refresh" class="btn btn-sm" type="button">刷新</button>
+        </div></div>
+      <p class="hint" style="margin:0 0 8px">来源：服务器磁盘 <code>app-YYYY-MM-DD.log</code>（最新在上）· 约 1 秒增量刷新，非 fsync 保证 · 无法确认安全的旧格式行只显示隐藏占位符</p>
+      <p id="dl-status" class="hint" role="status" aria-live="polite">正在连接磁盘日志…</p>
+      <div id="dl-newbar" class="warning-block" role="status" hidden><button id="dl-newjump" class="btn btn-sm" type="button">有新日志，点击查看</button></div>
+      <div id="dl-scroll" class="table-wrap" style="max-height:58vh;overflow:auto">
+        <table class="log-table">
+          <thead><tr><th style="width:190px">时间</th><th style="width:74px">级别</th><th>内容</th></tr></thead>
+          <tbody id="dl-body"><tr><td colspan="3">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="form-foot"><button id="dl-earlier" class="btn btn-sm" type="button" hidden>加载更早</button></div>
+    </section>`;
+
+  const find = selector => content.querySelector(selector);
+  const scroll = find('#dl-scroll');
+  const body = find('#dl-body');
+  const statusEl = find('#dl-status');
+  const newbar = find('#dl-newbar');
+  const current = () => epoch === logsEpoch && gen === pageGen && identity === token
+    && localStorage.getItem('emby_token') === identity && statusEl.isConnected;
+  const setStatus = (text, error = false) => {
+    if (!current()) return;
+    statusEl.textContent = text;
+    statusEl.setAttribute('role', error ? 'alert' : 'status');
+  };
+
+  const render = () => {
+    if (!current()) return;
+    const filtered = state.items.filter(item => !state.level || String(item.level).toUpperCase() === state.level);
+    body.innerHTML = filtered.length
+      ? filtered.map(item => `<tr><td class="mono">${esc(item.time || '—')}</td><td class="mono">${esc(item.level || '—')}</td><td class="mono">${esc(item.message || '')}</td></tr>`).join('')
+      : `<tr><td colspan="3">${state.level ? '当前已加载范围内没有该级别的日志' : '暂无日志'}</td></tr>`;
+    const earlier = find('#dl-earlier');
+    if (earlier) earlier.hidden = !state.hasMoreBefore || state.loadingEarlier;
+  };
+
+  // 按行 ID 去重；最多渲染 1000 行；始终 newest-first，追加后重新排序。
+  const addItems = (items) => {
+    let added = 0;
+    for (const item of items || []) {
+      if (!item || !item.id || state.ids.has(item.id)) continue;
+      state.ids.add(item.id);
+      state.items.push(item);
+      added++;
+    }
+    if (!added) return 0;
+    if (state.items.length > 1000) {
+      state.items.splice(1000).forEach(item => state.ids.delete(item.id));
+    }
+    state.items.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
+    return added;
+  };
+
+  let controller = null;
+  const request = async (query) => {
+    controller?.abort();
+    controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      return await api('/logs/disk' + query, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const replaceWithTail = (data, note) => {
+    state.items = [];
+    state.ids.clear();
+    addItems(data.items);
+    state.nextAfter = data.next_after || '';
+    state.nextBefore = data.next_before || '';
+    state.hasMoreBefore = !!data.next_before;
+    state.backoff = 1000;
+    newbar.hidden = true;
+    render();
+    setStatus(note, true);
+  };
+
+  const schedule = (delay) => {
+    if (!current()) return;
+    if (logsTimer) clearTimeout(logsTimer);
+    logsTimer = setTimeout(poll, delay);
+  };
+
+  const initial = async () => {
+    try {
+      const data = await request('?kind=app&limit=200');
+      if (!current()) return;
+      state.items = [];
+      state.ids.clear();
+      addItems(data.items || []);
+      state.nextAfter = data.next_after || '';
+      state.nextBefore = data.next_before || '';
+      state.hasMoreBefore = !!data.has_more;
+      state.backoff = 1000;
+      render();
+      if (data.reset || data.gap) setStatus('日志已轮转或清理，已从当前尾部重新加载；更早的缺口无法补读。', true);
+      else setStatus('已连接 · 每秒增量刷新');
+      schedule(1000);
+    } catch (e) {
+      if (!current()) return;
+      state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
+      setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
+      schedule(state.backoff);
+    }
+  };
+
+  const poll = async () => {
+    logsTimer = null;
+    if (!current()) return;
+    if (document.hidden) return; // 可见性恢复时由 visibilitychange 重新排程
+    if (state.paused) { schedule(2000); return; }
+    try {
+      const query = state.nextAfter
+        ? `?kind=app&after=${encodeURIComponent(state.nextAfter)}&limit=200`
+        : '?kind=app&limit=200';
+      const data = await request(query);
+      if (!current()) return;
+      if (data.reset || data.gap) {
+        replaceWithTail(data, '日志文件已轮转或被清理，已从当前尾部重新加载；缺口无法补读。');
+      } else {
+        const added = addItems(data.items || []);
+        state.nextAfter = data.next_after || state.nextAfter;
+        if (added) {
+          // 用户离开顶部阅读时暂停插入，只提示有新日志，避免抢滚动位置。
+          if (scroll.scrollTop > 8) newbar.hidden = false;
+          else render();
+        }
+        state.backoff = 1000;
+        if (!state.paused) setStatus('已连接 · 每秒增量刷新');
+      }
+      schedule(1000);
+    } catch (e) {
+      if (!current() || e.status === 401) return;
+      state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
+      setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
+      schedule(state.backoff);
+    }
+  };
+
+  logsVisibilityHandler = () => {
+    if (!current()) return;
+    if (document.hidden) {
+      if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
+      return;
+    }
+    state.backoff = 1000;
+    schedule(0);
+  };
+  document.addEventListener('visibilitychange', logsVisibilityHandler);
+
+  find('#dl-level').addEventListener('change', event => {
+    state.level = String(event.target.value || '').toUpperCase();
+    render();
+  });
+  find('#dl-pause').addEventListener('click', () => {
+    state.paused = !state.paused;
+    find('#dl-pause').textContent = state.paused ? '继续' : '暂停';
+    if (state.paused) {
+      if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
+      setStatus('已暂停自动刷新；点击「继续」恢复。');
+    } else {
+      setStatus('已恢复增量刷新');
+      schedule(0);
+    }
+  });
+  find('#dl-refresh').addEventListener('click', () => {
+    if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
+    setStatus('正在重新加载…');
+    void initial();
+  });
+  find('#dl-earlier').addEventListener('click', async () => {
+    if (!current() || state.loadingEarlier || !state.nextBefore) return;
+    state.loadingEarlier = true;
+    render();
+    try {
+      const data = await request(`?kind=app&before=${encodeURIComponent(state.nextBefore)}&limit=200`);
+      if (!current()) return;
+      if (data.reset || data.gap) { replaceWithTail(data, '日志已轮转或清理，无法继续向前读取；已回到当前尾部。'); return; }
+      const before = scroll.scrollTop;
+      addItems(data.items || []);
+      state.nextBefore = data.next_before || state.nextBefore;
+      state.hasMoreBefore = !!data.has_more;
+      render();
+      // 追加在底部，保持用户当前阅读位置。
+      scroll.scrollTop = Math.min(before, scroll.scrollHeight - scroll.clientHeight);
+      setStatus(`已加载更早日志 · 当前已加载 ${state.items.length} 条（仅本页范围，不代表全部磁盘历史）`);
+    } catch (e) {
+      if (current()) setStatus(`加载更早日志失败：${e.message || '读取失败'}`, true);
+    } finally {
+      state.loadingEarlier = false;
+      if (current()) render();
+    }
+  });
+  find('#dl-newjump').addEventListener('click', () => {
+    render();
+    scroll.scrollTop = 0;
+    newbar.hidden = true;
+  });
+
+  await initial();
+}
+
 /* ---------------------------------------------------------------- 路由 */
 const pages = {
   overview: pageOverview,
@@ -2146,7 +2747,9 @@ const pages = {
   items: pageItems,
   settings: pageSettings,
   activity: pageActivity,
+  logs: pageLogs,
   scrape: pageScrape,
+  translate: pageTranslate,
   scheduled: pageScheduled,
   probe: pageProbe
 };
@@ -2157,8 +2760,11 @@ let pageGen = 0;
 
 async function page(name) {
   // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
+  createdAPIKey = null; // 导航销毁仅在创建页暂存的管理员密钥原文。
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
+  stopLogsPolling();
+  if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
   stopProbePolling();
   // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
   // 否则它会在新页面上命中同名元素，把不该关的面板关掉。
@@ -2217,11 +2823,10 @@ function renderProbeProgress(p) {
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
   el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : (p.error ? '探测结束（存在错误）' : '探测完成'));
-  const total = p.total || 0;
-  const done = p.done || 0;
+  const { total, done, percent } = progressCounts(p);
   el.count.textContent = total ? `${done}/${total}` : String(done);
   el.fill.classList.toggle('is-indeterminate', !total && p.running);
-  el.fill.style.width = total ? `${Math.min(100, Math.round(done / total * 100))}%` : '100%';
+  el.fill.style.width = `${percent}%`;
   const parts = [];
   if (p.success) parts.push(`成功 ${p.success}`);
   if (p.skipped) parts.push(`跳过 ${p.skipped}`);
@@ -2240,6 +2845,8 @@ function setProbeButton(busy) {
   const btn = document.querySelector('#probe-media');
   if (!btn) return;
   btn.disabled = busy;
+  const mode = document.querySelector('#scan-mode');
+  if (mode) mode.disabled = busy;
   const span = btn.querySelector('span');
   if (span) span.textContent = busy ? '探测中…' : '探测媒体信息';
 }
@@ -2337,9 +2944,47 @@ const scanTitle = document.querySelector('#scan-progress-title');
 const scanCount = document.querySelector('#scan-progress-count');
 const scanFill = document.querySelector('#scan-progress-fill');
 const scanDetail = document.querySelector('#scan-progress-detail');
+const scanClose = document.querySelector('#scan-progress-close');
 let scanTimer = null;
 let scanSubmitting = false;
 let scanObservation = 0;
+// R2：首读历史终态不是通知；运行身份用 instance_id+run_id 识别，
+// 不比较秒级时间戳，也不在重启后把重新编号的 task_id 当同一轮运行。
+let scanFirstRead = true;
+const scanObservedRuns = new Set();
+const scanNotifiedRuns = new Set();
+let scanWallRefresh = null; // 只刷新本次提交来源的媒体墙，不跟随后来的导航/筛选。
+
+function scanRunKey(p) {
+  if (p && p.instance_id && p.run_id) return p.instance_id + ':' + p.run_id;
+  if (p && Number.isSafeInteger(p.task_id) && p.task_id > 0) return 'task:' + p.task_id;
+  return '';
+}
+
+async function readScanProgress(path, options) {
+  const p = await api(path, options);
+  const pending = scanWallRefresh;
+  if (!p || typeof p.running !== 'boolean' || !pending?.accepted || !pending.taskId) return p;
+  if (p.running && Number(p.task_id) === pending.taskId) return p;
+  // 202 后首读可能仍是旧任务（含 running）；始终按本次 task_id 确认。
+  const task = await api('/tasks/' + pending.taskId, options);
+  if (scanWallRefresh !== pending) return p;
+  if (task.task_id !== undefined && Number(task.task_id) !== pending.taskId) throw new Error('scan task identity mismatch');
+  if (task.status === 'queued' || task.status === 'running') return { running: true, task_id: pending.taskId, mode: task.mode, finished_at: null };
+  if (!['succeeded', 'failed', 'skipped'].includes(task.status)) throw new Error('invalid scan task status');
+  // 极快完成时服务器进度可能还停在上一轮；task 是当前提交的权威身份，
+  // 此时清空 instance/run，让完成通知按 task:<id> 归并，而不是冒充旧 run。
+  const stale = Number(p.task_id) !== pending.taskId;
+  const result = task.result && typeof task.result === 'object' && !Array.isArray(task.result) ? task.result : null;
+  const current = result ? { ...result } : (stale ? {} : p);
+  if (result && Number.isFinite(result.groups_total) && Number.isFinite(result.groups_done)) {
+    current.total = result.groups_total; current.done = result.groups_done;
+  }
+  return { ...current, mode: task.mode || current.mode,
+    instance_id: stale ? '' : p.instance_id, run_id: stale ? '' : p.run_id,
+    task_id: pending.taskId, running: false, finished_at: task.finished_at || (!stale ? p.finished_at : null),
+    error: task.error || (task.status === 'succeeded' ? current.error || '' : '扫描任务未成功完成'), task_confirmed: true };
+}
 // 扫描完成后面板自动收起的延时句柄。与 probeHideTimer 同理：
 // 句柄不托管时，上一轮排下的 4 秒定时器会关掉下一轮刚显示出来的面板
 //（而那时轮询已停，面板再也不会被显示回来）。
@@ -2354,18 +2999,28 @@ function baseName(path) {
 }
 
 function renderScanProgress(p) {
-  if (!p || (!p.running && !p.finished_at)) { scanPanel.hidden = true; return; }
+  if (!p || (!p.running && !p.finished_at)) { scanPanel.hidden = true; scanClose.hidden = true; return; }
   scanPanel.hidden = false;
+  const hasFailure = p.error || p.failed || p.incomplete;
+  scanClose.hidden = p.running || !hasFailure;
   const lib = p.libraries > 1 ? `${p.library_name || '媒体库'}（${p.library_index}/${p.libraries}）` : (p.library_name || '媒体库');
   scanTitle.textContent = p.running ? `正在扫描 ${lib}`
-    : `${p.error || p.failed ? '扫描结束（存在错误）' : '扫描完成'} ${lib}`;
+    : `${hasFailure ? '扫描结束（存在错误）' : '扫描完成'} ${lib}`;
   scanDetail.setAttribute('role', 'status');
-  const total = p.total || 0;
-  const done = p.done || 0;
-  scanCount.textContent = total ? `${done}/${total}` : String(done);
+  const groupMode = p.mode === 'incremental' || p.mode === 'full';
+  const { total, done, percent } = progressCounts(groupMode && Number.isFinite(p.groups_total) && Number.isFinite(p.groups_done)
+    ? { total: p.groups_total, done: p.groups_done } : p);
+  scanCount.textContent = total ? `${done}/${total}${groupMode ? ' 组' : ''}` : String(done);
   scanFill.classList.toggle('is-indeterminate', !total && p.running);
-  scanFill.style.width = total ? `${Math.min(100, Math.round(done / total * 100))}%` : '100%';
+  scanFill.style.width = `${percent}%`;
   const parts = [];
+  if (groupMode) {
+    parts.push(p.mode === 'incremental' ? '增量扫描' : '全量重建');
+    parts.push(`未变化 ${p.unchanged_groups || 0}`, `新增 ${p.added || 0}`, `更新 ${p.updated || 0}`, `删除 ${p.deleted || 0}`);
+    if (p.cleanup_performed) parts.push('已完成缺失索引清理检查');
+    else if (!p.running) parts.push('未执行缺失索引清理（保留原索引）');
+    if (p.incomplete) parts.push('未完成：部分成果已保留，请核对错误后重试');
+  }
   if (p.success) parts.push(`已刮削 ${p.success}`);
   if (p.pending) parts.push(`未刮削 ${p.pending}`);
   if (p.skipped) parts.push(`跳过 ${p.skipped}`);
@@ -2385,6 +3040,8 @@ function setScanButton(busy, label) {
   const btn = document.querySelector('#scan');
   if (!btn) return;
   btn.disabled = busy;
+  const mode = document.querySelector('#scan-mode');
+  if (mode) mode.disabled = busy;
   const span = btn.querySelector('span');
   if (span) span.textContent = label || (busy ? '扫描中…' : '开始扫描');
 }
@@ -2403,6 +3060,7 @@ function startScanPolling() {
   stopScanPolling();
   setScanButton(true, '确认扫描状态…');
   scanTimer = startProgressPolling('/scan/progress', p => {
+    if (p.running && scanWallRefresh?.accepted && Number(p.task_id) === scanWallRefresh.taskId) scanWallRefresh.sawRunning = true;
     if (!p.running && scanSubmitting) {
       // 异步提交在途：首个GET可能早于 worker 启动，或读到上一轮终态。
       // 不把在途提交误判为空闲，也不停止后续观察。
@@ -2413,11 +3071,43 @@ function startScanPolling() {
       setScanButton(true, '等待扫描响应…');
       return;
     }
-    renderScanProgress(p);
-    setScanButton(p.running);
-    if (!p.running) {
+    if (scanFirstRead && !p.running && !scanWallRefresh) {
+      // 初次打开就先读到空闲/历史终态：不展示、不安排收起动画，按钮恢复可用。
+      scanFirstRead = false;
+      scanPanel.hidden = true;
+      scanClose.hidden = true;
+      setScanButton(false);
       stopScanPolling();
-      if (p.finished_at && !p.failed && !p.error) {
+      return;
+    }
+    scanFirstRead = false;
+    const runKey = scanRunKey(p);
+    if (p.running) {
+      if (runKey) scanObservedRuns.add(runKey);
+      renderScanProgress(p);
+      setScanButton(true);
+      return;
+    }
+    if (runKey && scanNotifiedRuns.has(runKey)) {
+      // 同一轮终态只通知一次；换页/回到首页不重复弹窗。
+      scanPanel.hidden = true;
+      scanClose.hidden = true;
+      setScanButton(false);
+      stopScanPolling();
+      return;
+    }
+    if (runKey) scanNotifiedRuns.add(runKey);
+    renderScanProgress(p);
+    setScanButton(false);
+    if (!p.running) {
+      const pending = scanWallRefresh;
+      scanWallRefresh = null;
+      if (pending?.accepted && (p.task_confirmed || pending.sawRunning) &&
+          pending.gen === pageGen && pending.wall === wallGen && pending.identity === token &&
+          localStorage.getItem('emby_token') === pending.identity &&
+          pages[location.hash.replace('#', '')] === pageItems) reloadWall();
+      stopScanPolling();
+      if (p.finished_at && !p.failed && !p.error && !p.incomplete) {
         const observation = scanObservation;
         scanHideTimer = setTimeout(() => {
           if (observation !== scanObservation || scanSubmitting || scanTimer) return;
@@ -2429,13 +3119,15 @@ function startScanPolling() {
   }, delay => {
     scanProgressUnavailable(delay);
     if (delay === null) stopScanPolling();
-  }, () => scanSubmitting);
+  }, () => scanSubmitting, readScanProgress);
 }
 
 async function runScan(libraryId) {
   // 行内入口也必须服从全局状态：提交在途、状态未知或已确认运行均不可再次POST。
-  if (scanSubmitting || document.querySelector('#scan')?.disabled) return;
+  if (scanSubmitting || document.querySelector('#scan')?.disabled || localStorage.getItem('emby_token') !== token) return;
   const gen = pageGen, requestGen = wallGen;
+  const pending = { gen, wall: requestGen, identity: token, accepted: false, taskId: null, sawRunning: false };
+  scanWallRefresh = pending;
   scanSubmitting = true;
   let completed = false, denied = false;
   scanPanel.hidden = false;
@@ -2445,8 +3137,12 @@ async function runScan(libraryId) {
   startScanPolling();
   try {
     // 异步入口：202 只代表任务已排队，进度与计数由 /scan/progress 观察器呈现。
-    const url = libraryId ? `/tasks/scan?library_id=${encodeURIComponent(libraryId)}` : '/tasks/scan';
-    await api(url, { method: 'POST' });
+    const mode = document.querySelector('#scan-mode')?.value === 'full' ? 'full' : 'incremental';
+    const url = libraryId ? `/tasks/scan?library_id=${encodeURIComponent(libraryId)}&mode=${mode}` : `/tasks/scan?mode=${mode}`;
+    const accepted = await api(url, { method: 'POST' });
+    if (scanWallRefresh !== pending || pending.identity !== token || localStorage.getItem('emby_token') !== pending.identity) return;
+    pending.accepted = true;
+    pending.taskId = Number.isSafeInteger(accepted?.task_id) && accepted.task_id > 0 ? accepted.task_id : null;
     completed = true;
     toast('扫描任务已启动，进度见上方面板');
   } catch (e) {
@@ -2456,17 +3152,70 @@ async function runScan(libraryId) {
     scanSubmitting = false;
   }
   // 提交失败不重放POST；响应结束后只通过同一观察器重新确认全局状态。
-  if (denied) { stopScanPolling(); scanProgressUnavailable(null); }
+  if (scanWallRefresh !== pending || pending.identity !== token || localStorage.getItem('emby_token') !== pending.identity) return;
+  if (denied) { scanWallRefresh = null; stopScanPolling(); scanProgressUnavailable(null); }
   else startScanPolling();
   // 全局工具栏跨页面继续观察；提交回包不得刷新用户已切走/重新筛选的页面。
   const name = location.hash.replace('#', '');
-  if (completed && gen === pageGen && requestGen === wallGen && pages[name] === pageItems) reloadWall();
+  if (completed && gen === pageGen && requestGen === wallGen && pages[name] === pageItems) {
+    reloadWall();
+    pending.wall = wallGen; // 接受时的兼容刷新不使完成刷新误认作用户换筛选。
+  }
+}
+
+function clearSessionView() {
+  createdAPIKey = null;
+  settingsCategory = 'account';
+  me = null;
+  ++pageGen;
+  ++wallGen;
+  scanWallRefresh = null;
+  scanFirstRead = true;
+  scanObservedRuns.clear();
+  scanNotifiedRuns.clear();
+  stopScrapePolling();
+  if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
+  stopProbePolling();
+  stopScanPolling();
+  cancelProbeHide();
+  cancelScanHide();
+  closeOverlaysForNavigation();
+  content.innerHTML = '';
+  scanPanel.hidden = true;
+}
+
+async function logoutCurrentSession(button) {
+  const requestToken = token;
+  if (localStorage.getItem('emby_token') !== requestToken || button.disabled) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/auth/logout', { method: 'POST', headers: { 'X-Emby-Token': requestToken } });
+    if (localStorage.getItem('emby_token') !== requestToken) return;
+    if (!response.ok && response.status !== 401) throw new Error('退出失败，请重试');
+    clearSessionView();
+    localStorage.removeItem('emby_token');
+    token = null;
+    window.location.replace('/');
+  } catch (error) {
+    if (localStorage.getItem('emby_token') === requestToken) toast(error.message || '退出失败，请重试', 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function identityStorageChanged(event) {
+  if ((event.key === 'emby_token' || event.key === null) && localStorage.getItem('emby_token') !== token) {
+    clearSessionView();
+    window.location.replace('/');
+  }
 }
 
 async function boot() {
   if (!token) { window.location.replace('/'); return; }
+  const requestToken = token;
   try {
-    const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': token } });
+    const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': requestToken } });
+    if (localStorage.getItem('emby_token') !== requestToken) return;
     if (response.status === 401) {
       localStorage.removeItem('emby_token');
       window.location.replace('/');
@@ -2474,8 +3223,10 @@ async function boot() {
     }
     if (!response.ok) throw new Error('authentication unavailable');
     const dto = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
+    if (localStorage.getItem('emby_token') !== requestToken) return;
     me = dto ? { name: dto.Name || '', is_admin: !!(dto.Policy && dto.Policy.IsAdministrator) } : null;
   } catch {
+    if (localStorage.getItem('emby_token') !== requestToken) return;
     // A failed validation is not evidence that the stored credential is invalid.
     content.innerHTML = `<section class="empty"><p role="alert">暂时无法验证登录状态，请检查服务或网络后重试。已保留登录凭据。</p><button id="auth-retry" class="btn btn-accent" type="button">重试验证</button></section>`;
     document.querySelector('#auth-retry').addEventListener('click', event => {
@@ -2502,7 +3253,15 @@ async function boot() {
     const name = location.hash.replace('#', '');
     page(pages[name] ? name : 'overview');
   });
+  document.querySelector('#logout').addEventListener('click', event => { void logoutCurrentSession(event.currentTarget); });
   document.querySelector('#scan').addEventListener('click', () => runScan());
+  scanClose.addEventListener('click', () => {
+    cancelScanHide();
+    stopScanPolling();
+    scanPanel.hidden = true;
+    scanClose.hidden = true;
+    setScanButton(false);
+  });
   window.addEventListener('scroll', wallMaybeLoadMore, { passive: true });
   document.querySelector('#player-close').addEventListener('click', closePlayer);
   document.querySelector('#player-overlay').addEventListener('click', event => {
@@ -2532,4 +3291,5 @@ async function boot() {
   const initial = location.hash.replace('#', '');
   page(pages[initial] ? initial : 'overview');
 }
+window.addEventListener('storage', event => identityStorageChanged(event));
 boot();

@@ -116,13 +116,16 @@ async function submit(event, initializing) {
 
 async function bootLogin() {
   if (token) {
+    const requestToken = token;
     try {
-      const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': token } });
+      const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': requestToken } });
+      if (localStorage.getItem('emby_token') !== requestToken) return;
       if (response.ok) { window.location.replace('/admin'); return; }
       if (response.status !== 401) throw new Error('authentication unavailable');
       localStorage.removeItem('emby_token');
       token = '';
     } catch {
+      if (localStorage.getItem('emby_token') !== requestToken) return;
       root.innerHTML = `<section class="auth-card"><h1>暂时无法验证登录状态</h1><p class="auth-error" role="alert">请检查服务或网络后重试。已保留登录凭据。</p><button id="auth-retry" class="btn btn-accent" type="button">重试验证</button></section>`;
       document.querySelector('#auth-retry').addEventListener('click', event => {
         event.currentTarget.disabled = true;

@@ -38,6 +38,31 @@ func Run(opts Options) (Result, error) {
 	if strings.TrimSpace(opts.DBPath) == "" || strings.TrimSpace(opts.OutDir) == "" {
 		return Result{}, fmt.Errorf("backup: db and out dir required")
 	}
+	// 所有会删除、创建或遍历的路径在写文件前校验。固定本次使用的库清单，
+	// 避免校验后再从活动库读取另一组路径。
+	// 固定规范化路径供校验、发布和清理共同使用，不能让 prune 再解释原始路径。
+	var err error
+	opts.OutDir, err = canonicalPath(opts.OutDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("backup: resolve output: %w", err)
+	}
+	opts.DBPath, err = canonicalPath(opts.DBPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("backup: resolve database: %w", err)
+	}
+	db, err := sql.Open("sqlite", readonlyDSN(opts.DBPath))
+	if err != nil {
+		return Result{}, fmt.Errorf("backup: open db: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	libs, err := readLibraries(db, opts.NFORoot)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := validateOutputPaths(opts.DBPath, opts.OutDir, libs); err != nil {
+		return Result{}, err
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -58,13 +83,7 @@ func Run(opts Options) (Result, error) {
 			os.RemoveAll(stage)
 		}
 	}()
-	// 只读打开源库：备份不应有机会改写业务库；busy_timeout 给在线写入让路。
-	db, err := sql.Open("sqlite", readonlyDSN(opts.DBPath))
-	if err != nil {
-		return Result{}, fmt.Errorf("backup: open db: %w", err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
+	// 源库只读，busy_timeout 给在线写入者让路。
 	dest := filepath.Join(stage, "db.sqlite")
 	if _, err := db.Exec("VACUUM INTO ?", dest); err != nil {
 		return Result{}, fmt.Errorf("backup: snapshot: %w", err)
@@ -74,7 +93,7 @@ func Run(opts Options) (Result, error) {
 	}
 	result := Result{Dir: dir, Database: filepath.Join(dir, "db.sqlite"), FinishedAt: now.UTC()}
 	if opts.NFORoot {
-		count, err := copyNFO(db, filepath.Join(stage, "nfo"))
+		count, err := copyNFO(libs, filepath.Join(stage, "nfo"))
 		if err != nil {
 			return Result{}, err
 		}
@@ -96,6 +115,77 @@ func Run(opts Options) (Result, error) {
 		result.Pruned = pruned
 	}
 	return result, nil
+}
+
+// validateOutputPaths 要求备份根目录与源文件/媒体库分离。除了防止库内备份
+// 复制自身，也防止 replace/prune 把恰好使用时间戳目录名的源库删掉。
+func validateOutputPaths(dbPath, outDir string, libs []backupLibrary) error {
+	output, err := canonicalPath(outDir)
+	if err != nil {
+		return fmt.Errorf("backup: resolve output: %w", err)
+	}
+	database, err := canonicalPath(dbPath)
+	if err != nil {
+		return fmt.Errorf("backup: resolve database: %w", err)
+	}
+	if containsPath(output, database) || containsPath(database, output) {
+		return fmt.Errorf("backup: output directory overlaps source database")
+	}
+	for _, lib := range libs {
+		root, err := canonicalPath(lib.path)
+		if err != nil {
+			return fmt.Errorf("backup: resolve library %d: %w", lib.id, err)
+		}
+		if containsPath(root, output) || containsPath(output, root) {
+			return fmt.Errorf("backup: output directory overlaps library %d", lib.id)
+		}
+	}
+	return nil
+}
+
+func containsPath(parent, path string) bool {
+	rel, err := filepath.Rel(parent, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// canonicalPath 解析已有前缀的符号链接，同时支持尚未创建的输出/离线库。
+// 悬空链接不可当成普通不存在路径处理，否则可能绕过重叠校验。
+func canonicalPath(path string) (string, error) {
+	current := path
+	if !filepath.IsAbs(current) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		// 不使用 Join/Abs：必须先跟随符号链接，再处理其后的 ..。
+		current = cwd + string(filepath.Separator) + current
+	}
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if _, statErr := os.Lstat(current); statErr == nil || !os.IsNotExist(statErr) {
+			return "", err
+		}
+		dir, base := filepath.Split(current)
+		parent := strings.TrimSuffix(dir, string(filepath.Separator))
+		if parent == filepath.VolumeName(parent) {
+			parent = dir // 保留 / 或盘符根目录。
+		}
+		if parent == current || parent == "" {
+			return "", err
+		}
+		suffix = append(suffix, base)
+		current = parent
+	}
 }
 
 // readonlyDSN 只开放读事务，并用 busy_timeout 等待在线写入者。
@@ -130,29 +220,45 @@ func checkSnapshot(path string) error {
 	return nil
 }
 
-// copyNFO 按库复制 .nfo 文件，保持库内相对路径；任何读写错误都让备份失败，
-// 避免出现"数据库有、NFO 没有"的静默半份备份。
-func copyNFO(db *sql.DB, root string) (int, error) {
+type backupLibrary struct {
+	id   int64
+	path string
+}
+
+func readLibraries(db *sql.DB, required bool) ([]backupLibrary, error) {
+	if !required {
+		// 兼容只含业务自定义表的数据库备份，但应用库即使不复制 NFO
+		// 也必须保护媒体目录不被 replace/prune 清理。
+		var exists bool
+		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='libraries')").Scan(&exists); err != nil {
+			return nil, fmt.Errorf("backup: libraries schema: %w", err)
+		}
+		if !exists {
+			return nil, nil
+		}
+	}
 	rows, err := db.Query("SELECT id,path FROM libraries ORDER BY id")
 	if err != nil {
-		return 0, fmt.Errorf("backup: libraries: %w", err)
+		return nil, fmt.Errorf("backup: libraries: %w", err)
 	}
 	defer rows.Close()
-	type library struct {
-		id   int64
-		path string
-	}
-	var libs []library
+	var libs []backupLibrary
 	for rows.Next() {
-		var l library
+		var l backupLibrary
 		if err := rows.Scan(&l.id, &l.path); err != nil {
-			return 0, fmt.Errorf("backup: libraries: %w", err)
+			return nil, fmt.Errorf("backup: libraries: %w", err)
 		}
 		libs = append(libs, l)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("backup: libraries: %w", err)
+		return nil, fmt.Errorf("backup: libraries: %w", err)
 	}
+	return libs, nil
+}
+
+// copyNFO 按库复制 .nfo 文件，保持库内相对路径；任何读写错误都让备份失败，
+// 避免出现"数据库有、NFO 没有"的静默半份备份。
+func copyNFO(libs []backupLibrary, root string) (int, error) {
 	count := 0
 	for _, lib := range libs {
 		info, err := os.Stat(lib.path)

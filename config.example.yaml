@@ -25,7 +25,7 @@ server_name: "Emby-go"
 # 若需固定（如迁移/多实例），填一段全局唯一字符串。
 server_id: ""
 
-# Redis 为必选缓存后端：地址必填，连不上/Ping 失败将拒绝启动。
+# Redis 为可选缓存后端：未配置或连接失败时回退进程内缓存，仅适合单实例。
 redis_addr: "127.0.0.1:6379"   # 可选；留空或不可达时使用进程内缓存
 redis_password: ""
 redis_db: 0
@@ -73,6 +73,21 @@ webhook:
   url: ""                  # http(s)；禁止 userinfo 与 fragment
   timeout_seconds: 5       # 1..30 秒，0 使用默认 5；包含响应体读取
   allow_private: false     # 访问私网/回环需显式开启；仍遵循统一出站安全策略
+
+# ---- 认证限流（防爆破）----
+# 所有密码入口共用同一 guard：/Users/AuthenticateByName（含 /emby 前缀）、
+# /api/auth/initialize、/api/auth/password 与管理员解锁再认证。
+# 429 响应保持 AUTH_RATE_LIMITED 并带正整数 Retry-After；进程重启后计数清零。
+security:
+  auth:
+    ip_request_rate: 1.0            # 单 IP 每秒补令牌数
+    ip_request_burst: 10            # 单 IP 突发容量
+    global_request_rate: 20.0       # 全局每秒补令牌数
+    global_request_burst: 40        # 全局突发容量
+    bcrypt_concurrency: 4           # 1..16；占满后最多等待 100ms，超出返回 429
+    credential_body_bytes: 8192     # 512..1048576；超限 413 AUTH_BODY_TOO_LARGE
+    max_keys: 4096                  # 64..1048576；表满不再无界建键
+    account_cooldown_max_seconds: 300 # 1..3600；跨 IP 账号失败冷却上限
 
 # ---- 媒体信息探测（与扫库相互独立）----
 # 媒体墙「探测媒体信息」按钮 / POST /api/admin/probe/media 调用系统 ffprobe 读取

@@ -55,7 +55,7 @@ func (a *App) favoriteItem(c *gin.Context, favorite bool) {
 		return
 	}
 	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
+	if err != nil || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -81,7 +81,7 @@ func (a *App) rateItem(c *gin.Context, likes int) {
 		return
 	}
 	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
+	if err != nil || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -122,7 +122,7 @@ func (a *App) hideFromResume(c *gin.Context) {
 		return
 	}
 	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
+	if err != nil || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}

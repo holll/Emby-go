@@ -22,6 +22,7 @@ func playbackFixture(t *testing.T) (*App, int64) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
+	seedOwner(t, a)
 	lib, err := a.db.AddLibrary("playback", root)
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +39,7 @@ func reportPlayback(t *testing.T, a *App, id int64, event, sessionID string, pos
 	body := fmt.Sprintf(`{"ItemId":%q,"PositionTicks":%d,"PlaySessionId":%q}`, fmt.Sprint(id), position, sessionID)
 	w := httptest.NewRecorder()
 	c, _ := ginContext(w, httptest.NewRequest(http.MethodPost, "/Sessions/Playing"+event, strings.NewReader(body)))
+	c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
 	a.playing(c)
 	c.Writer.WriteHeaderNow()
 	if w.Code != http.StatusNoContent {

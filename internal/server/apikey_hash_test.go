@@ -31,7 +31,7 @@ func TestAPIKeyListHidesPlaintext(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if len(created.Key) != 48 || len(created.ID) != 64 || len(created.KeyPrefix) != 12 {
+	if len(created.Key) != 48 || len(created.ID) != 35 || len(created.KeyPrefix) != 12 {
 		t.Fatalf("create response=%s", w.Body.String())
 	}
 

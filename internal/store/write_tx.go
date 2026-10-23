@@ -5,11 +5,31 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"strings"
+	"time"
 )
 
 // writeTx owns a pinned SQLite connection and a transaction, but does not bump
 // cache versions. Callbacks must not commit/rollback or publish tentative state.
 func (s *Store) writeTx(write func(*sql.Tx) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = s.writeTxOnce(write)
+		if !isBusyErr(err) {
+			return err
+		}
+		time.Sleep(time.Duration(10<<attempt) * time.Millisecond)
+	}
+	return err
+}
+
+// writeTxOnce pins one connection and executes one write transaction. The
+// callback must be safe to re-run: the wrapper retries SQLITE_BUSY, which can
+// happen when another process commits between a deferred BEGIN and its first
+// write (busy_timeout cannot retry that snapshot upgrade).
+func (s *Store) writeTxOnce(write func(*sql.Tx) error) error {
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -39,6 +59,14 @@ func (s *Store) writeTx(write func(*sql.Tx) error) error {
 		return err
 	}
 	return nil
+}
+
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "SQLITE_BUSY")
 }
 
 func discardWriteConn(conn *sql.Conn) {

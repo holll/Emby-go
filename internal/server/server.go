@@ -32,10 +32,12 @@ type App struct {
 	db                *store.Store
 	router            *gin.Engine
 	cache             cache.Cache
-	webhook           *webhook.Sender
-	webhookMu         sync.RWMutex // immutable sender/config snapshots; never held during HTTP delivery
+	webhook           *webhook.Dispatcher
+	webhookMu         sync.RWMutex // immutable dispatcher/config snapshots; never held during HTTP delivery
 	webhookUpdateMu   sync.Mutex   // serialize persistent saves with shutdown
 	webhookConfig     config.WebhookConfig
+	webhookTargets    []webhookTargetSpec
+	webhookMulti      bool
 	webhookClosed     bool
 	logRetentionMu    sync.Mutex
 	logRetentionDays  int
@@ -58,7 +60,7 @@ type App struct {
 	nextTaskID int64
 
 	// 登录/初始化失败限流：进程内固定窗口，按 TCP 对端 IP 与账号计数。
-	authLimiter *authRateLimiter
+	authGuard *authGuard
 
 	// 进程内短缓存：图片 mtime tag 与 NFO 流信息解析结果，
 	// 避免列表/详情请求对媒体盘反复 stat / XML 解析（媒体盘可能较慢）。
@@ -81,8 +83,12 @@ type App struct {
 	scrapeSem chan struct{}
 
 	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
+	// instanceID 每次启动随机生成，runID 只在本实例内递增；前端用二者区分
+	// “同一轮运行”与“重启后重新编号的 task_id”，历史终态不再当新通知。
 	scanMu     sync.RWMutex
 	scanStatus scanStatus
+	instanceID string
+	scanRunSeq uint64
 
 	// D10：异步扫描任务表（进程内，容量 200，重启不恢复）。
 	scanTaskMu    sync.Mutex
@@ -92,13 +98,14 @@ type App struct {
 
 	// 媒体信息探测任务状态。probeCtx 挂在 rootCtx 之下：
 	// 任务在 goroutine 里跑，必须用常驻 context——用请求 context 会在 handler 返回时被取消。
-	probeTaskMu sync.RWMutex
-	probeStatus probeStatus
-	probeCtx    context.Context
-	probeCancel context.CancelFunc
-	rootCtx     context.Context
-	rootCancel  context.CancelFunc
-	startupWG   sync.WaitGroup // join startup DB readers before closing the store
+	probeTaskMu       sync.RWMutex
+	probeStatus       probeStatus
+	probeProgressEmit sync.Mutex // R6：串行化「计数 + 进度日志」，保证磁盘严格 [1/N]→[2/N]
+	probeCtx          context.Context
+	probeCancel       context.CancelFunc
+	rootCtx           context.Context
+	rootCancel        context.CancelFunc
+	startupWG         sync.WaitGroup // join startup DB readers before closing the store
 
 	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
 	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
@@ -124,8 +131,8 @@ type App struct {
 	// 计划任务调度器：定义存 DB，保存后 Reload 即时生效。
 	sched *scheduler.Scheduler
 
-	// nfoGate 是「扫库 / 探测 / 刮削」三者共用的 NFO 写入通道：
-	// 三者都会「读全文 → 改局部 → 原子写」同一批 NFO，并发会互相覆盖；
+	// nfoGate 是扫库、探测、刮削、头像、独立翻译和人工编辑共用的 NFO 写入通道：
+	// 它们都会「读全文 → 改局部 → 原子写」同一批 NFO，并发会互相覆盖；
 	// 刮削与整库扫描并行时 DeleteMissingSources 还可能误删。nfoOwner 记录当前持有者。
 	//
 	// nfoRefs 是同一持有者内的重入计数：批量探测与「单条探测」都用 "probe" 身份，
@@ -140,16 +147,31 @@ type App struct {
 	scrapeStatus scrapeStatus
 	scrapeCtx    context.Context
 	scrapeCancel context.CancelFunc
+
+	translation translationState
 }
 
 // scanStatus 管理端可轮询的扫描进度快照。
 type scanStatus struct {
+	InstanceID   string `json:"instance_id"`
+	RunID        string `json:"run_id,omitempty"`
+	TaskID       int64  `json:"task_id,omitempty"`
 	Running      bool   `json:"running"`
 	LibraryIndex int    `json:"library_index"`
 	Libraries    int    `json:"libraries"`
 	LibraryName  string `json:"library_name"`
+	Mode         string `json:"mode,omitempty"`
 	Total        int    `json:"total"`
 	Done         int    `json:"done"`
+	GroupsTotal  int    `json:"groups_total"`
+	GroupsDone   int    `json:"groups_done"`
+	Unchanged    int    `json:"unchanged_groups"`
+	Added        int    `json:"added"`
+	Updated      int    `json:"updated"`
+	Deleted      int    `json:"deleted"`
+	IndexChanged bool   `json:"index_changed"`
+	CleanupDone  bool   `json:"cleanup_performed"`
+	Incomplete   bool   `json:"incomplete"`
 	Current      string `json:"current"`
 	Success      int    `json:"success"`
 	Pending      int    `json:"pending"`
@@ -194,6 +216,16 @@ func New(cfg config.Config) (*App, error) {
 }
 
 // newApp 供测试注入任意 cache 实现（如内存版），生产路径不走这里。
+// newInstanceID 标识本次进程启动；配合实例内递增的 run_id，前端不必比较
+// 秒级时间戳，也不会在重启后把从 1 开始重新编号的 task_id 当成同一轮运行。
+func newInstanceID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err == nil {
+		return hex.EncodeToString(buf)
+	}
+	return fmt.Sprintf("t%d", time.Now().UnixNano())
+}
+
 func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -204,12 +236,12 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		db.Close()
 		return nil, err
 	}
-	effectiveWebhook, err := loadWebhookConfig(db, cfg.Webhook)
+	targets, targetSpecs, effectiveWebhook, multiTarget, err := loadWebhookTargets(db, cfg.Webhook)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	notifier, err := webhook.New(effectiveWebhook)
+	notifier, err := webhook.NewDispatcher(targets, webhook.DefaultEventBudget)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -241,7 +273,8 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		}
 	}
 	a := &App{
-		cfg: cfg, db: db, cache: cacheStore, webhook: notifier, webhookConfig: effectiveWebhook, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
+		cfg: cfg, db: db, cache: cacheStore, webhook: notifier, webhookConfig: effectiveWebhook,
+		webhookTargets: targetSpecs, webhookMulti: multiTarget, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
 		logRetentionDays: retentionDays, applyLogRetention: logging.SetRetentionDays,
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
 		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
@@ -249,7 +282,8 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
-		authLimiter:  newAuthRateLimiter(),
+		instanceID:   newInstanceID(),
+		authGuard:    newAuthGuard(authGuardConfig{IPRequestRate: cfg.Security.Auth.IPRequestRate, IPRequestBurst: cfg.Security.Auth.IPRequestBurst, GlobalRequestRate: cfg.Security.Auth.GlobalRequestRate, GlobalRequestBurst: cfg.Security.Auth.GlobalRequestBurst, BcryptConcurrency: cfg.Security.Auth.BcryptConcurrency, CredentialBodyBytes: int64(cfg.Security.Auth.CredentialBodyBytes), MaxKeys: cfg.Security.Auth.MaxKeys, AccountCooldownMaxSeconds: cfg.Security.Auth.AccountCooldownMaxSeconds}),
 		scanTasks:    make(map[int64]*asyncScanTask),
 		scanTaskIdem: make(map[string]scanIdemEntry),
 	}
@@ -434,6 +468,7 @@ func (a *App) routes() {
 	r.HEAD("/favicon.ico", a.favicon)
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
+	r.GET("/web/navigation.js", a.webAsset)
 	r.GET("/web/webhook-settings.js", a.webAsset)
 	r.GET("/web/log-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
@@ -442,9 +477,10 @@ func (a *App) routes() {
 	r.GET("/healthz", a.health)
 	r.GET("/api/version", noStore, a.buildInfo)
 	r.GET("/api/auth/status", noStore, a.authStatus)
-	r.POST("/api/auth/initialize", noStore, a.initialize)
+	r.POST("/api/auth/initialize", noStore, a.credentialLimited(a.initialize))
 	auth := r.Group("/api/auth", noStore, a.requireAuth)
-	auth.POST("/password", a.changePassword)
+	auth.POST("/password", a.credentialLimited(a.changePassword))
+	auth.POST("/logout", a.logout)
 	// 刮削预览用的图片代理刻意不挂鉴权：它要能直接放进 <img src>，而浏览器不会给
 	// 图片请求带自定义头（X-Emby-Token），挂鉴权只会让缩略图全部 401。
 	// 上游 MetaTube 的图片端点本身也是公开的（Jellyfin 插件同样直接引用），
@@ -454,6 +490,9 @@ func (a *App) routes() {
 	// noStore 必须先于 requireAuth：鉴权失败会 Abort，后面的中间件不再执行。
 	admin := r.Group("/api/admin", noStore, a.requireAuth, a.requireAdmin, a.auditAdminAction)
 	admin.GET("/libraries", a.adminLibraries)
+	// R1：认证防护的可观测与受保护应急解锁；解锁需交互会话 + 当前密码再认证。
+	admin.GET("/security/auth-limits", a.adminAuthLimits)
+	admin.POST("/security/unlock", a.credentialLimited(a.adminUnlockAuth))
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
 	admin.POST("/libraries/:id/move", a.adminMoveLibrary)
@@ -484,6 +523,7 @@ func (a *App) routes() {
 	admin.GET("/playback-events", a.adminPlaybackEvents)
 	admin.GET("/apikeys", a.adminAPIKeys)
 	admin.POST("/apikeys", a.adminCreateAPIKey)
+	admin.POST("/apikeys/:key/rotate", a.credentialLimited(a.adminRotateAPIKey))
 	admin.DELETE("/apikeys/:key", a.adminDeleteAPIKey)
 	// D01：撤销全部登录会话（API 密钥不受影响）。
 	admin.DELETE("/access-tokens", a.adminRevokeAllSessions)
@@ -491,11 +531,14 @@ func (a *App) routes() {
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/metrics", a.adminMetrics)
 	admin.GET("/logs", a.adminLogs)
+	admin.GET("/logs/disk", a.adminDiskLogs)
 	admin.GET("/logs/settings", a.adminLogSettings)
 	admin.PUT("/logs/settings", a.adminSaveLogSettings)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/webhook/settings", a.adminWebhookSettings)
 	admin.PUT("/webhook/settings", a.adminSaveWebhookSettings)
+	admin.GET("/webhook/targets", a.adminWebhookTargets)
+	admin.PUT("/webhook/targets", a.adminSaveWebhookTargets)
 	admin.GET("/tasks", a.adminTasks)
 	// 刮削（R4）：配置 + 批量/头像任务 + 单条预览确认 + 图片代理。
 	admin.GET("/scrape/settings", a.adminScrapeSettings)
@@ -506,6 +549,9 @@ func (a *App) routes() {
 	admin.POST("/scrape/avatars", a.adminScrapeAvatars)
 	admin.GET("/scrape/progress", a.adminScrapeProgress)
 	admin.POST("/scrape/cancel", a.adminScrapeCancel)
+	admin.POST("/translate/run", a.adminTranslationRun)
+	admin.GET("/translate/status", a.adminTranslationStatus)
+	admin.POST("/translate/cancel", a.adminTranslationCancel)
 	// 计划任务（cron）：保存/启停后调度器即时重建，无需重启。
 	admin.GET("/scheduled", a.adminScheduledTasks)
 	admin.POST("/scheduled", a.adminCreateScheduledTask)
@@ -548,7 +594,7 @@ type embyRoute struct {
 // /Users/... 与 /users/... 两种写法请求，而 Gin 路由是大小写敏感的。
 func (a *App) embyRoutes() []embyRoute {
 	return []embyRoute{
-		{"POST", "/Users/AuthenticateByName", false, a.authenticate},
+		{"POST", "/Users/AuthenticateByName", false, a.credentialLimited(a.authenticate)},
 		{"GET", "/Users/Public", false, a.publicUsers},
 		{"GET", "/Users/Me", true, a.me},
 		{"GET", "/Users/:uid", true, a.userByID},

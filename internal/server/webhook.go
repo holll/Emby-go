@@ -23,12 +23,27 @@ func (a *App) notifyWebhook(c *gin.Context, event webhook.Event) {
 	}
 	event.Server = webhook.Server{Id: a.serverID, Name: a.serverName}
 	event.Timestamp = time.Now().UTC()
-	if err := sender.Send(a.rootCtx, event); err != nil {
-		c.Header("X-Webhook-Status", "failed")
-		slog.Warn("Webhook delivery failed", "event", event.Event)
-		return
+	result := sender.Send(a.rootCtx, event)
+	c.Header("X-Webhook-Status", result.Status)
+	if result.Status == webhook.ResultFailed || result.Status == webhook.ResultPartial {
+		sent, failed, skipped := webhookResultCounts(result)
+		slog.Warn("Webhook delivery incomplete", "event", event.Event, "status", result.Status,
+			"sent", sent, "failed", failed, "skipped_budget", skipped)
 	}
-	c.Header("X-Webhook-Status", "sent")
+}
+
+func webhookResultCounts(result webhook.Result) (sent, failed, skipped int) {
+	for _, outcome := range result.Targets {
+		switch outcome.Status {
+		case webhook.TargetSent:
+			sent++
+		case webhook.TargetFailed:
+			failed++
+		case webhook.TargetSkippedBudget:
+			skipped++
+		}
+	}
+	return sent, failed, skipped
 }
 
 func (a *App) movieWebhook(c *gin.Context, name string, movie store.Movie) webhook.Event {
@@ -121,11 +136,15 @@ func (a *App) notifyMovieDeleted(c *gin.Context, movie store.Movie) {
 	}
 	// Do not use Request.Context: a disconnect after the committed deletion must
 	// not itself suppress delivery. App shutdown still cancels this request.
-	if err := sender.Send(a.rootCtx, event); err != nil {
-		c.Header("X-Webhook-Status", "failed")
-		slog.Warn("Webhook delivery failed after item deletion", "event", webhook.ItemDeleted, "item_id", movie.ID)
+	result := sender.Send(a.rootCtx, event)
+	c.Header("X-Webhook-Status", result.Status)
+	if result.Status == webhook.ResultFailed || result.Status == webhook.ResultPartial {
+		sent, failed, skipped := webhookResultCounts(result)
+		slog.Warn("Webhook deletion delivery incomplete", "event", webhook.ItemDeleted, "item_id", movie.ID,
+			"status", result.Status, "sent", sent, "failed", failed, "skipped_budget", skipped)
 		return
 	}
-	c.Header("X-Webhook-Status", "sent")
-	slog.Info("Webhook receiver acknowledged item deletion", "event", webhook.ItemDeleted, "item_id", movie.ID)
+	if result.Status == webhook.ResultSent {
+		slog.Info("Webhook receivers acknowledged item deletion", "event", webhook.ItemDeleted, "item_id", movie.ID)
+	}
 }

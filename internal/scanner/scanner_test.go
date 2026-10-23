@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -195,11 +197,21 @@ func TestScanReconcilesAddDeleteMove(t *testing.T) {
 		t.Fatalf("move should reconcile to one movie at new path: %+v", movies)
 	}
 
-	// 删除源文件
+	// 删除源文件：默认扫描必须拒绝清空整库（防挂载点失效误删）。
 	os.Remove(filepath.Join(dst, "ABC.strm"))
 	os.Remove(filepath.Join(dst, "ABC.nfo"))
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := Scan(s, lib); !errors.Is(err, ErrReconcileBlocked) {
+		t.Fatalf("empty inventory must be blocked by default, got %v", err)
+	}
+	if movies := visible(t, s); len(movies) != 1 {
+		t.Fatalf("blocked scan must keep the index, got %d", len(movies))
+	}
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull, AllowEmptyRemoval: true}, nil)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !result.CleanupPerformed {
+		t.Fatalf("explicit cleanup not performed: %+v", result)
 	}
 	if movies := visible(t, s); len(movies) != 0 {
 		t.Fatalf("deleted source should be purged, got %d", len(movies))

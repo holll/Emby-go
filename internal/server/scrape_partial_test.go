@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"emby-go/internal/scanner"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -21,7 +22,7 @@ func TestCanceledBatchRefreshesAlreadyWrittenNFO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.scanLibraries(lib.ID); err != nil {
+	if _, err := app.scanLibraries(lib.ID, 0, scanner.ScanModeFull, false); err != nil {
 		t.Fatal(err)
 	}
 	if !app.beginScrape("scrape", 2) {

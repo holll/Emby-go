@@ -13,7 +13,12 @@ function section(start, end) {
   return source.slice(from, to);
 }
 function sandbox(values) {
-  return vm.createContext({ URLSearchParams, ...values });
+  return vm.createContext({ URLSearchParams, AbortController, token: 'fixture-token', me: null,
+    TRANSLATE_HINT: '翻译来源提示',
+    // 页面清理会调用磁盘日志轮询的停止函数；被截取的代码段不包含该定义。
+    stopLogsPolling() {}, scanClose: { hidden: true, addEventListener() {} },
+    scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
+    localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
 
 test('媒体墙请求失败后停止自动加载，手工重试后恢复', async () => {
@@ -126,7 +131,7 @@ function authBootSandbox(kind, outcome) {
   }
   return { box, content, button, requests, redirects,
     boot: () => kind === 'admin' ? box.boot() : box.bootLogin(),
-    get stored() { return stored; }, get removed() { return removed; }, get rendered() { return rendered; },
+    get stored() { return stored; }, setStored(value) { stored = value; }, get removed() { return removed; }, get rendered() { return rendered; },
     retry: () => retry({ currentTarget: button }) };
 }
 
@@ -483,12 +488,13 @@ test('同类型计划参数合并保留隐藏limit和false，换类型不泄漏�
     assert.deepEqual(original, { library_id: 7, limit: 50, only_missing: false, overwrite: false });
   }
   const changed = box.scheduledFormParams('scan', { type: 'probe' }, { limit: 50, status: 'all', only_missing: false, probe_status_contract: 'explicit-v1' }, { library_id: 3 });
-  assert.deepEqual(JSON.parse(JSON.stringify(changed)), { library_id: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(changed)), { library_id: 3, mode: 'full' });
 });
 
 function scheduledSubmitFixture({ readable = true, library = '7', kind = 'probe', params = { limit: 50, status: 'manual', only_missing: false }, etag = '"sc1-fixture"', failure = 0 } = {}) {
   let submit; const calls = [], messages = [];
   const fields = { '#s-lib': { value: library }, '#s-status': { value: 'manual' }, '#s-only-missing': { checked: false }, '#s-name': { value: 'Renamed' }, '#s-enabled': { checked: false }, '#sched-submit': { disabled: false }, '#sched-form': { addEventListener(_, fn) { submit = fn; } } };
+  fields['#s-scan-mode'] = { value: 'full' };
   fields['#sched-conflict'] = { hidden: true, textContent: '' };
   const box = sandbox({ typeEl: { value: kind }, cronEl: { value: '0 3 * * *' }, editing: { id: 42, type: 'probe', config_etag: etag }, params, paramsReadable: readable, gen: 1,
     document: { querySelector: id => fields[id] }, api: async (path, options) => { calls.push({ path, body: JSON.parse(options.body), headers: options.headers, method: options.method }); if (failure) { const error = Error('fixture conflict'); error.status = failure; throw error; } }, toast: message => messages.push(message), refreshPage() {}, pageScheduled() {}, scheduledEditId: 42 });
@@ -502,7 +508,7 @@ test('真实计划提交只改名称仍保留隐藏limit，类型切换从新参
   assert.equal(same.calls[0].path, '/scheduled/42'); assert.equal(same.calls[0].body.params.limit, 50);
   assert.equal(same.calls[0].body.params.only_missing, false);
   const changed = scheduledSubmitFixture({ kind: 'scan' }); await changed.submit();
-  assert.deepEqual(changed.calls[0].body.params, { library_id: 7 });
+  assert.deepEqual(changed.calls[0].body.params, { library_id: 7, mode: 'full' });
 });
 
 test('损坏参数或已消失媒体库不允许静默覆盖或变成全部', async () => {
@@ -575,7 +581,7 @@ test('412后其他行切换成功或失败、删除均不重绘表单或替换�
     env.box.document.querySelectorAll = () => [el]; env.box.pageGen = 1;
     env.box.api = async () => { if (fail) throw Error('fixture unavailable'); };
     env.box.refreshPage = () => { refreshed++; }; env.box.confirm = () => true;
-    vm.runInContext(section("  document.querySelectorAll('[data-role]').forEach", '\n}\n\n/* ---------------------------------------------------------------- 路由 */'), env.box);
+    vm.runInContext(section("  document.querySelectorAll('[data-role]').forEach", '\n}\n\n/* ---------------------------------------------------------------- 运行日志 */'), env.box);
     await el.action();
     assert.equal(refreshed, 0); assert.equal(env.fields['#s-name'].value, 'Renamed');
     assert.equal(env.fields['#sched-conflict'].hidden, false); assert.equal(env.box.editing.config_etag, '"sc1-fixture"');
@@ -609,7 +615,7 @@ async function wallKeyboardFixture() {
   await box.pageItems();
   box.wallState.items = [{ id: 7 }];
   const card = { dataset: { play: '7' }, closest: selector => selector === '.wall-card' ? card : null };
-  return { handlers, calls, card };
+  return { handlers, calls, card, box, element };
 }
 function wallKey(target, key, extra = {}) {
   return { target, key, defaultPrevented: false,
@@ -852,7 +858,7 @@ test('刮削观察错误可见且切页停止，旧代回调不能更改当前�
 test('通用API在401保留稳定状态供观察器停止，仍执行原登出跳转', async () => {
   let removed = 0, redirects = 0;
   const box = sandbox({ token: 'fixture', FormData: class {},
-    fetch: async () => ({ status: 401 }), localStorage: { removeItem() { removed++; } },
+    fetch: async () => ({ status: 401 }), localStorage: { getItem: () => 'fixture', removeItem() { removed++; } },
     window: { location: { replace() { redirects++; } } } });
   vm.runInContext(section('async function api(', 'const STATUS_TEXT ='), box);
   await assert.rejects(box.api('/fixture'), e => e.status === 401 && e.message === '登录已失效');
@@ -1006,6 +1012,7 @@ function probePageFixture(progress = async () => ({ running: false }), post = as
   vm.runInContext(section('function refreshPage(', '/* ---------------------------------------------------------------- 总览'), box);
   vm.runInContext(section('function startProgressPolling(', 'function stopScrapePolling()'), box);
   vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
+  vm.runInContext(section('function progressCounts(', 'function renderScrapeProgress('), box);
   vm.runInContext(section('let probeTimer = null;', 'async function probeItem('), box);
   vm.runInContext(section('async function pageItems()', '// reloadWall'), box);
   vm.runInContext(section('function reloadWall()', '// wallMaybeLoadMore'), box);
@@ -1247,7 +1254,7 @@ test('boot不得裸读probe进度，恢复入口只在媒体墙DOM/button创建�
 });
 
 // 第23批：实际扫描函数 + 串行 helper；只模拟DOM/API/时钟，不启动服务器或浏览器。
-function scanFixture(progress = async () => ({ running: false }), post = async () => ({ success: 2, pending: 1 })) {
+function scanFixture(progress = async () => ({ running: false }), post = async () => ({ success: 2, pending: 1 }), task = async () => ({ status: 'succeeded', finished_at: 'now' })) {
   const clock = controlledClock(), nodes = new Map(), calls = [], toasts = [];
   let reloads = 0;
   function node(id) {
@@ -1266,10 +1273,12 @@ function scanFixture(progress = async () => ({ running: false }), post = async (
     api: (path, options = {}) => {
       calls.push({ path, options });
       if (options.method === 'POST') return post(path, options);
+      if (path.startsWith('/tasks/')) return task(path, options);
       assert.equal(path, '/scan/progress'); return progress(path, options);
     } });
   box.pages.items = box.pageItems;
   vm.runInContext(section('function startProgressPolling(', 'function stopScrapePolling()'), box);
+  vm.runInContext(section('function progressCounts(', 'function renderScrapeProgress('), box);
   vm.runInContext(section('/* ---------------------------------------------------------------- 扫描进度 */', 'async function boot()'), box);
   vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
   return { ...clock, box, node, calls, toasts, get reloads() { return reloads; },
@@ -1297,7 +1306,7 @@ test('扫描所有入口在状态未知或正在运行时拒绝重复提交，�
     assert.equal(env.posts().length, 1, 'confirmed running must gate every local entry');
     await env.fire(1500); assert.equal(env.node('#scan').disabled, false);
     await env.box.runScan(9); assert.equal(env.posts().length, 2);
-    assert.equal(env.posts()[1].path, '/tasks/scan?library_id=9');
+    assert.equal(env.posts()[1].path, '/tasks/scan?library_id=9&mode=incremental');
     env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
   }
 });
@@ -1314,9 +1323,9 @@ test('扫描实际wrapper首GET失败退避恢复，仅明确终态释放且历�
     assert.equal(env.node('#scan-progress-detail').role, 'status');
     assert.equal(env.node('#scan').disabled, true); assert.equal(env.posts().length, 0);
     await env.fire(3000); assert.equal(env.node('#scan').disabled, false);
-    assert.match(env.node('#scan-progress-title').textContent, /扫描完成/);
-    assert.deepEqual(env.toasts, []); assert.equal(env.has(4000), true);
-    await env.fire(4000); assert.equal(env.node('#scan-progress').hidden, true); assert.equal(env.timers.size, 0);
+    // R2：没有观察到运行身份的历史终态不算本轮完成，不通知、不排自动收起。
+    assert.deepEqual(env.toasts, []); assert.equal(env.node('#scan-progress').hidden, true);
+    assert.equal(env.has(4000), false); assert.equal(env.timers.size, 0);
   }
 });
 
@@ -1368,17 +1377,14 @@ test('扫描GET401/403停止且禁启动，不自动重放提交', async () => {
   }
 });
 
-test('扫描空闲/历史失败及error终态不toast，失败面板不自动隐藏', async () => {
+test('扫描首读历史空闲/失败/error终态都不算本轮完成，不toast不自动隐藏', async () => {
   for (const terminal of [{ running: false }, { ...scanTerminal, failed: 1 }, { ...scanTerminal, error: 'fixture scan error' }]) {
     const env = scanFixture(async () => terminal);
     env.box.startScanPolling(); await env.fire(0);
     assert.equal(env.node('#scan').disabled, false); assert.deepEqual(env.toasts, []);
     assert.equal(env.timers.size, 0);
-    assert.equal(env.node('#scan-progress').hidden, !terminal.finished_at);
-    if (terminal.finished_at) {
-      assert.match(env.node('#scan-progress-title').textContent, /存在错误/);
-      assert.match(env.node('#scan-progress-detail').textContent, terminal.error ? /fixture scan error/ : /失败 1/);
-    }
+    // R2：没有观察到 run_id 的历史终态只确认空闲并隐藏面板，不冒充本轮结果。
+    assert.equal(env.node('#scan-progress').hidden, true);
   }
 });
 
@@ -1411,8 +1417,10 @@ test('扫描全局工具栏跨实际page导航继续观察同一个GET', async (
 });
 
 test('扫描旧hide取消且即使旧回调已排队也不能关闭新scan', async () => {
-  const env = scanFixture(async () => scanTerminal);
-  env.box.startScanPolling(); await env.fire(0);
+  let reads = 0;
+  const terminal = { ...scanTerminal, instance_id: 'inst-1', run_id: '1' };
+  const env = scanFixture(async () => reads++ === 0 ? { running: true, instance_id: 'inst-1', run_id: '1', done: 0 } : terminal);
+  env.box.startScanPolling(); await env.fire(0); await env.fire(1500);
   const oldHide = [...env.timers.values()].find(t => t.delay === 4000).fn;
   env.box.startScanPolling(); assert.equal(env.has(4000), false);
   env.node('#scan-progress').hidden = false; oldHide();
@@ -1427,7 +1435,7 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
     const env = scanFixture(async () => reads++ ? { running: true, done: 1 } : initial,
       () => new Promise(resolve => { finish = resolve; }));
     const pending = env.box.runScan('lib &1'); await env.box.runScan(2);
-    assert.equal(env.posts().length, 1); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=lib%20%261');
+    assert.equal(env.posts().length, 1); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=lib%20%261&mode=incremental');
     await env.fire(0);
     assert.equal(env.node('#scan').disabled, true); assert.equal(env.node('#scan-progress').hidden, false);
     assert.match(env.node('#scan-progress-title').textContent, /请求进行中/);
@@ -1443,7 +1451,7 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
 
 test('实际runScan成功后只由重读终态释放按钮，不重放POST或重复toast', async () => {
   const env = scanFixture(async () => scanTerminal);
-  await env.box.runScan(); assert.equal(env.posts()[0].path, '/tasks/scan');
+  await env.box.runScan(); assert.equal(env.posts()[0].path, '/tasks/scan?mode=incremental');
   assert.equal(env.node('#scan').disabled, true); assert.equal(env.gets().length, 0);
   assert.match(env.toasts[0][0], /扫描任务已启动/);
   await env.fire(0); assert.equal(env.node('#scan').disabled, false);
@@ -1500,7 +1508,7 @@ test('实际boot首scan GET悬挂不阻塞初始page或导航，统一观察器�
   const rendered = [], events = {}, nav = env.node('nav'); nav.dataset.page = 'fixture';
   Object.assign(env.box, { token: 'fixture', fetch: async () => ({ ok: true, status: 200 }),
     window: { location: { replace() { assert.fail('unexpected redirect'); } }, addEventListener(type, fn) { events[type] = fn; } },
-    localStorage: { removeItem() { assert.fail('unexpected credential removal'); } },
+    localStorage: { getItem: () => 'fixture', removeItem() { assert.fail('unexpected credential removal'); } },
     closePlayer() {}, closeScrapePreview() {}, closeDetail() {}, wallMaybeLoadMore() {}, detailOverlay: env.node('detail'),
     page: name => { rendered.push(name); env.box.pageGen++; } });
   env.box.document.querySelectorAll = selector => selector === '.nav-item' ? [nav] : [];
@@ -1628,12 +1636,14 @@ test('刮削候选慢回包不覆盖更新的选择（P1-10）', async () => {
   assert.equal(state.id, 'B');
 });
 
-test('运行日志面板与 ffprobe 状态（生产可诊断）', async () => {
-  // 设置页拉取 /logs 并渲染级别筛选与刷新按钮，服务设置展示探测能力。
-  assert.match(source, /api\('\/logs\?limit=200'\)/);
-  assert.match(source, /<h2 id="logs-title">运行日志<\/h2>/);
-  assert.match(source, /id="log-refresh"/);
-  assert.match(source, /id="log-level"/);
+test('运行日志独立页与 ffprobe 状态（生产可诊断）', async () => {
+  // R4：日志从设置页拆到独立磁盘日志页，不再轮询 ring 的 /logs 接口。
+  assert.match(html, /id="nav-logs"/);
+  assert.match(source, /logs: pageLogs/);
+  assert.match(source, /api\('\/logs\/disk' \+ query/);
+  assert.match(source, /\?kind=app&limit=200/);
+  assert.match(source, /id="dl-earlier"/);
+  assert.match(source, /部分通知未送达，业务操作已完成/);
   assert.match(source, /ffprobe_error/);
   assert.match(source, /媒体信息探测/);
 });
@@ -1649,103 +1659,184 @@ test('移动端表格：用户卡片化与日志堆叠', async () => {
 });
 
 const webhookUI = fs.readFileSync(path.join(__dirname, 'web/webhook-settings.js'), 'utf8');
-const webhookConfig = (tag = '"cfg-1"') => ({ enabled: false, url_configured: true,
-  events: ['item.rate'], format: 'json', timeout_seconds: 5, allow_private: false, config_etag: tag });
+const webhookEventNames = [...webhookUI.matchAll(/\['((?:item|playback|user)\.[a-z]+)',/g)].map(m => m[1]);
+const whTarget = (over = {}) => ({ id: 'wh_1', name: '目标A', enabled: false, url_configured: true,
+  events: ['item.rate'], format: 'json', timeout_seconds: 5, allow_private: false, ...over });
+const whView = (targets = [whTarget()], tag = '"cfg-1"', multi = true) => ({ version: 2, config_etag: tag, multi_target: multi, targets });
+
 function webhookPanel(api) {
-  const ids = ['form', 'fields', 'save', 'reload', 'status', 'enabled', 'private', 'format', 'timeout', 'url', 'url-state', 'clear', 'confirm'];
-  const nodes = Object.fromEntries(ids.map(id => [id, { value: '', checked: false, disabled: false, textContent: '', listeners: {},
-    addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute(k, v) { this[k] = v; }, focus() { this.focused = true; } }]));
-  const names = [...webhookUI.matchAll(/\['((?:item|playback|user)\.[a-z]+)',/g)].map(m => m[1]);
-  const events = names.map(name => ({ dataset: { whEvent: name }, checked: false }));
+  const makeNode = () => ({ value: '', checked: false, disabled: false, textContent: '', hidden: false, role: '',
+    listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; },
+    setAttribute(k, v) { this[k] = v; }, focus() { this.focused = true; } });
+  const ids = ['webhook-title', 'wh-reload', 'wh-targets', 'wh-empty', 'wh-remove-preview', 'wh-confirm-remove-row',
+    'wh-confirm-remove', 'wh-confirm-empty-row', 'wh-confirm-empty', 'wh-confirm-delete', 'wh-status', 'wh-add', 'wh-save'];
+  const nodes = Object.fromEntries(ids.map(id => [id, makeNode()]));
+  const targetsHost = nodes['wh-targets'];
+  let cards = [];
+  targetsHost.appendChild = card => { cards.push(card); };
+  targetsHost.querySelectorAll = selector => {
+    if (selector === '[data-target-index]') return cards.slice();
+    if (selector === 'input, select, button') return cards.flatMap(card => card.fields());
+    return [];
+  };
+  Object.defineProperty(targetsHost, 'innerHTML', { get: () => '', set: () => { cards = []; } });
+  const cardStub = () => {
+    const map = new Map();
+    const field = selector => {
+      if (!map.has(selector)) map.set(selector, makeNode());
+      return map.get(selector);
+    };
+    const eventNodes = webhookEventNames.map(name => ({ dataset: { event: name }, checked: false, disabled: false }));
+    return {
+      ...makeNode(), open: false,
+      dataset: { targetIndex: '0' },
+      fields: () => [...map.values(), ...eventNodes],
+      events: eventNodes,
+      querySelector: field,
+      querySelectorAll: selector => selector === '[data-event]' ? eventNodes : [],
+      innerHTML: ''
+    };
+  };
+  const host = { isConnected: true, innerHTML: '', querySelector: selector => nodes[selector.replace(/^#/, '')] };
   const calls = [], prompts = [];
-  const host = { isConnected: true, innerHTML: '', querySelector: s => nodes[s.slice(4)], querySelectorAll: () => events };
   let active = true, confirms = true;
-  const box = sandbox({ confirm: text => { prompts.push(text); return confirms; } });
+  const box = sandbox({ document: { createElement: () => cardStub() },
+    confirm: text => { prompts.push(text); return confirms; } });
   vm.runInContext(webhookUI, box);
   const mounted = box.mountWebhookSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
-  return { nodes, events, calls, host, mounted, prompts, leave() { active = false; host.isConnected = false; },
-    confirm(value) { confirms = value; }, submit: () => nodes.form.listeners.submit({ preventDefault() {} }), reload: () => nodes.reload.listeners.click() };
+  const card = index => cards[index];
+  return {
+    nodes, calls, host, mounted, prompts,
+    cards: () => cards,
+    card,
+    field: (index, name) => cards[index].querySelector(`[data-field="${name}"]`),
+    events: index => cards[index].events,
+    add: () => nodes['wh-add'].listeners.click(),
+    remove: index => cards[index].querySelector('[data-remove]').listeners.click(),
+    save: () => nodes['wh-save'].listeners.click(),
+    reload: () => nodes['wh-reload'].listeners.click(),
+    confirm(value) { confirms = value; },
+    leave() { active = false; host.isConnected = false; }
+  };
 }
 
-test('Webhook设置加载不回显地址，保存完整订阅及If-Match，成功后清空秘密输入', async () => {
+test('Webhook多目标加载不回显地址，保存完整订阅及If-Match', async () => {
   const p = webhookPanel(async (path, options) => {
-    assert.equal(path, '/webhook/settings');
-    return options ? { ...webhookConfig('"cfg-2"'), enabled: true, events: ['playback.stop'], format: 'form', timeout_seconds: 12, allow_private: true } : webhookConfig();
+    assert.equal(path, '/webhook/targets');
+    if (!options) return whView();
+    return whView([whTarget({ name: '目标A', enabled: true, events: ['playback.stop'], format: 'form', timeout_seconds: 12, allow_private: true })], '"cfg-2"');
   });
   await p.mounted;
-  assert.equal(p.events.length, 13);
-  assert.equal(p.nodes.url.value, '');
-  assert.match(p.nodes['url-state'].textContent, /已保存地址.*不回显/);
-  assert.equal(p.nodes.save.disabled, false);
-  p.nodes.enabled.checked = true; p.nodes.private.checked = true;
-  p.nodes.url.value = 'https://receiver.example/private-token-canary'; p.nodes.format.value = 'form'; p.nodes.timeout.value = '12';
-  for (const e of p.events) e.checked = e.dataset.whEvent === 'playback.stop';
-  await p.submit();
+  assert.equal(p.cards().length, 1);
+  assert.equal(p.events(0).length, 13);
+  assert.equal(p.field(0, 'url').value, '');
+  assert.equal(p.nodes['wh-save'].disabled, false);
+  p.field(0, 'enabled').checked = true; p.field(0, 'allow-private').checked = true;
+  p.field(0, 'url').value = 'https://receiver.example/private-token-canary'; p.field(0, 'format').value = 'form'; p.field(0, 'timeout').value = '12';
+  for (const e of p.events(0)) e.checked = e.dataset.event === 'playback.stop';
+  await p.save();
   assert.equal(p.calls.length, 2, '只GET一次与PUT一次，不试发、不重载整页');
   const options = p.calls[1][1], body = JSON.parse(options.body);
   assert.equal(options.method, 'PUT'); assert.equal(options.headers['If-Match'], '"cfg-1"');
-  assert.deepEqual(body.events, ['playback.stop']); assert.equal(body.url, 'https://receiver.example/private-token-canary');
-  assert.equal(body.format, 'form'); assert.equal(body.timeout_seconds, 12); assert.equal(body.allow_private, true);
-  assert.equal(p.nodes.url.value, ''); assert.equal(p.nodes.confirm.checked, false);
-  assert.ok(!p.host.innerHTML.includes('private-token-canary'));
-  assert.match(p.nodes.status.textContent, /即时生效.*重启保留.*未发送测试通知/);
-  await p.submit(); assert.equal(p.calls[2][1].headers['If-Match'], '"cfg-2"');
-  assert.equal(JSON.parse(p.calls[2][1].body).url, '', '下一次留空保留，不填充旧URL');
+  assert.deepEqual(body.targets[0].events, ['playback.stop']); assert.equal(body.targets[0].url, 'https://receiver.example/private-token-canary');
+  assert.equal(body.targets[0].id, 'wh_1'); assert.equal(body.targets[0].format, 'form');
+  assert.equal(body.targets[0].timeout_seconds, 12); assert.equal(body.targets[0].allow_private, true);
+  assert.equal(body.confirm_delete, false); assert.equal(body.confirm_empty_targets, false);
+  assert.equal(p.field(0, 'url').value, ''); assert.equal(p.nodes['wh-confirm-delete'].checked, false);
+  assert.match(p.nodes['wh-status'].textContent, /即时生效.*重启保留.*未发送测试通知/);
+  await p.save(); assert.equal(p.calls[2][1].headers['If-Match'], '"cfg-2"');
+  assert.equal(JSON.parse(p.calls[2][1].body).targets[0].url, undefined, '下一次留空保留，不填充旧URL');
 });
 
-test('Webhook设置读取失败只能显式重载；保存503保留草稿而不自动重试', async () => {
+test('Webhook多目标新增目标由服务端分配ID，删除需清单确认，清空需显式确认', async () => {
+  const p = webhookPanel(async (path, options) => {
+    if (!options) return whView();
+    const body = JSON.parse(options.body);
+    if (body.targets.length === 0) return whView([], '"cfg-empty"');
+    return whView([whTarget(), whTarget({ id: 'wh_new', name: '新目标', url_configured: true, events: ['item.updated'] })], '"cfg-2"');
+  });
+  await p.mounted;
+  p.add();
+  assert.equal(p.cards().length, 2);
+  p.field(1, 'name').value = '新目标';
+  p.field(1, 'url').value = 'https://receiver.example/new';
+  for (const e of p.events(1)) e.checked = e.dataset.event === 'item.updated';
+  await p.save();
+  const body = JSON.parse(p.calls[1][1].body);
+  assert.equal(body.targets.length, 2);
+  assert.equal(body.targets[1].id, undefined, '新目标不伪造服务端 ID');
+  assert.equal(body.targets[1].name, '新目标');
+  assert.equal(p.cards().length, 2); assert.equal(p.field(1, 'name').value, '新目标');
+
+  p.remove(1);
+  assert.match(p.nodes['wh-remove-preview'].textContent, /保存后将删除/);
+  await p.save();
+  assert.equal(p.calls.length, 2, '未确认删除清单不发保存');
+  p.nodes['wh-confirm-remove'].checked = true;
+  p.remove(0);
+  assert.equal(p.nodes['wh-confirm-empty-row'].hidden, false);
+  await p.save();
+  assert.equal(p.calls.length, 2, '清空集合还需空集合确认');
+  p.nodes['wh-confirm-empty'].checked = true;
+  await p.save();
+  const emptyBody = JSON.parse(p.calls[2][1].body);
+  assert.deepEqual(emptyBody.targets, []); assert.equal(emptyBody.confirm_empty_targets, true);
+});
+
+test('Webhook多目标读取失败只能显式重载；保存503保留草稿而不自动重试', async () => {
   let step = 0;
-  const p = webhookPanel(async () => { if (++step !== 2) throw Object.assign(Error('network'), { status: 503 }); return webhookConfig(); });
-  await p.mounted; assert.equal(p.nodes.save.disabled, true); assert.equal(p.nodes.status.role, 'alert');
-  await p.reload(); assert.equal(p.nodes.save.disabled, false);
-  p.nodes.url.value = 'https://receiver.example/draft';
-  await p.submit(); assert.equal(p.calls.length, 3); assert.equal(p.nodes.url.value, 'https://receiver.example/draft');
-  assert.equal(p.nodes.save.disabled, false); assert.match(p.nodes.status.textContent, /保存未确认.*输入已保留/);
+  const p = webhookPanel(async () => { if (++step !== 2) throw Object.assign(Error('network'), { status: 503 }); return whView(); });
+  await p.mounted; assert.equal(p.nodes['wh-save'].disabled, true); assert.equal(p.nodes['wh-status'].role, 'alert');
+  await p.reload(); assert.equal(p.nodes['wh-save'].disabled, false);
+  p.field(0, 'url').value = 'https://receiver.example/draft';
+  await p.save(); assert.equal(p.calls.length, 3); assert.equal(p.field(0, 'url').value, 'https://receiver.example/draft');
+  assert.equal(p.nodes['wh-save'].disabled, false); assert.match(p.nodes['wh-status'].textContent, /保存未确认.*输入已保留/);
 });
 
-test('Webhook设置412保留草稿并禁旧重提，显式确认重新加载才获取新令牌', async () => {
+test('Webhook多目标412保留草稿并禁旧重提，显式确认重新加载才获取新令牌', async () => {
   let gets = 0;
   const p = webhookPanel(async (_, options) => {
     if (options) throw Object.assign(Error('conflict'), { status: 412 });
-    return webhookConfig(++gets === 1 ? '"old"' : '"new"');
+    return whView([whTarget()], gets++ === 0 ? '"old"' : '"new"');
   });
-  await p.mounted; p.nodes.url.value = 'https://receiver.example/unsaved';
-  await p.submit(); assert.equal(p.nodes.save.disabled, true); assert.equal(p.nodes.url.value, 'https://receiver.example/unsaved');
-  assert.match(p.nodes.status.textContent, /草稿已保留.*不会自动覆盖/);
-  await p.submit(); assert.equal(p.calls.length, 2);
-  p.confirm(false); await p.reload(); assert.equal(p.calls.length, 2); assert.equal(p.nodes.url.value, 'https://receiver.example/unsaved');
-  p.confirm(true); await p.reload(); assert.equal(p.nodes.url.value, ''); assert.equal(p.nodes.save.disabled, false);
-  await p.submit(); assert.equal(p.calls[3][1].headers['If-Match'], '"new"');
+  await p.mounted; p.field(0, 'url').value = 'https://receiver.example/unsaved';
+  await p.save(); assert.equal(p.nodes['wh-save'].disabled, true); assert.equal(p.field(0, 'url').value, 'https://receiver.example/unsaved');
+  assert.match(p.nodes['wh-status'].textContent, /草稿已保留.*不会自动覆盖/);
+  await p.save(); assert.equal(p.calls.length, 2);
+  p.confirm(false); p.reload(); assert.equal(p.calls.length, 2); assert.equal(p.field(0, 'url').value, 'https://receiver.example/unsaved');
+  p.confirm(true); await p.reload(); assert.equal(p.field(0, 'url').value, ''); assert.equal(p.nodes['wh-save'].disabled, false);
+  await p.save(); assert.equal(p.calls[3][1].headers['If-Match'], '"new"');
 });
 
-test('Webhook设置阻止空事件、坏超时及危险清除；启用删除必须明确确认', async () => {
-  const p = webhookPanel(async () => webhookConfig()); await p.mounted;
-  p.events.forEach(e => { e.checked = false; }); await p.submit(); assert.equal(p.calls.length, 1);
-  p.events.find(e => e.dataset.whEvent === 'item.deleted').checked = true;
-  p.nodes.timeout.value = '0'; await p.submit(); assert.equal(p.calls.length, 1);
-  p.nodes.timeout.value = '5'; p.nodes.enabled.checked = true; p.nodes.clear.checked = true;
-  await p.submit(); assert.equal(p.calls.length, 1);
-  p.nodes.clear.checked = false; await p.submit(); assert.equal(p.calls.length, 1); assert.equal(p.nodes.confirm.focused, true);
-  p.nodes.confirm.checked = true; await p.submit();
+test('Webhook多目标阻止空事件、坏超时及危险清除；删除订阅必须明确确认', async () => {
+  const p = webhookPanel(async () => whView()); await p.mounted;
+  for (const e of p.events(0)) e.checked = false; await p.save(); assert.equal(p.calls.length, 1);
+  p.events(0).find(e => e.dataset.event === 'item.deleted').checked = true;
+  p.field(0, 'timeout').value = '0'; await p.save(); assert.equal(p.calls.length, 1);
+  p.field(0, 'timeout').value = '5'; p.field(0, 'enabled').checked = true; p.field(0, 'clear-url').checked = true;
+  await p.save(); assert.equal(p.calls.length, 1);
+  p.field(0, 'clear-url').checked = false; p.field(0, 'url').value = 'https://receiver.example/x';
+  await p.save(); assert.equal(p.calls.length, 1, '启用删除订阅需确认');
+  p.nodes['wh-confirm-delete'].checked = true; await p.save();
   assert.equal(p.calls.length, 2); assert.equal(JSON.parse(p.calls[1][1].body).confirm_delete, true);
-  assert.equal(p.nodes.confirm.checked, false, '每次保存都重新确认');
+  assert.equal(p.nodes['wh-confirm-delete'].checked, false, '每次保存都重新确认');
 });
 
-test('Webhook设置在途提交单次，切页后迟到读取或保存不能覆盖新页面', async () => {
+test('Webhook多目标在途提交单次，切页后迟到读取或保存不能覆盖新页面', async () => {
   let resolve;
   const p = webhookPanel(() => new Promise(r => { resolve = r; }));
-  p.leave(); resolve(webhookConfig()); await p.mounted;
-  assert.equal(p.nodes.timeout.value, ''); assert.equal(p.nodes.save.disabled, true);
+  p.leave(); resolve(whView()); await p.mounted;
+  assert.equal(p.nodes['wh-save'].disabled, true);
   let finish;
-  const q = webhookPanel(async (_, opts) => opts ? new Promise(r => { finish = r; }) : webhookConfig());
-  await q.mounted; q.nodes.url.value = 'https://receiver.example/draft';
-  const saving = q.submit(); await q.submit(); assert.equal(q.calls.length, 2);
-  q.leave(); finish(webhookConfig('"new"')); await saving;
-  assert.equal(q.nodes.url.value, 'https://receiver.example/draft');
-  assert.equal(q.nodes.status.textContent, '正在保存；不会发送测试通知…');
+  const q = webhookPanel(async (_, opts) => opts ? new Promise(r => { finish = r; }) : whView());
+  await q.mounted; q.field(0, 'url').value = 'https://receiver.example/draft';
+  const saving = q.save(); await q.save(); assert.equal(q.calls.length, 2);
+  q.leave(); finish(whView([], '"new"')); await saving;
+  assert.equal(q.field(0, 'url').value, 'https://receiver.example/draft');
+  assert.equal(q.nodes['wh-status'].textContent, '正在保存；不会发送测试通知…');
 });
 
-test('Webhook设置独立资源在app之前加载，管理员设置挂载且不会请求真实试发接口', () => {
+test('Webhook多目标独立资源在app之前加载，管理员设置挂载且不会请求真实试发接口', () => {
   assert.ok(html.indexOf('/web/webhook-settings.js') < html.indexOf('/web/app.js'));
   const settings = section('async function pageSettings()', 'async function pageScrape()');
   assert.match(settings, /if \(!me \|\| !me\.is_admin\)/);
@@ -1753,9 +1844,11 @@ test('Webhook设置独立资源在app之前加载，管理员设置挂载且不�
   assert.match(settings, /mountWebhookSettings\(webhookHost, api, \(\) => gen === pageGen && webhookHost.isConnected\)/);
   assert.match(webhookUI, /type="password".*autocomplete="new-password"/);
   assert.ok(!webhookUI.includes('localStorage'));
-  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 2, '只提供读设置与保存设置');
+  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 2, '只提供读取目标与保存目标');
+  assert.match(webhookUI, /If-Match/);
+  assert.match(webhookUI, /confirm_empty_targets/);
+  assert.match(webhookUI, /confirm_delete/);
 });
-
 
 const logSettingsUI = fs.readFileSync(path.join(__dirname, 'web/log-settings.js'), 'utf8');
 function logPanel(api) {
@@ -1805,4 +1898,601 @@ test('日志期限嵌入资源先加载，管理员设置挂载且不提供任�
   assert.match(source,/mountLogSettings\(logHost, api, \(\) => gen === pageGen && logHost.isConnected\)/);
   assert.match(logSettingsUI,/app-YYYY-MM-DD.log/);assert.match(logSettingsUI,/无法撤销/);
   assert.equal((logSettingsUI.match(/apiRequest\('/g)||[]).length,2);
+});
+
+// Review regression tests execute production functions, not only source-presence checks.
+function identityAPIFixture() {
+  let stored = 'A', removed = 0, reply, jsonReply;
+  const redirects = [], calls = [];
+  const box = sandbox({ token: 'A', FormData: class {},
+    localStorage: { getItem: () => stored, removeItem() { stored = null; removed++; } },
+    window: { location: { replace: p => redirects.push(p) } },
+    fetch: (path, options) => { calls.push({ path, options }); return new Promise(r => { reply = r; }); } });
+  vm.runInContext(section('async function api(', 'const STATUS_TEXT ='), box);
+  return { box, calls, redirects, setStored(v) { stored = v; }, get stored() { return stored; }, get removed() { return removed; },
+    reply(status, result = {}) { reply({ status, ok: status >= 200 && status < 300, json: async () => result }); },
+    deferredJSON() { reply({ status: 200, ok: true, json: () => new Promise(r => { jsonReply = r; }) }); },
+    finishJSON(value) { jsonReply(value); } };
+}
+
+test('身份变更：旧401、旧200及延迟JSON均不能清新token或交付旧数据', async () => {
+  for (const status of [401, 200]) {
+    const env = identityAPIFixture(), pending = env.box.api('/apikeys');
+    env.setStored('B'); env.reply(status, { key: 'A-secret' });
+    await assert.rejects(pending, e => e.code === 'IDENTITY_CHANGED' && e.status === 401);
+    assert.equal(env.stored, 'B'); assert.equal(env.removed, 0); assert.deepEqual(env.redirects, []);
+    assert.equal(env.calls[0].options.headers['X-Emby-Token'], 'A');
+  }
+  const env = identityAPIFixture(), pending = env.box.api('/apikeys');
+  env.deferredJSON(); await new Promise(setImmediate); env.setStored('B'); env.finishJSON({ key: 'A-secret' });
+  await assert.rejects(pending, e => e.code === 'IDENTITY_CHANGED');
+  await assert.rejects(env.box.api('/settings'), e => e.code === 'IDENTITY_CHANGED');
+  assert.equal(env.calls.length, 1, '旧标签不再发新业务请求');
+});
+
+for (const kind of ['admin', 'login']) test(`${kind} 旧启动401/200不覆盖或清除另一个标签的新身份`, async () => {
+  for (const status of [401, 200]) {
+    const env = authBootSandbox(kind, 401); let reply;
+    env.box.fetch = () => new Promise(r => { reply = r; });
+    const pending = env.boot(); env.setStored('B'); reply({ status, ok: status === 200 }); await pending;
+    assert.equal(env.stored, 'B'); assert.equal(env.removed, 0); assert.deepEqual(env.redirects, []); assert.equal(env.rendered, 0);
+  }
+});
+
+function logoutFixture() {
+  let stored = 'A', finish, cleanups = 0;
+  const calls = [], redirects = [], errors = [];
+  const box = sandbox({ token: 'A', createdAPIKey: 'raw-secret', me: { is_admin: false }, pageGen: 1, wallGen: 2,
+    scanWallRefresh: {}, content: { innerHTML: 'private page' }, scanPanel: { hidden: false },
+    localStorage: { getItem: () => stored, removeItem() { stored = null; } },
+    fetch: (path, options) => { calls.push({ path, options }); return new Promise(r => { finish = r; }); },
+    window: { location: { replace: p => redirects.push(p) } }, toast: (...a) => errors.push(a),
+    stopScrapePolling() { cleanups++; }, stopProbePolling() { cleanups++; }, stopScanPolling() { cleanups++; },
+    cancelProbeHide() {}, cancelScanHide() {}, closeOverlaysForNavigation() { cleanups++; } });
+  vm.runInContext(section('function clearSessionView()', 'async function boot()'), box);
+  return { box, calls, redirects, errors, setStored(v) { stored = v; }, get stored() { return stored; }, get cleanups() { return cleanups; },
+    finish(status) { finish({ status, ok: status >= 200 && status < 300 }); } };
+}
+
+test('普通用户退出当前会话只POST当前凭据，单次在途，成功清敏感DOM/观察器', async () => {
+  const env = logoutFixture(), button = { disabled: false };
+  const pending = env.box.logoutCurrentSession(button); await env.box.logoutCurrentSession(button);
+  assert.equal(env.calls.length, 1); assert.equal(env.calls[0].path, '/api/auth/logout');
+  assert.equal(env.calls[0].options.headers['X-Emby-Token'], 'A'); assert.equal(env.calls[0].options.method, 'POST');
+  env.finish(204); await pending;
+  assert.equal(env.stored, null); assert.equal(env.box.createdAPIKey, null); assert.equal(env.box.content.innerHTML, '');
+  assert.equal(env.box.pageGen, 2); assert.equal(env.box.wallGen, 3); assert.equal(env.cleanups, 4);
+  assert.deepEqual(env.redirects, ['/']); assert.match(html, /id="logout"[^>]*aria-label="退出当前会话"/);
+});
+
+test('退出迟到204/401不清B；退出503保留A并允许手动重试', async () => {
+  for (const status of [204, 401]) {
+    const env = logoutFixture(), pending = env.box.logoutCurrentSession({ disabled: false });
+    env.setStored('B'); env.finish(status); await pending;
+    assert.equal(env.stored, 'B'); assert.equal(env.cleanups, 0); assert.deepEqual(env.redirects, []);
+  }
+  const env = logoutFixture(), button = { disabled: false }, pending = env.box.logoutCurrentSession(button);
+  env.finish(503); await pending; assert.equal(env.stored, 'A'); assert.equal(button.disabled, false); assert.equal(env.errors.length, 1);
+});
+
+test('跨标签身份切换与storage.clear主动销毁旧页面、密钥及扫描上下文', () => {
+  for (const key of ['emby_token', null]) {
+    const env = logoutFixture(); env.setStored('B'); env.box.identityStorageChanged({ key });
+    assert.equal(env.stored, 'B'); assert.equal(env.box.createdAPIKey, null); assert.equal(env.box.scanWallRefresh, null);
+    assert.equal(env.box.content.innerHTML, ''); assert.deepEqual(env.redirects, ['/']);
+  }
+});
+
+test('密钥明文只在原创建代际显示；离页/返回与换身份后的创建回包均不复活', async () => {
+  for (const change of ['none', 'navigate', 'identity']) {
+    let stored = 'A', finish, submit, refreshes = 0;
+    const box = sandbox({ token: 'A', gen: 1, pageGen: 1, createdAPIKey: null, content: {},
+      FormData: class { get() { return 'name'; } }, localStorage: { getItem: () => stored },
+      api: () => new Promise(r => { finish = r; }), toast() {}, pageSettings() {},
+      refreshPage() { refreshes++; }, document: { querySelector: () => ({ addEventListener(_, fn) { submit = fn; } }) },
+      pages: { items: async () => {}, settings: async () => {} }, stopScrapePolling() {}, stopProbePolling() {},
+      cancelProbeHide() {}, cancelScanHide() {}, setMeta() {}, skeletonPanel: () => '' });
+    vm.runInContext(section("  document.querySelector('#apikey-form').addEventListener", '  const logoutAll = document.querySelector'), box);
+    vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
+    const pending = submit({ preventDefault() {}, target: {} });
+    if (change === 'navigate') { await box.page('items'); await box.page('settings'); }
+    if (change === 'identity') stored = 'B';
+    finish({ key: 'raw-secret' }); await pending;
+    assert.equal(box.createdAPIKey, change === 'none' ? 'raw-secret' : null); assert.equal(refreshes, change === 'none' ? 1 : 0);
+    await box.page('items'); assert.equal(box.createdAPIKey, null);
+  }
+});
+
+test('扫描本次running→终态刷新一次；换页/筛选/身份不刷新新上下文', async () => {
+  for (const change of ['none', 'page', 'wall', 'identity']) {
+    let reads = 0;
+    const env = scanFixture(async () => reads++ ? { ...scanTerminal, task_id: 7 } : { running: true, task_id: 7 },
+      async () => ({ task_id: 7 }));
+    await env.box.runScan(); assert.equal(env.reloads, 1);
+    await env.fire(0);
+    if (change === 'page') env.box.pageGen++;
+    if (change === 'wall') env.box.wallGen++;
+    if (change === 'identity') env.box.token = 'B';
+    await env.fire(1500);
+    assert.equal(env.reloads, change === 'none' ? 2 : 1);
+    assert.equal(env.posts().length, 1); assert.equal(env.has(1500), false);
+  }
+});
+
+test('扫描202首读历史终态必须按task_id确认；快速完成未见running也刷新', async () => {
+  let taskReads = 0;
+  const env = scanFixture(async () => scanTerminal, async () => ({ task_id: 7 }), async (path) => {
+    assert.equal(path, '/tasks/7'); return taskReads++ ? { status: 'succeeded', finished_at: 'new' } : { status: 'queued' };
+  });
+  await env.box.runScan(); await env.fire(0);
+  assert.equal(env.reloads, 1); assert.equal(env.node('#scan').disabled, true); assert.equal(env.has(1500), true);
+  await env.fire(1500); assert.equal(env.reloads, 2); assert.equal(env.node('#scan').disabled, false);
+  assert.equal(env.posts().length, 1); assert.equal(taskReads, 2);
+  const fast = scanFixture(async () => scanTerminal, async () => ({ task_id: 8 }));
+  await fast.box.runScan(); await fast.fire(0); assert.equal(fast.reloads, 2);
+});
+
+test('运行日志页转义日志文本并支持级别筛选，切页后晚回不写新页面', async () => {
+  const nodes = new Map();
+  const make = id => ({ id, isConnected: true, textContent: '', innerHTML: '', hidden: false, value: '',
+    scrollTop: 0, scrollHeight: 100, clientHeight: 50, handlers: {},
+    addEventListener(type, fn) { this.handlers[type] = fn; }, setAttribute() {}, style: {} });
+  const content = {
+    _html: '',
+    get innerHTML() { return this._html; }, set innerHTML(value) { this._html = value; },
+    querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, make(selector)); return nodes.get(selector); }
+  };
+  const timers = [], listeners = {};
+  const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const box = sandbox({ me: { is_admin: true }, pageGen: 1, token: 'fixture-token', esc, empty: (a, b) => `${a} ${b}`,
+    content, document: { hidden: false, addEventListener(type, fn) { listeners[type] = fn; }, removeEventListener() {}, querySelector: () => null },
+    setTimeout: (fn, delay) => { timers.push([fn, delay]); return timers.length; }, clearTimeout() {},
+    api: async () => ({ items: [{ id: '1', time: '2026-10-23T10:00:00Z', level: 'INFO', message: '<script>x</script> token=ABC' }],
+      next_after: 'n1', next_before: 'b1', has_more: true }) });
+  vm.runInContext(section('let logsTimer = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
+  await box.pageLogs();
+  assert.match(nodes.get('#dl-body').innerHTML, /&lt;script&gt;/);
+  assert.doesNotMatch(nodes.get('#dl-body').innerHTML, /<script>/);
+  assert.equal(nodes.get('#dl-earlier').hidden, false);
+  nodes.get('#dl-level').value = 'warn';
+  nodes.get('#dl-level').handlers.change({ target: { value: 'warn' } });
+  assert.doesNotMatch(nodes.get('#dl-body').innerHTML, /token=ABC/);
+  assert.equal(timers.filter(([, delay]) => delay === 1000).length, 1, '只安排下一次增量轮询');
+  box.stopLogsPolling();
+  assert.equal(timers.filter(([, delay]) => delay === 1000).length, 1);
+});
+
+test('运行日志首读在切页后不渲染旧响应', async () => {
+  const nodes = new Map();
+  const make = id => ({ id, isConnected: true, textContent: '', innerHTML: '', hidden: false,
+    scrollTop: 0, scrollHeight: 100, clientHeight: 50, handlers: {},
+    addEventListener(type, fn) { this.handlers[type] = fn; }, setAttribute() {}, style: {} });
+  const content = {
+    innerHTML: '', querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, make(selector)); return nodes.get(selector); }
+  };
+  let resolve;
+  const box = sandbox({ me: { is_admin: true }, pageGen: 1, token: 'fixture-token', esc: String, empty: () => '',
+    content, document: { hidden: false, addEventListener() {}, removeEventListener() {}, querySelector: () => null },
+    setTimeout: () => 0, clearTimeout() {}, api: () => new Promise(r => { resolve = r; }) });
+  vm.runInContext(section('let logsTimer = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
+  const loading = box.pageLogs();
+  box.pageGen = 2;
+  resolve({ items: [{ id: 'old', time: '2026-10-23T10:00:00Z', level: 'INFO', message: 'old-response' }], next_after: 'x' });
+  await loading;
+  assert.equal(nodes.get('#dl-body').innerHTML, '', '旧页面响应不得写入新页面');
+});
+
+test('刮削inspect失败保留已有候选并提供重试，首次失败同样可重试，旧失败不可重绘', async () => {
+  for (const initial of [false, true]) {
+    let attempts = 0, retry, renders = 0;
+    const state = { movieId: 1, inspectSeq: 0, preview: {}, inspect: initial ? null : { title: 'old' } };
+    const body = { innerHTML: 'candidates', insertAdjacentHTML(_, markup) { this.innerHTML = markup + this.innerHTML; },
+      querySelector() { return { addEventListener(_, fn) { retry = fn; } }; } };
+    const box = sandbox({ scrapeState: state, document: { querySelector: () => body }, esc: String,
+      renderScrapePreview() { renders++; body.innerHTML = 'candidates'; },
+      api: async () => { if (!attempts++) throw Error('offline'); return { title: 'new' }; } });
+    vm.runInContext(section('async function loadScrapeInspect(', 'function renderScrapePreview()'), box);
+    await box.loadScrapeInspect('p', 'x'); assert.match(body.innerHTML, /role="alert"/); assert.match(body.innerHTML, /重试读取详情/);
+    if (!initial) assert.match(body.innerHTML, /candidates/);
+    retry(); await new Promise(setImmediate); assert.equal(state.inspect.title, 'new'); assert.ok(renders >= 1);
+    let fail; box.api = () => new Promise((_, reject) => { fail = reject; });
+    const old = box.loadScrapeInspect('p', 'old'); box.scrapeState = null; body.innerHTML = 'new page'; fail(Error('late'));
+    await old; assert.equal(body.innerHTML, 'new page');
+  }
+});
+
+test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位，标题与播放可聚焦', t => {
+  const { spawnSync } = require('node:child_process'), os = require('node:os');
+  const chrome = process.env.CHROME_BIN || '/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
+  if (!fs.existsSync(chrome)) { t.skip('未安装浏览器；不自动安装'); return; }
+  const box = sandbox({ me: { is_admin: true }, esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
+  vm.runInContext(section('function wallCard(', 'const WALL_PAGE_SIZE'), box);
+  const card = box.wallCard({ id: 1, status: 'success', Title: 'test' }, null);
+  const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
+  const doc = `<!doctype html><meta charset="utf-8"><style>${css}</style><div class="wall is-selecting" style="margin:20px;width:260px">${card}<div class="field" hidden id="f">probe<input></div></div><script>
+    const f=document.querySelector('#f'); const hits=['probe','reread','delete'].map(k=>{const b=document.querySelector('[data-'+k+']'),r=b.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===b;});
+    const title=document.querySelector('.wall-title'),play=document.querySelector('.wall-play'); title.focus();const titleFocus=document.activeElement===title;play.focus();
+    const selected=document.querySelector('[data-translate-select]'),r=selected.getBoundingClientRect(),selectionHit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===selected;
+    const out={width:innerWidth,selectionHit,display:getComputedStyle(f).display,height:f.getBoundingClientRect().height,hits,titleFocus,playFocus:document.activeElement===play};document.head.innerHTML='';document.body.innerHTML='<pre id="result"></pre>';document.querySelector('#result').textContent=JSON.stringify(out);</script>`;
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-css-regression-'));
+  try {
+    for (const width of [1280, 500]) {
+      const run = spawnSync(chrome, ['--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--user-data-dir=' + profile,
+        '--window-size=' + width + ',900', '--dump-dom', 'data:text/html;base64,' + Buffer.from(doc).toString('base64')], { encoding: 'utf8', timeout: 20000 });
+      assert.equal(run.status, 0, run.stderr); const match = run.stdout.match(/<pre id="result">([^<]+)<\/pre>/); assert.ok(match, run.stdout);
+      const actual = JSON.parse(match[1]); assert.equal(actual.width, width); assert.deepEqual(actual.hits, [true,true,true]); assert.equal(actual.selectionHit, true);
+      assert.equal(actual.display, 'none'); assert.equal(actual.height, 0); assert.equal(actual.titleFocus, true); assert.equal(actual.playFocus, true);
+    }
+  } finally {
+    assert.equal(path.dirname(profile), os.tmpdir()); assert.ok(path.basename(profile).startsWith('emby-css-regression-'));
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('扫描任务终态保持failed数字计数；任务failed/skipped及成功带非致命失败都不自动隐藏', async () => {
+  for (const status of ['failed', 'skipped', 'succeeded']) {
+    const env = scanFixture(async () => ({ ...scanTerminal, failed: 3 }), async () => ({ task_id: 9 }),
+      async () => ({ task_id: 9, status, finished_at: 'new', result: { failed: 3 }, error: status === 'failed' ? 'disk error' : '' }));
+    await env.box.runScan(); await env.fire(0);
+    assert.match(env.node('#scan-progress-title').textContent, /存在错误/);
+    assert.match(env.node('#scan-progress-detail').textContent, /失败 3/);
+    assert.doesNotMatch(env.node('#scan-progress-detail').textContent, /失败 true/);
+    assert.equal(env.has(4000), false); assert.equal(env.node('#scan-progress').hidden, false);
+    assert.equal(env.reloads, 2);
+  }
+  const failed = scanFixture(async () => scanTerminal, async () => ({ task_id: 10 }), async () => ({ status: 'failed', finished_at: 'new' }));
+  await failed.box.runScan(); await failed.fire(0);
+  assert.match(failed.node('#scan-progress-detail').textContent, /扫描任务未成功完成/);
+  assert.equal(failed.has(4000), false);
+});
+
+test('扫描task_id确认失败沿统一退避，停止观察会中止任务GET且晚回不重绘', async () => {
+  let attempts = 0;
+  const retry = scanFixture(async () => scanTerminal, async () => ({ task_id: 11 }), async () => {
+    if (!attempts++) throw Object.assign(Error('unavailable'), { status: 503 });
+    return { status: 'succeeded', finished_at: 'new' };
+  });
+  await retry.box.runScan(); await retry.fire(0); assert.equal(retry.has(3000), true); assert.equal(retry.reloads, 1);
+  await retry.fire(3000); assert.equal(retry.reloads, 2); assert.equal(retry.posts().length, 1);
+  let finish, signal;
+  const stopped = scanFixture(async () => scanTerminal, async () => ({ task_id: 12 }), (_, opts) => {
+    signal = opts.signal; return new Promise(r => { finish = r; });
+  });
+  await stopped.box.runScan(); const pending = stopped.fire(0);
+  await new Promise(setImmediate); stopped.box.stopScanPolling(); assert.equal(signal.aborted, true);
+  const before = stopped.snapshot(); finish({ status: 'succeeded', finished_at: 'new' }); await pending;
+  assert.equal(stopped.snapshot(), before); assert.equal(stopped.reloads, 1); assert.equal(stopped.has(1500), false);
+});
+
+function translationFixture(read = async () => ({ running: false }), post = async () => ({ task_id: 7 })) {
+  const clock = controlledClock(), nodes = new Map(), calls = [], confirmations = [];
+  const node = key => {
+    if (!nodes.has(key)) nodes.set(key, { checked: key.includes('"title"'), disabled: false, textContent: '', handlers: {},
+      addEventListener(event, fn) { this.handlers[event] = fn; } });
+    return nodes.get(key);
+  };
+  const root = { querySelector: node };
+  const box = sandbox({ pageGen: 1, scopeCurrent: true, completed: 0, AbortController,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, esc: String,
+    confirm: text => { confirmations.push(text); return box.confirmed !== false; },
+    api: async (url, opts = {}) => {
+      calls.push({ url, ...opts });
+      if (url === '/translate/run') return post(url, opts);
+      if (url === '/translate/cancel') return { running: true };
+      return read(url, opts);
+    } });
+  vm.runInContext(section('function startProgressPolling(', 'function stopScrapePolling()'), box);
+  vm.runInContext(section('const TRANSLATE_HINT =', '/* ------------------------------------------------------------ 计划任务 */'), box);
+  box.scope = { movie_ids: [1, 2] };
+  const halt = box.mountTranslation(root, () => box.scope, () => box.scopeCurrent, () => box.completed++);
+  return { ...clock, box, calls, confirmations, node, halt, root, click: key => node(`[data-translate-${key}]`).handlers.click() };
+}
+
+test('独立翻译payload严格范围/字段/limit；空选片不能退化全库，IDs不携带library_id', () => {
+  const env = translationFixture();
+  const payload = env.box.translationPayload({ movie_ids: [1, 1, 2], library_id: 9 }, ['title'], 10);
+  assert.deepEqual(JSON.parse(JSON.stringify(payload)), { movie_ids: [1, 2], fields: ['title'], limit: 10 });
+  for (const scope of [{ movie_ids: [] }, { movie_ids: [-1] }, { movie_ids: Array.from({ length: 1001 }, (_, i) => i + 1) }]) {
+    assert.throws(() => env.box.translationPayload(scope, ['title']), /请选择/);
+  }
+  assert.throws(() => env.box.translationPayload({}, []), /字段/);
+  assert.throws(() => env.box.translationPayload({}, ['plot'], 0.5), /整数/);
+  assert.throws(() => env.box.translationPayload({}, ['title'], 100001), /整数/);
+  assert.equal(env.box.translationPayload({ library_id: 8 }, ['plot']).library_id, 8);
+  const html = env.box.translationWidget('x');
+  assert.match(html, /data-translate-field="title" checked/); assert.doesNotMatch(html, /data-translate-field="plot" checked/);
+  assert.match(html, /originaltitle/); assert.match(html, /可能已经是译文/); assert.match(html, /字段锁/);
+  env.halt();
+});
+
+test('翻译提交前明确范围确认，单次POST，仅标题默认，不刮削/取图；终态按精确task_id刷新一次', async () => {
+  let state = { running: false };
+  const env = translationFixture(async () => state);
+  await env.fire(0);
+  await env.click('start'); await env.click('start');
+  assert.equal(env.calls.filter(c => c.url === '/translate/run').length, 1);
+  assert.match(env.confirmations[0], /所选 2 部影片/);
+  assert.match(env.confirmations[0], /不重新刮削、不取图/);
+  const body = JSON.parse(env.calls.find(c => c.url === '/translate/run').body);
+  assert.deepEqual(body, { fields: ['title'], limit: 0, movie_ids: [1, 2] });
+  state = { task_id: 7, running: false, success: 2, done: 2, total: 2, finished_at: 'now' };
+  await env.fire(0);
+  assert.equal(env.calls.at(-1).url, '/translate/status?task_id=7'); assert.equal(env.box.completed, 1);
+  assert.equal(env.has(1500), false); assert.match(env.node('[data-translate-progress]').textContent, /成功 2/);
+});
+
+test('取消翻译携带观察任务ID，等待真实终态；替换任务/404不刷新、不取消新任务', async () => {
+  let state = { task_id: 7, running: true };
+  const env = translationFixture(async () => state);
+  await env.fire(0); await env.click('cancel');
+  assert.deepEqual(JSON.parse(env.calls.find(c => c.url === '/translate/cancel').body), { task_id: 7 });
+  state = { task_id: 7, running: false, cancelled: true, done: 0 };
+  await env.fire(0); assert.match(env.node('[data-translate-progress]').textContent, /已取消/); assert.equal(env.box.completed, 0);
+  const other = translationFixture(async url => url.includes('?') ? { task_id: 99, running: true } : { running: false });
+  await other.fire(0); await other.click('start'); await other.fire(0);
+  assert.match(other.node('[data-translate-progress]').textContent, /已被替换/); assert.equal(other.box.completed, 0);
+  await other.click('cancel'); assert.equal(other.calls.filter(c => c.url.includes('/cancel')).length, 0);
+  other.halt();
+  const missing = translationFixture(async url => { if (url.includes('?')) throw Object.assign(Error('gone'), { status: 404 }); return { running: false }; });
+  await missing.fire(0); await missing.click('start'); await missing.fire(0);
+  assert.equal(missing.has(3000), false); assert.equal(missing.box.completed, 0); assert.match(missing.node('[data-translate-progress]').textContent, /快照/);
+});
+
+test('翻译状态503退避只GET，10秒软超时/导航中止；旧POST成功不复活，旧终态不刷新新scope', async () => {
+  let attempts = 0;
+  const retry = translationFixture(async () => { if (!attempts++) throw Object.assign(Error('unavailable'), { status: 503 }); return { running: false }; });
+  await retry.fire(0); assert.equal(retry.has(3000), true); assert.equal(retry.node('[data-translate-start]').disabled, true);
+  await retry.fire(3000); assert.equal(retry.calls.filter(c => c.method === 'POST').length, 0); retry.halt();
+  let finishRead, signal;
+  const stopped = translationFixture((_, opts) => { signal = opts.signal; return new Promise(r => { finishRead = r; }); });
+  const pending = stopped.fire(0); await new Promise(setImmediate); assert.equal(stopped.has(10000), true);
+  stopped.box.stopTranslationPolling(); assert.equal(signal.aborted, true);
+  const before = stopped.node('[data-translate-progress]').textContent; finishRead({ running: false, task_id: 7, success: 2 }); await pending;
+  assert.equal(stopped.node('[data-translate-progress]').textContent, before); assert.equal(stopped.box.completed, 0);
+  for (const change of [env => env.box.pageGen++, env => env.box.scopeCurrent = false, env => env.box.localStorage = { getItem: () => 'B' }]) {
+    let finishPost;
+    const late = translationFixture(async () => ({ running: false }), () => new Promise(r => { finishPost = r; }));
+    await late.fire(0); const post = late.click('start'); change(late); finishPost({ task_id: 7 }); await post;
+    assert.equal(late.has(0), false); assert.equal(late.box.completed, 0);
+    const end = translationFixture(async url => url.includes('?') ? { running: false, task_id: 7, success: 1 } : { running: false });
+    await end.fire(0); await end.click('start'); change(end); await end.fire(0); assert.equal(end.box.completed, 0);
+    end.halt();
+  }
+});
+
+test('翻译表单空字段/空ID不POST、取消范围确认不POST；计划保留unknown与ETag，换类型不泄漏', async () => {
+  const env = translationFixture(); await env.fire(0);
+  env.box.scope = { movie_ids: [] }; await env.click('start'); assert.match(env.node('[data-translate-progress]').textContent, /请选择/);
+  env.box.scope = { movie_ids: [1] }; env.node('[data-translate-field="title"]').checked = false;
+  await env.click('start'); assert.match(env.node('[data-translate-progress]').textContent, /至少选择/);
+  env.node('[data-translate-field="plot"]').checked = true; env.box.confirmed = false; await env.click('start');
+  assert.equal(env.calls.filter(c => c.method === 'POST').length, 0); env.halt();
+  const box = sandbox({}); vm.runInContext(section('function scheduledFormParams(', 'async function pageScheduled('), box);
+  const params = box.scheduledFormParams('translate', { type: 'translate' }, { fields: ['plot'], limit: 20, future: false }, { fields: ['title'], limit: 10, library_id: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(params)), { fields: ['title'], limit: 10, future: false, library_id: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(box.scheduledFormParams('translate', { type: 'probe' }, { status: 'all', only_missing: false }, { fields: ['title'], limit: 0, library_id: 0 }))), { fields: ['title'], limit: 0, library_id: 0 });
+  assert.match(source, /!editing && kind === 'translate'.*checked = false/);
+  assert.match(source, /取消“保存后参与调度”/); assert.match(source, /If-Match.*editing.config_etag/);
+  assert.match(source, /data-show="translate"/);
+});
+
+test('翻译全skip/nochange仍刷新修复的索引；失败保留真实计数，取消无done不刷新', async () => {
+  for (const summary of [{ success: 0, skipped: 2, done: 2 }, { success: 0, failed: 1, done: 1, error: 'failure' }]) {
+    const env = translationFixture(async url => url.includes('?') ? { task_id: 7, running: false, finished_at: 'now', ...summary } : { running: false });
+    await env.fire(0); await env.click('start'); await env.fire(0);
+    assert.equal(env.box.completed, 1); assert.equal(env.node('[data-translate-start]').disabled, false);
+    assert.match(env.node('[data-translate-progress]').textContent, /翻译结束/);
+  }
+});
+
+test('翻译读取403停止、悬挂10秒中止退避；提交503保留选择且绝不自动重放POST', async () => {
+  const denied = translationFixture(async () => { throw Object.assign(Error('forbidden'), { status: 403 }); });
+  await denied.fire(0); assert.equal(denied.has(3000), false); assert.match(denied.node('[data-translate-progress]').textContent, /读取受限/);
+  let signal, fail;
+  const timeout = translationFixture((_, opts) => { signal = opts.signal; return new Promise((resolve, reject) => { fail = reject; }); });
+  const request = timeout.fire(0); await new Promise(setImmediate);
+  timeout.fire(10000); assert.equal(signal.aborted, true); fail(Error('aborted')); await request;
+  assert.equal(timeout.has(3000), true); assert.match(timeout.node('[data-translate-progress]').textContent, /状态未知/); timeout.halt();
+  const post = translationFixture(async () => ({ running: false }), async () => { throw Object.assign(Error('unavailable'), { status: 503 }); });
+  await post.fire(0); await post.click('start'); await post.fire(0);
+  assert.equal(post.calls.filter(c => c.url === '/translate/run').length, 1);
+  assert.equal(post.node('[data-translate-field="title"]').checked, true);
+  assert.equal(post.box.scope.movie_ids.length, 2); assert.equal(post.box.completed, 0);
+});
+
+test('真实翻译计划PATCH保留unknown/limit/fields与If-Match；412禁旧重提、空字段拒绝提交', async () => {
+  for (const failure of [0, 412]) {
+    const env = scheduledSubmitFixture({ kind: 'translate', params: { future: { preserve: true }, limit: 50, fields: ['plot'] }, failure });
+    env.box.editing.type = 'translate';
+    env.fields['#s-translate-title'] = { checked: true }; env.fields['#s-translate-plot'] = { checked: false }; env.fields['#s-translate-limit'] = { value: '20' };
+    vm.runInContext(section('function translationPayload(', 'function translationWidget('), env.box);
+    await env.submit();
+    assert.deepEqual(env.calls[0].body.params, { future: { preserve: true }, limit: 20, fields: ['title'], library_id: 7 });
+    assert.equal(env.calls[0].headers['If-Match'], '"sc1-fixture"'); assert.equal(env.calls[0].body.enabled, false);
+    if (failure) { assert.equal(env.fields['#sched-conflict'].hidden, false); await env.submit(); assert.equal(env.calls.length, 1); }
+  }
+  const empty = scheduledSubmitFixture({ kind: 'translate' });
+  empty.fields['#s-translate-title'] = { checked: false }; empty.fields['#s-translate-plot'] = { checked: false }; empty.fields['#s-translate-limit'] = { value: '0' };
+  vm.runInContext(section('function translationPayload(', 'function translationWidget('), empty.box);
+  await empty.submit(); assert.equal(empty.calls.length, 0); assert.match(empty.messages[0], /字段/);
+  const visible = { library: [{ hidden: false }], scan: [{ hidden: false }], probe: [{ hidden: false }], translate: [{ hidden: true }] }, enabled = { checked: true };
+  const box = sandbox({ editing: null, typeEl: { value: 'translate' }, document: { querySelector: () => enabled, querySelectorAll: selector => visible[selector.match(/"([^"]+)"/)[1]] } });
+  vm.runInContext(section('  function syncParams()', '  // 即时校验'), box); box.syncParams();
+  assert.equal(enabled.checked, false); assert.equal(visible.probe[0].hidden, true); assert.equal(visible.translate[0].hidden, false);
+  box.typeEl.value = 'probe'; box.syncParams(); assert.equal(visible.translate[0].hidden, true); assert.equal(visible.probe[0].hidden, false);
+});
+
+test('媒体墙轻量多选不触发详情/播放，最多1000，搜索reload清空旧选片', async () => {
+  const env = await wallKeyboardFixture();
+  const input = { checked: true, dataset: { translateSelect: '7' }, matches: selector => selector === 'input' };
+  const target = { closest: selector => selector.includes('data-translate-select') ? input : null };
+  await env.handlers.click({ target, stopPropagation() {} });
+  assert.equal(env.box.wallState.translateSelection.has('7'), true); assert.equal(env.calls.length, 0);
+  input.checked = false; await env.handlers.click({ target, stopPropagation() {} }); assert.equal(env.box.wallState.translateSelection.size, 0);
+  for (let i = 1; i <= 1000; i++) env.box.wallState.translateSelection.add(String(i));
+  input.dataset.translateSelect = '1001'; input.checked = true;
+  await env.handlers.click({ target, stopPropagation() {} }); assert.equal(input.checked, false); assert.equal(env.box.wallState.translateSelection.size, 1000);
+  const count = { textContent: '' }, query = env.box.document.querySelector;
+  env.box.document.querySelector = id => id === '#wall-translate-count' ? count : query(id);
+  vm.runInContext(section('function reloadWall()', '// wallMaybeLoadMore'), env.box); env.box.reloadWall();
+  assert.equal(env.box.wallState.translateSelection.size, 0); assert.match(count.textContent, /已选 0 部/); assert.equal(env.calls.length, 0);
+});
+
+test('手动执行禁调度的翻译计划也必须确认范围，保持enabled；损坏参数拒绝执行', async () => {
+  const task = { id: 42, name: '手动翻译', type: 'translate', enabled: false, params: JSON.stringify({ library_id: 7, fields: ['plot'], limit: 20 }) };
+  let click; const calls = [], confirmations = [], messages = [];
+  const box = sandbox({ id: '42', items: [task], TRANSLATE_HINT: 'source hint', accepted: false,
+    el: { disabled: false, addEventListener(_, fn) { click = fn; } },
+    confirm: text => { confirmations.push(text); return box.accepted; },
+    api: async (url, options) => calls.push({ url, ...options }), toast: message => messages.push(message) });
+  vm.runInContext(section('function translationPayload(', 'function translationWidget('), box);
+  vm.runInContext(section("      el.addEventListener('click', async () => {\n        if (el.disabled)", "    } else if (role === 'edit')"), box);
+  await click(); assert.equal(calls.length, 0); assert.match(confirmations[0], /媒体库 7/); assert.match(confirmations[0], /plot/); assert.match(confirmations[0], /20/);
+  box.accepted = true; await click(); assert.equal(calls[0].url, '/scheduled/42/run'); assert.equal(task.enabled, false);
+  task.params = '[]'; await click(); assert.equal(calls.length, 1); assert.match(messages.at(-1), /参数无法确认/);
+});
+
+// 增量扫描：只模拟DOM/API/时钟，不访问真实库，不自动允许空库删除。
+test('扫描计划mode兼容full、保留未知高级参数，类型切换不泄漏；提交带ETag', async () => {
+  const original = { mode: 'incremental', limit: 17, root_marker_path: '.mounted', root_marker_sha256: 'abc', allow_empty_removal: true, future: false };
+  const env = scheduledSubmitFixture({ kind: 'scan', params: original });
+  env.box.editing.type = 'scan'; env.fields['#s-scan-mode'].value = 'incremental';
+  await env.submit();
+  assert.deepEqual(env.calls[0].body.params, { ...original, library_id: 7 });
+  assert.equal(env.calls[0].headers['If-Match'], '"sc1-fixture"'); assert.equal(env.calls[0].method, 'PATCH');
+  assert.equal(original.mode, 'incremental');
+  const legacy = env.box.scheduledFormParams('scan', { type: 'scan' }, { future: false }, { library_id: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(legacy)), { future: false, library_id: 2, mode: 'full' });
+  const changed = env.box.scheduledFormParams('scan', { type: 'probe' }, { status: 'all', future: true }, { library_id: 0, mode: 'incremental' });
+  assert.deepEqual(JSON.parse(JSON.stringify(changed)), { library_id: 0, mode: 'incremental' });
+  assert.throws(() => env.box.scheduledFormParams('scan', null, {}, { library_id: 0, mode: 'bad' }), /扫描模式/);
+  const invalid = scheduledSubmitFixture({ kind: 'scan' }); invalid.fields['#s-scan-mode'].value = '';
+  await invalid.submit(); assert.equal(invalid.calls.length, 0); assert.match(invalid.messages[0], /扫描模式/);
+  const conflict = scheduledSubmitFixture({ kind: 'scan', failure: 412 });
+  await conflict.submit(); await conflict.submit(); assert.equal(conflict.calls.length, 1); assert.equal(conflict.fields['#sched-submit'].disabled, true);
+});
+
+test('扫描计划回填不静默覆盖坏mode，相关控件仅scan显示，旧计划full', () => {
+  for (const [mode, expected, readable] of [[undefined, 'full', true], ['incremental', 'incremental', true], ['bad', 'bad', false], [null, null, false]]) {
+    const nodes = new Map(); const node = id => { if (!nodes.has(id)) nodes.set(id, { value: '', hidden: true, disabled: false, checked: false }); return nodes.get(id); };
+    const box = sandbox({ editing: { type: 'scan' }, params: mode === undefined ? {} : { mode }, paramsReadable: true,
+      document: { querySelector: node } });
+    vm.runInContext(section('  // 回填编辑中的参数。', '  syncParams();'), box);
+    assert.equal(node('#s-scan-mode').value, expected); assert.equal(box.paramsReadable, readable);
+    if (!readable) { assert.equal(node('#sched-submit').disabled, true); assert.match(node('#sched-conflict').textContent, /扫描模式参数无法读取/); }
+  }
+  const visible = Object.fromEntries(['library', 'scan', 'probe', 'translate'].map(k => [k, [{ hidden: false }]]));
+  const box = sandbox({ typeEl: { value: 'scan' }, editing: true, document: { querySelectorAll: selector => visible[selector.match(/data-show="([^"]+)"/)[1]] } });
+  vm.runInContext(section('  function syncParams()', '  // 即时校验表达式'), box);
+  box.syncParams(); assert.equal(visible.scan[0].hidden, false); assert.equal(visible.probe[0].hidden, true);
+  box.typeEl.value = 'reindex'; box.syncParams(); assert.equal(visible.scan[0].hidden, true); assert.equal(visible.library[0].hidden, true);
+});
+
+test('扫描本次task结果覆盖旧running与旧计数，失败保留部分成果与未清理提示', async () => {
+  const result = { mode: 'incremental', groups_total: 7, groups_done: 4, success: 2, pending: 1, failed: 1,
+    unchanged_groups: 1, added: 2, updated: 1, deleted: 0, index_changed: true, cleanup_performed: false, incomplete: true };
+  const env = scanFixture(async () => ({ running: true, task_id: 99, failed: 42, deleted: 99, cleanup_performed: true }),
+    async () => ({ task_id: 7 }), async path => { assert.equal(path, '/tasks/7'); return { task_id: 7, mode: 'incremental', status: 'failed', finished_at: 'now', result, error: 'read failed' }; });
+  await env.box.runScan(); await env.fire(0);
+  assert.equal(env.reloads, 2); assert.equal(env.node('#scan-progress-count').textContent, '4/7 组');
+  const detail = env.node('#scan-progress-detail').textContent;
+  assert.match(detail, /新增 2 · 更新 1 · 删除 0/); assert.match(detail, /失败 1/); assert.match(detail, /部分成果已保留/);
+  assert.match(detail, /未执行缺失索引清理/); assert.doesNotMatch(detail, /42|99|已完成缺失索引清理/);
+  assert.equal(env.has(4000), false); assert.equal(env.node('#scan-progress-close').hidden, false);
+  assert.equal(env.posts().length, 1);
+});
+
+test('扫描极快无变化终态只采用本次false字段，安全未完成也不能自动隐藏', async () => {
+  for (const incomplete of [false, true]) {
+    const env = scanFixture(async () => ({ ...scanTerminal, task_id: 99, failed: 12, incomplete: true, cleanup_performed: true }),
+      async () => ({ task_id: 8 }), async () => ({ task_id: 8, status: 'succeeded', finished_at: 'new', mode: 'incremental',
+        result: { groups_total: 5, groups_done: 5, unchanged_groups: 5, failed: 0, incomplete, cleanup_performed: !incomplete, index_changed: false } }));
+    await env.box.runScan(); await env.fire(0);
+    assert.equal(env.reloads, 2); assert.doesNotMatch(env.node('#scan-progress-detail').textContent, /失败 12/);
+    assert.match(env.node('#scan-progress-detail').textContent, /未变化 5 · 新增 0 · 更新 0 · 删除 0/);
+    assert.equal(env.has(4000), !incomplete);
+    if (incomplete) assert.match(env.node('#scan-progress-title').textContent, /存在错误/);
+    env.box.stopScanPolling();
+  }
+});
+
+test('扫描taskID不匹配只GET退避，不刷新冒名任务；本地换身份禁止旧请求与迟到刷新', async () => {
+  const mismatch = scanFixture(async () => scanTerminal, async () => ({ task_id: 7 }),
+    async () => ({ task_id: 8, status: 'succeeded', finished_at: 'wrong', result: { deleted: 100 } }));
+  await mismatch.box.runScan(); await mismatch.fire(0);
+  assert.equal(mismatch.reloads, 1); assert.equal(mismatch.has(3000), true); assert.equal(mismatch.posts().length, 1);
+  assert.doesNotMatch(mismatch.node('#scan-progress-detail').textContent, /删除 100/); mismatch.box.stopScanPolling();
+  let finish;
+  const late = scanFixture(async () => ({ running: false }), () => new Promise(resolve => { finish = resolve; }));
+  const submitting = late.box.runScan(); late.box.localStorage = { getItem: () => 'new-identity' }; finish({ task_id: 7 }); await submitting;
+  assert.equal(late.reloads, 0); late.box.stopScanPolling();
+  await late.box.runScan(); assert.equal(late.posts().length, 1);
+  const current = scanFixture(async () => ({ ...scanTerminal, task_id: 7 }), async () => ({ task_id: 7 }));
+  await current.box.runScan(); current.box.localStorage = { getItem: () => 'new-identity' }; await current.fire(0);
+  assert.equal(current.reloads, 1); current.box.stopScanPolling();
+});
+
+test('手动扫描full/incremental均显式下发，不携带允许空删；模式有可见说明', async () => {
+  for (const mode of ['full', 'incremental']) {
+    const env = scanFixture(); env.node('#scan-mode').value = mode;
+    await env.box.runScan(3); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=3&mode=' + mode);
+    assert.doesNotMatch(env.posts()[0].path, /allow_empty/); env.box.stopScanPolling();
+  }
+  const html = fs.readFileSync(path.join(__dirname, 'web/index.html'), 'utf8');
+  assert.match(html, /label for="scan-mode"/); assert.match(html, /aria-describedby="scan-mode-description"/);
+  assert.match(html, /两种模式都会完整枚举目录/);
+});
+
+
+test('设置分类只显示一组，切换不移除草稿，刷新保留分类且身份清理重置', () => {
+  const keys = ['account', 'users', 'notifications', 'logs', 'recovery', 'service'];
+  const make = key => ({ dataset: { settingsCategory: key, settingsPanel: key }, hidden: false,
+    draft: key + '-draft', setAttribute(name, value) { this[name] = value; }, addEventListener(_, fn) { this.click = fn; } });
+  const buttons = keys.map(make), panels = keys.map(make);
+  const root = { querySelectorAll: selector => selector === '[data-settings-category]' ? buttons : panels };
+  const box = sandbox(); vm.runInContext(section("let settingsCategory = 'account';", 'async function pageSettings('), box);
+  box.mountSettingsCategories(root);
+  assert.deepEqual(panels.filter(p => !p.hidden).map(p => p.dataset.settingsPanel), ['account']);
+  buttons[1].click(); assert.equal(buttons[1]['aria-pressed'], 'true');
+  assert.deepEqual(panels.filter(p => !p.hidden).map(p => p.dataset.settingsPanel), ['users']);
+  box.mountSettingsCategories(root); assert.equal(panels[1].hidden, false); assert.equal(panels[1].draft, 'users-draft');
+  vm.runInContext("settingsCategory = 'account'", box); box.mountSettingsCategories(root);
+  assert.equal(panels[0].hidden, false); assert.equal(panels[1].hidden, true);
+  assert.match(section('function clearSessionView()', 'function identityStorageChanged('), /settingsCategory = 'account'/);
+  assert.match(section("document.querySelector('#apikey-form').addEventListener", 'const logoutAll'), /settingsCategory = 'users';[\s\S]*refreshPage/);
+});
+
+test('Webhook折叠摘要使用文字不回显秘密，已有目标默认闭合、新建展开且重绘不丢草稿', async () => {
+  const name = '<img src=x onerror=alert(1)>';
+  const p = webhookPanel(async () => whView([whTarget({ name })])); await p.mounted;
+  assert.equal(p.cards().length, 1); assert.equal(p.card(0).open, false);
+  assert.match(p.card(0).innerHTML, /<summary class="disclosure-summary">/);
+  assert.match(p.card(0).querySelector('[data-target-summary]').textContent, /<img src=x/);
+  assert.equal(p.card(0).innerHTML.includes(name), false);
+  assert.match(p.card(0).querySelector('[data-target-summary]').textContent, /地址已保存 · 1 项订阅/);
+  p.card(0).open = true; p.field(0, 'url').value = 'https://example.invalid/new-secret';
+  p.field(0, 'name').value = '草稿'; p.field(0, 'enabled').checked = true;
+  p.card(0).listeners.change(); assert.match(p.card(0).querySelector('[data-target-summary]').textContent, /^草稿 · 已启用/);
+  assert.equal(p.card(0).querySelector('[data-target-summary]').textContent.includes('new-secret'), false);
+  p.add(); assert.equal(p.card(0).open, true); assert.equal(p.card(1).open, true);
+  assert.equal(p.field(0, 'url').value, 'https://example.invalid/new-secret'); assert.equal(p.field(0, 'name').value, '草稿');
+  p.card(0).open = false; p.remove(1); assert.equal(p.card(0).open, false);
+  assert.match(p.host.innerHTML, /wh-confirm-remove/); assert.match(p.host.innerHTML, /wh-confirm-empty/);
+});
+
+test('计划列表与刮削执行先于收起配置，墙和详情维护为原生可聚焦披露而不改业务ID', () => {
+  const scheduled = section('async function pageScheduled(', 'async function pageLogs(');
+  assert.ok(scheduled.indexOf('<h2>已配置任务</h2>') < scheduled.indexOf('id="sched-form"'));
+  assert.match(scheduled, /<details class="panel disclosure" id="scheduled-editor"\$\{editing \? ' open' : ''\}/);
+  const scrape = section('async function pageScrape(', 'function progressCounts(');
+  assert.ok(scrape.indexOf('id="scrape-start"') < scrape.indexOf('id="scrape-form"'));
+  assert.match(scrape, /<details class="panel disclosure" id="scrape-configuration">/);
+  assert.match(scrape, /共享翻译服务/);
+  const items = section('async function pageItems(', 'function reloadWall(');
+  assert.ok(items.indexOf('id="item-search"') < items.indexOf('id="probe-media"'));
+  assert.match(items, /<details class="disclosure wall-maintenance"><summary/);
+  const detail = section('async function openDetail(', 'async function pageActivity(');
+  assert.ok(detail.indexOf('id="detail-play"') < detail.indexOf('detail-maintenance'));
+  assert.match(detail, /<details class="disclosure detail-maintenance"><summary/);
+  assert.match(section('function overlayFocusables(', 'function overlayContains('), /summary,/);
 });

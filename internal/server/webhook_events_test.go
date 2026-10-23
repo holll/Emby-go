@@ -12,6 +12,16 @@ import (
 	"emby-go/internal/webhook"
 )
 
+func webhookDispatcherForTest(t *testing.T, cfg config.WebhookConfig) *webhook.Dispatcher {
+	t.Helper()
+	spec := legacyWebhookTargetSpec(normalizeWebhookConfig(cfg))
+	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec.target()}, webhook.DefaultEventBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatcher
+}
+
 func TestWebhookEventsAfterSuccessfulWrites(t *testing.T) {
 	f := newAdminDeleteFixture(t)
 	events := make(chan webhook.Event, 32)
@@ -25,10 +35,7 @@ func TestWebhookEventsAfterSuccessfulWrites(t *testing.T) {
 	}))
 	defer target.Close()
 	cfg := config.WebhookConfig{Enabled: true, URL: target.URL, AllowPrivate: true, TimeoutSeconds: 1, Events: []string{"user.authenticated", "user.logout", "item.rate", "item.unrate", "item.markplayed", "item.markunplayed", "item.updated", "playback.start", "playback.progress", "playback.pause", "playback.unpause", "playback.stop"}}
-	sender, err := webhook.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sender := webhookDispatcherForTest(t, cfg)
 	defer sender.Close()
 	f.a.webhook.Close()
 	f.a.webhook = sender
@@ -177,10 +184,7 @@ func TestWebhookFailureDoesNotUndoOtherWrites(t *testing.T) {
 	f := newAdminDeleteFixture(t)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
 	defer target.Close()
-	s, err := webhook.New(config.WebhookConfig{Enabled: true, URL: target.URL, AllowPrivate: true, Events: []string{"item.rate"}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := webhookDispatcherForTest(t, config.WebhookConfig{Enabled: true, URL: target.URL, AllowPrivate: true, Events: []string{"item.rate"}})
 	defer s.Close()
 	f.a.webhook.Close()
 	f.a.webhook = s

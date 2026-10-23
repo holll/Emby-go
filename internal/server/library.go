@@ -556,7 +556,24 @@ func (a *App) similar(c *gin.Context) {
 		}
 		return
 	}
-	if !src.IsVisible() {
+	// One immutable authorization snapshot drives source, cache and candidates.
+	visible, admin, ok := a.viewerLibraries(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return
+	}
+	canView := func(libraryID int64) bool {
+		if admin {
+			return true
+		}
+		for _, id := range visible {
+			if id == libraryID {
+				return true
+			}
+		}
+		return false
+	}
+	if !src.IsVisible() || !canView(src.LibraryID) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -566,11 +583,7 @@ func (a *App) similar(c *gin.Context) {
 	}
 	// 相似度结果按 (版本,账户,授权,影片,limit) 短缓存：候选过滤依赖当前账户的
 	// 媒体库授权，不能跨账户复用。
-	grantKey, ok := a.viewerCacheKey(c)
-	if !ok {
-		itemDataUnavailable(c)
-		return
-	}
+	grantKey := libraryScopeCacheKey(visible, admin)
 	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(simKey); ok {
 		c.Data(200, "application/json", b)
@@ -622,7 +635,7 @@ func (a *App) similar(c *gin.Context) {
 			continue
 		}
 		// 可见性：未授权媒体库的候选不能出现在相似列表里（缓存键已按账户隔离）。
-		if !movie.IsVisible() || !a.canViewMovie(c, movie) {
+		if !movie.IsVisible() || !canView(movie.LibraryID) {
 			continue
 		}
 		shared := sharedActorCount(srcActorSet, candidateActors[movie.ID])
@@ -1060,7 +1073,12 @@ func (a *App) suggestions(c *gin.Context) {
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	movies, err := a.db.Latest(0, limit, 0)
+	visible, _, ok := a.viewerLibraries(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return
+	}
+	movies, err := a.db.LatestVisible(0, visible, limit, 0)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -1074,6 +1092,32 @@ func (a *App) suggestions(c *gin.Context) {
 		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
 	}
 	c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
+}
+
+// movieQueryOptions contains only the filters shared by movie-list scopes.
+// Parent scope, visibility, pagination and cache identity remain with the caller.
+type movieQueryOptions struct {
+	sortBy                       string
+	desc                         bool
+	genre, tags, studios, person string
+	unplayed, favorite           bool
+	term, years                  string
+}
+
+func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
+	filters := strings.ToLower(c.Query("Filters"))
+	return movieQueryOptions{
+		sortBy:   firstSortKey(c.DefaultQuery("SortBy", "SortName")),
+		desc:     strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending"),
+		genre:    joinEntityNames(c, "Genres", "Genre", "GenreIds"),
+		tags:     joinEntityNames(c, "Tags", "Tag", "TagIds"),
+		studios:  joinEntityNames(c, "Studios", "Studio", "StudioIds"),
+		person:   joinEntityNames(c, "Person", "Person", "PersonIds"),
+		unplayed: strings.Contains(filters, "isunplayed"),
+		favorite: strings.Contains(filters, "isfavorite"),
+		term:     c.Query("SearchTerm"),
+		years:    c.Query("Years"),
+	}
 }
 
 // itemsQuery 处理 GET /Users/{uid}/Items 与 GET /Items。
@@ -1152,16 +1196,8 @@ func (a *App) itemsQuery(c *gin.Context) {
 			return
 		}
 		// 打开某个合集：列出其成员影片。
-		// SortBy 取首键，库用 DateCreated 主排序。
-		sortBy := firstSortKey(c.DefaultQuery("SortBy", "SortName"))
-		desc := strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending")
-		genre := joinEntityNames(c, "Genres", "Genre", "GenreIds")
-		tags := joinEntityNames(c, "Tags", "Tag", "TagIds")
-		studios := joinEntityNames(c, "Studios", "Studio", "StudioIds")
-		person := joinEntityNames(c, "Person", "Person", "PersonIds")
-		unplayed := strings.Contains(strings.ToLower(c.Query("Filters")), "isunplayed")
-		favorite := strings.Contains(strings.ToLower(c.Query("Filters")), "isfavorite")
-		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, c.Query("SearchTerm"), c.Query("Years"), genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
+		options := parseMovieQueryOptions(c)
+		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start)
 		if e != nil {
 			itemDataUnavailable(c)
 			return
@@ -1191,19 +1227,10 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 	}
 
-	sortBy := firstSortKey(c.DefaultQuery("SortBy", "SortName"))
-	desc := strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending")
-	genre := joinEntityNames(c, "Genres", "Genre", "GenreIds")
-	tags := joinEntityNames(c, "Tags", "Tag", "TagIds")
-	studios := joinEntityNames(c, "Studios", "Studio", "StudioIds")
-	person := joinEntityNames(c, "Person", "Person", "PersonIds")
-	filterLower := strings.ToLower(c.Query("Filters"))
-	unplayed := strings.Contains(filterLower, "isunplayed")
-	favorite := strings.Contains(filterLower, "isfavorite")
+	options := parseMovieQueryOptions(c)
 
 	// Fields 决定响应体内容，须纳入缓存键，否则不同 Fields 的请求会互相串缓存。
 	fields := requestedFields(c)
-	term, years := c.Query("SearchTerm"), c.Query("Years")
 	// 缓存键不需要带请求来源：响应里的流地址是相对路径，与宿主无关。
 	grantKey := "all"
 	if !admin {
@@ -1213,12 +1240,12 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 		grantKey = strings.Join(parts, ",")
 	}
-	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), term, years, genre, tags, studios, person, c.Query("Filters"), sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cache.Get("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return
 	}
-	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", term, years, genre, tags, studios, person, unplayed, favorite, sortBy, desc, limit, start)
+	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start)
 	if e != nil {
 		itemDataUnavailable(c)
 		return
@@ -1514,30 +1541,21 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	if limit < 1 || limit > 1000 {
 		limit = 100
 	}
-	// 实体名需扫全库 JSON 列去重，逐项还要查代表海报，故按（版本/类型/范围/分页）缓存。
-	cacheKey := "entities:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
+	visible, admin, ok := a.viewerLibraries(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return
+	}
+	// Bind the query and cache to one grant snapshot. Scope aggregation before
+	// sorting/pagination; filtering a page afterwards would leak counts and gaps.
+	cacheKey := "entities:scope-v1:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
+		strconv.FormatInt(a.currentUserID(c), 10) + ":" + libraryScopeCacheKey(visible, admin) + ":" +
 		strconv.FormatInt(libraryID, 10) + ":" + collection + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cache.Get(cacheKey); ok {
 		c.Data(http.StatusOK, "application/json", b)
 		return
 	}
-	var (
-		names []string
-		err   error
-	)
-	switch strings.ToLower(kind) {
-	case "genre":
-		names, err = a.db.Genres(libraryID, collection)
-	case "tag":
-		names, err = a.db.Tags(libraryID, collection)
-	case "studio":
-		names, err = a.db.Studios(libraryID, collection)
-	case "person":
-		names, err = a.db.Persons(libraryID, collection)
-	default:
-		a.emptyItems(c)
-		return
-	}
+	names, err := a.db.EntityNamesVisible(kind, libraryID, visible, collection)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -1556,7 +1574,12 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 			"Id": entityId(kind, name), "Name": name, "Type": kind,
 			"IsFolder": false, "ServerId": a.serverID,
 		}
-		if poster := a.entityPosterPath(kind, name); poster != "" {
+		poster, err := a.db.EntityPosterVisible(kind, name, libraryID, visible, collection)
+		if err != nil {
+			itemDataUnavailable(c)
+			return
+		}
+		if poster != "" {
 			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 		}
 		items = append(items, item)
@@ -1636,11 +1659,19 @@ func (a *App) item(c *gin.Context) {
 		}
 		// 虚拟实体（genre:/tag:/studio:/person:）详情：避免 404，返回最小 BaseItemDto。
 		if kind, name, ok := entityKind(rawID); ok {
+			poster, exists, ok := a.visibleEntity(c, kind, name)
+			if !ok {
+				return
+			}
+			if !exists {
+				apiError(c, http.StatusNotFound, "not found")
+				return
+			}
 			item := gin.H{
 				"Id": rawID, "Name": name, "Type": kind,
 				"IsFolder": false, "ServerId": a.serverID,
 			}
-			if poster := a.entityPosterPath(kind, name); poster != "" {
+			if poster != "" {
 				item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 			}
 			c.JSON(http.StatusOK, item)

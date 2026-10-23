@@ -23,6 +23,9 @@ func (s *Store) MarkIndexedManual(sourcePath, nfoPath string) error {
 			return err
 		}
 		if libraryID.Valid {
+			if err := InvalidateScanGroupsForPathsTx(tx, libraryID.Int64, []string{sourcePath}); err != nil {
+				return err
+			}
 			return bumpLibraryVersionTx(tx, libraryID.Int64)
 		}
 		return nil

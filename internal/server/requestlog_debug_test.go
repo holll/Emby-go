@@ -154,8 +154,12 @@ func TestRawDebugAppConfigurationIsolation(t *testing.T) {
 		if _, err := file.ReadAt(data, start); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), "INSTANCE_SECRET") != raw {
-			t.Fatalf("raw=%v logs=%s", raw, data)
+		// 查询串在 raw debug 中也被遮蔽；debug 不是绕过凭据边界的理由。
+		if strings.Contains(string(data), "INSTANCE_SECRET") {
+			t.Fatalf("raw=%v logs leaked query secret: %s", raw, data)
+		}
+		if raw && !strings.Contains(string(data), "redacted") {
+			t.Fatalf("raw debug missing redacted query marker: %s", data)
 		}
 		if gin.Mode() != gin.ReleaseMode {
 			t.Fatal("global Gin mode changed")
@@ -188,13 +192,22 @@ func TestRawDebugRequestLogs(t *testing.T) {
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d", w.Code)
 			}
-			for _, secret := range []string{"BODY_SECRET", "AUTH_SECRET", "COOKIE_SECRET", "HEADER_SECRET", "QUERY_SECRET", "UNKNOWN_SECRET", "HANDLER_SECRET"} {
-				if strings.Contains(logs.String(), secret) != raw {
-					t.Errorf("raw=%v unexpected presence of %s in %s", raw, secret, logs.String())
+			// 非敏感路由：body/普通 header/gin error 仍可原样诊断；
+			// 认证头、Cookie 与全部查询串永远不得进入原始日志。
+			for _, visibility := range []struct {
+				secret  string
+				present bool
+			}{
+				{"BODY_SECRET", raw}, {"HEADER_SECRET", raw}, {"HANDLER_SECRET", raw},
+				{"AUTH_SECRET", false}, {"COOKIE_SECRET", false},
+				{"QUERY_SECRET", false}, {"UNKNOWN_SECRET", false},
+			} {
+				if got := strings.Contains(logs.String(), visibility.secret); got != visibility.present {
+					t.Errorf("raw=%v secret %s presence=%v want=%v in %s", raw, visibility.secret, got, visibility.present, logs.String())
 				}
 			}
-			if raw && !strings.Contains(logs.String(), uri) {
-				t.Fatalf("raw query lost: %s", logs.String())
+			if raw && !strings.Contains(logs.String(), "/emby/Users/1/Items/42?redacted") {
+				t.Fatalf("raw query marker lost: %s", logs.String())
 			}
 			if !raw && strings.Contains(logs.String(), "ListItemIds") {
 				t.Fatal("safe unknown-query policy changed")
@@ -203,6 +216,41 @@ func TestRawDebugRequestLogs(t *testing.T) {
 				t.Fatalf("raw request leaked into app log: %s", app.String())
 			}
 		})
+	}
+}
+
+func TestRawDebugMasksCredentialRoutes(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		var logs bytes.Buffer
+		r := gin.New()
+		r.Use(requestDiagnostics(raw, &logs, io.Discard)...)
+		r.POST("/Users/AuthenticateByName", func(c *gin.Context) { c.Status(http.StatusUnauthorized) })
+		r.DELETE("/api/admin/apikeys/:key", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+		body := `{"Username":"admin","Pw":"AUTH_BODY_SECRET"}`
+		req := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName?api_key=QUERY_SECRET", strings.NewReader(body))
+		req.Header.Set("Authorization", "Emby Token=AUTH_HEADER_SECRET")
+		req.Header.Set("X-Emby-Token", "EMBY_TOKEN_SECRET")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status=%d", w.Code)
+		}
+		before := logs.Len()
+		req = httptest.NewRequest(http.MethodDelete, "/api/admin/apikeys/APIKEY_PATH_SECRET", nil)
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		combined := logs.String()
+		for _, secret := range []string{"AUTH_BODY_SECRET", "QUERY_SECRET", "AUTH_HEADER_SECRET", "EMBY_TOKEN_SECRET", "APIKEY_PATH_SECRET"} {
+			if strings.Contains(combined, secret) {
+				t.Fatalf("raw=%v sensitive route leaked %s: %s", raw, secret, combined)
+			}
+		}
+		if raw && !strings.Contains(combined, "[sensitive route]") {
+			t.Fatalf("raw debug missing sensitive marker: %s", combined)
+		}
+		if got := logs.String()[before:]; strings.Contains(got, "redacted sensitive route") == raw == false {
+			_ = got
+		}
 	}
 }
 

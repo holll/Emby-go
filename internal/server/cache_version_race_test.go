@@ -181,6 +181,9 @@ func TestCacheVersionRaceSimilarSourceSnapshot(t *testing.T) {
 		}
 	})
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
+	})
 	r.GET("/similar/:id", f.a.similar)
 	url := "/similar/" + strconv.FormatInt(f.victim, 10) + "?Limit=1"
 	beforeVersion := f.a.db.Version("g:version")

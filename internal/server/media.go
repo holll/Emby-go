@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -274,42 +275,87 @@ func (a *App) imageInfo(c *gin.Context) {
 	rawID := c.Param("id")
 	if id, err := strconv.ParseInt(rawID, 10, 64); err == nil {
 		if libID, ok := parseLibraryExternal(id); ok {
-			if poster := a.libraryCoverPathByID(libID); poster != "" {
-				c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
-				return
+			if a.canViewLibrary(c, libID) {
+				if poster := a.libraryCoverPathByID(libID); poster != "" {
+					c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
+					return
+				}
 			}
 			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
 		movie, err := a.db.Movie(id)
-		if err == nil && movie.IsVisible() {
+		if err == nil {
+			if !movie.IsVisible() || !a.canViewMovie(c, movie) {
+				apiError(c, http.StatusNotFound, "not found")
+				return
+			}
 			c.JSON(http.StatusOK, a.movieImageInfo(movie))
 			return
 		}
-		// 媒体库（旧内部 id 兼容）：给出库封面，避免列表页拿空数组。
-		if poster := a.libraryCoverPathByID(id); poster != "" {
-			c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
+		if !store.NotFound(err) {
+			itemDataUnavailable(c)
 			return
+		}
+		// Only use the legacy library-id fallback if no movie occupies that id.
+		if a.canViewLibrary(c, id) {
+			if poster := a.libraryCoverPathByID(id); poster != "" {
+				c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster)}})
+				return
+			}
 		}
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	// 合集：仅 Primary（代表海报）。
-	if p := a.boxsetPoster(rawID); p != "" {
-		c.JSON(http.StatusOK, []gin.H{{"ImageType": "Primary", "Path": p, "Filename": filepath.Base(p), "ImageTag": a.posterTag(p)}})
+	images := []gin.H{}
+	if name, isBoxset := parseBoxsetID(rawID); isBoxset || rawID == boxsetViewID {
+		stats, ok := a.collectionStats(c, 0)
+		if !ok {
+			return
+		}
+		poster := ""
+		if isBoxset {
+			stat, exists := stats[name]
+			if !exists {
+				apiError(c, http.StatusNotFound, "not found")
+				return
+			}
+			poster = stat.Poster
+		} else {
+			// Stable representative from visible collections only.
+			names := make([]string, 0, len(stats))
+			for name := range stats {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if stats[name].Poster != "" {
+					poster = stats[name].Poster
+					break
+				}
+			}
+		}
+		if poster != "" {
+			images = append(images, gin.H{"ImageType": "Primary", "Path": poster, "Filename": filepath.Base(poster), "ImageTag": a.posterTag(poster)})
+		}
+		c.JSON(http.StatusOK, images)
 		return
 	}
-	// 虚拟实体：仅 Primary（演员优先用本地头像副本，否则回代表性海报）。
-	images := []gin.H{}
 	if kind, name, ok := entityKind(rawID); ok {
+		poster, exists, ok := a.visibleEntity(c, kind, name)
+		if !ok {
+			return
+		}
+		if !exists {
+			apiError(c, http.StatusNotFound, "not found")
+			return
+		}
 		path, tag := "", ""
 		if kind == "Person" {
 			path, tag = a.personAvatar(name)
 		}
-		if path == "" {
-			if poster := a.entityPosterPath(kind, name); poster != "" {
-				path, tag = poster, a.posterTag(poster)
-			}
+		if path == "" && poster != "" {
+			path, tag = poster, a.posterTag(poster)
 		}
 		if path != "" {
 			images = append(images, gin.H{"ImageType": "Primary", "Path": path, "Filename": filepath.Base(path), "ImageTag": tag})
@@ -1190,7 +1236,7 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		return
 	}
 	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
+	if err != nil || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
@@ -1217,7 +1263,7 @@ func (a *App) additionalParts(c *gin.Context) {
 		return
 	}
 	movie, err := a.db.Movie(id)
-	if err != nil || !movie.IsVisible() {
+	if err != nil || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -85,13 +84,14 @@ func (a *App) authOK(c *gin.Context) (store.User, bool, error) {
 	if err != nil {
 		return store.User{}, false, err
 	}
+	session := valid
 	if !valid {
 		userID, valid, err = a.db.APIKeyUser(token)
 		if err != nil || !valid {
 			return store.User{}, false, err
 		}
 	}
-	u, err := a.db.UserByID(userID)
+	u, err := a.db.RequestCredentialUser(token, userID, session)
 	if errors.Is(err, store.ErrUserNotFound) {
 		// 凭据有效但账户已不存在：按未授权处理，不回落旧口令/旧管理员。
 		return store.User{}, false, nil
@@ -186,18 +186,27 @@ func (a *App) adminRevokeAllSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"revoked": revoked})
 }
 
-// authRateLimited 在 IP 或账号超出失败预算时写 429 并返回 true。
-// 429 与 401 分开：客户端能据此退避，而不是把限流误判成密码错误。
-func (a *App) authRateLimited(c *gin.Context, username string) bool {
-	retry := a.authLimiter.retryAfter(c.ClientIP(), username)
-	if retry <= 0 {
-		return false
+// beginCredentialAttempt 在读取请求体和校验密码之前原子消耗入场预算。
+// 返回的 ticket 必须由调用方在 defer 中 Finish，否则在途预留不会释放。
+func (a *App) beginCredentialAttempt(c *gin.Context) (*authTicket, bool) {
+	ticket, retry := a.authGuard.AdmitRequest(c.ClientIP())
+	if ticket == nil {
+		authRateLimitedRetry(c, retry)
+		return nil, false
 	}
-	c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
-	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-		"error": "尝试次数过多，请稍后再试", "code": "AUTH_RATE_LIMITED", "retryable": true,
-	})
-	return true
+	return ticket, true
+}
+
+// verifyPassword 在 bcrypt 并发槽内校验密码。槽有界等待，超时按限流处理，
+// 不能为每个请求起 goroutine 无限排队（那等于把 CPU 攻击换成内存攻击）。
+func (a *App) verifyPassword(c *gin.Context, username, password string) (store.User, bool, error, bool) {
+	release, ok := a.authGuard.AcquireBcrypt(c.Request.Context(), bcryptSlotWait)
+	if !ok {
+		return store.User{}, false, nil, false
+	}
+	defer release()
+	user, valid, err := a.db.AuthenticateUser(username, password)
+	return user, valid, err, true
 }
 
 func (a *App) authStatus(c *gin.Context) {
@@ -210,8 +219,15 @@ func (a *App) authStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"initialized": initialized, "setup_code_required": a.cfg.SetupCode != ""})
 }
 
+// validPassword 是创建/修改密码的统一规则：至少 9 个 Unicode 字符，
+// 且不超过 bcrypt 的 72 字节上限（超限明确报错，不静默截断）。
+func validPassword(password string) bool {
+	n := len([]rune(password))
+	return n >= 9 && len(password) <= 72
+}
+
 func validCredentials(username, password string) bool {
-	return len([]rune(strings.TrimSpace(username))) >= 3 && len([]rune(password)) >= 9
+	return len([]rune(strings.TrimSpace(username))) >= 3 && validPassword(password)
 }
 
 // initializeAllowed 按 initialize_allow_from 限制首次初始化的来源；为空时不限制。
@@ -236,64 +252,95 @@ func (a *App) initialize(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "初始化入口不允许该来源", "code": "INIT_SOURCE_DENIED"})
 		return
 	}
-	// 初始化只在空库时可用，按 IP 限流即可；失败一律计数，避免被当成
-	// 免费的账号枚举/写库入口。
-	if a.authRateLimited(c, "") {
+	// 初始化没有账号维度，只消耗来源/全局预算；所有失败仍计入来源失败历史。
+	ticket, ok := a.beginCredentialAttempt(c)
+	if !ok {
 		return
 	}
+	ip := c.ClientIP()
+	outcome := authOutcomeInterrupted
+	defer func() { a.authGuard.Finish(ticket, outcome) }()
+
 	var req struct {
 		Username string `json:"Username"`
 		Pw       string `json:"Pw"`
 		Code     string `json:"Code"`
 	}
-	if c.ShouldBindJSON(&req) != nil || !validCredentials(req.Username, req.Pw) {
-		a.authLimiter.recordFailure(c.ClientIP(), "")
-		apiError(c, http.StatusBadRequest, "账号至少 3 个字符，密码至少 9 个字符")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if credentialBindTooLarge(c, err) {
+			return
+		}
+		outcome = authOutcomeInvalidPassword
+		apiError(c, http.StatusBadRequest, "账号至少 3 个字符，密码至少 9 个字符且不超过 72 字节")
+		return
+	}
+	if !validCredentials(req.Username, req.Pw) {
+		outcome = authOutcomeInvalidPassword
+		apiError(c, http.StatusBadRequest, "账号至少 3 个字符，密码至少 9 个字符且不超过 72 字节")
 		return
 	}
 	// D04：配置了 setup_code 时，首初始化必须携带；比较用恒定时间实现。
 	if a.cfg.SetupCode != "" && !hmac.Equal([]byte(req.Code), []byte(a.cfg.SetupCode)) {
-		a.authLimiter.recordFailure(c.ClientIP(), "")
+		outcome = authOutcomeInvalidPassword
 		c.JSON(http.StatusForbidden, gin.H{"error": "初始化验证码不正确", "code": "SETUP_CODE_INVALID"})
 		return
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
 		// 存储故障不是调用方的失败，不计数。
+		outcome = authOutcomeStorageFailure
 		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	if initialized {
-		a.authLimiter.recordFailure(c.ClientIP(), "")
+		outcome = authOutcomeInvalidPassword
 		apiError(c, http.StatusConflict, "管理员已初始化")
 		return
 	}
 	if err := a.db.InitializeAdministrator(strings.TrimSpace(req.Username), req.Pw); err != nil {
-		a.authLimiter.recordFailure(c.ClientIP(), "")
+		outcome = authOutcomeStorageFailure
 		apiError(c, http.StatusConflict, "初始化失败，请更换账号后重试")
 		return
 	}
-	a.authLimiter.reset(c.ClientIP(), "")
+	outcome = authOutcomePasswordVerified
+	a.authGuard.OnCredentialCommitSuccess(ip, strings.TrimSpace(req.Username))
 	a.setAdminName(strings.TrimSpace(req.Username))
 	c.Status(http.StatusNoContent)
 }
 
 func (a *App) authenticate(c *gin.Context) {
+	// 入场预算必须早于 JSON 解码：畸形/巨大请求同样消耗额度。
+	ticket, ok := a.beginCredentialAttempt(c)
+	if !ok {
+		return
+	}
+	ip := c.ClientIP()
+	outcome := authOutcomeInterrupted
+	defer func() { a.authGuard.Finish(ticket, outcome) }()
+
 	var req struct {
 		Username string `json:"Username"`
 		Pw       string `json:"Pw"`
 	}
+	// Emby 客户端既可能发 JSON 也可能发 form-urlencoded；ShouldBind 按
+	// Content-Type 选择绑定器，不能用 ShouldBindJSON 把 form 请求误杀。
 	if err := c.ShouldBind(&req); err != nil {
-		a.authLimiter.recordFailure(c.ClientIP(), "")
+		if credentialBindTooLarge(c, err) {
+			return
+		}
+		outcome = authOutcomeInvalidPassword
 		apiError(c, http.StatusBadRequest, "invalid credentials payload")
 		return
 	}
 	username := strings.TrimSpace(req.Username)
-	if a.authRateLimited(c, username) {
+	// 解析出账号后原子预留失败额度：已有失败 + 在途预留不能并发穿透阈值。
+	if retry := a.authGuard.AttachAccount(ticket, username); retry > 0 {
+		authRateLimitedRetry(c, retry)
 		return
 	}
 	initialized, err := a.db.HasAdministrator()
 	if err != nil {
+		outcome = authOutcomeStorageFailure
 		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
@@ -301,25 +348,27 @@ func (a *App) authenticate(c *gin.Context) {
 		apiError(c, http.StatusPreconditionRequired, "管理员尚未初始化")
 		return
 	}
-	user, valid, err := a.db.AuthenticateUser(username, req.Pw)
+	user, valid, err, attempted := a.verifyPassword(c, username, req.Pw)
+	if !attempted {
+		authRateLimitedRetry(c, time.Second)
+		return
+	}
 	if err != nil {
+		outcome = authOutcomeStorageFailure
 		apiError(c, http.StatusInternalServerError, "authentication storage unavailable")
 		return
 	}
 	if !valid {
-		a.authLimiter.recordFailure(c.ClientIP(), username)
-		if err := a.db.RecordLoginEvent(0, username, c.ClientIP(), false, time.Now()); err != nil {
+		outcome = authOutcomeInvalidPassword
+		if err := a.db.RecordLoginEvent(0, username, ip, false, time.Now()); err != nil {
 			slog.Warn("记录失败登录失败", "error", err)
 		}
 		apiError(c, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
-	a.authLimiter.reset(c.ClientIP(), username)
-	if err := a.db.RecordLoginEvent(user.ID, user.Name, c.ClientIP(), true, time.Now()); err != nil {
-		slog.Warn("记录登录审计失败", "error", err)
-	}
 	b := make([]byte, 24)
 	if _, err = rand.Read(b); err != nil {
+		outcome = authOutcomeStorageFailure
 		apiError(c, http.StatusInternalServerError, "生成访问令牌失败")
 		return
 	}
@@ -327,9 +376,21 @@ func (a *App) authenticate(c *gin.Context) {
 		a.setAdminName(user.Name)
 	}
 	token := hex.EncodeToString(b)
-	if err := a.db.SaveAccessTokenForUser(token, user.ID, a.sessionExpiry(time.Now())); err != nil {
+	if err := a.db.SaveAccessTokenForAuthenticatedUser(token, user, a.sessionExpiry(time.Now())); err != nil {
+		// 密码已验证但签发失败：不算密码错误，也不清除任何失败历史。
+		outcome = authOutcomeStorageFailure
+		if errors.Is(err, store.ErrAuthenticationChanged) {
+			apiError(c, http.StatusUnauthorized, "账户凭据已变更，请重新登录")
+			return
+		}
 		apiError(c, http.StatusInternalServerError, "保存访问令牌失败")
 		return
+	}
+	// 只有条件签发真正提交后才清理账号/组合失败历史；IP 喷洒历史保留。
+	a.authGuard.OnCredentialCommitSuccess(ip, username)
+	outcome = authOutcomePasswordVerified
+	if err := a.db.RecordLoginEvent(user.ID, user.Name, c.ClientIP(), true, time.Now()); err != nil {
+		slog.Warn("记录登录审计失败", "error", err)
 	}
 	a.notifyUserWebhook(c, "user.authenticated", user)
 	c.JSON(http.StatusOK, gin.H{

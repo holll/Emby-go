@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"emby-go/internal/scanner"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -27,7 +29,15 @@ func asyncScanFixture(t *testing.T) (*App, *httptest.Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(app.Close)
+	t.Cleanup(func() {
+		app.BeginShutdown()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := app.WaitBackground(ctx); err != nil {
+			t.Error(err)
+		}
+		app.Close()
+	})
 	ts := httptest.NewServer(app.Handler())
 	t.Cleanup(ts.Close)
 
@@ -195,7 +205,7 @@ func TestAsyncScanIdempotencyKeyReplays(t *testing.T) {
 
 func TestAsyncScanRejectsWhileBusy(t *testing.T) {
 	app, ts, token := asyncScanFixture(t)
-	if !app.beginScan(1) {
+	if !app.beginScan(1, 0, scanner.ScanModeFull) {
 		t.Fatal("测试夹具占用扫描状态失败")
 	}
 	defer app.endScan(nil)
@@ -216,12 +226,12 @@ func TestScanTaskRegistryCapacity(t *testing.T) {
 	app, _, _ := asyncScanFixture(t)
 	now := time.Now()
 	for i := int64(1); i <= scanTaskCapacity; i++ {
-		if _, _, err := app.registerScanTask(i, "scan", 0, "", now); err != nil {
+		if _, _, err := app.registerScanTask(i, "scan", 0, scanner.ScanModeFull, false, "", "", now); err != nil {
 			t.Fatalf("登记 %d: %v", i, err)
 		}
 		app.finishScanTask(i, "succeeded", nil, nil)
 	}
-	if _, _, err := app.registerScanTask(scanTaskCapacity+1, "scan", 0, "", now); err != nil {
+	if _, _, err := app.registerScanTask(scanTaskCapacity+1, "scan", 0, scanner.ScanModeFull, false, "", "", now); err != nil {
 		t.Fatalf("满容有已完成任务时应淘汰最旧: %v", err)
 	}
 	if _, err := app.scanTaskByID(1); err == nil {
@@ -234,11 +244,11 @@ func TestScanTaskRegistryCapacity(t *testing.T) {
 	// 全部在跑且满容：拒绝。
 	allRunning, _, _ := asyncScanFixture(t)
 	for i := int64(1); i <= scanTaskCapacity; i++ {
-		if _, _, err := allRunning.registerScanTask(i, "scan", 0, "", now); err != nil {
+		if _, _, err := allRunning.registerScanTask(i, "scan", 0, scanner.ScanModeFull, false, "", "", now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := allRunning.registerScanTask(scanTaskCapacity+1, "scan", 0, "", now); err == nil {
+	if _, _, err := allRunning.registerScanTask(scanTaskCapacity+1, "scan", 0, scanner.ScanModeFull, false, "", "", now); err == nil {
 		t.Fatal("满容且全部在跑时应拒绝")
 	}
 }
@@ -246,7 +256,7 @@ func TestScanTaskRegistryCapacity(t *testing.T) {
 func TestScanIdempotencyExpiresAfterOneHour(t *testing.T) {
 	app, _, _ := asyncScanFixture(t)
 	now := time.Now()
-	if _, _, err := app.registerScanTask(7, "scan", 0, "expiring-key", now); err != nil {
+	if _, _, err := app.registerScanTask(7, "scan", 0, scanner.ScanModeFull, false, "", "expiring-key", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := app.replayScanTask("expiring-key", now.Add(59*time.Minute)); !ok {

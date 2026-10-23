@@ -206,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12, applyMigration13,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1141,6 +1141,21 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case identityMigrationVersion:
+			if checksum != migration14Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case apiKeyStableMigrationVersion:
+			if checksum != migration15Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case scanStateMigrationVersion:
+			if checksum != migration16Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1217,6 +1232,21 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[identityMigrationVersion] {
+		if err := applyMigration14(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[apiKeyStableMigrationVersion] {
+		if err := applyMigration15(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[scanStateMigrationVersion] {
+		if err := applyMigration16(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1284,6 +1314,21 @@ func (s *Store) migrate() error {
 	if !applied[adminAuditMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", adminAuditMigrationVersion, migration13Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", adminAuditMigrationVersion, err)
+		}
+	}
+	if !applied[identityMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", identityMigrationVersion, migration14Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", identityMigrationVersion, err)
+		}
+	}
+	if !applied[apiKeyStableMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", apiKeyStableMigrationVersion, migration15Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", apiKeyStableMigrationVersion, err)
+		}
+	}
+	if !applied[scanStateMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", scanStateMigrationVersion, migration16Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", scanStateMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

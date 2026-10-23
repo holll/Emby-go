@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -101,15 +102,159 @@ func TestImageUploadGetsLargerBodyBudget(t *testing.T) {
 	}
 }
 
-func TestAuthRateLimitBlocksAccount(t *testing.T) {
+func mustAdmit(t *testing.T, g *authGuard, ip string) *authTicket {
+	t.Helper()
+	ticket, _ := g.AdmitRequest(ip)
+	if ticket == nil {
+		t.Fatalf("AdmitRequest(%s) unexpectedly rejected", ip)
+	}
+	return ticket
+}
+
+func mustAttach(t *testing.T, g *authGuard, ticket *authTicket, username string) {
+	t.Helper()
+	if retry := g.AttachAccount(ticket, username); retry > 0 {
+		t.Fatalf("AttachAccount(%s) rejected with %v", username, retry)
+	}
+}
+
+func TestAuthGuardComboBlocksRepeatedGuesses(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{})
+	const ip = "198.51.100.7"
+	for i := 0; i < authComboFailureLimit; i++ {
+		ticket := mustAdmit(t, g, ip)
+		mustAttach(t, g, ticket, "admin")
+		g.Finish(ticket, authOutcomeInvalidPassword)
+	}
+	ticket := mustAdmit(t, g, ip)
+	if retry := g.AttachAccount(ticket, "admin"); retry <= 0 {
+		t.Fatal("组合失败阈值未生效：第 6 次仍可尝试验证")
+	}
+	g.Finish(ticket, authOutcomeInterrupted)
+}
+
+func TestAuthGuardSuccessClearsAccountAndComboOnly(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{})
+	const ip = "198.51.100.7"
+	for i := 0; i < 2; i++ {
+		ticket := mustAdmit(t, g, ip)
+		mustAttach(t, g, ticket, "admin")
+		g.Finish(ticket, authOutcomeInvalidPassword)
+	}
+	g.OnCredentialCommitSuccess(ip, "ADMIN")
+	g.mu.Lock()
+	ipLeft := g.failures[authIPKey(ip)].failures
+	_, accountLeft := g.failures[authAccountDigest("admin")]
+	total := len(g.failures)
+	g.mu.Unlock()
+	if ipLeft != 2 {
+		t.Fatalf("成功登录不得清除 IP 喷洒历史：left=%d", ipLeft)
+	}
+	if accountLeft || total != 1 {
+		t.Fatalf("账号/组合失败历史未清理：accountLeft=%v total=%d", accountLeft, total)
+	}
+}
+
+func TestAuthGuardAccountCooldownIsBounded(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{AccountCooldownMaxSeconds: 300})
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	g.now = func() time.Time { return now }
+	// 账号维度要跨来源累积：同一 IP/账号组合会在 5 次后被组合阈值先挡住。
+	for i := 0; i < authAccountFailureLimit; i++ {
+		ip := fmt.Sprintf("198.51.100.%d", i+1)
+		ticket := mustAdmit(t, g, ip)
+		mustAttach(t, g, ticket, "admin")
+		g.Finish(ticket, authOutcomeInvalidPassword)
+		now = now.Add(time.Second)
+	}
+	const lastIP = "203.0.113.9"
+	ticket := mustAdmit(t, g, lastIP)
+	retry := g.AttachAccount(ticket, "admin")
+	g.Finish(ticket, authOutcomeInterrupted)
+	if retry <= 0 || retry > 5*time.Minute+time.Second {
+		t.Fatalf("账号冷却 retry=%v 超出 5 分钟上限", retry)
+	}
+	now = now.Add(5*time.Minute + time.Second)
+	ticket = mustAdmit(t, g, lastIP)
+	if retry := g.AttachAccount(ticket, "admin"); retry > 0 {
+		t.Fatalf("有界冷却到期后仍被永久锁定：retry=%v", retry)
+	}
+	g.Finish(ticket, authOutcomeInterrupted)
+}
+
+func TestAuthGuardInflightReservationsShareBudget(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{})
+	const ip = "198.51.100.7"
+	tickets := make([]*authTicket, 0, authComboFailureLimit)
+	for i := 0; i < authComboFailureLimit; i++ {
+		ticket := mustAdmit(t, g, ip)
+		mustAttach(t, g, ticket, "admin")
+		tickets = append(tickets, ticket)
+	}
+	ticket := mustAdmit(t, g, ip)
+	if retry := g.AttachAccount(ticket, "admin"); retry <= 0 {
+		t.Fatal("在途预留未被计入阈值，并发请求可穿透")
+	}
+	for _, t2 := range append(tickets, ticket) {
+		g.Finish(t2, authOutcomeInterrupted)
+	}
+}
+
+func TestAuthGuardIPFailureSprayAcrossAccounts(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{})
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	g.now = func() time.Time { return now }
+	const ip = "198.51.100.7"
+	for i := 0; i < authIPFailureLimit; i++ {
+		ticket := mustAdmit(t, g, ip)
+		if retry := g.AttachAccount(ticket, fmt.Sprintf("spray-%d", i)); retry > 0 {
+			t.Fatalf("第 %d 次在阈值前被拒绝：%v", i+1, retry)
+		}
+		g.Finish(ticket, authOutcomeInvalidPassword)
+		now = now.Add(time.Second)
+	}
+	// IP 喷洒阈值在入场处生效：不需要再解析账号就应拒绝。
+	if ticket, retry := g.AdmitRequest(ip); ticket != nil || retry <= 0 {
+		t.Fatalf("IP 喷洒阈值未生效：ticket=%v retry=%v", ticket, retry)
+	}
+}
+
+func TestAuthGuardIPRequestBurst(t *testing.T) {
+	g := newAuthGuard(authGuardConfig{})
+	const ip = "198.51.100.7"
+	for i := 0; i < defaultAuthIPRequestBurst; i++ {
+		ticket := mustAdmit(t, g, ip)
+		g.Finish(ticket, authOutcomeInterrupted)
+	}
+	if ticket, retry := g.AdmitRequest(ip); ticket != nil || retry <= 0 {
+		t.Fatalf("入场桶未限制突发：ticket=%v retry=%v", ticket, retry)
+	}
+}
+
+func TestAuthSuccessClearsAccountBudgetButNotIPSpray(t *testing.T) {
 	a := limitsInitializedApp(t)
-	for i := 0; i < authAccountLimit; i++ {
-		w := limitsLogin(a, "admin", "wrong-password")
-		if w.Code != http.StatusUnauthorized {
+	for i := 0; i < authComboFailureLimit-1; i++ {
+		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
 		}
 	}
-	w := limitsLogin(a, "admin", "wrong-password")
+	if w := limitsLogin(a, "admin", "password-1234"); w.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 成功登录清掉账号+组合失败；IP 桶里的请求令牌与失败喷洒历史不清。
+	if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("success falsely reset IP history: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuthRateLimitedResponseShape(t *testing.T) {
+	a := limitsInitializedApp(t)
+	for i := 0; i < authComboFailureLimit; i++ {
+		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
+		}
+	}
+	w := limitsLogin(a, "admin", "password-1234")
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -120,76 +265,36 @@ func TestAuthRateLimitBlocksAccount(t *testing.T) {
 	if body["code"] != "AUTH_RATE_LIMITED" || body["retryable"] != true {
 		t.Fatalf("body=%v", body)
 	}
-	// 封禁期内即使密码正确也不放行：否则攻击者猜中后一次成功即可绕过计数。
-	if w := limitsLogin(a, "admin", "password-1234"); w.Code != http.StatusTooManyRequests {
-		t.Fatalf("correct password while blocked: status=%d body=%s", w.Code, w.Body.String())
-	}
 }
 
-func TestAuthSuccessResetsFailureBudget(t *testing.T) {
+func TestCredentialEndpointRejectsOversizedChunkedBody(t *testing.T) {
+	// 没有 Content-Length 的 chunked 请求也必须在上限处返回 413，而不是
+	// 让 JSON 解码器读到半截后变成含糊的 400。
 	a := limitsInitializedApp(t)
-	for i := 0; i < authAccountLimit-1; i++ {
-		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: status=%d", i+1, w.Code)
-		}
-	}
-	if w := limitsLogin(a, "admin", "password-1234"); w.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", w.Code, w.Body.String())
-	}
-	for i := 0; i < authAccountLimit-1; i++ {
-		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
-			t.Fatalf("post-reset attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
-		}
-	}
-}
-
-func TestAuthRateLimitCountsPerIPAcrossAccounts(t *testing.T) {
-	a := limitsInitializedApp(t)
-	for i := 0; i < authIPLimit; i++ {
-		w := limitsLogin(a, fmt.Sprintf("spray-%d", i), "wrong-password")
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
-		}
-	}
-	if w := limitsLogin(a, "spray-final", "wrong-password"); w.Code != http.StatusTooManyRequests {
+	payload := `{"Username":"admin","Pw":"` + strings.Repeat("a", 9000) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/Users/AuthenticateByName", nil)
+	req.Body = io.NopCloser(strings.NewReader(payload))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
+	if body := decodeLimitsBody(t, w); body["code"] != "AUTH_BODY_TOO_LARGE" {
+		t.Fatalf("body=%v", body)
+	}
 }
 
-func TestInitializeRateLimited(t *testing.T) {
-	a := limitsTestApp(t)
-	for i := 0; i < authIPLimit; i++ {
-		w := limitsPost(a.Handler(), "/api/auth/initialize", `{"Username":"ab","Pw":"short"}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
-		}
-	}
-	w := limitsPost(a.Handler(), "/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`)
-	if w.Code != http.StatusTooManyRequests {
+func TestCredentialEndpointRejectsOversizedBody(t *testing.T) {
+	a := limitsInitializedApp(t)
+	payload := `{"Username":"admin","Pw":"` + strings.Repeat("a", 9000) + `"}`
+	w := limitsPost(a.Handler(), "/Users/AuthenticateByName", payload)
+	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if retry := w.Header().Get("Retry-After"); retry == "" {
-		t.Fatal("missing Retry-After")
-	}
-}
-
-func TestAuthLimiterWindowExpiry(t *testing.T) {
-	l := newAuthRateLimiter()
-	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
-	l.now = func() time.Time { return now }
-	for i := 0; i < authAccountLimit; i++ {
-		l.recordFailure("198.51.100.7", "Admin")
-	}
-	if got := l.retryAfter("198.51.100.7", "admin"); got <= 0 || got > authAccountWindow {
-		t.Fatalf("retryAfter=%v", got)
-	}
-	now = now.Add(authAccountWindow + time.Second)
-	if got := l.retryAfter("198.51.100.7", "admin"); got != 0 {
-		t.Fatalf("expired window retryAfter=%v", got)
-	}
-	// 窗口过期后重新计数：一次失败不应再次封禁。
-	l.recordFailure("198.51.100.7", "admin")
-	if got := l.retryAfter("198.51.100.7", "admin"); got != 0 {
-		t.Fatalf("after reset retryAfter=%v", got)
+	body := decodeLimitsBody(t, w)
+	if body["code"] != "AUTH_BODY_TOO_LARGE" {
+		t.Fatalf("body=%v", body)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/metatube"
+	"emby-go/internal/scanner"
 	"emby-go/internal/scraper"
 	"emby-go/internal/store"
 )
@@ -46,7 +47,8 @@ const maxScrapeFailureSamples = 20
 var errScrapeBusy = errors.New("刮削任务正在进行中")
 var errScrapeIndexRefresh = errors.New("刮削文件已保存，但索引刷新未确认；请检查存储后重新扫库")
 
-// claimNFO 独占 NFO 写入通道。kind 为 scan / probe / scrape / scrape_avatars。
+// claimNFO 独占 NFO 写入通道。kind 为 scan / probe / scrape / scrape_avatars / translate / edit。
+// 独立翻译还持有自己的单任务门，整个翻译与逐片索引刷新期间占用 translate 通道。
 //
 // 同类型任务通过引用计数共用通道；人工编辑/重读源必须独占，避免索引旧快照互相覆盖。
 //
@@ -95,6 +97,8 @@ func (a *App) nfoBusyOwner() string {
 		return "刮削"
 	case "scrape_avatars":
 		return "演员头像任务"
+	case "translate":
+		return "翻译"
 	case "edit":
 		return "元数据编辑或重读源"
 	}
@@ -287,7 +291,7 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 	// 取消或熔断不撤销此前已落盘的成功项，仍须导入这些 NFO。
 	// 扫描不使用已取消的刮削 context。
 	if progress.Success > 0 {
-		if _, scanErr := a.scanLibraries(0); scanErr != nil {
+		if _, scanErr := a.scanLibraries(0, 0, scanner.ScanModeFull, false); scanErr != nil {
 			a.scrapeTaskMu.Lock()
 			a.scrapeStatus.IndexRefreshFailed = true
 			a.scrapeTaskMu.Unlock()

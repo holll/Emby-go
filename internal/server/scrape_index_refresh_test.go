@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"emby-go/internal/scanner"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,7 +63,7 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = a.scanLibraries(lib.ID); err != nil {
+			if _, err = a.scanLibraries(lib.ID, 0, scanner.ScanModeFull, false); err != nil {
 				t.Fatal(err)
 			}
 			id, err := a.db.MovieIDByPath(filepath.Join(media, "ABF-018.strm"))
@@ -136,7 +137,7 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 				if _, e = raw.Exec("DROP TRIGGER fail_scrape_index"); e != nil {
 					t.Fatal(e)
 				}
-				if _, e = a.scanLibraries(lib.ID); e != nil {
+				if _, e = a.scanLibraries(lib.ID, 0, scanner.ScanModeFull, false); e != nil {
 					t.Fatalf("recovery scan: %v", e)
 				}
 			}
@@ -185,7 +186,7 @@ func TestScrapeStaysRunningUntilIndexRefreshReturns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = a.scanLibraries(lib.ID); err != nil {
+	if _, err = a.scanLibraries(lib.ID, 0, scanner.ScanModeFull, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := sql.Open("sqlite", filepath.Join(root, "t.db")+"?_pragma=busy_timeout(10000)")

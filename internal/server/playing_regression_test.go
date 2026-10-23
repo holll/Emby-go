@@ -32,6 +32,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer a.Close()
+				seedOwner(t, a)
 				lib, err := a.db.AddLibrary("test", root)
 				if err != nil {
 					t.Fatal(err)
@@ -53,6 +54,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 					w := httptest.NewRecorder()
 					// 直接验证处理函数；路由注册与鉴权由现有 API 测试覆盖。
 					c, _ := ginContext(w, req)
+					c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
 					a.playing(c)
 					c.Writer.WriteHeaderNow()
 					if w.Code != http.StatusNoContent {
@@ -89,6 +91,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 				for _, invalid := range []string{virtualPartID(id, 1), virtualPartID(id, 3), "part-999999-2", "part-invalid-2"} {
 					w := httptest.NewRecorder()
 					c, _ := ginContext(w, httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Stopped", strings.NewReader(fmt.Sprintf(`{"ItemId":%q,"PositionTicks":456}`, invalid))))
+					c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
 					a.playing(c)
 					if w.Code != http.StatusNotFound {
 						t.Fatalf("invalid %s status=%d", invalid, w.Code)

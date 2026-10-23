@@ -55,7 +55,7 @@ func loadWebhookConfig(db *store.Store, fallback config.WebhookConfig) (config.W
 	return normalizeWebhookConfig(stored.Config), nil
 }
 
-func (a *App) webhookSender() *webhook.Sender {
+func (a *App) webhookSender() *webhook.Dispatcher {
 	a.webhookMu.RLock()
 	defer a.webhookMu.RUnlock()
 	return a.webhook
@@ -88,8 +88,13 @@ func (a *App) adminWebhookSettings(c *gin.Context) {
 	a.webhookMu.RLock()
 	cfg := a.webhookConfig
 	a.webhookMu.RUnlock()
+	a.webhookMu.RLock()
+	multi := a.webhookMulti
+	a.webhookMu.RUnlock()
+	view := webhookSettingsView(cfg)
+	view["multi_target"] = multi
 	c.Header("ETag", webhookConfigETag(cfg))
-	c.JSON(http.StatusOK, webhookSettingsView(cfg))
+	c.JSON(http.StatusOK, view)
 }
 
 type webhookSettingsRequest struct {
@@ -113,6 +118,14 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 		webhookSettingsError(c, 428, "WEBHOOK_PRECONDITION_REQUIRED", "请重新加载 Webhook 配置后保存")
 		return
 	}
+	a.webhookMu.RLock()
+	multiNow := a.webhookMulti
+	a.webhookMu.RUnlock()
+	if multiNow {
+		// 旧单目标写入在看到多目标配置后立即拒绝，避免解析/校验先改变状态码。
+		webhookSettingsError(c, http.StatusConflict, "WEBHOOK_MULTI_TARGET_CONFIG", "已启用多目标 Webhook；请使用新的目标配置接口")
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 16385))
 	var req webhookSettingsRequest
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -130,7 +143,13 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 	}
 	a.webhookMu.RLock()
 	oldCfg := a.webhookConfig
+	multi := a.webhookMulti
 	a.webhookMu.RUnlock()
+	if multi {
+		// v2 已成为权威配置；旧单目标保存不得悄悄删掉其它地址。
+		webhookSettingsError(c, http.StatusConflict, "WEBHOOK_MULTI_TARGET_CONFIG", "已启用多目标 Webhook；请使用新的目标配置接口")
+		return
+	}
 	if c.GetHeader("If-Match") != webhookConfigETag(oldCfg) {
 		webhookSettingsError(c, 412, "WEBHOOK_CONFIG_CHANGED", "Webhook 配置已被修改；请重新加载后核对，不要覆盖旧配置")
 		return
@@ -167,25 +186,23 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 			return
 		}
 	}
-	next, err := webhook.New(cfg)
+	spec := legacyWebhookTargetSpec(cfg)
+	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec.target()}, webhook.DefaultEventBudget)
 	if err != nil {
 		webhookSettingsError(c, 400, "WEBHOOK_INVALID_CONFIG", "Webhook 配置无效")
 		return
 	}
 	data, _ := json.Marshal(storedWebhookConfig{Version: 1, Config: cfg})
 	if err = a.db.SetSetting(settingWebhook, string(data)); err != nil {
-		next.Close()
+		dispatcher.Close()
 		webhookSettingsError(c, 500, "WEBHOOK_SETTINGS_UNAVAILABLE", "Webhook 配置保存失败，当前配置未变")
 		return
 	}
-	// Persist first, then atomically publish an immutable sender/config pair.
-	// Already-started deliveries may finish with their original configuration.
-	a.webhookMu.Lock()
-	old := a.webhook
-	a.webhook = next
-	a.webhookConfig = cfg
-	a.webhookMu.Unlock()
-	old.Close()
+	// Persist first, then atomically publish an immutable dispatcher/config
+	// pair. Already-started deliveries finish on their original snapshot.
+	a.publishWebhook(dispatcher, []webhookTargetSpec{spec}, cfg, false)
+	view := webhookSettingsView(cfg)
+	view["multi_target"] = false
 	c.Header("ETag", webhookConfigETag(cfg))
-	c.JSON(http.StatusOK, webhookSettingsView(cfg))
+	c.JSON(http.StatusOK, view)
 }

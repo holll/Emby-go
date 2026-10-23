@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net/url"
@@ -20,6 +21,17 @@ import (
 type Result struct {
 	Success int `json:"success"`
 	Pending int `json:"pending"`
+	// 组级增量扫描统计。full 也会写入基线，因此这两组字段对两种模式都有效。
+	Mode             string `json:"mode,omitempty"`
+	GroupsTotal      int    `json:"groups_total,omitempty"`
+	GroupsDone       int    `json:"groups_done,omitempty"`
+	UnchangedGroups  int    `json:"unchanged_groups,omitempty"`
+	Added            int    `json:"added,omitempty"`
+	Updated          int    `json:"updated,omitempty"`
+	Deleted          int    `json:"deleted,omitempty"`
+	IndexChanged     bool   `json:"index_changed,omitempty"`
+	CleanupPerformed bool   `json:"cleanup_performed"`
+	Incomplete       bool   `json:"incomplete,omitempty"`
 	// Skipped 本次扫描跳过的文件数（非 http(s) 源的 .strm）。
 	// 这类文件不再进入 movies 表，只在扫描结果里报个数。
 	Skipped int `json:"skipped"`
@@ -65,88 +77,9 @@ func Scan(s *store.Store, lib store.Library) (Result, error) {
 }
 
 // ScanWithProgress 与 Scan 相同，但在每个分组处理完后回调进度（可为 nil）。
+// 默认 full：旧调用者行为不变，但会记录组基线供后续 incremental 使用。
 func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progress)) (Result, error) {
-	// 扫库只负责「按磁盘现状重建索引」，不动人工录入的分类：
-	// 先一次性取出该库全部 manual 的 source_path，扫描时对上号的条目保留 manual
-	//（否则 applyMeta 会把它们无条件覆盖成 success，这个分类就留不住）。
-	manualPaths, err := s.ManualSourcePaths(lib.ID)
-	if err != nil {
-		return Result{}, err
-	}
-	opts := scanOptions{manualPaths: manualPaths}
-	var result Result
-	groups := make(map[string][]candidate)
-	err = filepath.Walk(lib.Path, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			// 遍历不完整不能据此判定文件已删除，否则会级联清除观看记录。
-			return walkErr
-		}
-		if path == lib.Path && !info.IsDir() {
-			return errors.New("媒体库路径不是目录: " + lib.Path)
-		}
-		if info.IsDir() || !strings.EqualFold(filepath.Ext(path), ".strm") {
-			return nil
-		}
-		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		candidate := candidate{path: path, info: info, base: base}
-		if match := cdPartPattern.FindStringSubmatch(base); match != nil {
-			candidate.base = match[1]
-			candidate.part = parsePart(match[2])
-			candidate.groupKey = filepath.Join(filepath.Dir(path), strings.ToLower(match[1]))
-		} else {
-			candidate.groupKey = path
-		}
-		groups[candidate.groupKey] = append(groups[candidate.groupKey], candidate)
-		return nil
-	})
-	if err != nil {
-		return result, err
-	}
-
-	total := len(groups)
-	report := func(done int, current string) {
-		if onProgress != nil {
-			onProgress(Progress{LibraryID: lib.ID, LibraryName: lib.Name, Total: total, Done: done, Current: current, Result: result})
-		}
-	}
-	report(0, "")
-
-	paths := make(map[string]struct{})
-	groupKeys := make([]string, 0, len(groups))
-	for key := range groups {
-		groupKeys = append(groupKeys, key)
-	}
-	sort.Strings(groupKeys)
-	done := 0
-	for _, key := range groupKeys {
-		group := groups[key]
-		primary, parts, ok := stackedGroup(group)
-		if !ok {
-			for _, item := range group {
-				if err := scanCandidate(s, lib, item, nil, "", opts, &result, paths); err != nil {
-					return result, err
-				}
-			}
-		} else {
-			partPaths := make([]string, 0, len(parts))
-			for _, part := range parts {
-				partPaths = append(partPaths, part.path)
-			}
-			fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
-			if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, opts, &result, paths); err != nil {
-				return result, err
-			}
-		}
-		done++
-		report(done, key)
-	}
-
-	if result.Failed == 0 {
-		if err := s.ReconcileMissingSources(lib.ID, paths); err != nil {
-			return result, err
-		}
-	}
-	return finishIndexScan(result)
+	return ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, onProgress)
 }
 
 // RescanOne 只重扫一个 .strm，用于单条刮削/编辑后立即刷新索引。
@@ -191,22 +124,8 @@ func rescanOne(s *store.Store, lib store.Library, strmPath string, nonDestructiv
 	}
 
 	paths := make(map[string]struct{})
-	group := collectGroup(candidate)
-	if primary, parts, ok := stackedGroup(group); ok {
-		partPaths := make([]string, 0, len(parts))
-		for _, part := range parts {
-			partPaths = append(partPaths, part.path)
-		}
-		fallbackNFO := filepath.Join(filepath.Dir(primary.path), primary.base+".nfo")
-		if err := scanCandidate(s, lib, primary, partPaths, fallbackNFO, opts, &result, paths); err != nil {
-			return result, err
-		}
-	} else {
-		for _, item := range group {
-			if err := scanCandidate(s, lib, item, nil, "", opts, &result, paths); err != nil {
-				return result, err
-			}
-		}
+	if err := scanGroup(s, lib, collectGroup(candidate), opts, &result, paths); err != nil {
+		return result, err
 	}
 	return finishIndexScan(result)
 }
@@ -277,7 +196,26 @@ func stackedGroup(group []candidate) (candidate, []candidate, bool) {
 	return primary, parts, true
 }
 
-func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, fallbackNFO string, opts scanOptions, result *Result, paths map[string]struct{}) error {
+// scanGroup shares CD stacking between library scans and single-file reindexing.
+// Progress reporting and missing-source reconciliation remain with the caller.
+func scanGroup(s *store.Store, lib store.Library, group []candidate, opts scanOptions, result *Result, paths map[string]struct{}) error {
+	primary, parts, ok := stackedGroup(group)
+	if !ok {
+		for _, item := range group {
+			if err := scanCandidate(s, lib, item, nil, opts, result, paths); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	partPaths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		partPaths = append(partPaths, part.path)
+	}
+	return scanCandidate(s, lib, primary, partPaths, opts, result, paths)
+}
+
+func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, opts scanOptions, result *Result, paths map[string]struct{}) error {
 	paths[item.path] = struct{}{}
 	movie := store.Movie{LibraryID: lib.ID, SourcePath: item.path, OutputDir: filepath.Dir(item.path), Status: "pending", AdditionalParts: additionalParts}
 	line, err := ReadSource(item.path)
@@ -307,11 +245,14 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		return nil
 	}
 	var actors []store.ActorRef
-	nfoPath := strings.TrimSuffix(item.path, filepath.Ext(item.path)) + ".nfo"
+	// Retain legacy discovery precedence: existing registered CD1 sidecars
+	// must still be read after edits even if a shared NFO also exists.
+	// New stacks without a sidecar are written to the shared path.
+	nfoPath := nfo.SidecarPath(item.path, false)
 	meta, nfoErr := nfo.Read(nfoPath)
-	if nfoErr != nil && fallbackNFO != "" {
-		nfoPath = fallbackNFO
-		meta, nfoErr = nfo.Read(fallbackNFO)
+	if nfoErr != nil && len(additionalParts) > 0 {
+		nfoPath = nfo.SidecarPath(item.path, true)
+		meta, nfoErr = nfo.Read(nfoPath)
 	}
 	if nfoErr == nil {
 		applyMeta(&movie, meta, nfoPath)

@@ -29,12 +29,16 @@ func (s *Store) SetIndexedImage(id int64, kind, path string) error {
 			return err
 		}
 		var libraryID sql.NullInt64
+		var sourcePath string
 		// The column is a code-owned whitelist, not caller-controlled SQL.
-		if err := tx.QueryRow("UPDATE movies SET "+column+"=?,updated_at=? WHERE id=? RETURNING library_id",
-			path, time.Now().UTC().Format(time.RFC3339), id).Scan(&libraryID); err != nil {
+		if err := tx.QueryRow("UPDATE movies SET "+column+"=?,updated_at=? WHERE id=? RETURNING library_id,source_path",
+			path, time.Now().UTC().Format(time.RFC3339), id).Scan(&libraryID, &sourcePath); err != nil {
 			return err
 		}
 		if libraryID.Valid {
+			if err := InvalidateScanGroupsForPathsTx(tx, libraryID.Int64, []string{sourcePath}); err != nil {
+				return err
+			}
 			return bumpLibraryVersionTx(tx, libraryID.Int64)
 		}
 		return nil

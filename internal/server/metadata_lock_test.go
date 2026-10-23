@@ -1,6 +1,7 @@
 package server
 
 import (
+	"emby-go/internal/scanner"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -20,7 +21,7 @@ func TestMetadataEditAndRereadRejectConcurrentScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !app.beginScan(1) {
+	if !app.beginScan(1, 0, scanner.ScanModeFull) {
 		t.Fatal("无法占用扫描通道")
 	}
 	for _, kind := range []struct{ method, suffix, body string }{

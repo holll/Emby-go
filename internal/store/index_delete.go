@@ -34,6 +34,9 @@ func (s *Store) DeleteIndexedMovieSnapshot(id int64) (Movie, error) {
 		}
 		if libraryID.Valid {
 			movie.LibraryID = libraryID.Int64
+			if err := InvalidateScanGroupsForPathsTx(tx, movie.LibraryID, []string{movie.SourcePath}); err != nil {
+				return err
+			}
 			return bumpLibraryVersionTx(tx, libraryID.Int64)
 		}
 		return nil
@@ -111,6 +114,9 @@ func missingSourcePaths(db sourcePathQuerier, libraryID int64, paths map[string]
 }
 
 func deleteSourcePathsTx(tx *sql.Tx, libraryID int64, missing []string) error {
+	if err := InvalidateScanGroupsForPathsTx(tx, libraryID, missing); err != nil {
+		return err
+	}
 	const chunk = 500
 	for start := 0; start < len(missing); start += chunk {
 		end := start + chunk

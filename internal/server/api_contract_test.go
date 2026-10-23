@@ -56,9 +56,18 @@ func TestAPIContractCriticalRoutesRegistered(t *testing.T) {
 		"GET /api/auth/status",
 		"POST /api/auth/initialize",
 		"GET /api/admin/settings",
+		"GET /api/admin/security/auth-limits",
+		"POST /api/admin/security/unlock",
+		"POST /api/admin/apikeys/:key/rotate",
+		"GET /api/admin/logs/disk",
+		"GET /api/admin/webhook/targets",
+		"PUT /api/admin/webhook/targets",
 		"GET /api/admin/items",
 		"GET /api/admin/tasks/:id",
 		"POST /api/admin/tasks/scan",
+		"POST /api/admin/translate/run",
+		"GET /api/admin/translate/status",
+		"POST /api/admin/translate/cancel",
 	}
 	for _, key := range critical {
 		if !registered[key] {

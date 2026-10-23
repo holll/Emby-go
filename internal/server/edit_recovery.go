@@ -23,7 +23,7 @@ func editNFOPath(m store.Movie) string {
 	if p := strings.TrimSpace(m.NFOPath); p != "" {
 		return p
 	}
-	return strings.TrimSuffix(m.SourcePath, filepath.Ext(m.SourcePath)) + ".nfo"
+	return nfo.SidecarPath(m.SourcePath, len(m.AdditionalParts) > 0)
 }
 
 func nfoDigest(path string) (string, error) {

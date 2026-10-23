@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/scanner"
 	"emby-go/internal/scheduler"
 	"emby-go/internal/scraper"
 	"emby-go/internal/store"
@@ -31,6 +32,7 @@ var scheduledTypes = map[string]string{
 	"probe":          "媒体信息探测",
 	"scrape":         "内置刮削",
 	"scrape_avatars": "演员头像补全",
+	"translate":      "独立翻译",
 }
 
 // scheduledView 计划任务列表项：定义 + 下次执行时间。
@@ -53,6 +55,8 @@ func (a *App) runScheduledTask(_ context.Context, task scheduler.Task) error {
 		return a.runScheduledScrape(task)
 	case "scrape_avatars":
 		return a.runScheduledScrapeAvatars(task)
+	case "translate":
+		return a.runScheduledTranslation(task)
 	default:
 		return fmt.Errorf("不支持的任务类型 %q", task.Type)
 	}
@@ -61,14 +65,23 @@ func (a *App) runScheduledTask(_ context.Context, task scheduler.Task) error {
 // runScheduledScan 执行扫描/重建索引（同步阻塞直到结束，调度器据此判定重叠）。
 func (a *App) runScheduledScan(task scheduler.Task) error {
 	libraryID := int64(0)
+	mode := scanner.ScanModeFull
 	if task.Type == "scan" {
-		libraryID = paramInt64(task.Params, "library_id")
+		var err error
+		libraryID, mode, err = scheduledScanParams(task.Params)
+		if err != nil {
+			return err
+		}
+	}
+	marker, err := scheduledScanMarker(task.Params)
+	if err != nil {
+		return err
 	}
 	if a.scanning() {
 		return scheduler.ErrBusy
 	}
 	taskID := a.startTask(task.Type)
-	result, err := a.scanLibraries(libraryID)
+	result, err := a.scanLibraries(libraryID, taskID, mode, false, marker)
 	if errors.Is(err, errScanBusy) {
 		a.finishTaskBusy(taskID, err.Error())
 		return scheduler.ErrBusy
@@ -180,15 +193,78 @@ func scheduledProbeStatus(raw map[string]any) (string, error) {
 	}
 }
 
+func scheduledScanMarker(raw map[string]any) (scanRootMarker, error) {
+	pathValue, pathPresent := raw["root_marker_path"]
+	digestValue, digestPresent := raw["root_marker_sha256"]
+	path, pathOK := pathValue.(string)
+	digest, digestOK := digestValue.(string)
+	if (pathPresent && !pathOK) || (digestPresent && !digestOK) {
+		return scanRootMarker{}, fmt.Errorf("root marker parameters must be strings")
+	}
+	return normalizeScanMarker(path, digest, pathPresent, digestPresent)
+}
+
+// scheduledScanParams preserves missing-mode legacy full behavior while refusing
+// explicit malformed mode or library scope (including non-string modes).
+func scheduledScanParams(raw map[string]any) (int64, scanner.ScanMode, error) {
+	mode := scanner.ScanModeFull
+	if value, present := raw["mode"]; present {
+		text, ok := value.(string)
+		if !ok {
+			return 0, "", fmt.Errorf("scan mode must be full or incremental")
+		}
+		mode, ok = parseScanMode(text)
+		if !ok {
+			return 0, "", fmt.Errorf("scan mode must be full or incremental")
+		}
+	}
+	libraryID := int64(0)
+	if value, present := raw["library_id"]; present {
+		var err error
+		if text, ok := value.(string); ok {
+			libraryID, err = strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+		} else {
+			data, marshalErr := json.Marshal(value)
+			err = marshalErr
+			if err == nil {
+				if value == nil {
+					err = fmt.Errorf("null scope")
+				} else {
+					err = json.Unmarshal(data, &libraryID)
+				}
+			}
+		}
+		if err != nil || libraryID < 0 {
+			return 0, "", fmt.Errorf("scan library_id must be nonnegative")
+		}
+	}
+	return libraryID, mode, nil
+}
+
 // normalizeParams 按任务类型把请求参数整理成规范 JSON：
 // 只保留该类型认识的键，避免把垃圾字段沉淀进库。
 func normalizeParams(kind string, raw map[string]any) (string, error) {
 	out := map[string]any{}
 	switch kind {
 	case "scan":
-		out["library_id"] = paramInt64(raw, "library_id")
+		libraryID, mode, err := scheduledScanParams(raw)
+		if err != nil {
+			return "", err
+		}
+		// Retain opaque fields so conditional editors do not destroy future
+		// options. Missing mode remains absent for stable legacy ETags.
+		for key, value := range raw {
+			out[key] = value
+		}
+		out["library_id"] = libraryID
+		if _, present := raw["mode"]; present {
+			out["mode"] = string(mode)
+		}
 	case "reindex":
-		// 无参数
+		// Mode/scope never alter reindex execution, but opaque options round-trip.
+		for key, value := range raw {
+			out[key] = value
+		}
 	case "probe":
 		out["library_id"] = paramInt64(raw, "library_id")
 		status, err := scheduledProbeStatus(raw)
@@ -218,6 +294,12 @@ func normalizeParams(kind string, raw map[string]any) (string, error) {
 		if value, ok := raw["overwrite"]; ok {
 			out["overwrite"] = paramBool(value)
 		}
+	case "translate":
+		var err error
+		out, err = normalizeTranslationParams(raw)
+		if err != nil {
+			return "", err
+		}
 	case "scrape_avatars":
 		out["library_id"] = paramInt64(raw, "library_id")
 		if limit := paramInt64(raw, "limit"); limit > 0 {
@@ -225,6 +307,16 @@ func normalizeParams(kind string, raw map[string]any) (string, error) {
 		}
 	default:
 		return "", fmt.Errorf("不支持的任务类型 %q", kind)
+	}
+	if kind == "scan" || kind == "reindex" {
+		marker, err := scheduledScanMarker(raw)
+		if err != nil {
+			return "", err
+		}
+		if _, present := raw["root_marker_path"]; present {
+			out["root_marker_path"] = marker.Path
+			out["root_marker_sha256"] = marker.SHA256
+		}
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

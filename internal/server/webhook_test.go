@@ -18,10 +18,7 @@ import (
 func enableDeleteWebhook(t *testing.T, f adminDeleteFixture, url string) {
 	t.Helper()
 	cfg := config.WebhookConfig{Enabled: true, URL: url, TimeoutSeconds: 1, AllowPrivate: true}
-	sender, err := webhook.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sender := webhookDispatcherForTest(t, cfg)
 	f.a.webhook.Close()
 	f.a.webhook = sender
 	f.a.cfg.Webhook = cfg

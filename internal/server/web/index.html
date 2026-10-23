@@ -9,8 +9,9 @@
 </head>
 <body>
 <div id="app-shell">
-  <aside class="sidebar">
+  <aside id="nav-drawer" class="sidebar" aria-label="控制台菜单" tabindex="-1">
     <div class="brand">
+      <button id="nav-close" class="icon-btn nav-close" type="button" aria-label="关闭菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       <span class="brand-mark" aria-hidden="true">E</span>
       <div class="brand-text">
         <strong>Emby-go</strong>
@@ -23,6 +24,8 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <span>总览</span>
       </button>
+      <section class="nav-group" aria-label="内容管理">
+        <h2 class="nav-group-label">内容管理</h2>
       <button class="nav-item" data-page="libraries">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <span>媒体库</span>
@@ -31,42 +34,76 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m9.5 13 3 2 2-1.5"/><circle cx="8" cy="12.5" r=".5"/></svg>
         <span>媒体墙</span>
       </button>
-      <button class="nav-item" data-page="settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
-        <span>设置</span>
-      </button>
-      <button class="nav-item" data-page="activity">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>
-        <span>活动记录</span>
-      </button>
+      </section>
+      <section class="nav-group" aria-label="资料处理">
+        <h2 class="nav-group-label">资料处理</h2>
       <button class="nav-item" data-page="scrape">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3"/><path d="M12 18v3"/><circle cx="12" cy="12" r="4"/><path d="M3 12h3M18 12h3"/></svg>
         <span>刮削</span>
+      </button>
+      <button class="nav-item" data-page="translate">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c1 5 4 8 8 10M13 5c-1 5-4 8-8 10M14 21l4-11 4 11M16 17h4"/></svg>
+        <span>独立翻译</span>
       </button>
       <button class="nav-item" data-page="scheduled">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
         <span>计划任务</span>
       </button>
+      </section>
+      <section class="nav-group" aria-label="运维诊断">
+        <h2 class="nav-group-label">运维诊断</h2>
+      <button class="nav-item" data-page="logs" id="nav-logs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 9h10M4 13h16M4 17h7"/><path d="M17 15l2 2-2 2"/></svg>
+        <span>运行日志</span>
+      </button>
+      <button class="nav-item" data-page="activity">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>
+        <span>活动记录</span>
+      </button>
       <button class="nav-item" data-page="probe">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <span>接口探针</span>
       </button>
+      </section>
+      <section class="nav-group" aria-label="账户与设置">
+        <h2 class="nav-group-label">账户与设置</h2>
+      <button class="nav-item" data-page="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        <span>设置</span>
+      </button>
+      </section>
     </nav>
 
     <footer class="side-foot"><span class="status-dot" aria-hidden="true"></span><a class="foot-link" href="{{REPO_URL}}" target="_blank" rel="noopener noreferrer">holll/Emby-go</a><span class="foot-sep">·</span><span class="foot-ver">{{VERSION}}</span></footer>
   </aside>
 
-  <main class="main">
+  <div id="nav-backdrop" class="nav-backdrop" hidden aria-hidden="true"></div>
+  <main class="main" id="main-content">
     <header class="topbar">
-      <div>
+      <div class="page-heading">
+        <button id="nav-toggle" class="btn nav-toggle" type="button" aria-expanded="false" aria-controls="nav-drawer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>菜单</span></button>
+        <div>
         <p class="crumb" id="page-eyebrow">Archive / Index</p>
         <h1 id="page-title">总览</h1>
+        </div>
       </div>
       <div class="top-actions">
+        <details class="scan-tools">
+          <summary class="btn">全局扫描<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <div class="scan-tools-panel">
+        <div class="scan-mode-field"><label for="scan-mode">扫描模式</label>
+        <select id="scan-mode" class="scan-mode-select" aria-describedby="scan-mode-description" title="扫描两种模式都会完整枚举目录；增量模式只重建变化的影片组">
+          <option value="incremental">增量扫描（推荐）</option>
+          <option value="full">全量重建</option>
+        </select>
+        <small id="scan-mode-description">两种模式都会完整枚举目录</small></div>
         <button id="scan" class="btn btn-accent">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>
           <span>开始扫描</span>
         </button>
+          </div>
+        </details>
+        <button id="logout" class="btn account-action" type="button" aria-label="退出当前会话" title="退出当前会话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 4H4v16h5M14 8l4 4-4 4M9 12h12"/></svg><span>退出</span></button>
       </div>
     </header>
 
@@ -102,6 +139,7 @@
   <div class="scan-progress-head">
     <strong id="scan-progress-title">扫描中…</strong>
     <span id="scan-progress-count"></span>
+    <button id="scan-progress-close" class="icon-btn" title="关闭" hidden>✕</button>
   </div>
   <div class="scan-progress-bar"><i id="scan-progress-fill"></i></div>
   <small id="scan-progress-detail"></small>
@@ -111,6 +149,7 @@
 <script src="/web/vendor/artplayer.min.js"></script>
 <script src="/web/webhook-settings.js"></script>
 <script src="/web/log-settings.js"></script>
-<script src="/web/app.js"></script>
+<script src="/web/navigation.js" defer></script>
+<script src="/web/app.js" defer></script>
 </body>
 </html>

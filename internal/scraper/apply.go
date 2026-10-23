@@ -446,11 +446,11 @@ func splitReleaseDate(raw string) (string, int) {
 }
 
 // writeNFO 走标签级更新器写盘。NFO 位置以影片已登记的 NFOPath 为准；
-// 没有时按 scanner 的约定（与 .strm 同名的 .nfo）新建。
+// 没有时按 scanner 的约定新建，多分段影片使用去掉 CD 后缀的共享 NFO。
 func writeNFO(movie store.Movie, fields nfo.ScrapeFields) error {
 	path := strings.TrimSpace(movie.NFOPath)
 	if path == "" {
-		path = strings.TrimSuffix(movie.SourcePath, filepath.Ext(movie.SourcePath)) + ".nfo"
+		path = nfo.SidecarPath(movie.SourcePath, len(movie.AdditionalParts) > 0)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

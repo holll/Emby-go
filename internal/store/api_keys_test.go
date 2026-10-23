@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,11 +20,11 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	if len(created.Key) != 48 {
 		t.Fatalf("plaintext key length=%d", len(created.Key))
 	}
-	if len(created.ID) != 64 || created.KeyPrefix != created.Key[:12] {
+	if len(created.ID) != 35 || !strings.HasPrefix(created.ID, "ak_") || created.KeyPrefix != created.Key[:12] {
 		t.Fatalf("created id/prefix=%q/%q", created.ID, created.KeyPrefix)
 	}
-	if created.ID != apiKeyHash(created.Key) {
-		t.Fatalf("id is not the digest")
+	if created.Key == created.ID || created.ID == apiKeyHash(created.Key) {
+		t.Fatalf("id must be a stable record identity, not credential material")
 	}
 	items, err := s.APIKeys()
 	if err != nil || len(items) != 1 {
@@ -44,14 +45,14 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 		t.Fatalf("wrong credential accepted: ok=%v err=%v", ok, err)
 	}
 	var stored string
-	if err := s.db.QueryRow("SELECT key FROM api_keys WHERE key_hash=?", created.ID).Scan(&stored); err != nil {
+	if err := s.db.QueryRow("SELECT key FROM api_keys WHERE key_hash=?", apiKeyHash(created.Key)).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored == created.Key {
 		t.Fatal("plaintext key still stored")
 	}
-	if err := s.DeleteAPIKey(created.Key); err != nil {
-		t.Fatalf("delete by plaintext: %v", err)
+	if err := s.DeleteAPIKey(created.ID); err != nil {
+		t.Fatalf("delete by stable id: %v", err)
 	}
 	if ok, _ := s.HasAPIKey(created.Key); ok {
 		t.Fatal("deleted key still valid")

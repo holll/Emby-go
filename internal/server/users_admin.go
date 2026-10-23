@@ -4,9 +4,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	"unicode/utf8"
 
 	"emby-go/internal/store"
 )
@@ -90,8 +91,8 @@ func (a *App) adminCreateUser(c *gin.Context) {
 		return
 	}
 	name, ok := normalizeName(req.Name)
-	if !ok || len(req.Password) < 9 {
-		apiError(c, http.StatusBadRequest, "用户名至少 3 个字符，密码至少 9 个字符")
+	if !ok || !validPassword(req.Password) {
+		apiError(c, http.StatusBadRequest, "用户名至少 3 个字符，密码至少 9 个字符且不超过 72 字节")
 		return
 	}
 	libs, ok := a.validateLibraryIDs(req.LibraryIDs)
@@ -99,14 +100,9 @@ func (a *App) adminCreateUser(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, "媒体库不存在")
 		return
 	}
-	user, err := a.db.CreateUser(name, req.Password, req.IsAdmin)
+	user, err := a.db.AdminCreateUser(adminUserActorID(c), name, req.Password, req.IsAdmin, libs, adminUserActor(c))
 	if err != nil {
-		status := http.StatusBadRequest
-		apiError(c, status, userErrorText(err))
-		return
-	}
-	if err := a.db.SetUserLibraries(user.ID, libs); err != nil {
-		apiError(c, http.StatusInternalServerError, "保存媒体库授权失败")
+		adminUserErrorResponse(c, err)
 		return
 	}
 	views, err := a.userViews([]store.User{user})
@@ -115,6 +111,28 @@ func (a *App) adminCreateUser(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"user": views[0]})
+}
+
+// Missing authentication must never use the legacy currentUserID owner fallback.
+func adminUserActor(c *gin.Context) store.User {
+	u, _ := currentUser(c)
+	return u
+}
+
+func adminUserActorID(c *gin.Context) int64 {
+	user, ok := currentUser(c)
+	if !ok {
+		return 0
+	}
+	return user.ID
+}
+
+func adminUserErrorResponse(c *gin.Context, err error) {
+	if err == store.ErrAdminGenerationStale {
+		apiError(c, http.StatusForbidden, "管理员权限已撤销")
+		return
+	}
+	apiError(c, http.StatusBadRequest, userErrorText(err))
 }
 
 func userErrorText(err error) string {
@@ -157,30 +175,11 @@ func (a *App) adminUpdateUser(c *gin.Context) {
 			apiError(c, http.StatusBadRequest, "用户名至少 3 个字符")
 			return
 		}
-		if err := a.db.RenameUser(id, name); err != nil {
-			apiError(c, http.StatusBadRequest, userErrorText(err))
-			return
-		}
+		req.Name = &name
 	}
-	if req.Password != nil {
-		if len(*req.Password) < 9 {
-			apiError(c, http.StatusBadRequest, "密码至少 9 个字符")
-			return
-		}
-		if err := a.db.SetUserPassword(id, *req.Password); err != nil {
-			apiError(c, http.StatusBadRequest, userErrorText(err))
-			return
-		}
-		if err := a.db.RevokeUserAccessTokens(id); err != nil {
-			apiError(c, http.StatusInternalServerError, "撤销旧会话失败")
-			return
-		}
-	}
-	if req.IsAdmin != nil {
-		if err := a.db.SetUserAdmin(id, *req.IsAdmin); err != nil {
-			apiError(c, http.StatusBadRequest, userErrorText(err))
-			return
-		}
+	if req.Password != nil && !validPassword(*req.Password) {
+		apiError(c, http.StatusBadRequest, "密码至少 9 个字符且不超过 72 字节")
+		return
 	}
 	if req.LibraryIDs != nil {
 		libs, ok := a.validateLibraryIDs(*req.LibraryIDs)
@@ -188,10 +187,13 @@ func (a *App) adminUpdateUser(c *gin.Context) {
 			apiError(c, http.StatusBadRequest, "媒体库不存在")
 			return
 		}
-		if err := a.db.SetUserLibraries(id, libs); err != nil {
-			apiError(c, http.StatusInternalServerError, "保存媒体库授权失败")
-			return
-		}
+		req.LibraryIDs = &libs
+	}
+	if err := a.db.AdminUpdateUser(adminUserActorID(c), id, store.AdminUserUpdate{
+		Name: req.Name, Password: req.Password, IsAdmin: req.IsAdmin, LibraryIDs: req.LibraryIDs,
+	}, adminUserActor(c)); err != nil {
+		adminUserErrorResponse(c, err)
+		return
 	}
 	user, err := a.db.UserByID(id)
 	if err != nil {
@@ -229,8 +231,8 @@ func (a *App) adminSetUserLibraries(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, "媒体库不存在")
 		return
 	}
-	if err := a.db.SetUserLibraries(id, libs); err != nil {
-		apiError(c, http.StatusInternalServerError, "保存媒体库授权失败")
+	if err := a.db.AdminUpdateUser(adminUserActorID(c), id, store.AdminUserUpdate{LibraryIDs: &libs}, adminUserActor(c)); err != nil {
+		adminUserErrorResponse(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"library_ids": libs})
@@ -247,19 +249,28 @@ func (a *App) adminDeleteUser(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, "不能删除当前登录账户")
 		return
 	}
-	if err := a.db.DeleteUser(id); err != nil {
+	if err := a.db.AdminDeleteUser(adminUserActorID(c), id, adminUserActor(c)); err != nil {
 		if store.NotFound(err) || err == store.ErrUserNotFound {
 			apiError(c, http.StatusNotFound, "用户不存在")
 			return
 		}
-		apiError(c, http.StatusBadRequest, userErrorText(err))
+		adminUserErrorResponse(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
 }
 
 // changePassword 允许用户修改自己的密码；成功后撤销该账户全部会话，要求重新登录。
+// 当前密码校验与登录共用同一 guard：改密不是绕开防爆破的第二入口。
 func (a *App) changePassword(c *gin.Context) {
+	ticket, ok := a.beginCredentialAttempt(c)
+	if !ok {
+		return
+	}
+	ip := c.ClientIP()
+	outcome := authOutcomeInterrupted
+	defer func() { a.authGuard.Finish(ticket, outcome) }()
+
 	user, err := a.db.UserByID(a.currentUserID(c))
 	if err != nil {
 		apiError(c, http.StatusUnauthorized, "账户不存在")
@@ -270,25 +281,55 @@ func (a *App) changePassword(c *gin.Context) {
 		NewPassword     string `json:"new_password"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if credentialBindTooLarge(c, err) {
+			return
+		}
 		apiError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if _, ok, err := a.db.AuthenticateUser(user.Name, req.CurrentPassword); err != nil || !ok {
+	if retry := a.authGuard.AttachAccount(ticket, user.Name); retry > 0 {
+		authRateLimitedRetry(c, retry)
+		return
+	}
+	authenticated, valid, authErr, attempted := a.verifyPassword(c, user.Name, req.CurrentPassword)
+	if !attempted {
+		authRateLimitedRetry(c, time.Second)
+		return
+	}
+	if authErr != nil {
+		outcome = authOutcomeStorageFailure
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "authentication unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
+		})
+		return
+	}
+	if !valid {
+		outcome = authOutcomeInvalidPassword
 		apiError(c, http.StatusBadRequest, "当前密码不正确")
 		return
 	}
-	if len(req.NewPassword) < 9 {
-		apiError(c, http.StatusBadRequest, "密码至少 9 个字符")
+	// Names are mutable: another account can take this name between the ID
+	// lookup above and password authentication. Never apply its proof to this
+	// request, even when both accounts happen to share a password.
+	if authenticated.ID != user.ID {
+		apiError(c, http.StatusUnauthorized, "账户凭据已变更，请重新登录")
 		return
 	}
-	if err := a.db.SetUserPassword(user.ID, req.NewPassword); err != nil {
+	if !validPassword(req.NewPassword) {
+		apiError(c, http.StatusBadRequest, "密码至少 9 个字符且不超过 72 字节")
+		return
+	}
+	if err := a.db.SetAuthenticatedUserPassword(authenticated, req.NewPassword); err != nil {
+		outcome = authOutcomeStorageFailure
+		if err == store.ErrAuthenticationChanged {
+			apiError(c, http.StatusUnauthorized, "账户凭据已变更，请重新登录")
+			return
+		}
 		apiError(c, http.StatusInternalServerError, "保存密码失败")
 		return
 	}
-	if err := a.db.RevokeUserAccessTokens(user.ID); err != nil {
-		apiError(c, http.StatusInternalServerError, "撤销旧会话失败")
-		return
-	}
+	outcome = authOutcomePasswordVerified
+	a.authGuard.OnCredentialCommitSuccess(ip, user.Name)
 	c.Status(http.StatusNoContent)
 }
 

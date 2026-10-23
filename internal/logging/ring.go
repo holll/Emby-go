@@ -92,7 +92,7 @@ func (w *RingWriter) Write(p []byte) (int, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		entry := Entry{Time: now().Format(time.RFC3339), Level: "INFO", Message: redactSecrets(line)}
+		entry := Entry{Time: now().Format(time.RFC3339), Level: "INFO", Message: SanitizeText(line)}
 		for _, field := range strings.Fields(line) {
 			switch {
 			case strings.HasPrefix(field, "time="):
@@ -113,31 +113,6 @@ func SetupTo(console io.Writer, debug bool) {
 	if debug {
 		level = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(console, NewRingWriter()), &slog.HandlerOptions{Level: level})))
-}
-
-func isSensitiveKey(key string) bool {
-	lower := strings.ToLower(key)
-	for _, marker := range []string{"password", "token", "secret", "authorization", "api_key", "apikey", "cookie"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// redactSecrets 兜底清理整行文本里可能出现的凭据（key=value 形式）。
-func redactSecrets(line string) string {
-	fields := strings.Fields(line)
-	for i, field := range fields {
-		key, _, ok := strings.Cut(field, "=")
-		if !ok || !isSensitiveKey(key) {
-			continue
-		}
-		rest := field[len(key):]
-		if strings.HasPrefix(rest, "=") {
-			fields[i] = key + "=[REDACTED]"
-		}
-	}
-	return strings.Join(fields, " ")
+	handler := slog.NewTextHandler(io.MultiWriter(console, NewRingWriter()), &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(newSanitizingHandler(handler)))
 }

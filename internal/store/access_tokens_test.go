@@ -12,6 +12,9 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 	const ttl = 30 * 24 * time.Hour
 
@@ -82,6 +85,9 @@ func TestRevokeAllAccessTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+		t.Fatal(err)
+	}
 	for _, token := range []string{"a", "b", "c"} {
 		if err := s.SaveAccessToken(token); err != nil {
 			t.Fatal(err)
@@ -136,6 +142,9 @@ func TestAccessTokensStoredAsDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+		t.Fatal(err)
+	}
 	const token = "plain-session-token"
 	if err := s.SaveAccessToken(token); err != nil {
 		t.Fatal(err)
@@ -162,6 +171,9 @@ func TestMigration12HashesLegacySessions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy-token.db")
 	s, err := Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
 	const legacy = "0123456789abcdef0123456789abcdef0123456789abcdef"

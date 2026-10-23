@@ -22,7 +22,14 @@ func TestAuthFailsClosedWhenTokenUserIsGone(t *testing.T) {
 	defer a.Close()
 	seedOwner(t, a)
 	const token = "orphan-session"
-	if err := a.db.SaveAccessTokenForUser(token, 7, time.Time{}); err != nil {
+	u, err := a.db.CreateUser("deleted-viewer", "viewer-password-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.SaveAccessTokenForUser(token, u.ID, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.DeleteUser(u.ID); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)

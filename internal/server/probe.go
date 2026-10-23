@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/logging"
 	"emby-go/internal/nfo"
 	"emby-go/internal/probe"
 	"emby-go/internal/scanner"
@@ -108,6 +109,14 @@ func probeTargets(movies []store.Movie) []probeTarget {
 		}
 	}
 	return out
+}
+
+// probeOutcome 是单个文件的完成事件：状态只允许 success/skipped/failed/cancelled，
+// SafeErrorCode 是可安全落盘的稳定分类，不含路径、URL、ffprobe stderr。
+type probeOutcome struct {
+	Status        string
+	SafeErrorCode string
+	Detail        string // 仅回给管理端/失败样例，写日志前统一脱敏
 }
 
 // probePlan 探测任务的准备结果：已自检的 ffprobe 与展开后的文件级目标。
@@ -284,24 +293,34 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 	files := make([]gin.H, 0, len(targets))
 	var firstInfo probe.Info
 	var failures []string
+	done := 0
 	for _, item := range targets {
+		done++
+		// 单条同步探测：复用同一个格式化函数输出 1..N，但不改写批量运行状态。
+		finish := func(status, code string) {
+			a.emitProbeProgress(0, item, status, code, done, len(targets))
+		}
 		url, readErr := scanner.ReadSource(item.Path)
 		if readErr != nil {
 			failures = append(failures, item.label()+"：无法读取 .strm ("+readErr.Error()+")")
+			finish("failed", "READ_SOURCE_FAILED")
 			continue
 		}
 		if !scanner.ValidHTTP(url) {
 			failures = append(failures, item.label()+"：源不是 http(s) 地址")
+			finish("failed", "NON_HTTP_SOURCE")
 			continue
 		}
 		result, runErr := probe.Run(ctx, ffprobe, url, a.cfg.ProbeTimeout())
 		if runErr != nil {
 			failures = append(failures, item.label()+"："+runErr.Error())
+			finish("failed", "FFPROBE_FAILED")
 			continue
 		}
 		if item.Primary {
 			if err = a.writeProbeNFO(movie, url, result.Info); err != nil {
 				failures = append(failures, item.label()+"：写入 NFO 失败 ("+err.Error()+")")
+				finish("failed", "NFO_WRITE_FAILED")
 				continue
 			}
 			firstInfo = result.Info
@@ -310,6 +329,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 		if err = saveMediaInfo(item.Path, url, result.Raw); err != nil {
 			slog.Warn("写入 mediainfo.json 失败", "path", item.Path, "error", err)
 		}
+		finish("success", "PROBED")
 		files = append(files, gin.H{
 			"kind":           map[bool]string{true: "primary", false: "part"}[item.Primary],
 			"index":          item.Index,
@@ -385,6 +405,10 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 		ctx = a.rootCtx
 	}
 
+	// R6：启动日志固定 0/N；总数是文件级 len(targets)，不是影片数。
+	slog.Info(fmt.Sprintf("媒体信息探测[0/%d]，任务开始", len(targets)),
+		"task_id", taskID, "total", len(targets), "state", "started")
+
 	jobs := make(chan probeTarget)
 	touched := make(chan int64, len(targets))
 	var wg sync.WaitGroup
@@ -398,7 +422,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 				if ctx.Err() != nil || a.probeAborted() {
 					continue
 				}
-				a.probeOne(ctx, ffprobe, target, onlyMissing, touched)
+				a.probeOne(ctx, taskID, ffprobe, target, onlyMissing, touched)
 			}
 		}()
 	}
@@ -493,18 +517,26 @@ func (a *App) probeFailureSamples() []string {
 //  1. mediainfo.json（或主文件的 NFO 标记）显示已探测且直链未变 → 跳过，不发任何探测
 //  2. 本地留有原始输出 → 重新映射回填，不联网
 //  3. 其余 → 联网 ffprobe，写 mediainfo.json（主文件另写 NFO）
-func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, onlyMissing bool, touched chan<- int64) {
+func (a *App) probeOne(ctx context.Context, taskID int64, ffprobe string, target probeTarget, onlyMissing bool, touched chan<- int64) {
 	movie := target.Movie
 	a.setProbeCurrent(target.label())
-	defer a.markProbeDone()
+	// 默认按「意外退出」记账：任何没有显式设置 outcome 的返回（含 panic 前的 defer）
+	// 都不算成功，也不会把失败吞掉。取消后仍未处理的目标不计完成。
+	outcome := probeOutcome{Status: "failed", SafeErrorCode: "UNEXPECTED_EXIT"}
+	defer func() {
+		if ctx.Err() != nil && outcome.Status == "failed" {
+			outcome.Status = "cancelled"
+		}
+		a.completeProbe(taskID, target, outcome)
+	}()
 
 	url, err := scanner.ReadSource(target.Path)
 	if err != nil {
-		a.probeFailure(movie, target.label()+"：读取 .strm 失败: "+err.Error())
+		outcome = probeOutcome{Status: "failed", SafeErrorCode: "READ_SOURCE_FAILED", Detail: "读取 .strm 失败: " + err.Error()}
 		return
 	}
 	if !scanner.ValidHTTP(url) {
-		a.probeFailure(movie, target.label()+"：源不是 http(s) 地址")
+		outcome = probeOutcome{Status: "failed", SafeErrorCode: "NON_HTTP_SOURCE", Detail: "源不是 http(s) 地址"}
 		return
 	}
 	if onlyMissing {
@@ -518,16 +550,20 @@ func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, 
 			// 数据已就绪。但主文件的 NFO 可能落后（外部改动/丢失），有本地原始数据就顺手回填，不联网。
 			if target.Primary && !nfoCurrent && hasCache && a.backfillFromMediaInfo(target, file) {
 				touched <- movie.LibraryID
-				a.probeSuccess()
+				outcome = probeOutcome{Status: "success", SafeErrorCode: "BACKFILLED_LOCAL"}
 				return
 			}
-			a.probeSkipped()
+			code := "CACHE_CURRENT"
+			if nfoCurrent && !cacheCurrent {
+				code = "NFO_CURRENT"
+			}
+			outcome = probeOutcome{Status: "skipped", SafeErrorCode: code}
 			return
 		case hasCache:
 			// 缓存版本偏低（探测逻辑升级）：本地重新映射即可。
 			if a.backfillFromMediaInfo(target, file) {
 				touched <- movie.LibraryID
-				a.probeSuccess()
+				outcome = probeOutcome{Status: "success", SafeErrorCode: "BACKFILLED_LOCAL"}
 				return
 			}
 			// 回填失败（缓存原始数据已不可解析）→ 落到下面的真实探测
@@ -536,13 +572,13 @@ func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, 
 
 	result, err := probe.Run(ctx, ffprobe, url, a.cfg.ProbeTimeout())
 	if err != nil {
-		a.probeFailure(movie, target.label()+"："+err.Error())
+		outcome = probeOutcome{Status: "failed", SafeErrorCode: "FFPROBE_FAILED", Detail: err.Error()}
 		return
 	}
 	// 主文件的 NFO 是权威产物，写入失败即整体失败。
 	if target.Primary {
 		if err := a.writeProbeNFO(movie, url, result.Info); err != nil {
-			a.probeFailure(movie, target.label()+"：写入 NFO 失败: "+err.Error())
+			outcome = probeOutcome{Status: "failed", SafeErrorCode: "NFO_WRITE_FAILED", Detail: "写入 NFO 失败: " + err.Error()}
 			return
 		}
 	}
@@ -552,23 +588,127 @@ func (a *App) probeOne(ctx context.Context, ffprobe string, target probeTarget, 
 		slog.Warn("写入 mediainfo.json 失败（不影响去重，仅失去本地回填）", "path", target.Path, "error", err)
 	}
 	touched <- movie.LibraryID
-	a.probeSuccess()
+	outcome = probeOutcome{Status: "success", SafeErrorCode: "PROBED"}
 }
 
-// probeSuccess / probeSkipped 记录非失败结果，并把连续失败计数归零——
-// 连续失败计数是熔断的判据，中间只要有一条成功就说明环境是好的，必须重置。
-func (a *App) probeSuccess() {
-	a.countProbe(func(status *probeStatus) {
+// completeProbe 是批量探测唯一的完成入口：一次调用只加一次计数、只写一条进度日志。
+// 锁顺序固定为 progressEmitMu → probeTaskMu；状态锁内不写日志、不等待 emit。
+func (a *App) completeProbe(taskID int64, target probeTarget, outcome probeOutcome) {
+	if outcome.Status == "cancelled" {
+		return
+	}
+	if outcome.Status != "success" && outcome.Status != "skipped" {
+		outcome.Status = "failed"
+	}
+	if outcome.Status == "failed" && outcome.SafeErrorCode == "" {
+		outcome.SafeErrorCode = "UNEXPECTED_EXIT"
+	}
+	a.probeProgressEmit.Lock()
+	defer a.probeProgressEmit.Unlock()
+
+	var done, total, failed, consecutive int
+	var shouldLog, tripped bool
+	var cancel context.CancelFunc
+	a.probeTaskMu.Lock()
+	status := &a.probeStatus
+	status.Done++
+	done, total = status.Done, status.Total
+	switch outcome.Status {
+	case "success":
 		status.Success++
 		status.consecutiveFailures = 0
-	})
-}
-
-func (a *App) probeSkipped() {
-	a.countProbe(func(status *probeStatus) {
+	case "skipped":
 		status.Skipped++
 		status.consecutiveFailures = 0
-	})
+	default:
+		status.Failed++
+		status.consecutiveFailures++
+		if len(status.Failures) < maxProbeFailures {
+			// 失败样例给管理端看，保留原因但先做统一脱敏，避免 URL 凭据落库/落盘。
+			status.Failures = append(status.Failures, target.label()+"："+logging.SanitizeText(outcome.Detail))
+		}
+		shouldLog = status.failureLogged < maxProbeFailureLogs
+		if shouldLog {
+			status.failureLogged++
+		}
+		failed, consecutive = status.Failed, status.consecutiveFailures
+		tripped = consecutive == maxProbeConsecutiveFailures && a.probeCancel != nil
+		cancel = a.probeCancel
+	}
+	a.probeTaskMu.Unlock()
+
+	if tripped {
+		slog.Warn("媒体信息探测触发熔断：连续失败过多，中止任务", "consecutive", consecutive, "failed", failed)
+		cancel()
+	}
+	a.emitProbeProgress(taskID, target, outcome.Status, outcome.SafeErrorCode, done, total)
+	if outcome.Status != "failed" {
+		return
+	}
+	number, _ := probeLogIdentity(target)
+	switch {
+	case shouldLog:
+		slog.Warn("媒体信息探测失败", "task_id", taskID, "item_id", target.Movie.ID, "number", number,
+			"total", total, "safe_error", outcome.SafeErrorCode, "failed", failed,
+			"reason", logging.SanitizeText(outcome.Detail))
+	case failed%500 == 0:
+		// 长时间持续失败时给出进度级提示，避免日志完全静默。
+		slog.Warn("媒体信息探测持续失败", "task_id", taskID, "failed", failed,
+			"consecutive", consecutive, "safe_error", outcome.SafeErrorCode,
+			"last_reason", logging.SanitizeText(outcome.Detail))
+	}
+}
+
+// emitProbeProgress 输出一条「媒体信息探测[done/total]，当前编号 标题」进度行。
+// 单条同步探测也复用它（done/total 由调用方给 1/1），不触碰批量运行状态。
+func (a *App) emitProbeProgress(taskID int64, target probeTarget, status, safeCode string, done, total int) {
+	if done < 0 || total < 0 {
+		return
+	}
+	number, title := probeLogIdentity(target)
+	display := title
+	if number != "" && !strings.HasPrefix(title, number) {
+		if display != "" {
+			display = number + " " + display
+		} else {
+			display = number
+		}
+	}
+	if !target.Primary {
+		display += "（CD" + strconv.Itoa(target.Index) + "）"
+	}
+	slog.Info(fmt.Sprintf("媒体信息探测[%d/%d]，当前%s", done, total, display),
+		"task_id", taskID, "item_id", target.Movie.ID, "number", number,
+		"part", target.Index, "status", status, "done", done, "total", total)
+	if status == "failed" && safeCode != "" {
+		slog.Info("媒体信息探测失败分类", "task_id", taskID, "item_id", target.Movie.ID, "safe_error", safeCode)
+	}
+}
+
+// probeLogIdentity 返回可安全落盘的编号与标题：去掉 CR/LF/控制字符，
+// 折叠空白并按 rune 截断；编号为空时绝不拿数据库 ID 冒充番号。
+func probeLogIdentity(target probeTarget) (string, string) {
+	number := cleanProbeLabel(target.Movie.Number, 48)
+	title := cleanProbeLabel(target.Movie.Title, 96)
+	if number == "" && title == "" {
+		title = "未命名影片"
+	}
+	return number, title
+}
+
+func cleanProbeLabel(value string, limit int) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' || r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	runes := []rune(cleaned)
+	if len(runes) > limit {
+		cleaned = string(runes[:limit]) + "…"
+	}
+	return cleaned
 }
 
 // writeProbeNFO 把探测结果写入 NFO，并记录版本与直链（后者用于识别换源）。

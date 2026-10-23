@@ -384,7 +384,7 @@ func TestProbeFailureRetries(t *testing.T) {
 	movie := store.Movie{ID: 1, LibraryID: 1, NFOPath: filepath.Join(root, "bad.nfo"), SourcePath: filepath.Join(root, "bad.strm")}
 	touched := make(chan int64, 1)
 	a.beginProbe(1)
-	a.probeOne(a.probeCtx, ffprobe, probeTarget{Movie: movie, Path: movie.SourcePath, Primary: true, Index: 1}, true, touched)
+	a.probeOne(a.probeCtx, 0, ffprobe, probeTarget{Movie: movie, Path: movie.SourcePath, Primary: true, Index: 1}, true, touched)
 
 	a.probeTaskMu.RLock()
 	failed := a.probeStatus.Failed

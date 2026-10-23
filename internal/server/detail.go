@@ -119,7 +119,7 @@ func (a *App) adminItemDetail(c *gin.Context) {
 	lockData := false
 	nfoPath := movie.NFOPath
 	if nfoPath == "" {
-		nfoPath = strings.TrimSuffix(movie.SourcePath, filepath.Ext(movie.SourcePath)) + ".nfo"
+		nfoPath = nfo.SidecarPath(movie.SourcePath, len(movie.AdditionalParts) > 0)
 	}
 	if meta, err := nfo.Read(nfoPath); err == nil {
 		for _, field := range strings.Split(meta.LockedFields, "|") {

@@ -14,11 +14,12 @@ func TestNormalizeParams(t *testing.T) {
 	}{
 		{"scan 默认全部库", "scan", nil, `{"library_id":0}`},
 		{"scan 指定库", "scan", map[string]any{"library_id": float64(3)}, `{"library_id":3}`},
-		{"reindex 无参数", "reindex", map[string]any{"library_id": float64(3)}, `{}`},
+		{"reindex 保留不影响全库执行的参数", "reindex", map[string]any{"library_id": float64(3)}, `{"library_id":3}`},
 		{"probe 全字段", "probe", map[string]any{"library_id": float64(2), "status": "manual", "limit": float64(50), "only_missing": false},
 			`{"library_id":2,"limit":50,"only_missing":false,"status":"manual"}`},
 		{"probe 省略空状态与零 limit", "probe", map[string]any{"status": "", "limit": float64(0)}, `{"library_id":0}`},
-		{"丢弃未知字段", "scan", map[string]any{"library_id": float64(1), "junk": "x"}, `{"library_id":1}`},
+		{"scan 保留未知字段", "scan", map[string]any{"library_id": float64(1), "junk": "x"}, `{"library_id":1,"junk":"x"}`},
+		{"scan 增量模式", "scan", map[string]any{"library_id": float64(2), "mode": " INCREMENTAL "}, `{"library_id":2,"mode":"incremental"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +48,9 @@ func TestNormalizeParams(t *testing.T) {
 
 	if _, err := normalizeParams("unknown-type", nil); err == nil {
 		t.Error("未接入的类型应被拒绝")
+	}
+	if _, err := normalizeParams("scan", map[string]any{"mode": "fast"}); err == nil {
+		t.Error("非法扫描模式应被拒绝")
 	}
 }
 

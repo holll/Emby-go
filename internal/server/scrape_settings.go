@@ -62,6 +62,13 @@ func settingBool(values map[string]string, key string, fallback bool) bool {
 
 // scrapeConfig 组装刮削配置：代码默认值 + DB 里用户改过的项。
 func (a *App) scrapeConfig() scraper.Config {
+	cfg, _ := a.scrapeConfigChecked()
+	return cfg
+}
+
+// scrapeConfigChecked preserves settings read failures for independent jobs.
+// The legacy wrapper deliberately retains its default-on-read-error behavior.
+func (a *App) scrapeConfigChecked() (scraper.Config, error) {
 	cfg := scraper.DefaultConfig()
 	values, err := a.db.Settings()
 	if err != nil {
@@ -84,7 +91,7 @@ func (a *App) scrapeConfig() scraper.Config {
 	cfg.Translate.APIURL = settingString(values, settingTranslateAPIURL, cfg.Translate.APIURL)
 	cfg.Translate.APIKey = settingString(values, settingTranslateAPIKey, cfg.Translate.APIKey)
 	cfg.Translate.Timeout = secondsToDuration(settingInt(values, settingTranslateTimeout, int(cfg.Translate.Timeout.Seconds())))
-	return cfg
+	return cfg, err
 }
 
 // maskSecret 密钥只写不回显：给出前 4 位 + 固定掩码，够人工核对配的是哪一把，又不足以复原。

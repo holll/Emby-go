@@ -7,6 +7,7 @@ import (
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -108,17 +109,27 @@ func (a *App) adminMoveLibrary(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "success"})
 }
 
-// adminLibraryCover 上传媒体库封面：统一转 webp 落到库根目录的固定文件名，
-// 优先级高于目录里自带的 poster/cover，也高于借用影片代表图。
-func (a *App) adminLibraryCover(c *gin.Context) {
+// adminCoverLibrary resolves the library for the two cover mutation endpoints.
+// All lookup errors retain their historical 404 response, not just missing rows.
+func (a *App) adminCoverLibrary(c *gin.Context) (store.Library, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		apiError(c, 404, "not found")
-		return
+		return store.Library{}, false
 	}
 	lib, err := a.db.Library(id)
 	if err != nil {
 		apiError(c, 404, "library not found")
+		return store.Library{}, false
+	}
+	return lib, true
+}
+
+// adminLibraryCover 上传媒体库封面：统一转 webp 落到库根目录的固定文件名，
+// 优先级高于目录里自带的 poster/cover，也高于借用影片代表图。
+func (a *App) adminLibraryCover(c *gin.Context) {
+	lib, ok := a.adminCoverLibrary(c)
+	if !ok {
 		return
 	}
 	f, err := c.FormFile("file")
@@ -137,30 +148,24 @@ func (a *App) adminLibraryCover(c *gin.Context) {
 	}
 	a.invalidateImageTag(dest) // 同名文件被覆盖，立刻失效它的 tag 缓存
 	a.cache.Clear()            // libraryCoverPath 的结果按 g:version 缓存，必须清
-	slog.Info("上传媒体库封面", "library_id", id, "path", dest)
+	slog.Info("上传媒体库封面", "library_id", lib.ID, "path", dest)
 	c.JSON(200, gin.H{"status": "success", "path": dest})
 }
 
 // adminLibraryCoverDelete 移除上传的封面，回退到目录自带图或影片代表图。
 func (a *App) adminLibraryCoverDelete(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		apiError(c, 404, "not found")
-		return
-	}
-	lib, err := a.db.Library(id)
-	if err != nil {
-		apiError(c, 404, "library not found")
+	lib, ok := a.adminCoverLibrary(c)
+	if !ok {
 		return
 	}
 	dest := filepath.Join(lib.Path, libraryCoverFileName)
-	if err = os.Remove(dest); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
 		apiError(c, 500, err.Error())
 		return
 	}
 	a.invalidateImageTag(dest)
 	a.cache.Clear()
-	slog.Info("移除媒体库封面", "library_id", id)
+	slog.Info("移除媒体库封面", "library_id", lib.ID)
 	c.Status(http.StatusNoContent)
 }
 
@@ -230,7 +235,7 @@ var errScanBusy = errors.New("扫描正在进行中")
 
 // beginScan / updateScanProgress / endScan 维护管理端可轮询的扫描进度。
 // beginScan 返回 false 表示已有扫描在跑，或有探测/刮削占用着同一批 NFO。
-func (a *App) beginScan(libraries int) bool {
+func (a *App) beginScan(libraries int, taskID int64, mode scanner.ScanMode) bool {
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
 	if a.scanStatus.Running {
@@ -240,7 +245,14 @@ func (a *App) beginScan(libraries int) bool {
 	if !a.claimNFO("scan") {
 		return false
 	}
-	a.scanStatus = scanStatus{Running: true, Libraries: libraries, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	a.scanRunSeq++
+	a.scanStatus = scanStatus{
+		InstanceID: a.instanceID,
+		RunID:      strconv.FormatUint(a.scanRunSeq, 10),
+		TaskID:     taskID,
+		Mode:       string(mode),
+		Running:    true, Libraries: libraries, StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
 	return true
 }
 
@@ -259,6 +271,12 @@ func (a *App) updateScanProgress(p scanner.Progress) {
 	a.scanStatus.Total, a.scanStatus.Done, a.scanStatus.Current = p.Total, p.Done, p.Current
 	a.scanStatus.Success, a.scanStatus.Pending = p.Result.Success, p.Result.Pending
 	a.scanStatus.Skipped, a.scanStatus.Failed = p.Result.Skipped, p.Result.Failed
+	a.scanStatus.GroupsTotal, a.scanStatus.GroupsDone = p.Result.GroupsTotal, p.Result.GroupsDone
+	a.scanStatus.Unchanged, a.scanStatus.Added, a.scanStatus.Updated = p.Result.UnchangedGroups, p.Result.Added, p.Result.Updated
+	a.scanStatus.Deleted = p.Result.Deleted
+	a.scanStatus.IndexChanged = p.Result.IndexChanged
+	a.scanStatus.CleanupDone = p.Result.CleanupPerformed
+	a.scanStatus.Incomplete = p.Result.Incomplete
 }
 
 func (a *App) endScan(err error) {
@@ -267,6 +285,7 @@ func (a *App) endScan(err error) {
 	a.scanStatus.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	if err != nil {
 		a.scanStatus.Error = err.Error()
+		a.scanStatus.Incomplete = true
 	} else {
 		a.scanStatus.Done = a.scanStatus.Total
 	}
@@ -283,9 +302,114 @@ func (a *App) adminScanProgress(c *gin.Context) {
 	c.JSON(200, status)
 }
 
+// parseScanMode normalizes the public mode query/parameter. Missing means full
+// for backward compatibility; anything else outside the allowlist is rejected.
+func parseScanMode(raw string) (scanner.ScanMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "full":
+		return scanner.ScanModeFull, true
+	case "incremental":
+		return scanner.ScanModeIncremental, true
+	default:
+		return "", false
+	}
+}
+
+func parseAllowEmptyRemoval(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true":
+		return true, true
+	case "", "0", "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// Parse before idempotent replay: malformed scope must never widen to all libraries.
+func parseScanQuery(c *gin.Context) (int64, scanner.ScanMode, bool, bool) {
+	values := c.Request.URL.Query()
+	for _, key := range []string{"library_id", "mode", "allow_empty_removal", "root_marker_path", "root_marker_sha256"} {
+		if value, present := values[key]; present && len(value) != 1 {
+			apiError(c, http.StatusBadRequest, "duplicate scan parameter: "+key)
+			return 0, "", false, false
+		}
+	}
+	libraryID := int64(0)
+	if _, present := values["library_id"]; present {
+		raw := c.Query("library_id")
+		var err error
+		libraryID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || libraryID < 0 {
+			apiError(c, http.StatusBadRequest, "library_id must be nonnegative")
+			return 0, "", false, false
+		}
+	}
+	mode, ok := parseScanMode(c.Query("mode"))
+	if !ok {
+		apiError(c, http.StatusBadRequest, "mode must be full or incremental")
+		return 0, "", false, false
+	}
+	if _, present := values["allow_empty_removal"]; present && strings.TrimSpace(c.Query("allow_empty_removal")) == "" {
+		apiError(c, http.StatusBadRequest, "allow_empty_removal must not be empty")
+		return 0, "", false, false
+	}
+	allowEmpty, ok := parseAllowEmptyRemoval(c.Query("allow_empty_removal"))
+	if !ok {
+		apiError(c, http.StatusBadRequest, "allow_empty_removal must be true or false")
+		return 0, "", false, false
+	}
+	return libraryID, mode, allowEmpty, true
+}
+
+type scanRootMarker struct {
+	Path   string
+	SHA256 string
+}
+
+func normalizeScanMarker(path, digest string, pathPresent, digestPresent bool) (scanRootMarker, error) {
+	if pathPresent != digestPresent {
+		return scanRootMarker{}, fmt.Errorf("root_marker_path and root_marker_sha256 must be paired")
+	}
+	if !pathPresent {
+		return scanRootMarker{}, nil
+	}
+	path = strings.TrimSpace(path)
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	if path == "" || digest == "" {
+		return scanRootMarker{}, fmt.Errorf("root marker pair must not be empty")
+	}
+	if err := scanner.ValidateRootMarkerOptions(scanner.ScanOptions{RootMarkerPath: path, RootMarkerSHA256: digest}); err != nil {
+		return scanRootMarker{}, err
+	}
+	return scanRootMarker{Path: filepath.Clean(path), SHA256: digest}, nil
+}
+
+func scanMarkerQuery(c *gin.Context) (scanRootMarker, bool) {
+	values := c.Request.URL.Query()
+	for _, key := range []string{"root_marker_path", "root_marker_sha256"} {
+		if value, present := values[key]; present && len(value) != 1 {
+			apiError(c, http.StatusBadRequest, "duplicate scan parameter: "+key)
+			return scanRootMarker{}, false
+		}
+	}
+	_, pathPresent := values["root_marker_path"]
+	_, digestPresent := values["root_marker_sha256"]
+	marker, err := normalizeScanMarker(c.Query("root_marker_path"), c.Query("root_marker_sha256"), pathPresent, digestPresent)
+	if err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return scanRootMarker{}, false
+	}
+	return marker, true
+}
+
 // scanLibraries 扫描指定媒体库（libraryID=0 表示全部）。扫描即重建：
 // 逐文件 upsert，收尾按磁盘现状删除失效索引行，再清缓存。
-func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
+func (a *App) scanLibraries(libraryID, taskID int64, mode scanner.ScanMode, allowEmptyRemoval bool, markers ...scanRootMarker) (scanner.Result, error) {
+	marker := scanRootMarker{}
+	if len(markers) > 0 {
+		marker = markers[0]
+	}
 	libraries, err := a.db.Libraries()
 	if err != nil {
 		return scanner.Result{}, err
@@ -300,33 +424,39 @@ func (a *App) scanLibraries(libraryID int64) (scanner.Result, error) {
 	if len(selected) == 0 {
 		return scanner.Result{}, sql.ErrNoRows
 	}
-	if !a.beginScan(len(selected)) {
+	if !a.beginScan(len(selected), taskID, mode) {
 		return scanner.Result{}, errScanBusy
 	}
 	// 用 defer 释放扫描状态与 NFO 写入通道：中途 panic 时若走不到 endScan，
 	// nfoOwner 会永久停留在 "scan"，此后探测/刮削全部被拒（需要重启才能恢复）。
-	result := scanner.Result{}
+	result := scanner.Result{Mode: string(mode)}
 	var scanErr error
 	defer func() { a.endScan(scanErr) }()
 	for index, library := range selected {
 		a.setScanLibrary(index+1, library)
 		slog.Info("正在扫描媒体库", "library_id", library.ID, "name", library.Name, "path", library.Path)
-		current, err := scanner.ScanWithProgress(a.db, library, a.updateScanProgress)
+		current, err := scanner.ScanWithOptions(a.rootCtx, a.db, library,
+			scanner.ScanOptions{Mode: mode, AllowEmptyRemoval: allowEmptyRemoval, RootMarkerPath: marker.Path, RootMarkerSHA256: marker.SHA256}, a.updateScanProgress)
+		// Merge first: a failed library may still have committed earlier groups,
+		// and those counts must survive into the partial result.
+		result.Merge(current)
 		if err != nil {
-			slog.Error("媒体库扫描失败", "library", library.Name, "error", err)
+			slog.Error("媒体库扫描失败", "library", library.Name, "error", err,
+				"added", current.Added, "updated", current.Updated, "deleted", current.Deleted)
 			scanErr = err
 			break
 		}
-		slog.Info("媒体库扫描完成", "library", library.Name,
+		slog.Info("媒体库扫描完成", "library", library.Name, "mode", current.Mode,
+			"groups", current.GroupsTotal, "unchanged", current.UnchangedGroups,
+			"added", current.Added, "updated", current.Updated, "deleted", current.Deleted,
 			"success", current.Success, "pending", current.Pending,
 			"skipped", current.Skipped, "failed", current.Failed)
-		result.Success += current.Success
-		result.Pending += current.Pending
-		result.Skipped += current.Skipped
-		result.Failed += current.Failed
 	}
-	// endScan 由上面的 defer 负责调用（panic 时也必须释放）。
-	a.cache.Clear()
+	// endScan 由上面的 defer 负责调用（panic 时也必须释放）。缓存只在业务
+	// 索引确有提交时失效：unchanged 扫描不推进版本，也不该清空热缓存。
+	if result.IndexChanged {
+		a.cache.Clear()
+	}
 	return result, scanErr
 }
 
@@ -340,13 +470,20 @@ func (a *App) scanning() bool {
 func (a *App) adminScan(c *gin.Context) {
 	// v2 弃用登记：同步扫描由 /api/admin/tasks/scan 替代，旧入口保留到 Sunset。
 	markDeprecated(c, legacySyncScan)
+	libraryID, mode, allowEmpty, ok := parseScanQuery(c)
+	if !ok {
+		return
+	}
+	marker, ok := scanMarkerQuery(c)
+	if !ok {
+		return
+	}
 	if a.scanning() {
 		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return
 	}
-	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
 	taskID := a.startTask("scan")
-	result, err := a.scanLibraries(libraryID)
+	result, err := a.scanLibraries(libraryID, taskID, mode, allowEmpty, marker)
 	a.finishTask(taskID, err)
 	if err != nil {
 		if errors.Is(err, errScanBusy) {
@@ -365,13 +502,17 @@ func (a *App) adminScan(c *gin.Context) {
 
 // adminReindex 全库重建索引（与扫描同一路径，仅范围是全部媒体库）。
 func (a *App) adminReindex(c *gin.Context) {
+	marker, ok := scanMarkerQuery(c)
+	if !ok {
+		return
+	}
 	if a.scanning() {
 		apiError(c, http.StatusConflict, errScanBusy.Error())
 		return
 	}
 	slog.Info("开始重建索引")
 	taskID := a.startTask("reindex")
-	result, err := a.scanLibraries(0)
+	result, err := a.scanLibraries(0, taskID, scanner.ScanModeFull, false, marker)
 	a.finishTask(taskID, err)
 	if err != nil {
 		if errors.Is(err, errScanBusy) {
@@ -773,7 +914,7 @@ func (a *App) adminCreateAPIKey(c *gin.Context) {
 		apiError(c, 400, "name required")
 		return
 	}
-	key, err := a.db.CreateAPIKey(req.Name)
+	key, err := a.db.CreateAPIKeyForUser(req.Name, a.currentUserID(c))
 	if err != nil {
 		apiError(c, 500, err.Error())
 		return
@@ -784,12 +925,28 @@ func (a *App) adminCreateAPIKey(c *gin.Context) {
 
 func (a *App) adminDeleteAPIKey(c *gin.Context) {
 	key := c.Param("key")
-	if err := a.db.DeleteAPIKey(key); err != nil {
-		if store.NotFound(err) {
-			apiError(c, 404, "key not found")
+	var expectedVersion int64
+	if match := strings.TrimSpace(c.GetHeader("If-Match")); match != "" {
+		_, version, err := parseAPIKeyIfMatch(match)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "If-Match 格式不合法", "code": "API_KEY_PRECONDITION_INVALID",
+			})
 			return
 		}
-		apiError(c, 500, err.Error())
+		expectedVersion = version
+	}
+	if err := a.db.DeleteAPIKeyByVersion(key, expectedVersion); err != nil {
+		switch {
+		case errors.Is(err, store.ErrAPIKeyNotFound):
+			apiError(c, 404, "key not found")
+		case errors.Is(err, store.ErrAPIKeyVersionStale):
+			c.AbortWithStatusJSON(http.StatusPreconditionFailed, gin.H{
+				"error": "密钥版本已变化，请刷新后重试", "code": "API_KEY_VERSION_STALE",
+			})
+		default:
+			apiError(c, 500, err.Error())
+		}
 		return
 	}
 	a.cache.Delete("apikey:" + key)

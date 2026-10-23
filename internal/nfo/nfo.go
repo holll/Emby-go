@@ -240,6 +240,12 @@ func Read(path string) (MovieMeta, error) {
 	if err != nil {
 		return MovieMeta{}, err
 	}
+	return ReadBytes(b)
+}
+
+// ReadBytes parses an already-read NFO document. Scanning reads each NFO once
+// so the fingerprint and the indexed metadata describe the same bytes.
+func ReadBytes(b []byte) (MovieMeta, error) {
 	// encoding/xml matches unqualified struct tags by local name, so a
 	// vendor:plot could otherwise resurrect a cleared <plot> in the index.
 	// For ordinary unqualified movie documents, exclude namespaced direct

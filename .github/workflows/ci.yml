@@ -92,4 +92,4 @@ jobs:
           node-version: '22'
 
       - name: Frontend VM tests
-        run: node --test internal/server/web_test.cjs
+        run: node --test internal/server/web*_test.cjs

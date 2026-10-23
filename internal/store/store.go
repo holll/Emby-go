@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -34,6 +35,10 @@ type Store struct {
 	// visibleCount/visibleVersion 可见影片数缓存（见 visibleMovieCount）。
 	visibleCount   atomic.Int64
 	visibleVersion atomic.Int64
+	// writeMu serializes in-process writers. Deferred BEGIN transactions that
+	// read before writing can otherwise hit SQLITE_BUSY_SNAPSHOT when a
+	// background writer (feature backfill, scanner commit) commits in between.
+	writeMu sync.Mutex
 }
 
 type Library struct {
@@ -285,11 +290,19 @@ func (s *Store) ValidateAccessToken(token string, now time.Time, ttl time.Durati
 
 // RevokeAllAccessTokens 让所有登录会话立即失效；API 密钥不在删除范围内。
 func (s *Store) RevokeAllAccessTokens() (int64, error) {
-	result, err := s.db.Exec("DELETE FROM access_tokens")
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	var count int64
+	err := s.writeTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec("UPDATE users SET auth_generation=auth_generation+1"); err != nil {
+			return err
+		}
+		result, err := tx.Exec("DELETE FROM access_tokens")
+		if err != nil {
+			return err
+		}
+		count, err = result.RowsAffected()
+		return err
+	})
+	return count, err
 }
 
 // DeleteAccessToken revokes only the supplied login session. It is idempotent
@@ -341,10 +354,12 @@ type APIKey struct {
 	KeyPrefix string `json:"key_prefix"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
+	Version   int64  `json:"version"`
+	RotatedAt string `json:"rotated_at,omitempty"`
 }
 
 func (s *Store) APIKeys() ([]APIKey, error) {
-	rows, err := s.db.Query("SELECT COALESCE(key_hash,''),COALESCE(key_prefix,''),name,created_at FROM api_keys ORDER BY created_at DESC, key")
+	rows, err := s.db.Query("SELECT COALESCE(stable_id,''),COALESCE(key_prefix,''),name,created_at,version,COALESCE(rotated_at,'') FROM api_keys ORDER BY created_at DESC, key")
 	if err != nil {
 		return nil, err
 	}
@@ -352,9 +367,11 @@ func (s *Store) APIKeys() ([]APIKey, error) {
 	out := make([]APIKey, 0)
 	for rows.Next() {
 		var v APIKey
-		if err := rows.Scan(&v.ID, &v.KeyPrefix, &v.Name, &v.CreatedAt); err != nil {
+		var stable string
+		if err := rows.Scan(&stable, &v.KeyPrefix, &v.Name, &v.CreatedAt, &v.Version, &v.RotatedAt); err != nil {
 			return nil, err
 		}
+		v.ID = APIKeyPublicID(stable)
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -365,29 +382,28 @@ func (s *Store) CreateAPIKey(name string) (APIKey, error) {
 }
 
 func (s *Store) CreateAPIKeyForUser(name string, userID int64) (APIKey, error) {
-	buf := make([]byte, 24)
-	if _, err := rand.Read(buf); err != nil {
+	key, hash, prefix, err := newAPIKeyCredential()
+	if err != nil {
 		return APIKey{}, err
 	}
-	key := hex.EncodeToString(buf)
-	hash := apiKeyHash(key)
-	v := APIKey{ID: hash, Key: key, KeyPrefix: key[:12], Name: strings.TrimSpace(name), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	_, err := s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at,user_id) VALUES(?,?,?,?,?,?)", hash, hash, v.KeyPrefix, v.Name, v.CreatedAt, userID)
+	stable, err := newAPIKeyStableID()
+	if err != nil {
+		return APIKey{}, err
+	}
+	v := APIKey{ID: APIKeyPublicID(stable), Key: key, KeyPrefix: prefix, Name: strings.TrimSpace(name),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339), Version: 1}
+	_, err = s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at,user_id,stable_id,version) VALUES(?,?,?,?,?,?,?,1)",
+		hash, hash, v.KeyPrefix, v.Name, v.CreatedAt, userID, stable)
 	return v, err
 }
 
 func (s *Store) DeleteAPIKey(id string) error {
-	// 同时接受摘要 ID 与旧明文（后者按摘要匹配），便于升级前已打开的页面继续工作。
-	result, err := s.db.Exec("DELETE FROM api_keys WHERE key_hash=? OR key=?", apiKeyHash(id), id)
-	if err != nil {
+	// 同时接受稳定 ID、摘要 ID 与旧明文，便于升级前已打开的页面继续工作。
+	if err := s.DeleteAPIKeyByVersion(id, 0); err != nil {
+		if errors.Is(err, ErrAPIKeyNotFound) {
+			return sql.ErrNoRows
+		}
 		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
 	}
 	return nil
 }
@@ -404,7 +420,7 @@ func (s *Store) AddLibrary(name, path string) (Library, error) {
 	var id int64
 	err := s.db.QueryRow("INSERT INTO libraries(name,path) VALUES(?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name RETURNING id", name, path).Scan(&id)
 	if err != nil {
-		return Library{}, err
+		return Library{}, fmt.Errorf("insert library %q: %w", path, err)
 	}
 	return Library{ID: id, Name: name, Path: path}, nil
 }
@@ -568,6 +584,9 @@ func (s *Store) UpsertMovie(m Movie, size int64, mtime time.Time) (int64, error)
 		if err != nil {
 			return err
 		}
+		if err := invalidateMovieScanStateTx(tx, m); err != nil {
+			return err
+		}
 		return refreshFeaturesTx(tx, id)
 	})
 	if err != nil {
@@ -665,22 +684,21 @@ func (s *Store) ensureFeatures() error {
 		if end > len(ids) {
 			end = len(ids)
 		}
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		for _, id := range ids[start:end] {
-			if s.featuresCanceled() {
-				_ = tx.Rollback()
-				return errFeaturesBackfillCanceled
+		// Route maintenance writes through writeTx so they share the in-process
+		// writer lock with scans: a deferred read-then-write transaction racing a
+		// feature batch otherwise fails with SQLITE_BUSY_SNAPSHOT.
+		if err := s.writeTx(func(tx *sql.Tx) error {
+			for _, id := range ids[start:end] {
+				if s.featuresCanceled() {
+					return errFeaturesBackfillCanceled
+				}
+				if err := refreshFeaturesTx(tx, id); err != nil {
+					return err
+				}
+				s.featuresDone.Add(1)
 			}
-			if err = refreshFeaturesTx(tx, id); err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-			s.featuresDone.Add(1)
-		}
-		if err = tx.Commit(); err != nil {
+			return nil
+		}); err != nil {
 			return err
 		}
 	}
@@ -998,18 +1016,23 @@ func (s *Store) MovieIDByPath(path string) (int64, error) {
 }
 
 func (s *Store) DeleteMovie(id int64) error {
-	result, err := s.db.Exec("DELETE FROM movies WHERE id=?", id)
-	if err != nil {
-		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return s.writeTx(func(tx *sql.Tx) error {
+		if err := invalidateMovieScanStateByIDTx(tx, id); err != nil {
+			return err
+		}
+		result, err := tx.Exec("DELETE FROM movies WHERE id=?", id)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
 // DeleteLibrary 删除媒体库及其影片索引（仅删库内记录，不触碰磁盘文件）。
@@ -1416,12 +1439,12 @@ func (s *Store) SetActorAvatar(name, url, tag string) error {
 	if name == "" {
 		return nil
 	}
-	_, err := s.db.Exec(`INSERT INTO actors(name,avatar_url,avatar_tag,updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(name) DO UPDATE SET
-			avatar_url=CASE WHEN excluded.avatar_url<>'' THEN excluded.avatar_url ELSE actors.avatar_url END,
-			avatar_tag=CASE WHEN excluded.avatar_tag<>'' THEN excluded.avatar_tag ELSE actors.avatar_tag END`,
-		name, url, tag, time.Now().UTC().Format(time.RFC3339))
-	return err
+	return s.writeTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(actorAvatarUpsertSQL, name, url, tag, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+		return invalidateActorScanStateTx(tx, name)
+	})
 }
 
 // b2i 把布尔值转成 SQLite 的 0/1。
@@ -1467,6 +1490,9 @@ func (s *Store) ClearProbes() error {
 // 不能让一次扫描把头像任务已写入的索引抹掉。
 func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
 	return s.writeTx(func(tx *sql.Tx) error {
+		if err := invalidateMovieScanStateByIDTx(tx, movieID); err != nil {
+			return err
+		}
 		if err := replaceActorsTx(tx, movieID, actors); err != nil {
 			return err
 		}
@@ -1618,19 +1644,21 @@ func (s *Store) CountByStatus(status string) (int, error) {
 // 与 UpsertMovie 的区别：只改这两列，不动其它索引字段——调用方（元数据编辑）
 // 紧接着会用 scanner.RescanOne 从 NFO 重建其余字段，重扫会因这条记录已是 manual 而保留分类。
 func (s *Store) MarkManual(sourcePath, nfoPath string) error {
-	result, err := s.db.Exec("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=?",
-		nfoPath, time.Now().UTC().Format(time.RFC3339), sourcePath)
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return s.writeTx(func(tx *sql.Tx) error {
+		var libraryID sql.NullInt64
+		err := tx.QueryRow("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=? RETURNING library_id",
+			nfoPath, time.Now().UTC().Format(time.RFC3339), sourcePath).Scan(&libraryID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.ErrNoRows
+		}
+		if err != nil {
+			return err
+		}
+		if libraryID.Valid {
+			return InvalidateScanGroupsForPathsTx(tx, libraryID.Int64, []string{sourcePath})
+		}
+		return nil
+	})
 }
 
 // 扫描器据此在重建索引时保留人工录入分类：一次扫描只查一次，
@@ -2256,72 +2284,52 @@ const ScrapeConfirmPrefix = "[待人工确认] "
 
 // MoviesForScrape 返回刮削候选影片。
 //
-//   - libraryID=0 表示全部媒体库；
+//   - libraryID<=0 表示全部媒体库；
 //   - onlyMissing=true 只挑元数据缺失的（无 NFO 或无标题），这是默认范围。
 //
 // 非 http(s) 源在扫描阶段就不会入库（见 scanner.scanCandidate），这里无需再排除。
 //
 // 顺带取出 additional_parts 与 nfo_path：刮削只写主 NFO，分段不单独处理。
 func (s *Store) MoviesForScrape(libraryID int64, onlyMissing bool, limit int) ([]Movie, error) {
-	query := "SELECT " + movieCols + " FROM movies"
-	args := []any{}
-	if libraryID > 0 {
-		query += " WHERE library_id=?"
-		args = append(args, libraryID)
-	}
-	if onlyMissing {
-		if libraryID > 0 {
-			query += " AND"
-		} else {
-			query += " WHERE"
-		}
-		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
-	}
-	query += " ORDER BY id"
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
-	}
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Movie
-	for rows.Next() {
-		m, err := movieScan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	where, args := scrapeMovieFilter(libraryID, onlyMissing)
+	return s.queryMoviesForScrape(where, args, limit)
 }
 
 // MoviesForScrapeBatch 按 id 游标返回一批刮削候选，供全量任务流式处理，
 // 避免一次性把整库影片（含 plot 等宽字段）读进内存。afterID 为上一批最后一条 id。
 func (s *Store) MoviesForScrapeBatch(libraryID int64, onlyMissing bool, afterID int64, limit int) ([]Movie, error) {
-	query := "SELECT " + movieCols + " FROM movies"
+	where, args := scrapeMovieFilter(libraryID, onlyMissing)
+	if where != "" {
+		where += " AND id > ?"
+	} else {
+		where = " WHERE id > ?"
+	}
+	args = append(args, afterID)
+	return s.queryMoviesForScrape(where, args, limit)
+}
+
+// scrapeMovieFilter 是列表、游标批次和计数共用的候选口径。
+// 参数先放 libraryID，游标和条数由调用方按顺序追加。
+func scrapeMovieFilter(libraryID int64, onlyMissing bool) (string, []any) {
+	where := ""
 	args := []any{}
 	if libraryID > 0 {
-		query += " WHERE library_id=?"
+		where = " WHERE library_id=?"
 		args = append(args, libraryID)
 	}
 	if onlyMissing {
-		if libraryID > 0 {
-			query += " AND"
+		if where != "" {
+			where += " AND"
 		} else {
-			query += " WHERE"
+			where = " WHERE"
 		}
-		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
+		where += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
 	}
-	if libraryID > 0 || onlyMissing {
-		query += " AND id > ?"
-	} else {
-		query += " WHERE id > ?"
-	}
-	args = append(args, afterID)
-	query += " ORDER BY id"
+	return where, args
+}
+
+func (s *Store) queryMoviesForScrape(where string, args []any, limit int) ([]Movie, error) {
+	query := "SELECT " + movieCols + " FROM movies" + where + " ORDER BY id"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -2344,20 +2352,8 @@ func (s *Store) MoviesForScrapeBatch(libraryID int64, onlyMissing bool, afterID 
 
 // CountMoviesForScrape 统计候选数量，供管理端展示「本次会处理多少条」。
 func (s *Store) CountMoviesForScrape(libraryID int64, onlyMissing bool) (int, error) {
-	query := "SELECT COUNT(*) FROM movies"
-	args := []any{}
-	if libraryID > 0 {
-		query += " WHERE library_id=?"
-		args = append(args, libraryID)
-	}
-	if onlyMissing {
-		if libraryID > 0 {
-			query += " AND"
-		} else {
-			query += " WHERE"
-		}
-		query += " (COALESCE(nfo_path,'')='' OR COALESCE(title,'')='')"
-	}
+	where, args := scrapeMovieFilter(libraryID, onlyMissing)
+	query := "SELECT COUNT(*) FROM movies" + where
 	var count int
 	err := s.db.QueryRow(query, args...).Scan(&count)
 	return count, err

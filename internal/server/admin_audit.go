@@ -22,8 +22,14 @@ func (a *App) auditAdminAction(c *gin.Context) {
 		return
 	}
 	status := c.Writer.Status()
-	if err := a.db.RecordAdminAudit(u.ID, u.Name, c.Request.Method, c.Request.URL.Path, status, time.Now()); err != nil {
-		slog.Warn("记录管理操作审计失败", "path", c.Request.URL.Path, "error", err)
+	// 只记录路由模板与非秘密对象 ID：原始 URL 可能含查询凭据，或把
+	// DELETE /apikeys/:key 里的长期密钥写进审计与错误日志。
+	path := c.FullPath()
+	if path == "" {
+		path = "[unmatched admin route]"
+	}
+	if err := a.db.RecordAdminAudit(u.ID, u.Name, c.Request.Method, path, status, time.Now()); err != nil {
+		slog.Warn("记录管理操作审计失败", "path", path, "error", err)
 	}
 }
 

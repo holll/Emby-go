@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,19 +25,25 @@ const (
 var (
 	errScanTaskCapacity = errors.New("任务表已满：没有可淘汰的已完成任务")
 	errScanTaskNotFound = errors.New("task not found")
+	errScanIdemConflict = errors.New("Idempotency-Key 已用于不同参数的请求")
 )
 
 type asyncScanTask struct {
-	ID         int64           `json:"task_id"`
-	Type       string          `json:"type"`
-	Status     string          `json:"status"` // queued/running/succeeded/failed/skipped
-	LibraryID  int64           `json:"library_id"`
-	CreatedAt  string          `json:"created_at"`
-	StartedAt  string          `json:"started_at,omitempty"`
-	FinishedAt string          `json:"finished_at,omitempty"`
-	Result     *scanner.Result `json:"result,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	IdemKey    string          `json:"-"`
+	ID               int64           `json:"task_id"`
+	Type             string          `json:"type"`
+	Status           string          `json:"status"` // queued/running/succeeded/failed/skipped
+	LibraryID        int64           `json:"library_id"`
+	Mode             string          `json:"mode,omitempty"`
+	AllowEmpty       bool            `json:"allow_empty_removal,omitempty"`
+	CreatedAt        string          `json:"created_at"`
+	StartedAt        string          `json:"started_at,omitempty"`
+	FinishedAt       string          `json:"finished_at,omitempty"`
+	Result           *scanner.Result `json:"result,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	IdemKey          string          `json:"-"`
+	IdemDigest       string          `json:"-"`
+	RootMarkerPath   string          `json:"root_marker_path,omitempty"`
+	RootMarkerSHA256 string          `json:"root_marker_sha256,omitempty"`
 }
 
 type scanIdemEntry struct {
@@ -54,17 +61,25 @@ func (t asyncScanTask) finished() bool {
 
 // registerScanTask 登记一个已由 startTask 分配 ID 的任务。幂等键命中时直接
 // 返回已有任务（created=false）。容量裁剪与幂等过期在同一把锁内完成。
-func (a *App) registerScanTask(id int64, kind string, libraryID int64, idemKey string, now time.Time) (asyncScanTask, bool, error) {
+func (a *App) registerScanTask(id int64, kind string, libraryID int64, mode scanner.ScanMode, allowEmpty bool, digest, idemKey string, now time.Time, markers ...scanRootMarker) (asyncScanTask, bool, error) {
 	a.scanTaskMu.Lock()
 	defer a.scanTaskMu.Unlock()
 	a.pruneScanIdemLocked(now)
 	if idemKey != "" {
 		if entry, ok := a.scanTaskIdem[idemKey]; ok {
 			if task, ok := a.scanTasks[entry.taskID]; ok {
+				if task.IdemDigest != digest {
+					return asyncScanTask{}, false, errScanIdemConflict
+				}
 				return *task, false, nil
 			}
 			delete(a.scanTaskIdem, idemKey)
 		}
+	}
+	// Check busy only after the locked replay check so concurrent identical
+	// submissions still replay even if the first worker has already started.
+	if a.scanning() {
+		return asyncScanTask{}, false, errScanBusy
 	}
 	for len(a.scanTaskOrder) >= scanTaskCapacity {
 		evicted := false
@@ -88,12 +103,19 @@ func (a *App) registerScanTask(id int64, kind string, libraryID int64, idemKey s
 		}
 	}
 	task := &asyncScanTask{
-		ID:        id,
-		Type:      kind,
-		Status:    "queued",
-		LibraryID: libraryID,
-		CreatedAt: now.UTC().Format(time.RFC3339),
-		IdemKey:   idemKey,
+		ID:         id,
+		Type:       kind,
+		Status:     "queued",
+		LibraryID:  libraryID,
+		Mode:       string(mode),
+		AllowEmpty: allowEmpty,
+		CreatedAt:  now.UTC().Format(time.RFC3339),
+		IdemKey:    idemKey,
+		IdemDigest: digest,
+	}
+	if len(markers) > 0 {
+		task.RootMarkerPath = markers[0].Path
+		task.RootMarkerSHA256 = markers[0].SHA256
 	}
 	a.scanTasks[id] = task
 	a.scanTaskOrder = append(a.scanTaskOrder, id)
@@ -169,52 +191,64 @@ func (a *App) finishScanTask(id int64, status string, result *scanner.Result, er
 // 成功 202 + task_id；扫描已在进行中 409；任务表满 429；幂等键 1 小时内重放。
 func (a *App) adminSubmitScan(c *gin.Context) {
 	now := time.Now()
-	if key := strings.TrimSpace(c.GetHeader("Idempotency-Key")); key != "" {
+	libraryID, mode, allowEmpty, ok := parseScanQuery(c)
+	if !ok {
+		return
+	}
+	marker, ok := scanMarkerQuery(c)
+	if !ok {
+		return
+	}
+	digest := fmt.Sprintf("v3|scan|library=%d|mode=%s|empty=%t|marker=%q|sha256=%s", libraryID, mode, allowEmpty, marker.Path, marker.SHA256)
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if key != "" {
 		if len(key) > maxIdempotencyKey {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key 过长", "code": "IDEMPOTENCY_KEY_TOO_LONG"})
 			return
 		}
 		if task, ok := a.replayScanTask(key, now); ok {
+			// Same key + different normalized request is a conflict, not a replay.
+			if task.IdemDigest != digest {
+				c.JSON(http.StatusConflict, gin.H{"error": "Idempotency-Key 已用于不同参数的请求", "code": "IDEMPOTENCY_CONFLICT"})
+				return
+			}
 			c.JSON(http.StatusAccepted, gin.H{
 				"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID,
-				"created_at": task.CreatedAt, "replayed": true,
+				"mode": task.Mode, "created_at": task.CreatedAt, "replayed": true,
 			})
 			return
 		}
-		c.Set("idempotency-key", key)
-	}
-	if a.scanning() {
-		c.JSON(http.StatusConflict, gin.H{"error": errScanBusy.Error(), "code": "SCAN_BUSY"})
-		return
-	}
-	libraryID, err := strconv.ParseInt(c.Query("library_id"), 10, 64)
-	if err != nil && c.Query("library_id") != "" {
-		apiError(c, http.StatusBadRequest, "library_id 非法")
-		return
 	}
 	taskID := a.startTask("scan")
-	task, created, err := a.registerScanTask(taskID, "scan", libraryID, c.GetString("idempotency-key"), now)
+	task, created, err := a.registerScanTask(taskID, "scan", libraryID, mode, allowEmpty, digest, key, now, marker)
 	if err != nil {
 		a.finishTaskBusy(taskID, err.Error())
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error(), "code": "TASK_CAPACITY"})
+		switch {
+		case errors.Is(err, errScanIdemConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "IDEMPOTENCY_CONFLICT"})
+		case errors.Is(err, errScanBusy):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "SCAN_BUSY"})
+		default:
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error(), "code": "TASK_CAPACITY"})
+		}
 		return
 	}
 	if !created {
 		a.finishTaskBusy(taskID, "幂等重放")
-		c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "replayed": true})
+		c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode, "replayed": true})
 		return
 	}
 	a.workerWG.Add(1)
 	go func() {
 		defer a.workerWG.Done()
-		a.runAsyncScan(task.ID, task.LibraryID)
+		a.runAsyncScan(task.ID, task.LibraryID, mode, allowEmpty, marker)
 	}()
-	c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID})
+	c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode})
 }
 
-func (a *App) runAsyncScan(id, libraryID int64) {
+func (a *App) runAsyncScan(id, libraryID int64, mode scanner.ScanMode, allowEmpty bool, markers ...scanRootMarker) {
 	a.setScanTaskRunning(id)
-	result, err := a.scanLibraries(libraryID)
+	result, err := a.scanLibraries(libraryID, id, mode, allowEmpty, markers...)
 	switch {
 	case err == nil:
 		a.finishTask(id, nil)
@@ -224,7 +258,8 @@ func (a *App) runAsyncScan(id, libraryID int64) {
 		a.finishScanTask(id, "skipped", nil, err)
 	default:
 		a.finishTask(id, err)
-		a.finishScanTask(id, "failed", nil, err)
+		// Partial results from committed groups must survive a failure.
+		a.finishScanTask(id, "failed", &result, err)
 	}
 }
 

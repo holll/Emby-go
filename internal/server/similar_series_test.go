@@ -49,6 +49,9 @@ func TestSimilarSeriesComesFirst(t *testing.T) {
 	index("Actor Heavy", "Series T", true)
 
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
+	})
 	r.GET("/similar/:id", app.similar)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/similar/"+strconv.FormatInt(src, 10)+"?Limit=10", nil))
@@ -106,6 +109,9 @@ func TestSimilarTierOrdering(t *testing.T) {
 	movie("Rating Only", "S6", "UUU-001", "Other", 2020, []string{"G9"})
 
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
+	})
 	r.GET("/similar/:id", app.similar)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/similar/"+strconv.FormatInt(src, 10)+"?Limit=10", nil))
