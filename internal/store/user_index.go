@@ -65,7 +65,7 @@ func (s *Store) writeIndexedUserData(userID, id int64, statement string, value i
 		}
 		var libraryID sql.NullInt64
 		var runtimeSeconds int64
-		if err := tx.QueryRow("SELECT library_id,runtime_seconds FROM movies WHERE id=? AND status IN ('success','manual')", id).Scan(&libraryID, &runtimeSeconds); err != nil {
+		if err := tx.QueryRow("SELECT library_id,COALESCE(runtime_seconds,0) FROM movies WHERE id=? AND status IN ('success','manual')", id).Scan(&libraryID, &runtimeSeconds); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(statement, userID, id, value); err != nil {

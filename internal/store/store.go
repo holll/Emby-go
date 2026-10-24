@@ -1088,7 +1088,9 @@ func movieScan(row *sql.Rows) (Movie, error) {
 	return m, err
 }
 
-const movieCols = "id,library_id,source_path,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),genres,tags,studios,poster_path,backdrop_path,COALESCE(landscape_path,''),runtime_seconds,COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
+// Default only nullable metadata at the read boundary; preserve stored values,
+// scan conversion errors, and the raw columns used by filtering and ordering.
+const movieCols = "id,library_id,source_path,COALESCE(file_mtime,''),COALESCE(source_protocol,''),COALESCE(source_container,''),COALESCE(number,''),status,COALESCE(nfo_path,''),COALESCE(output_dir,''),COALESCE(title,''),COALESCE(original_title,''),COALESCE(plot,''),COALESCE(year,0),COALESCE(premiered,''),COALESCE(rating,0),COALESCE(director,''),COALESCE(series,''),COALESCE(maker,''),COALESCE(label,''),COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),COALESCE(genres,''),COALESCE(tags,''),COALESCE(studios,''),COALESCE(poster_path,''),COALESCE(backdrop_path,''),COALESCE(landscape_path,''),COALESCE(runtime_seconds,0),COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
 
 func (s *Store) Movie(id int64) (Movie, error) {
 	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id=?", id)
@@ -1167,7 +1169,7 @@ func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
 // 需要逐个探测、各自留下 mediainfo.json，故调用方要能枚举出全部分段文件。
 // status 为空表示不限状态；limit<=0 表示不限条数。
 func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Movie, error) {
-	query := "SELECT id,library_id,nfo_path,source_path,title,COALESCE(additional_parts,'[]') FROM movies WHERE COALESCE(nfo_path,'')<>''"
+	query := "SELECT id,library_id,nfo_path,source_path,COALESCE(title,''),COALESCE(additional_parts,'[]') FROM movies WHERE COALESCE(nfo_path,'')<>''"
 	args := []any{}
 	if libraryID > 0 {
 		query += " AND library_id=?"
@@ -1715,7 +1717,7 @@ func splitTerms(value string) []string {
 // distinctStrings 对可见影片某 JSON 列（genres/tags/studios）做去重。
 // collection："" 不限；"*" 限定“属于任一合集”；其它值限定具体合集。
 func (s *Store) distinctStrings(libraryID int64, collection, column string) ([]string, error) {
-	query := "SELECT " + column + " FROM movies WHERE status IN ('success','manual')"
+	query := "SELECT COALESCE(" + column + ",'') FROM movies WHERE status IN ('success','manual')"
 	args := []any{}
 	if libraryID > 0 {
 		query += " AND library_id=?"
@@ -1943,7 +1945,7 @@ func (s *Store) CollectionStats(minMovies int) (map[string]CollectionStat, error
 		return nil, err
 	}
 	// 流派存在每行的 JSON 列里，单独取两列后在内存聚合去重。
-	rows2, err := s.db.Query(`SELECT collection, genres FROM movies
+	rows2, err := s.db.Query(`SELECT collection, COALESCE(genres,'') FROM movies
 		WHERE status IN ('success','manual') AND COALESCE(collection,'')<>''`)
 	if err != nil {
 		return nil, err
@@ -2003,7 +2005,7 @@ func (s *Store) CollectionStatsVisible(minMovies int, libraryID int64, visible [
 		}
 		where += " AND library_id IN (" + strings.Join(marks, ",") + ")"
 	}
-	rows, err := s.db.Query("SELECT collection, poster_path, genres FROM movies WHERE "+where+" ORDER BY id DESC", args...)
+	rows, err := s.db.Query("SELECT collection, COALESCE(poster_path,''), COALESCE(genres,'') FROM movies WHERE "+where+" ORDER BY id DESC", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2055,7 +2057,7 @@ func (s *Store) CollectionSummary(collection string) (count int, genres []string
 		WHERE collection=? AND status IN ('success','manual')`, collection).Scan(&count); err != nil {
 		return 0, nil, err
 	}
-	rows, err := s.db.Query(`SELECT genres FROM movies
+	rows, err := s.db.Query(`SELECT COALESCE(genres,'') FROM movies
 		WHERE collection=? AND status IN ('success','manual')`, collection)
 	if err != nil {
 		return count, nil, err

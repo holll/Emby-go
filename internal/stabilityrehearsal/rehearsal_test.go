@@ -279,16 +279,69 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 	}
 }
 
-// Characterization, not compatibility success: allowed NULL historical rows can
-// migrate successfully but cannot currently be read by Movie. Reported to lead.
+// Schema-legal NULL metadata is read as absent, without a data-repair migration.
+// The first incremental scan must still build its baseline from real disk inputs.
 func TestLegacyNullableMovieReadBoundary(t *testing.T) {
-	path, _ := legacyFixture(t)
+	path, media := legacyFixture(t)
 	db := rawDB(t, path)
-	mustExec(t, db, "UPDATE movies SET file_mtime=NULL WHERE id=42")
+	columns := []string{"file_size", "file_mtime", "source_protocol", "source_container", "number", "nfo_path", "output_dir", "title", "original_title", "plot", "year", "premiered", "rating", "director", "series", "maker", "label", "genres", "tags", "studios", "poster_path", "backdrop_path", "runtime_seconds"}
+	assignments, nullChecks := make([]string, 0, len(columns)), make([]string, 0, len(columns))
+	for _, column := range columns {
+		assignments = append(assignments, column+"=NULL")
+		nullChecks = append(nullChecks, column+" IS NULL")
+	}
+	mustExec(t, db, "UPDATE movies SET "+strings.Join(assignments, ",")+" WHERE id=42")
+	for _, stage := range []string{"upgrade", "reopen"} {
+		t.Run(stage, func(t *testing.T) {
+			s := openStore(t, path)
+			version := s.Version("g:version")
+			m, err := s.Movie(42)
+			if err != nil || m.ID != 42 || m.LibraryID != 11 || m.SourcePath != filepath.Join(media, "A.strm") || m.Status != "success" || m.CreatedAt != "t0" || m.Title != "" || m.Year != 0 || m.Rating != 0 || m.RuntimeSeconds != 0 {
+				t.Fatalf("nullable row=%+v err=%v", m, err)
+			}
+			if scalar(t, db, "SELECT count(*) FROM movies WHERE id=42 AND "+strings.Join(nullChecks, " AND ")) != 1 {
+				t.Fatal("upgrade or read rewrote raw NULL metadata")
+			}
+			if scalar(t, db, "SELECT count(*) FROM scan_groups") != 0 || s.Version("g:version") != version {
+				t.Fatal("read created a baseline or changed the index version")
+			}
+			data, err := s.DataUser(7, 42)
+			if err != nil || data.PositionTicks != 1234567 || data.PlayCount != 4 || !data.IsFavorite {
+				t.Fatalf("watch state changed: %+v %v", data, err)
+			}
+		})
+	}
 	s := openStore(t, path)
-	_, err := s.Movie(42)
-	if err == nil || !strings.Contains(err.Error(), `converting NULL to string is unsupported`) {
-		t.Fatalf("nullable row boundary changed: %v", err)
+	lib, err := s.Library(11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := func() scanner.Result {
+		t.Helper()
+		r, err := scanner.ScanWithOptions(context.Background(), s, lib, scanner.ScanOptions{Mode: scanner.ScanModeIncremental}, nil)
+		if err != nil || r.Incomplete {
+			t.Fatalf("scan=%+v err=%v", r, err)
+		}
+		return r
+	}
+	if r := scan(); r.Updated != 1 || r.UnchangedGroups != 0 || !r.IndexChanged {
+		t.Fatalf("NULL values falsely proved an unchanged baseline: %+v", r)
+	}
+	version := s.Version("g:version")
+	if r := scan(); r.UnchangedGroups != 1 || r.IndexChanged || s.Version("g:version") != version {
+		t.Fatalf("unchanged after real baseline=%+v", r)
+	}
+	put(t, filepath.Join(media, "A.nfo"), "<movie><title>Changed on disk</title></movie>")
+	if r := scan(); r.Updated != 1 || r.UnchangedGroups != 0 || !r.IndexChanged {
+		t.Fatalf("disk change skipped=%+v", r)
+	}
+	m, err := s.Movie(42)
+	if err != nil || m.Title != "Changed on disk" || m.CreatedAt != "t0" {
+		t.Fatalf("identity/metadata=%+v %v", m, err)
+	}
+	data, err := s.DataUser(7, 42)
+	if err != nil || data.PositionTicks != 1234567 || data.PlayCount != 4 {
+		t.Fatalf("scan lost watch state: %+v %v", data, err)
 	}
 	integrity(t, path)
 }

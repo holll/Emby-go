@@ -197,12 +197,19 @@ func TestScrapeQueriesNullMetadata(t *testing.T) {
 				if err != nil || count != 1 {
 					t.Fatalf("NULL %s count = %d, %v; want 1", column, count, err)
 				}
-				// 既有 movieScan 不能将 SQL NULL 扫入 string；本次仅共用筛选，保留该错误契约。
-				if movies, err := s.MoviesForScrape(libraryID, true, 0); err == nil || movies != nil {
-					t.Fatalf("NULL %s full = %+v, %v; want nil and scan error", column, movies, err)
-				}
-				if movies, err := s.MoviesForScrapeBatch(libraryID, true, 0, 0); err == nil || movies != nil {
-					t.Fatalf("NULL %s batch = %+v, %v; want nil and scan error", column, movies, err)
+				// NULL metadata is projected as empty without changing missing-item selection.
+				for name, query := range map[string]func() ([]Movie, error){
+					"full":  func() ([]Movie, error) { return s.MoviesForScrape(libraryID, true, 0) },
+					"batch": func() ([]Movie, error) { return s.MoviesForScrapeBatch(libraryID, true, 0, 0) },
+				} {
+					movies, err := query()
+					if err != nil {
+						t.Fatalf("NULL %s %s: %v", column, name, err)
+					}
+					assertScrapeMovieIDs(t, movies, []int64{id}, name)
+					if (column == "title" && movies[0].Title != "") || (column == "nfo_path" && movies[0].NFOPath != "") {
+						t.Fatalf("NULL %s not empty: %+v", column, movies[0])
+					}
 				}
 				movies, err := s.MoviesForScrapeBatch(libraryID, true, id, 0)
 				if err != nil || movies != nil {
