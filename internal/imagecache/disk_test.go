@@ -195,7 +195,16 @@ func TestDiskStatsAndSetMaxBytes(t *testing.T) {
 	if got := disk.MaxBytes(); got != 1<<20 {
 		t.Fatalf("MaxBytes = %d", got)
 	}
-	// 上限 6 字节 → 目标水位 4，只剩一份，释放 6 字节。
+	// 淘汰按 mtime 从旧到新，而不是按 Put 顺序或文件名。
+	// 显式让 6 字节的 b 更旧，避免文件系统时间戳精度影响排序。
+	now := time.Now()
+	for key, age := range map[string]time.Duration{"stats-a": time.Minute, "stats-b": 2 * time.Minute} {
+		at := now.Add(-age)
+		if err := os.Chtimes(disk.PathFor(key), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 上限 6 字节 → 目标水位 4；先淘汰旧 b，保留新 a。
 	disk.SetMaxBytes(6)
 	removed, freed, err := disk.Trim()
 	if err != nil {

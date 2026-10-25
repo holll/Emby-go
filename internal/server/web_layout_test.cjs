@@ -13,14 +13,22 @@ const web = path.join(__dirname, 'web');
 async function browser(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-layout-'));
   const proc = spawn(chrome, ['--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', '--user-data-dir=' + path.join(dir, 'profile'), 'about:blank']);
+  const exited = new Promise(resolve => { proc.once('exit', resolve); proc.once('error', resolve); });
   let ws;
   t.after(async () => {
-    if (ws) ws.close();
-    proc.kill();
-    await new Promise(resolve => { if (proc.exitCode !== null || proc.signalCode) resolve(); else proc.once('exit', resolve); });
+    // Prefer Chromium's own shutdown, so renderers finish profile writes too.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ id: 0, method: 'Browser.close' })); } catch { /* fallback below */ }
+    }
+    const terminate = setTimeout(() => proc.kill(), 1000);
+    const forceKill = setTimeout(() => proc.kill('SIGKILL'), 2500);
+    try { await exited; } finally { clearTimeout(terminate); clearTimeout(forceKill); if (ws) ws.close(); }
     assert.equal(path.dirname(dir), os.tmpdir());
     assert.ok(path.basename(dir).startsWith('emby-layout-'));
-    fs.rmSync(dir, { recursive: true, force: true });
+    // Chromium descendants may finish profile writes just after the browser
+    // process exits. Retry only transient filesystem errors, with a bounded
+    // backoff; never suppress a persistent cleanup failure.
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   });
   const url = await new Promise((resolve, reject) => {
     let text = '';

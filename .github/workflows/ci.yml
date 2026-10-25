@@ -40,7 +40,8 @@ jobs:
 
       - name: Coverage gate (≥70%)
         run: |
-          go test -coverprofile=cover.out ./...
+          set -o pipefail
+          go test -coverprofile=cover.out ./... 2>&1 | tee /tmp/test.log
           total=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
           echo "total coverage: ${total}%"
           awk -v t="${total}" 'BEGIN { exit !(t+0 >= 70) }'
@@ -54,8 +55,14 @@ jobs:
       - name: Test failure details
         if: failure()
         run: |
-          echo "::error::$(grep -m1 -E '^--- FAIL|^panic:' /tmp/test.log || echo 'go test failed')"
-          grep -E -A6 '^--- FAIL|^panic:' /tmp/test.log | head -80
+          if [ -f /tmp/test.log ]; then
+            detail=$(awk '/^--- FAIL|^panic:/ { found=1 } found { print; lines++ } lines >= 8 { exit }' /tmp/test.log)
+            if [ -z "$detail" ]; then detail='Go test or coverage gate failed; see the failing step log.'; fi
+            detail=${detail//%/%25}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
+            echo "::error::$detail"
+          fi
 
       # 认证限流、请求预算、出站策略与播放会话计数是并发敏感路径，额外跑 race。
       - name: Race (auth/outbound/store)
@@ -92,4 +99,19 @@ jobs:
           node-version: '22'
 
       - name: Frontend VM tests
-        run: node --test internal/server/web*_test.cjs
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap internal/server/web*_test.cjs 2>&1 | tee /tmp/web-test.log
+
+      # 将首个失败断言写进公开 annotations，不再只看到 exit code 1。
+      - name: Frontend failure details
+        if: failure()
+        run: |
+          if [ -f /tmp/web-test.log ]; then
+            detail=$(awk '/^not ok / { found=1 } found { print; lines++ } found && (/^  \.\.\./ || lines >= 60) { exit }' /tmp/web-test.log)
+            if [ -z "$detail" ]; then detail='Frontend tests failed before a TAP assertion; see Frontend VM tests log.'; fi
+            detail=${detail//%/%25}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
+            echo "::error::$detail"
+          fi
