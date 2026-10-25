@@ -20,6 +20,8 @@ async function main() {
   assert.equal(typeof login.AccessToken, 'string');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-live-browser-'));
   const proc = spawn(process.env.CHROME_BIN, ['--headless','--no-sandbox','--disable-gpu','--no-first-run','--remote-debugging-port=0','--user-data-dir='+path.join(dir,'profile'),'about:blank']);
+  // Register immediately: Chromium may exit before startup or cleanup awaits it.
+  const exited = new Promise(resolve => { proc.once('exit', resolve); proc.once('error', resolve); });
   let ws;
   const interrupted = () => { proc.kill(); if (ws) ws.close(); };
   process.once('SIGINT', interrupted);
@@ -118,14 +120,20 @@ async function main() {
         fs.writeFileSync(path.join(output,'dashboard-'+width+'.png'),Buffer.from(shot.data,'base64'));
       }
     }
-    console.log('PASS real HTTP dashboard at 1440/768/390/360/320px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall');
   } finally {
     process.removeListener('SIGINT', interrupted);
-    if(ws)ws.close();
-    proc.kill();
-    await new Promise(resolve=>{if(proc.exitCode!==null||proc.signalCode)resolve();else proc.once('exit',resolve)});
+    // Ask Chromium to stop its renderers/profile writers before removing files.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ id: 0, method: 'Browser.close' })); } catch { /* bounded fallback below */ }
+    }
+    const terminate = setTimeout(() => proc.kill(), 1000);
+    const forceKill = setTimeout(() => proc.kill('SIGKILL'), 2500);
+    try { await exited; } finally { clearTimeout(terminate); clearTimeout(forceKill); if (ws) ws.close(); }
     assert.equal(path.dirname(dir),os.tmpdir());assert.ok(path.basename(dir).startsWith('emby-live-browser-'));
-    fs.rmSync(dir,{recursive:true,force:true});
+    // Descendants can finish filesystem writes just after the browser exits.
+    // Retry transient removal races; persistent cleanup errors must still fail.
+    fs.rmSync(dir,{recursive:true,force:true,maxRetries:8,retryDelay:100});
   }
+  console.log('PASS real HTTP dashboard at 1440/768/390/360/320px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall; browser cleanup completed');
 }
 main().catch(error=>{console.error(error.stack);process.exitCode=1});

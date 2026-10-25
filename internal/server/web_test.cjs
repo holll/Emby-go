@@ -2126,7 +2126,9 @@ test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位
     }
   } finally {
     assert.equal(path.dirname(profile), os.tmpdir()); assert.ok(path.basename(profile).startsWith('emby-css-regression-'));
-    fs.rmSync(profile, { recursive: true, force: true });
+    // --dump-dom waits for the browser, but profile writers may finish later.
+    // Keep cleanup bounded and fail if the directory stays unremovable.
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   }
 });
 
