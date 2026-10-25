@@ -56,6 +56,9 @@ type Config struct {
 	// Security 为认证入口防护参数；缺省即启用安全默认值。
 	Security SecurityConfig `yaml:"security"`
 
+	// ImageCache 为按请求尺寸生成的缩略图落盘缓存；缺省即启用。
+	ImageCache ImageCacheConfig `yaml:"image_cache"`
+
 	path string // 配置文件来源路径（非 yaml 字段），供写回使用
 }
 
@@ -225,6 +228,66 @@ const (
 	defaultSessionTTLDays   = 30
 )
 
+// 缩略图磁盘缓存的默认值：一页海报墙按 200 条、每条约 40KB 算不到 10MB，
+// 2GiB 足够放下一整个中等媒体库的全部尺寸变体；7 天没人要的变体基本是
+// 已经没人看的条目（或者源文件早就换了），留着只占空间。
+const (
+	defaultImageCacheMaxBytes = 2 << 30
+	defaultImageCacheTTLHours = 168
+)
+
+// ImageCacheConfig 是缩略图变体磁盘缓存的开关与预算。
+// 零值即启用并使用默认目录/容量/保留时长；显式 false 可完全关掉（退回纯内存缓存）。
+type ImageCacheConfig struct {
+	Enabled  *bool  `yaml:"enabled"`   // 省略或 true 启用；false 关闭
+	Dir      string `yaml:"dir"`       // 目录；留空 = 与 db_path 同级的 image-cache/
+	MaxBytes int64  `yaml:"max_bytes"` // 容量上限；0 = 默认 2GiB，-1 = 不限
+	TTLHours int    `yaml:"ttl_hours"` // 保留小时数；0 = 默认 168，-1 = 永不过期
+}
+
+// ApplyDefaults 只填充零值：显式配置（包括 false 和 -1）永远优先。
+func (c ImageCacheConfig) ApplyDefaults() ImageCacheConfig {
+	if c.Enabled == nil {
+		enabled := true
+		c.Enabled = &enabled
+	}
+	if c.MaxBytes == 0 {
+		c.MaxBytes = defaultImageCacheMaxBytes
+	}
+	if c.TTLHours == 0 {
+		c.TTLHours = defaultImageCacheTTLHours
+	}
+	return c
+}
+
+// Validate 拒绝无意义的负值，避免把「不限」和「打错」混为一谈。
+func (c ImageCacheConfig) Validate() error {
+	if c.MaxBytes < -1 {
+		return errors.New("image_cache: max_bytes must be 0, -1 or positive")
+	}
+	if c.TTLHours < -1 {
+		return errors.New("image_cache: ttl_hours must be 0, -1 or positive")
+	}
+	return nil
+}
+
+// IsEnabled 报告缓存是否启用（nil 视为启用，与 ApplyDefaults 保持一致）。
+func (c ImageCacheConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// TTL 返回变体保留时长；0 表示永不过期。
+func (c ImageCacheConfig) TTL() time.Duration {
+	if c.TTLHours < 0 {
+		return 0
+	}
+	hours := c.TTLHours
+	if hours == 0 {
+		hours = defaultImageCacheTTLHours
+	}
+	return time.Duration(hours) * time.Hour
+}
+
 // ProbeTimeout 返回单条探测超时。
 func (c Config) ProbeTimeout() time.Duration {
 	seconds := c.ProbeTimeoutSec
@@ -266,6 +329,7 @@ func (c Config) Addr() string {
 func Load(path string) (Config, error) {
 	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", SessionTTLDays: defaultSessionTTLDays, Webhook: WebhookConfig{TimeoutSeconds: 5}, path: path}
 	cfg.Security.Auth = cfg.Security.Auth.ApplyDefaults()
+	cfg.ImageCache = cfg.ImageCache.ApplyDefaults()
 	if path == "" {
 		return cfg, nil
 	}
@@ -287,6 +351,10 @@ func Load(path string) (Config, error) {
 	// not prevent startup when an authoritative database override is present.
 	cfg.Security.Auth = cfg.Security.Auth.ApplyDefaults()
 	if err := cfg.Security.Auth.Validate(); err != nil {
+		return cfg, err
+	}
+	cfg.ImageCache = cfg.ImageCache.ApplyDefaults()
+	if err := cfg.ImageCache.Validate(); err != nil {
 		return cfg, err
 	}
 	cfg.path = path

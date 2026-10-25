@@ -36,6 +36,9 @@ type Result struct {
 	// 这类文件不再进入 movies 表，只在扫描结果里报个数。
 	Skipped int `json:"skipped"`
 	Failed  int `json:"failed"`
+	// UnreadableNFO 表示侧车存在但解析失败的条目数。这类条目保留上一版元数据
+	// 与可见状态，只跟随文件刷新派生列，原因写入影片的 last_scrape_error。
+	UnreadableNFO int `json:"unreadable_nfo,omitempty"`
 	// IndexedSources is populated only by RescanOne after metadata/actors commit.
 	// It is internal evidence, not a new public scan-response field.
 	IndexedSources []string `json:"-"`
@@ -250,9 +253,20 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	// New stacks without a sidecar are written to the shared path.
 	nfoPath := nfo.SidecarPath(item.path, false)
 	meta, nfoErr := nfo.Read(nfoPath)
+	// 记住「文件在但读不出来」的候选；只有回退到共享 NFO 并读成功才清掉。
+	unreadablePath, unreadableErr := "", error(nil)
+	if nfoErr != nil && !errors.Is(nfoErr, os.ErrNotExist) {
+		unreadablePath, unreadableErr = nfoPath, nfoErr
+	}
 	if nfoErr != nil && len(additionalParts) > 0 {
 		nfoPath = nfo.SidecarPath(item.path, true)
 		meta, nfoErr = nfo.Read(nfoPath)
+		switch {
+		case nfoErr == nil:
+			unreadablePath, unreadableErr = "", nil
+		case !errors.Is(nfoErr, os.ErrNotExist):
+			unreadablePath, unreadableErr = nfoPath, nfoErr
+		}
 	}
 	if nfoErr == nil {
 		applyMeta(&movie, meta, nfoPath)
@@ -270,18 +284,41 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 			movie.Status = "manual"
 		}
 	}
-	if _, err := s.IndexMovie(movie, item.info.Size(), item.info.ModTime(), actors); err != nil {
+	if unreadablePath != "" {
+		// 侧车存在但读不出来：这不是「删掉元数据」的信号。已索引的行保留旧元数据
+		// 与可见状态，只跟随文件刷新派生列；原因写进 last_scrape_error。
+		if err := s.IndexMovieUnreadableNFO(movie, item.info.Size(), item.info.ModTime(), nfoNote(unreadablePath, unreadableErr)); err != nil {
+			return err
+		}
+		result.UnreadableNFO++
+		return nil
+	}
+	id, err := s.IndexMovie(movie, item.info.Size(), item.info.ModTime(), actors)
+	if err != nil {
 		return err
 	}
 	if nfoErr == nil {
+		// 读取成功：清掉上一轮留下的「NFO 不可读」备注，刮削结论不受影响。
+		if err := s.ClearScanNFONote(id); err != nil {
+			return err
+		}
 		result.Success++
+		if opts.indexedSources != nil {
+			*opts.indexedSources = append(*opts.indexedSources, item.path)
+		}
 	} else {
 		result.Pending++
 	}
-	if nfoErr == nil && opts.indexedSources != nil {
-		*opts.indexedSources = append(*opts.indexedSources, item.path)
-	}
 	return nil
+}
+
+// nfoNote 描述一次「文件在但读不出来」的原因，供 last_scrape_error 展示。
+func nfoNote(path string, err error) string {
+	note := store.ScanNFONotePrefix + path + ": " + err.Error()
+	if runes := []rune(note); len(runes) > 300 {
+		note = string(runes[:300]) + "…"
+	}
+	return note
 }
 
 func applyMeta(movie *store.Movie, meta nfo.MovieMeta, nfoPath string) {

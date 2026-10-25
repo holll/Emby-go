@@ -19,6 +19,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"emby-go/internal/config"
+	"emby-go/internal/imagecache"
 	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
 	"emby-go/internal/outbound"
@@ -112,7 +114,38 @@ const (
 	maxThumbConcurrency = 4
 	// maxThumbEdge 目标边长上限：超过就不生成，直接发原图。
 	maxThumbEdge = 4000
+	// thumbDiskKeyVersion 是磁盘变体的命名空间：编码参数或缩放实现变化时递增，
+	// 旧变体自然过期淘汰，不需要逐条改文件名。
+	thumbDiskKeyVersion = "v1"
 )
+
+// imageEdgeBuckets 是允许生成的边长档位（像素）。
+//
+// 客户端可以请求任意 maxWidth/maxHeight；若每个数值都独立生成变体，磁盘上
+// 会有几百种彼此几乎无法复用的尺寸。按档位**向下**取整把变体数量收在一个
+// 可枚举的集合里，同时保证响应不超过请求上限——客户端不会拿到比 maxWidth
+// 更大的图（那会破坏布局语义），代价是可能略小一档。
+var imageEdgeBuckets = []int{
+	32, 40, 50, 60, 72, 80, 96, 100, 120, 144, 160, 180, 200,
+	240, 300, 360, 400, 480, 540, 720, 1080, 1440, 2160, 4000,
+}
+
+// normalizeImageEdge 把请求边长向下对齐到最近的档位。
+// 小于最小档位时保留原值：再小的图本来就很便宜，抬到 32 反而违反 maxWidth 上限。
+func normalizeImageEdge(edge int) int {
+	if edge <= 0 {
+		return 0
+	}
+	if edge < imageEdgeBuckets[0] {
+		return edge
+	}
+	for i := len(imageEdgeBuckets) - 1; i >= 0; i-- {
+		if edge >= imageEdgeBuckets[i] {
+			return imageEdgeBuckets[i]
+		}
+	}
+	return imageEdgeBuckets[0]
+}
 
 // firstCollectionPoster 返回第一个有海报的合集封面（没有则空串）。
 func (a *App) firstCollectionPoster(names []string) string {
@@ -164,16 +197,59 @@ func (a *App) serveImage(c *gin.Context, path string) {
 	c.File(path)
 }
 
+// thumbFlight 是一次「同 key 生成中」的登记：leader 负责生成，follower 等结果。
+type thumbFlight struct {
+	done chan struct{}
+	data []byte
+	ok   bool
+}
+
+// thumbCacheKey 是变体的唯一标识：路径、源图 tag（mtime+size）、目标尺寸、画质。
+// 任何一项变化都必须产生不同的 key，否则会拿到旧图、错尺寸或错画质。
+func thumbCacheKey(path, tag string, width, height, quality int) string {
+	return thumbDiskKeyVersion + "|t:" + path + ":" + tag + ":" +
+		strconv.Itoa(width) + "x" + strconv.Itoa(height) + ":q" + strconv.Itoa(quality)
+}
+
 // thumbnail 返回按请求参数生成的缩略图；未请求缩放或生成失败时返回 false（调用方发原图）。
+//
+// 命中顺序：进程内 LRU → 磁盘变体 → 同 key 合并生成。前两层都是纯读，
+// 只有都落空才值得花 CPU；磁盘层让重启进程、或内存 LRU 被新条目顶掉之后
+// 仍不必重新解码。
 func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 	width, height, quality := imageResizeParams(c)
 	if width <= 0 && height <= 0 {
 		return nil, false
 	}
-	key := "t:" + path + ":" + tag + ":" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + ":q" + strconv.Itoa(quality)
+	key := thumbCacheKey(path, tag, width, height, quality)
 	if data, ok := a.imgThumb.Get(key); ok {
 		return data, true
 	}
+	if data, ok := a.imgDisk.Get(key); ok {
+		a.imgThumb.Set(key, data, imageThumbTTL)
+		return data, true
+	}
+	// 同一张图的同一个尺寸常被并发请求（<img> 与 srcset 同时开）。
+	// 信号量只能限流：后到者会排队、复查命中，但排在前面的一批仍会各自算一遍。
+	flight, leader := a.beginThumbFlight(key)
+	if !leader {
+		select {
+		case <-flight.done:
+			if flight.ok {
+				return flight.data, true
+			}
+			return nil, false
+		case <-c.Request.Context().Done():
+			return nil, false
+		}
+	}
+	data, ok := a.generateThumbnail(c, key, path, width, height, quality)
+	a.finishThumbFlight(key, flight, data, ok)
+	return data, ok
+}
+
+// generateThumbnail 是 leader 的生成路径：限流 → 复查 → 生成 → 落盘。
+func (a *App) generateThumbnail(c *gin.Context, key, path string, width, height, quality int) ([]byte, bool) {
 	// 限流：解码/缩放/编码是纯 CPU 活，一次性放开会把 CPU 打满。
 	select {
 	case a.thumbSem <- struct{}{}:
@@ -181,10 +257,20 @@ func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 	case <-c.Request.Context().Done():
 		return nil, false
 	}
-	if data, ok := a.imgThumb.Get(key); ok { // 等锁期间可能已被别的请求填上
+	// 排队期间可能已被别的请求填上（内存或磁盘）。
+	if data, ok := a.imgThumb.Get(key); ok {
 		return data, true
 	}
-	data, err := imageutil.Thumbnail(path, width, height, quality)
+	if data, ok := a.imgDisk.Get(key); ok {
+		a.imgThumb.Set(key, data, imageThumbTTL)
+		return data, true
+	}
+	generate := a.thumbGenerate
+	if generate == nil {
+		// 测试里用字面量构造的 App 没有走 newApp；给个默认实现免得 panic。
+		generate = imageutil.Thumbnail
+	}
+	data, err := generate(path, width, height, quality)
 	if err != nil || len(data) == 0 {
 		// 生成失败（格式不支持、文件坏）不算错误：回退原图，用户仍能看到图。
 		if err != nil {
@@ -193,7 +279,38 @@ func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 		return nil, false
 	}
 	a.imgThumb.Set(key, data, imageThumbTTL)
+	if err := a.imgDisk.Put(key, data); err != nil {
+		// 写盘失败只影响下次复用，这一次的响应照常返回。
+		slog.Debug("写入缩略图磁盘缓存失败", "path", path, "error", err)
+	}
 	return data, true
+}
+
+// beginThumbFlight 登记一次生成；leader=true 表示由当前请求负责生成，
+// false 表示已有同 key 的生成在进行，等待它的结果即可。
+func (a *App) beginThumbFlight(key string) (*thumbFlight, bool) {
+	a.thumbMu.Lock()
+	defer a.thumbMu.Unlock()
+	if a.thumbFlights == nil {
+		// 字面量构造的 App（测试）没有初始化这张表。
+		a.thumbFlights = make(map[string]*thumbFlight)
+	}
+	if flight, ok := a.thumbFlights[key]; ok {
+		return flight, false
+	}
+	flight := &thumbFlight{done: make(chan struct{})}
+	a.thumbFlights[key] = flight
+	return flight, true
+}
+
+// finishThumbFlight 发布结果并注销登记。先写字段再 close(done)：
+// follower 收到关闭信号时一定能读到完整结果。
+func (a *App) finishThumbFlight(key string, flight *thumbFlight, data []byte, ok bool) {
+	a.thumbMu.Lock()
+	flight.data, flight.ok = data, ok
+	delete(a.thumbFlights, key)
+	a.thumbMu.Unlock()
+	close(flight.done)
 }
 
 // imageResizeParams 解析 Emby 客户端的缩放参数。
@@ -214,10 +331,33 @@ func imageResizeParams(c *gin.Context) (width, height, quality int) {
 	if height < 0 {
 		height = 0
 	}
+	// 对齐到档位（向下）：控制变体总量，且保证响应不超过请求上限。
+	width = normalizeImageEdge(width)
+	height = normalizeImageEdge(height)
 	if quality < 1 || quality > 100 {
 		quality = 0 // 0 表示用内置默认画质
 	}
 	return width, height, quality
+}
+
+// openImageDisk 打开缩略图变体目录；目录建不出来就降级为纯内存缓存——
+// 缓存不可用不该让图片接口（乃至整个服务）起不来。
+func openImageDisk(cfg config.Config) *imagecache.Disk {
+	cacheCfg := cfg.ImageCache.ApplyDefaults()
+	dir := strings.TrimSpace(cacheCfg.Dir)
+	if dir == "" {
+		// 默认放在库文件旁边：部署时一个目录就是一个实例的运行时数据。
+		dir = filepath.Join(filepath.Dir(cfg.DBPath), "image-cache")
+	}
+	disk, err := imagecache.Open(dir, cacheCfg.MaxBytes, cacheCfg.TTL(), cacheCfg.IsEnabled())
+	if err != nil {
+		slog.Warn("缩略图磁盘缓存不可用，退回内存缓存", "dir", dir, "error", err)
+		return imagecache.Disabled()
+	}
+	if disk.Enabled() {
+		slog.Info("缩略图磁盘缓存已启用", "dir", disk.Dir(), "max_bytes", cacheCfg.MaxBytes, "ttl_hours", cacheCfg.TTLHours)
+	}
+	return disk
 }
 
 // queryInt 取第一个能解析为正整数的查询参数，都没有则返回 0。

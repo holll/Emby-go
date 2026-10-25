@@ -17,6 +17,8 @@ import (
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
+	"emby-go/internal/imagecache"
+	"emby-go/internal/imageutil"
 	"emby-go/internal/logging"
 	"emby-go/internal/metatube"
 	"emby-go/internal/scheduler"
@@ -78,6 +80,20 @@ type App struct {
 	// thumbSem 限制同时解码 + 缩放 + 编码的数量：纯 CPU 活，一次海报墙
 	// 几百张不加限制会把 CPU 打满、拖慢其它请求。
 	thumbSem chan struct{}
+	// imgDisk 是缩略图变体的磁盘缓存：内存 LRU 只留最近几百条，重启即失效，
+	// 磁盘把「同一张图的同一个尺寸」的解码/缩放/编码成本降到一次。
+	imgDisk *imagecache.Disk
+	// thumbMu/thumbFlights 实现同 key 只生成一次（singleflight）：
+	// 海报墙里同一张图会被 <img> 和 srcset 同时请求，信号量只能限流不能去重，
+	// 后到的请求等锁后复查命中，但更早的并发请求会排出多份相同的 CPU 工作。
+	thumbMu      sync.Mutex
+	thumbFlights map[string]*thumbFlight
+	// thumbGenerate 是生成变体的实际实现，抽成字段以便测试统计调用次数。
+	thumbGenerate func(path string, width, height, quality int) ([]byte, error)
+	// imageCacheMu 串行化「读取/保存容量上限」与快照，避免设置页并发保存互相覆盖；
+	// imageCacheMaxBytes 是当前生效的上限（0 表示不限制），设置页修改后立即生效。
+	imageCacheMu       sync.Mutex
+	imageCacheMaxBytes int64
 	// scrapeSem 限制同时向上游拉取的缩略图数量：刮削预览页一次十几张，
 	// 不加限制就是十几路并发上游请求，慢上游会把 goroutine 堆起来。
 	scrapeSem chan struct{}
@@ -117,11 +133,13 @@ type App struct {
 	probeRefillAt  time.Time
 	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
 
-	startAt      time.Time
-	ready        atomic.Bool    // readiness：收到退出信号后立即为 false
-	shutdownOnce sync.Once      // BeginShutdown 幂等
-	closeOnce    sync.Once      // Close 幂等
-	workerWG     sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
+	monitor          *requestMonitor
+	dashboardSummary dashboardSummaryCache
+	startAt          time.Time
+	ready            atomic.Bool    // readiness：收到退出信号后立即为 false
+	shutdownOnce     sync.Once      // BeginShutdown 幂等
+	closeOnce        sync.Once      // Close 幂等
+	workerWG         sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
 	// 周期性统计信息维护（ANALYZE）。analyzeStats 可替换以便测试观察调用。
 	maintenanceOnce sync.Once
 	analyzeStats    func() error
@@ -153,33 +171,34 @@ type App struct {
 
 // scanStatus 管理端可轮询的扫描进度快照。
 type scanStatus struct {
-	InstanceID   string `json:"instance_id"`
-	RunID        string `json:"run_id,omitempty"`
-	TaskID       int64  `json:"task_id,omitempty"`
-	Running      bool   `json:"running"`
-	LibraryIndex int    `json:"library_index"`
-	Libraries    int    `json:"libraries"`
-	LibraryName  string `json:"library_name"`
-	Mode         string `json:"mode,omitempty"`
-	Total        int    `json:"total"`
-	Done         int    `json:"done"`
-	GroupsTotal  int    `json:"groups_total"`
-	GroupsDone   int    `json:"groups_done"`
-	Unchanged    int    `json:"unchanged_groups"`
-	Added        int    `json:"added"`
-	Updated      int    `json:"updated"`
-	Deleted      int    `json:"deleted"`
-	IndexChanged bool   `json:"index_changed"`
-	CleanupDone  bool   `json:"cleanup_performed"`
-	Incomplete   bool   `json:"incomplete"`
-	Current      string `json:"current"`
-	Success      int    `json:"success"`
-	Pending      int    `json:"pending"`
-	Skipped      int    `json:"skipped"`
-	Failed       int    `json:"failed"`
-	StartedAt    string `json:"started_at,omitempty"`
-	FinishedAt   string `json:"finished_at,omitempty"`
-	Error        string `json:"error,omitempty"`
+	InstanceID    string `json:"instance_id"`
+	RunID         string `json:"run_id,omitempty"`
+	TaskID        int64  `json:"task_id,omitempty"`
+	Running       bool   `json:"running"`
+	LibraryIndex  int    `json:"library_index"`
+	Libraries     int    `json:"libraries"`
+	LibraryName   string `json:"library_name"`
+	Mode          string `json:"mode,omitempty"`
+	Total         int    `json:"total"`
+	Done          int    `json:"done"`
+	GroupsTotal   int    `json:"groups_total"`
+	GroupsDone    int    `json:"groups_done"`
+	Unchanged     int    `json:"unchanged_groups"`
+	Added         int    `json:"added"`
+	Updated       int    `json:"updated"`
+	Deleted       int    `json:"deleted"`
+	IndexChanged  bool   `json:"index_changed"`
+	CleanupDone   bool   `json:"cleanup_performed"`
+	Incomplete    bool   `json:"incomplete"`
+	Current       string `json:"current"`
+	Success       int    `json:"success"`
+	Pending       int    `json:"pending"`
+	Skipped       int    `json:"skipped"`
+	Failed        int    `json:"failed"`
+	UnreadableNFO int    `json:"unreadable_nfo,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	FinishedAt    string `json:"finished_at,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // tagEntry / nfoCacheEntry 为上述短缓存的条目（neg 表示负缓存，TTL 更短）。
@@ -282,6 +301,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
+		thumbFlights: make(map[string]*thumbFlight), thumbGenerate: imageutil.Thumbnail,
 		instanceID:   newInstanceID(),
 		authGuard:    newAuthGuard(authGuardConfig{IPRequestRate: cfg.Security.Auth.IPRequestRate, IPRequestBurst: cfg.Security.Auth.IPRequestBurst, GlobalRequestRate: cfg.Security.Auth.GlobalRequestRate, GlobalRequestBurst: cfg.Security.Auth.GlobalRequestBurst, BcryptConcurrency: cfg.Security.Auth.BcryptConcurrency, CredentialBodyBytes: int64(cfg.Security.Auth.CredentialBodyBytes), MaxKeys: cfg.Security.Auth.MaxKeys, AccountCooldownMaxSeconds: cfg.Security.Auth.AccountCooldownMaxSeconds}),
 		scanTasks:    make(map[int64]*asyncScanTask),
@@ -289,6 +309,32 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	}
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
+	// 变体目录：启动时清一次（过期 + 超限），之后由写入侧按十分钟节流触发。
+	a.imgDisk = openImageDisk(cfg)
+	a.imageCacheMaxBytes = effectiveImageCacheMaxBytes(cfg)
+	// 设置页保存过的上限优先于配置文件：配置是部署默认值，页面是运行期决策。
+	if saved, ok, err := loadImageCacheMaxBytes(a.db); err != nil {
+		slog.Warn("图片缓存设置不可用，沿用配置文件", "error", err)
+	} else if ok {
+		a.imgDisk.SetMaxBytes(saved)
+		if saved != a.imageCacheMaxBytes {
+			// 显式说明生效值来自设置页，避免启动日志里的配置文件默认值被误读。
+			slog.Info("图片缓存上限来自设置页", "max_bytes", saved, "config_default_bytes", a.imageCacheMaxBytes)
+		}
+		a.imageCacheMaxBytes = saved
+	}
+	a.startupWG.Add(1)
+	go func() {
+		defer a.startupWG.Done()
+		removed, freed, err := a.imgDisk.Trim()
+		if err != nil {
+			slog.Debug("缩略图缓存启动清理失败", "error", err)
+			return
+		}
+		if removed > 0 {
+			slog.Info("缩略图缓存启动清理完成", "removed", removed, "freed_bytes", freed)
+		}
+	}()
 	a.analyzeStats = db.Analyze
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
@@ -347,7 +393,8 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	if cfg.Debug {
 		slog.Warn("debug 原始请求日志已开启：密码、token、Cookie、请求体将写入 request 日志，请仅临时排障使用")
 	}
-	middlewares := append([]gin.HandlerFunc{securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter())...)
+	a.monitor = newRequestMonitor(a.startAt)
+	middlewares := append([]gin.HandlerFunc{a.monitor.middleware(), securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter())...)
 	r.Use(middlewares...)
 	a.router = r
 	a.routes()
@@ -469,8 +516,11 @@ func (a *App) routes() {
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
 	r.GET("/web/navigation.js", a.webAsset)
+	r.GET("/web/dashboard.js", a.webAsset)
+	r.GET("/web/dashboard.css", a.webAsset)
 	r.GET("/web/webhook-settings.js", a.webAsset)
 	r.GET("/web/log-settings.js", a.webAsset)
+	r.GET("/web/image-cache-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/health", a.health)
@@ -530,10 +580,15 @@ func (a *App) routes() {
 	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/metrics", a.adminMetrics)
+	admin.GET("/dashboard", a.adminDashboard)
 	admin.GET("/logs", a.adminLogs)
 	admin.GET("/logs/disk", a.adminDiskLogs)
 	admin.GET("/logs/settings", a.adminLogSettings)
 	admin.PUT("/logs/settings", a.adminSaveLogSettings)
+	// 图片缓存（缩略图变体目录）：容量上限、当前占用与手动清理。
+	admin.GET("/image-cache/settings", a.adminImageCacheSettings)
+	admin.PUT("/image-cache/settings", a.adminSaveImageCacheSettings)
+	admin.POST("/image-cache/trim", a.adminTrimImageCache)
 	admin.GET("/settings", a.adminSettings)
 	admin.GET("/webhook/settings", a.adminWebhookSettings)
 	admin.PUT("/webhook/settings", a.adminSaveWebhookSettings)

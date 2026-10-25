@@ -35,6 +35,8 @@ func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 		"DELETE /api/admin/apikeys/:key":           "transaction",
 		"DELETE /api/admin/access-tokens":          "transaction",
 		"PUT /api/admin/logs/settings":             "configuration-snapshot",
+		"PUT /api/admin/image-cache/settings":      "configuration-snapshot",
+		"POST /api/admin/image-cache/trim":         "request-snapshot",
 		"PUT /api/admin/webhook/settings":          "configuration-snapshot",
 		"PUT /api/admin/webhook/targets":           "configuration-snapshot",
 		"PUT /api/admin/scrape/settings":           "configuration-snapshot",

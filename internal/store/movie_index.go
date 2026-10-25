@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,70 @@ func (s *Store) IndexMovie(m Movie, size int64, mtime time.Time, actors []ActorR
 		return 0, err
 	}
 	return id, nil
+}
+
+// IndexMovieUnreadableNFO indexes a source whose sidecar exists but cannot be
+// parsed. An existing row keeps its metadata, actors, features and visibility;
+// only the file-derived columns follow the source, and the parse error is
+// recorded. A source that was never indexed is inserted as pending so the
+// operator still sees it.
+func (s *Store) IndexMovieUnreadableNFO(m Movie, size int64, mtime time.Time, note string) error {
+	return s.writeVersioned(m.LibraryID, func(tx *sql.Tx) error {
+		var previousID, previousLibrary sql.NullInt64
+		err := tx.QueryRow("SELECT id, library_id FROM movies WHERE source_path=?", m.SourcePath).Scan(&previousID, &previousLibrary)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if previousID.Valid && previousLibrary.Valid && previousLibrary.Int64 == m.LibraryID {
+			entry := ScanGroupMovie{Movie: m, Size: size, Mtime: mtime, KeepIndexedMetadata: true, MetadataError: note}
+			_, err := preserveIndexedMetadataTx(tx, previousID.Int64, entry)
+			return err
+		}
+		if previousID.Valid && previousLibrary.Valid {
+			// The source moved in from another library: retire that library's
+			// cached view before the new owner takes the row.
+			if err := bumpLibraryVersionTx(tx, previousLibrary.Int64); err != nil {
+				return err
+			}
+		}
+		return s.reindexUnreadableNFO(tx, m, size, mtime, note)
+	})
+}
+
+func (s *Store) reindexUnreadableNFO(tx *sql.Tx, m Movie, size int64, mtime time.Time, note string) error {
+	id, err := upsertMovieTx(tx, m, size, mtime)
+	if err != nil {
+		return err
+	}
+	if err := replaceActorsTx(tx, id, nil); err != nil {
+		return err
+	}
+	if err := invalidateMovieScanStateTx(tx, m); err != nil {
+		return err
+	}
+	if err := setScanNoteTx(tx, id, note); err != nil {
+		return err
+	}
+	return refreshFeaturesTx(tx, id)
+}
+
+// ClearScanNFONote drops an "unreadable NFO" note once the sidecar parses again.
+// It reads first so the common case (no note) costs no write lock; scrape
+// outcomes and operator confirmations share the column but other prefixes.
+func (s *Store) ClearScanNFONote(movieID int64) error {
+	var note string
+	err := s.db.QueryRow(`SELECT COALESCE(last_scrape_error,'') FROM movies WHERE id=?`, movieID).Scan(&note)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if !strings.HasPrefix(note, ScanNFONotePrefix) {
+		return nil
+	}
+	_, err = s.db.Exec(`UPDATE movies SET last_scrape_error='' WHERE id=? AND last_scrape_error LIKE ?`, movieID, ScanNFONotePrefix+"%")
+	return err
 }
 
 // invalidateMovieScanStateTx drops the incremental baseline for the indexed

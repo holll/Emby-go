@@ -97,6 +97,10 @@ type recordPlan struct {
 	movie       store.Movie
 	actors      []store.ActorRef
 	validSource bool
+	// metaUnreadable 表示侧车文件存在但解析失败。这类条目必须保留已索引的
+	// 元数据，只跟随文件刷新派生列，原因写进 last_scrape_error。
+	metaUnreadable bool
+	metaError      string
 }
 
 type groupInputs struct {
@@ -288,7 +292,8 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 				continue
 			}
 			member := memberFor(inputs, record.member.path)
-			movieEntries = append(movieEntries, store.ScanGroupMovie{Movie: record.movie, Size: member.size, Mtime: time.Unix(0, member.mtimeNS), Actors: record.actors})
+			movieEntries = append(movieEntries, store.ScanGroupMovie{Movie: record.movie, Size: member.size, Mtime: time.Unix(0, member.mtimeNS), Actors: record.actors,
+				KeepIndexedMetadata: record.metaUnreadable, MetadataError: record.metaError})
 			if record.movie.Status == "success" {
 				outcome = "success"
 			} else if outcome != "success" {
@@ -312,6 +317,8 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 				result.Success++
 			case !record.validSource:
 				result.Skipped++
+			case record.metaUnreadable:
+				result.UnreadableNFO++
 			case record.movie.Status == "success" || record.movie.Status == "manual":
 				result.Success++
 			default:
@@ -816,11 +823,26 @@ func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string
 		if selected.present {
 			selected.meta, selected.parseErr = nfo.ReadBytes(selected.data)
 		}
+		// 记住「文件在但读不出来」的候选：换用共享 NFO 成功后才清掉这个标记。
+		unreadablePath, unreadableErr := "", error(nil)
+		if selected.present && selected.parseErr != nil {
+			unreadablePath, unreadableErr = selected.path, selected.parseErr
+		}
 		if selected.missingOrInvalid() && len(record.parts) > 0 {
 			selected = inputs.nfos["shared:"+nfo.SidecarPath(record.member.path, true)]
 			if selected.present {
 				selected.meta, selected.parseErr = nfo.ReadBytes(selected.data)
 			}
+			if selected.present && selected.parseErr == nil {
+				unreadablePath, unreadableErr = "", nil
+			} else if selected.present {
+				unreadablePath, unreadableErr = selected.path, selected.parseErr
+			}
+		}
+		if unreadablePath != "" {
+			// 侧车存在但读不出内容：保留上一版元数据，别让空构建清空索引。
+			record.metaUnreadable = true
+			record.metaError = nfoNote(unreadablePath, unreadableErr)
 		}
 		if selected.present && selected.parseErr == nil {
 			applyMeta(&record.movie, selected.meta, selected.path)

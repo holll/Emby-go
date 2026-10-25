@@ -1,0 +1,133 @@
+/* 首页运行驾驶舱：实色工业面板，无网络字体、装饰性动画或假数据。 */
+.dashboard {
+  --dash-bg: #0d1726; --dash-panel: #122036; --dash-ink: #edf4ff;
+  --dash-muted: #abc0d8; --dash-line: #30445d; --dash-blue: #78aeff;
+  --dash-cyan: #65e0d0; --dash-amber: #ffca7c;
+  color: var(--dash-ink); background: var(--dash-bg); border: 1px solid var(--dash-line);
+  border-radius: 18px; padding: clamp(16px, 2.1vw, 30px); min-width: 0;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.dashboard *, .dashboard *::before, .dashboard *::after { box-sizing: border-box; }
+.dashboard [hidden] { display: none !important; }
+.dashboard h2, .dashboard h3, .dashboard p { margin: 0; }
+.dashboard a { color: var(--dash-cyan); text-underline-offset: 4px; overflow-wrap: anywhere; }
+.dashboard button, .dashboard a, .dashboard summary { touch-action: manipulation; }
+.dashboard button, .dashboard summary { min-height: 44px; cursor: pointer; }
+.dashboard button:disabled { cursor: wait; opacity: .6; }
+.dashboard button:focus-visible, .dashboard a:focus-visible, .dashboard summary:focus-visible { outline: 2px solid var(--dash-cyan); outline-offset: 4px; }
+.dashboard .dash-kicker { color: var(--dash-muted); font: 600 10px/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; letter-spacing: .15em; }
+.dashboard .dash-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 24px; border-bottom: 1px solid var(--dash-line); }
+.dashboard .dash-heading h2 { font-size: clamp(24px, 2.7vw, 36px); font-weight: 650; line-height: 1.2; letter-spacing: -.035em; margin-top: 8px; }
+.dashboard .dash-heading h2 span { display: block; color: var(--dash-muted); font-size: 13px; font-weight: 400; letter-spacing: 0; margin-top: 10px; }
+.dashboard .dash-update { display: grid; gap: 7px; text-align: right; font-size: 12px; color: var(--dash-muted); max-width: 330px; line-height: 1.6; }
+.dashboard .dash-state { color: var(--dash-cyan); }
+.dashboard .dash-warning { color: var(--dash-amber); }
+.dashboard.is-stale .dash-state { color: var(--dash-amber); }
+.dashboard .dash-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
+.dashboard .dash-windows, .dashboard .dash-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.dashboard .btn { background: #192b43; border: 1px solid #3c526e; color: var(--dash-ink); min-width: 44px; font-size: 13px; }
+.dashboard .btn:hover { background: #223952; border-color: #6483a5; }
+.dashboard .dash-windows .btn[aria-pressed="true"], .dashboard .dash-controls .btn[aria-pressed="true"] { color: #092923; background: var(--dash-cyan); border-color: var(--dash-cyan); font-weight: 650; }
+.dashboard .dash-feedback { color: var(--dash-amber); font-size: 12px; line-height: 1.7; margin-top: 12px; }
+.dashboard .dash-feedback:empty { display: none; }
+.dashboard .dash-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 20px 0; }
+.dashboard .dash-kpi { background: var(--dash-panel); border: 1px solid var(--dash-line); border-top: 2px solid #587aa2; padding: 20px; min-width: 0; border-radius: 10px; }
+.dashboard .dash-kpi-p95 { border-top-color: var(--dash-cyan); }
+.dashboard .dash-kpi-requests { border-top-color: var(--dash-blue); }
+.dashboard .dash-kpi-errors { border-top-color: var(--dash-amber); }
+.dashboard .dash-kpi h3 { font-size: 13px; color: var(--dash-muted); font-weight: 500; }
+.dashboard .dash-kpi p { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 15px 0 9px; }
+.dashboard .dash-kpi strong { font: 600 clamp(28px, 3.2vw, 43px)/1.05 "SFMono-Regular", Consolas, "Liberation Mono", monospace; letter-spacing: -.05em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dashboard .dash-kpi p span { font-size: 12px; color: var(--dash-muted); }
+.dashboard .dash-kpi small { display: block; color: var(--dash-muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.dashboard .dash-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.dashboard .dash-panel { min-width: 0; background: var(--dash-panel); border: 1px solid var(--dash-line); border-radius: 10px; padding: 20px; }
+.dashboard .dash-panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 15px; }
+.dashboard .dash-panel-head h3 { font-size: 16px; font-weight: 600; margin-top: 4px; line-height: 1.5; }
+.dashboard .dash-panel-head > span, .dashboard .dash-panel-head a { font-size: 11px; color: var(--dash-muted); line-height: 1.7; }
+.dashboard .dash-panel-head a { color: var(--dash-cyan); }
+.dashboard .dash-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 11px; color: var(--dash-muted); }
+.dashboard .dash-key::before { content: ""; display: inline-block; vertical-align: middle; width: 16px; border-top: 2px solid; margin-right: 6px; }
+.dashboard .dash-key-blue::before { color: var(--dash-blue); }
+.dashboard .dash-key-cyan::before { color: var(--dash-cyan); }
+.dashboard .dash-key-amber::before { color: var(--dash-amber); border-top-style: dashed; }
+.dashboard .dash-key-muted::before { color: var(--dash-muted); border-top-style: dashed; }
+.dashboard .dash-chart { min-height: 195px; margin-top: 14px; }
+.dashboard .dash-chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.dashboard .dash-gridline { stroke: #30445d; stroke-width: 1; stroke-dasharray: 2 5; }
+.dashboard .dash-axis { fill: #abc0d8; font: 10px "SFMono-Regular", Consolas, monospace; }
+.dashboard .dash-line { fill: none !important; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.dashboard .dash-line-blue { fill: var(--dash-blue); stroke: var(--dash-blue); }
+.dashboard .dash-line-cyan { fill: var(--dash-cyan); stroke: var(--dash-cyan); }
+.dashboard .dash-line-amber { fill: var(--dash-amber); stroke: var(--dash-amber); }
+.dashboard .dash-line-muted { fill: var(--dash-muted); stroke: var(--dash-muted); }
+.dashboard .dash-dashed { stroke-dasharray: 5 5; }
+.dashboard .dash-chart-empty { min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; font-size: 15px; color: var(--dash-ink); border-bottom: 1px dashed var(--dash-line); }
+.dashboard .dash-chart-empty span { font-size: 12px; color: var(--dash-muted); text-align: center; line-height: 1.8; }
+.dashboard .dash-data { border: 1px solid var(--dash-line); border-radius: 10px; margin: 16px 0; background: var(--dash-panel); }
+.dashboard .dash-data > summary { padding: 13px 18px; font-size: 13px; }
+.dashboard .dash-data > .disclosure-body { padding: 0 18px 18px; }
+.dashboard .dash-note { color: var(--dash-muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.dashboard .dash-data .dash-note { margin-bottom: 12px; }
+.dashboard .table-wrap { max-width: 100%; overflow: auto; border: 1px solid var(--dash-line); border-radius: 8px; }
+.dashboard .dash-table { min-width: 560px; width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.dashboard .dash-table th, .dashboard .dash-table td { padding: 11px 12px; border-bottom: 1px solid var(--dash-line); text-align: right; white-space: nowrap; }
+.dashboard .dash-table th { color: var(--dash-muted); font-weight: 500; }
+.dashboard .dash-table th:first-child { text-align: left; }
+.dashboard .dash-bottom { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; }
+.dashboard .dash-media { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 12px 0 18px; }
+.dashboard .dash-media strong { display: block; font: 600 24px/1.4 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+.dashboard .dash-media span { display: block; margin-top: 5px; font-size: 11px; color: var(--dash-muted); }
+.dashboard .dash-runtime { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; margin: 16px 0 0; font-size: 12px; }
+.dashboard .dash-runtime dt { color: var(--dash-muted); }
+.dashboard .dash-runtime dd { margin: 0; text-align: right; font-family: "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.dashboard .dash-tasks { grid-column: 1 / -1; }
+.dashboard .dash-task-list { list-style: none; padding: 0; margin: 0 0 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+.dashboard .dash-task-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--dash-line); padding: 12px 0; min-width: 0; }
+.dashboard .dash-task-list strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.dashboard .dash-task-list small { display: block; color: var(--dash-muted); font-size: 11px; margin-top: 5px; }
+.dashboard .dash-task-state { color: var(--dash-cyan); border: 1px solid #45616f; padding: 4px 8px; border-radius: 5px; font-size: 11px; flex-shrink: 0; }
+.dashboard .dash-footer { border-top: 1px solid var(--dash-line); padding-top: 16px; margin-top: 20px; }
+.dashboard .dash-footer nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.dashboard .dash-footer a { display: inline-flex; min-height: 44px; align-items: center; font-size: 12px; }
+/* 用户显式选择的大屏布局；离页销毁控制器移除此状态。 */
+body.dashboard-wide .sidebar, body.dashboard-wide .topbar { display: none; }
+body.dashboard-wide .main { margin-left: 0; }
+body.dashboard-wide .content { max-width: none; padding: 20px; }
+.dashboard.is-wide .dash-kpi strong { font-size: clamp(34px, 4vw, 66px); }
+.dashboard:fullscreen { overflow-y: auto; width: 100%; height: 100%; border-radius: 0; }
+@media (min-width: 1700px) {
+  .dashboard.is-wide .dash-bottom { grid-template-columns: 1fr 1fr 1.3fr; }
+  .dashboard.is-wide .dash-tasks { grid-column: auto; }
+  .dashboard.is-wide .dash-task-list { grid-template-columns: 1fr; }
+}
+@media (max-width: 1100px) {
+  .dashboard .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard .dash-charts { grid-template-columns: 1fr; }
+}
+@media (max-width: 650px) {
+  .dashboard { padding: 16px 12px; border-radius: 12px; }
+  .dashboard .dash-heading { flex-direction: column; gap: 16px; padding-bottom: 18px; }
+  .dashboard .dash-update { text-align: left; max-width: none; }
+  .dashboard .dash-toolbar { align-items: stretch; gap: 10px; }
+  .dashboard .dash-windows, .dashboard .dash-controls { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dashboard .btn { padding-inline: 8px; font-size: 12px; }
+  .dashboard .dash-kpis { gap: 10px; margin-top: 16px; }
+  .dashboard .dash-kpi { padding: 14px 10px; }
+  .dashboard .dash-kpi strong { font-size: clamp(24px, 7vw, 37px); }
+  .dashboard .dash-kpi h3 { font-size: 12px; }
+  .dashboard .dash-kpi small { font-size: 11px; }
+  .dashboard .dash-kpi p { gap: 5px; }
+  .dashboard .dash-panel { padding: 16px 12px; }
+  .dashboard .dash-panel-head { gap: 8px; }
+  .dashboard .dash-panel-head h3 { font-size: 15px; }
+  .dashboard .dash-chart { min-height: 120px; }
+  .dashboard .dash-bottom { grid-template-columns: 1fr; }
+  .dashboard .dash-task-list { grid-template-columns: 1fr; }
+  .dashboard .dash-media { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard .dash-data > .disclosure-body { padding-inline: 10px; }
+  body.dashboard-wide .content { padding: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dashboard *, .dashboard *::before, .dashboard *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

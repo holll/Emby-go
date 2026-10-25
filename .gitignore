@@ -20,6 +20,9 @@
 /config.yaml
 /config.local.yaml
 
+# 缩略图变体缓存（运行时数据，默认与 db 同级）
+/image-cache/
+
 # 运行日志（log/ 下按天切分的 app-*.log / request-*.log）
 *.log
 /log/

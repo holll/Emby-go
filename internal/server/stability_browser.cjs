@@ -48,7 +48,27 @@ async function main() {
     await call('Page.addScriptToEvaluateOnNewDocument',{source:`if(location.origin===${JSON.stringify(base.origin)}){localStorage.setItem('emby_token',${JSON.stringify(login.AccessToken)});window.__errors=[];addEventListener('error',e=>__errors.push(e.message));}`});
     await call('Page.navigate',{url:new URL('/admin',base).href});
     const wait=expression=>evaluate(`(async()=>{const end=Date.now()+12000;while(Date.now()<end){if(${expression})return true;await new Promise(r=>setTimeout(r,25));}throw Error('UI deadline: '+document.body.innerText.slice(0,800));})()`);
-    await wait("document.querySelector('#reindex')");
+    await wait("document.querySelector('#overview-dashboard')");
+    await wait("document.querySelector('[data-dash=\"requests\"]')?.textContent!=='—' && document.querySelector('[data-dash=\"requests\"]')");
+    const liveSnapshot=await request('/api/admin/dashboard?window=15m',undefined,login.AccessToken);
+    assert.ok(liveSnapshot.requests.total>0,'real login/JSON requests are measured');
+    assert.ok(liveSnapshot.requests.p95_ms>0 || liveSnapshot.requests.p95_overflow,'real latency samples, not demo values');
+    assert.equal(liveSnapshot.series.length,15);
+    for(const width of [1440,768,390,360]){
+      await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<860});
+      const state=await evaluate("(()=>{const r=document.querySelector('#overview-dashboard');return {root:!!r,overflow:document.documentElement.scrollWidth>innerWidth+1,p95:document.querySelector('[data-dash=\"p95\"]').textContent,charts:r.querySelectorAll('svg[role=\"img\"]').length,controls:[...r.querySelectorAll('.dash-toolbar button')].map(b=>{const q=b.getBoundingClientRect();return {width:q.width,height:q.height}}),errors:__errors.slice()};})()");
+      assert.equal(state.root,true);assert.equal(state.overflow,false,'dashboard width '+width);assert.notEqual(state.p95,'—');assert.equal(state.charts,2);assert.deepEqual(state.errors,[]);
+      assert.ok(state.controls.every(b=>b.width>=43.99&&b.height>=43.99),'dashboard touch targets '+width);
+    }
+    await evaluate("document.querySelector('[data-window=\"5\"]').click()");
+    await wait("document.querySelectorAll('[data-dash=\"samples\"] tr').length===5");
+    await evaluate("document.querySelector('[data-dash=\"pause\"]').click()");
+    assert.equal(await evaluate("document.querySelector('[data-dash=\"pause\"]').getAttribute('aria-pressed')"),'true');
+    await evaluate("document.querySelector('[data-dash=\"wide\"]').click()");
+    await wait("document.body.classList.contains('dashboard-wide')");
+    await evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    assert.equal(await evaluate("document.body.classList.contains('dashboard-wide')"),false);
+    await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
     await evaluate("(async()=>{await page('libraries');document.querySelector('#lib-name').value='Mobile live library';document.querySelector('#lib-path').value="+JSON.stringify(process.env.EMBY_STABILITY_LIBRARY)+";document.querySelector('#library-form').requestSubmit();})()");
     await wait("document.querySelector('[data-lib-scan]')");
     const libraries=await request('/api/admin/libraries',undefined,login.AccessToken);
@@ -67,7 +87,21 @@ async function main() {
     assert.match(await evaluate("document.querySelector('#content').innerText"),/Mobile stability sample/);
     const menu=await evaluate("(()=>{const b=document.querySelector('#nav-toggle');b.focus();b.click();const opened=b.getAttribute('aria-expanded')==='true';document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return {opened,closed:b.getAttribute('aria-expanded')==='false',restored:document.activeElement===b,overflow:document.documentElement.scrollWidth>innerWidth+1,errors:__errors};})()");
     assert.equal(menu.opened,true);assert.equal(menu.closed,true);assert.equal(menu.restored,true);assert.equal(menu.overflow,false);assert.deepEqual(menu.errors,[]);
-    console.log('PASS real HTTP mobile 390px: create library → tap scan → indexed media wall; native assets, focus and no overflow');
+    if(process.env.EMBY_DASHBOARD_ARTIFACT_DIR){
+      // Optional review artifacts contain only this temporary test service, not demo telemetry or production data.
+      const output=path.resolve(process.env.EMBY_DASHBOARD_ARTIFACT_DIR);fs.mkdirSync(output,{recursive:true});
+      await new Promise(r=>setTimeout(r,16000));
+      await request('/api/admin/dashboard?window=15m',undefined,login.AccessToken);
+      await evaluate("page('overview')");
+      await wait("document.querySelector('[data-dash=\"requests\"]')?.textContent!=='—' && document.querySelector('[data-dash=\"requests\"]')");
+      for(const width of [1440,390]){
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:width<860});
+        const metrics=await call('Page.getLayoutMetrics');
+        const shot=await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:true,clip:{x:0,y:0,width,height:Math.min(Math.ceil(metrics.cssContentSize.height),5000),scale:1}});
+        fs.writeFileSync(path.join(output,'dashboard-'+width+'.png'),Buffer.from(shot.data,'base64'));
+      }
+    }
+    console.log('PASS real HTTP dashboard at 1440/768/390/360px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall');
   } finally {
     process.removeListener('SIGINT', interrupted);
     if(ws)ws.close();

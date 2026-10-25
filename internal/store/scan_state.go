@@ -34,7 +34,17 @@ type ScanGroupMovie struct {
 	Size   int64
 	Mtime  time.Time
 	Actors []ActorRef
+	// KeepIndexedMetadata 标记「NFO 存在但无法解析」。这类条目只跟随文件刷新
+	// 派生列：已索引的元数据、演员、特征与可见状态原样保留，空构建不是
+	// 「清空索引」指令。MetadataError 记录原因，写入 last_scrape_error。
+	KeepIndexedMetadata bool
+	MetadataError       string
 }
+
+// ScanNFONotePrefix 标记扫描期「NFO 存在但无法解析」的备注。它与刮削失败、
+// 批量确认共用 last_scrape_error 一列（不新增 status 枚举），但前缀独立：
+// NFO 恢复可解析后由扫描清除，不干扰刮削结论。
+const ScanNFONotePrefix = "[NFO 不可读] "
 
 // ScanGroupCommitResult reports the business rows touched by one group commit.
 type ScanGroupCommitResult struct {
@@ -218,6 +228,23 @@ func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool
 			if err := tx.QueryRow(`SELECT id, library_id, status FROM movies WHERE source_path = ?`, entry.Movie.SourcePath).Scan(&previousID, &previousLibrary, &previousStatus); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+			if entry.KeepIndexedMetadata && previousID.Valid {
+				// The sidecar exists but cannot be parsed. That is a read failure,
+				// not an instruction to erase metadata: keep the row visible with
+				// what is already indexed and only follow the file.
+				if !previousLibrary.Valid || previousLibrary.Int64 != libraryID {
+					return ErrScanInventoryChanged
+				}
+				changed, err := preserveIndexedMetadataTx(tx, previousID.Int64, entry)
+				if err != nil {
+					return err
+				}
+				if changed {
+					result.Updated++
+				}
+				result.MovieIDs[entry.Movie.SourcePath] = previousID.Int64
+				continue
+			}
 			if previousStatus == "manual" {
 				// A missing/invalid NFO produces an empty pending build, not an
 				// instruction to erase operator metadata, actors or features.
@@ -254,6 +281,18 @@ func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool
 			}
 			if err := refreshFeaturesTx(tx, id); err != nil {
 				return err
+			}
+			if entry.KeepIndexedMetadata {
+				// New row for an unreadable sidecar: it is legitimately pending,
+				// but the reason must be visible to the operator.
+				if err := setScanNoteTx(tx, id, entry.MetadataError); err != nil {
+					return err
+				}
+			} else if entry.Movie.Status == "success" || entry.Movie.Status == "manual" {
+				// Metadata refreshed normally; a previous "unreadable" note is stale.
+				if err := clearScanNoteTx(tx, id); err != nil {
+					return err
+				}
 			}
 			if previousID.Valid {
 				result.Updated++
@@ -356,6 +395,36 @@ func updateManualScanStructureTx(tx *sql.Tx, id int64, entry ScanGroupMovie) (bo
 	}
 	n, err := result.RowsAffected()
 	return n > 0, err
+}
+
+// preserveIndexedMetadataTx follows the file for a row whose sidecar exists but
+// cannot be parsed. Structure columns move with the source; metadata, actors,
+// features and status stay exactly as indexed, so the row stays visible and a
+// repaired NFO can refresh it later.
+func preserveIndexedMetadataTx(tx *sql.Tx, id int64, entry ScanGroupMovie) (bool, error) {
+	changed, err := updateManualScanStructureTx(tx, id, entry)
+	if err != nil {
+		return false, err
+	}
+	return changed, setScanNoteTx(tx, id, entry.MetadataError)
+}
+
+// setScanNoteTx records why a scan pass could not refresh metadata. The note
+// shares last_scrape_error with scrape outcomes but keeps its own prefix.
+func setScanNoteTx(tx *sql.Tx, id int64, note string) error {
+	if note == "" {
+		return nil
+	}
+	_, err := tx.Exec(`UPDATE movies SET last_scrape_error=? WHERE id=? AND COALESCE(last_scrape_error,'')<>?`, note, id, note)
+	return err
+}
+
+// clearScanNoteTx drops a note left by an earlier scan pass once the sidecar
+// parses again. Scrape failures and operator confirmations use the same column
+// but different prefixes, so they survive.
+func clearScanNoteTx(tx *sql.Tx, id int64) error {
+	_, err := tx.Exec(`UPDATE movies SET last_scrape_error='' WHERE id=? AND last_scrape_error LIKE ?`, id, ScanNFONotePrefix+"%")
+	return err
 }
 
 func nullableID(id int64) any {

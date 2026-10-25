@@ -93,3 +93,57 @@ func TestProbeConfigFromYAML(t *testing.T) {
 		t.Errorf("探测配置 = %v/%d", cfg.ProbeTimeout(), cfg.ProbeWorkers())
 	}
 }
+
+func TestImageCacheDefaults(t *testing.T) {
+	var cfg Config
+	cfg.ImageCache = cfg.ImageCache.ApplyDefaults()
+	if !cfg.ImageCache.IsEnabled() {
+		t.Error("缺省应启用缩略图磁盘缓存")
+	}
+	if cfg.ImageCache.MaxBytes != defaultImageCacheMaxBytes {
+		t.Errorf("默认容量 = %d, want %d", cfg.ImageCache.MaxBytes, defaultImageCacheMaxBytes)
+	}
+	if got := cfg.ImageCache.TTL(); got != defaultImageCacheTTLHours*time.Hour {
+		t.Errorf("默认保留 = %v", got)
+	}
+	// 显式关闭不能被 ApplyDefaults 打开。
+	disabled := false
+	cfg.ImageCache.Enabled = &disabled
+	cfg.ImageCache = cfg.ImageCache.ApplyDefaults()
+	if cfg.ImageCache.IsEnabled() {
+		t.Error("enabled: false 必须保持关闭")
+	}
+	// -1 表示不限制/不过期。
+	cfg.ImageCache.MaxBytes, cfg.ImageCache.TTLHours = -1, -1
+	if got := cfg.ImageCache.TTL(); got != 0 {
+		t.Errorf("ttl_hours: -1 应表示永不过期，实际 %v", got)
+	}
+	if err := cfg.ImageCache.Validate(); err != nil {
+		t.Errorf("-1 是合法值: %v", err)
+	}
+	cfg.ImageCache.MaxBytes = -2
+	if err := cfg.ImageCache.Validate(); err == nil {
+		t.Error("max_bytes: -2 应被拒绝")
+	}
+}
+
+func TestImageCacheConfigFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	src := "image_cache:\n  enabled: false\n  dir: /var/lib/emby-go/thumbs\n  max_bytes: 1048576\n  ttl_hours: 24\n"
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImageCache.IsEnabled() {
+		t.Error("yaml 里的 enabled: false 应生效")
+	}
+	if cfg.ImageCache.Dir != "/var/lib/emby-go/thumbs" {
+		t.Errorf("dir = %q", cfg.ImageCache.Dir)
+	}
+	if cfg.ImageCache.MaxBytes != 1048576 || cfg.ImageCache.TTL() != 24*time.Hour {
+		t.Errorf("容量/保留 = %d/%v", cfg.ImageCache.MaxBytes, cfg.ImageCache.TTL())
+	}
+}

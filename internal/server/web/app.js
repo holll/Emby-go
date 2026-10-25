@@ -173,51 +173,21 @@ function refreshPage(render, gen) {
 }
 
 /* ---------------------------------------------------------------- 总览 */
+let dashboardStop = null;
+function stopDashboardPolling() {
+  if (typeof dashboardStop === 'function') dashboardStop();
+  dashboardStop = null;
+}
 async function pageOverview() {
-  const gen = pageGen;
-  const [libraries, success, status] = await Promise.all([
-    api('/libraries'),
-    api('/items?status=success'),
-    api('/status')
-  ]);
-  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
-  const pendingCount = status.pending || 0;
-  const rows = [
-    ['success', status.success || 0],
-    ['manual', status.manual || 0],
-    ['pending', pendingCount]
-  ].filter(([, n]) => n > 0);
-  content.innerHTML = `
-    <div class="cards">
-      ${[
-        ['媒体库', libraries.total ?? libraries.items?.length ?? 0, 'Collection Folder'],
-        ['已刮削影片', success.total || 0, 'NFO 真源 · 可见于 Emby'],
-        ['未刮削 / 需处理', pendingCount, '尚无 NFO 或刮削未成功']
-      ].map(([label, value, sub]) => `<div class="card"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(sub)}</span></div>`).join('')}
-    </div>
-    <section class="panel">
-      <div class="panel-head"><h2>档案状态</h2>
-        <div class="panel-actions">
-          <button id="reindex" class="btn">${icon('refresh')}<span>重建索引</span></button>
-        </div>
-      </div>
-      ${rows.length ? `
-        <div class="table-wrap"><table>
-          <thead><tr><th>状态</th><th style="width:80px">数量</th></tr></thead>
-          <tbody>${rows.map(([status, n]) => `<tr><td>${statusBadge(status)}</td><td class="num">${n}</td></tr>`).join('')}</tbody>
-        </table></div>` : empty('档案为空', '添加媒体库并开始扫描。')}
-      <p class="hint">NFO 是元数据真源；仅 http/https .strm 进入 Emby，其它协议的源在扫描时直接跳过。</p>
-    </section>`;
-  document.querySelector('#reindex').addEventListener('click', async () => {
-    const btn = document.querySelector('#reindex');
-    btn.disabled = true;
-    try {
-      const r = await api('/reindex', { method: 'POST' });
-      toast(`重建完成：${r.success} 已刮削 / ${r.pending} 未刮削${r.skipped ? ` / 跳过 ${r.skipped} 个不兼容` : ''}`);
-    }
-    catch (e) { toast(e.message, 'error'); }
-    btn.disabled = false;
-    refreshPage(pageOverview, gen);
+  const gen = pageGen, identity = token;
+  stopDashboardPolling();
+  if (typeof mountDashboard !== 'function') {
+    content.innerHTML = '<section class="panel" role="alert"><h2>监控资源未加载</h2><p>请刷新页面重试；没有读取到的指标不会显示为零。</p></section>';
+    return;
+  }
+  dashboardStop = mountDashboard(content, {
+    apiRequest: api,
+    isCurrent: () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity
   });
 }
 
@@ -1286,7 +1256,7 @@ async function pageSettings() {
   ];
   const keys = keyData.items || [];
   content.innerHTML = `
-    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')], ['service', '服务信息']].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
+    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['cache', '图片缓存'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')], ['service', '服务信息']].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
     <div class="settings-category" data-settings-panel="account">
     <section class="panel">
       <div class="panel-head"><h2>登录会话</h2></div>
@@ -1385,6 +1355,10 @@ async function pageSettings() {
     </section>
     </div>
 
+    <div class="settings-category" data-settings-panel="cache" hidden>
+    <section id="image-cache-settings" class="panel" aria-labelledby="image-cache-title"></section>
+    </div>
+
     <div class="settings-category" data-settings-panel="recovery" hidden>
     <section class="panel">
       <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
@@ -1408,7 +1382,7 @@ async function pageSettings() {
       <div class="table-wrap"><table>
         <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
       </table></div>
-      <p class="hint">上述启动配置修改后需重启服务；通知与日志期限分类中的设置保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
+      <p class="hint">上述启动配置修改后需重启服务；通知、日志期限与图片缓存分类中的设置保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
     </section>
     </div>`;
   mountSettingsCategories(content);
@@ -1416,6 +1390,8 @@ async function pageSettings() {
   void mountLogSettings(logHost, api, () => gen === pageGen && logHost.isConnected);
   const webhookHost = document.querySelector('#webhook-settings');
   void mountWebhookSettings(webhookHost, api, () => gen === pageGen && webhookHost.isConnected);
+  const imageCacheHost = document.querySelector('#image-cache-settings');
+  void mountImageCacheSettings(imageCacheHost, api, () => gen === pageGen && imageCacheHost.isConnected);
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const name = String(new FormData(event.target).get('name') || '').trim();
@@ -2761,6 +2737,7 @@ let pageGen = 0;
 async function page(name) {
   // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
   createdAPIKey = null; // 导航销毁仅在创建页暂存的管理员密钥原文。
+  if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
   stopLogsPolling();
@@ -3023,6 +3000,7 @@ function renderScanProgress(p) {
   }
   if (p.success) parts.push(`已刮削 ${p.success}`);
   if (p.pending) parts.push(`未刮削 ${p.pending}`);
+  if (p.unreadable_nfo) parts.push(`NFO 不可读 ${p.unreadable_nfo}（已保留原元数据）`);
   if (p.skipped) parts.push(`跳过 ${p.skipped}`);
   if (p.failed) parts.push(`失败 ${p.failed}`);
   if (p.running && p.current) parts.push(`当前 ${baseName(p.current)}`);
@@ -3164,6 +3142,7 @@ async function runScan(libraryId) {
 }
 
 function clearSessionView() {
+  if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   createdAPIKey = null;
   settingsCategory = 'account';
   me = null;

@@ -72,6 +72,11 @@ async function browser(t) {
       else if(p.endsWith('/recovery'))data={items:[]};
       else if(p.endsWith('/webhook/targets'))data={config_etag:'fixture',targets:[{id:'one',name:'通知目标',enabled:true,url_configured:true,events:['item.updated'],format:'json',timeout_seconds:5,allow_private:false}]};
       else if(p.endsWith('/scheduled'))data={items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:true,config_etag:'fixture'}]};
+      else if(p.endsWith('/dashboard')){
+        // Deliberately synthetic layout fixture; real HTTP telemetry is verified by Go/CDP integration.
+        const minutes=Number(new URL(url,'http://fixture').searchParams.get('window')?.replace('m','')||15), now=Date.now();
+        data={instance_id:'layout-fixture',started_at:new Date(now-120000).toISOString(),generated_at:new Date(now).toISOString(),retention_minutes:60,window_minutes:minutes,window_start:new Date(now-minutes*60000).toISOString(),window_end:new Date(now).toISOString(),requests:{total:60,errors_4xx:2,errors_5xx:1,rate_per_second:.5,p50_ms:2,p95_ms:20,p50_overflow:false,p95_overflow:false,sampled_seconds:120},latency:{unit:'ms',method:'histogram_upper_bound',max_finite_ms:60000,scope:'json_control_plane'},runtime:{uptime_seconds:120,goroutines:24,heap_alloc_bytes:8388608,heap_inuse_bytes:10485760,go_sys_bytes:16777216,num_gc:3},media:{available:true,stale:false,success:36,manual:4,pending:2,total:42,libraries:1,updated_at:new Date(now).toISOString()},tasks:{running:0,recent:[{id:1,kind:'scan',status:'success',started_at:new Date(now-10000).toISOString(),ended_at:new Date(now-5000).toISOString()}]},series:Array.from({length:minutes},(_,i)=>({start:new Date(now-(minutes-i-1)*60000).toISOString(),observed:i>=minutes-2,requests:i>=minutes-2?30:null,errors_4xx:i>=minutes-2?1:null,errors_5xx:i>=minutes-2?0:null,p50_ms:i>=minutes-2?2:null,p95_ms:i>=minutes-2?20:null,p50_overflow:false,p95_overflow:false}))};
+      }
       else if(p.endsWith('/tasks'))data={items:[]};
       else if(p.endsWith('/logs'))data={items:[]};
       else if(p.endsWith('/scrape/settings'))data={};
@@ -81,14 +86,14 @@ async function browser(t) {
     };`;
   await call('Page.addScriptToEvaluateOnNewDocument', { source: fixture });
   let html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
-  html = html.replace(/<link[^>]*href="\/web\/style.css"[^>]*>/, () => '<style>' + fs.readFileSync(path.join(web, 'style.css'), 'utf8') + '</style>');
+  html = html.replace(/<link[^>]*href="\/web\/([^\"]+\.css)"[^>]*>/g, (_, name) => '<style>' + fs.readFileSync(path.join(web, name), 'utf8') + '</style>');
   html = html.replace(/<script[^>]*src="\/web\/([^\"]+)"[^>]*><\/script>/g, (_, name) => {
     if (name.startsWith('vendor/')) return '';
     return '<script>' + fs.readFileSync(path.join(web, name), 'utf8').replace(/<\/script/gi, '<\\/script') + '</script>';
   });
   const file = path.join(dir, 'index.html'); fs.writeFileSync(file, html);
   await call('Page.navigate', { url: pathToFileURL(file).href });
-  await evaluate(`(async()=>{for(let i=0;i<100;i++){if(document.querySelector('#reindex'))return;await new Promise(r=>setTimeout(r,20));}throw Error('boot did not render: '+document.body.innerText);})()`);
+  await evaluate(`(async()=>{for(let i=0;i<100;i++){if(document.querySelector('#overview-dashboard'))return;await new Promise(r=>setTimeout(r,20));}throw Error('boot did not render: '+document.body.innerText);})()`);
   return { call, evaluate, dir };
 }
 
@@ -104,6 +109,16 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
       assert.ok(actual.scroll <= width + 1, `${name} at ${width}: scrollWidth=${actual.scroll}`);
       assert.deepEqual(actual.errors, [], name);
       assert.doesNotMatch(actual.error, /加载失败|请求失败|TypeError|ReferenceError/);
+      if (name === 'overview') {
+        const metrics = await evaluate(`(()=>{const r=document.querySelector('#overview-dashboard');return {root:!!r,live:r?.getAttribute('aria-live'),sample:document.querySelector('[data-dash="p95"]')?.textContent,charts:r?.querySelectorAll('svg[role="img"]').length,controls:[...r.querySelectorAll('.dash-toolbar button')].map(b=>({h:b.getBoundingClientRect().height}))};})()`);
+        assert.equal(metrics.root,true); assert.equal(metrics.live,'off'); assert.equal(metrics.sample,'20'); assert.equal(metrics.charts,2);
+        assert.ok(metrics.controls.every(b=>b.h>=43.99),`dashboard touch controls at ${width}`);
+        const switched=await evaluate(`(async()=>{document.querySelector('[data-window="5"]').click();document.querySelector('[data-window="60"]').click();await new Promise(r=>setTimeout(r,40));return {selected:document.querySelector('[data-window="60"]').getAttribute('aria-pressed'),rows:document.querySelectorAll('[data-dash="samples"] tr').length,scroll:document.documentElement.scrollWidth};})()`);
+        assert.equal(switched.selected,'true');assert.equal(switched.rows,60);assert.ok(switched.scroll<=width+1);
+        const pause=await evaluate(`(()=>{const b=document.querySelector('[data-dash="pause"]');b.click();return {pressed:b.getAttribute('aria-pressed'),state:document.querySelector('[data-dash="state"]').textContent};})()`);
+        assert.equal(pause.pressed,'true');assert.match(pause.state,/暂停/);
+        await evaluate(`document.querySelector('[data-dash="pause"]').click()`);
+      }
       if (name === 'settings') {
         const state = await evaluate(`(()=>{const buttons=[...document.querySelectorAll('.settings-nav button')];return {count:buttons.length,shown:[...document.querySelectorAll('.settings-category')].filter(e=>!e.hidden).length};})()`);
         assert.ok(state.count >= 4, 'settings categories available');
@@ -134,7 +149,7 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
         const detail = await evaluate(`(async()=>{await openDetail({id:1});const maintenance=document.querySelector('.detail-maintenance');if(!maintenance)return {missing:true};const collapsed=!maintenance.open;maintenance.open=true;document.querySelector('#detail-edit-toggle').click();await new Promise(r=>setTimeout(r,20));const result={collapsed,scroll:document.documentElement.scrollWidth,shown:!document.querySelector('#detail-edit').hidden};document.querySelector('#detail-close').click();return result;})()`);
         assert.equal(detail.missing, undefined);assert.equal(detail.collapsed,true);assert.equal(detail.shown,true);assert.ok(detail.scroll<=width+1,`detail editor at ${width}: ${detail.scroll}`);
       }
-      if (process.env.EMBY_LAYOUT_ARTIFACT_DIR && [1280,390].includes(width) && ['settings','scheduled','items'].includes(name)) {
+      if (process.env.EMBY_LAYOUT_ARTIFACT_DIR && [1280,390].includes(width) && ['overview','settings','scheduled','items'].includes(name)) {
         const output = path.resolve(process.env.EMBY_LAYOUT_ARTIFACT_DIR);
         fs.mkdirSync(output, { recursive: true });
         const shot = await call('Page.captureScreenshot', { format:'png' });

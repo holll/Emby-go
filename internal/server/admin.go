@@ -271,6 +271,7 @@ func (a *App) updateScanProgress(p scanner.Progress) {
 	a.scanStatus.Total, a.scanStatus.Done, a.scanStatus.Current = p.Total, p.Done, p.Current
 	a.scanStatus.Success, a.scanStatus.Pending = p.Result.Success, p.Result.Pending
 	a.scanStatus.Skipped, a.scanStatus.Failed = p.Result.Skipped, p.Result.Failed
+	a.scanStatus.UnreadableNFO = p.Result.UnreadableNFO
 	a.scanStatus.GroupsTotal, a.scanStatus.GroupsDone = p.Result.GroupsTotal, p.Result.GroupsDone
 	a.scanStatus.Unchanged, a.scanStatus.Added, a.scanStatus.Updated = p.Result.UnchangedGroups, p.Result.Added, p.Result.Updated
 	a.scanStatus.Deleted = p.Result.Deleted
@@ -771,7 +772,8 @@ func (a *App) adminReread(c *gin.Context) {
 	}
 	// 单文件重扫：整库重扫在「点一条重读源」这种场景下代价过高，
 	// 且会顺带触发 DeleteMissingSources，风险与收益不成比例。
-	if _, err = scanner.RescanOne(a.db, library, movie.SourcePath); err != nil {
+	result, err := scanner.RescanOne(a.db, library, movie.SourcePath)
+	if err != nil {
 		apiError(c, 500, err.Error())
 		return
 	}
@@ -781,7 +783,13 @@ func (a *App) adminReread(c *gin.Context) {
 		return
 	}
 	a.cache.Clear()
-	c.JSON(200, gin.H{"status": movie.Status, "protocol": movie.SourceProtocol})
+	response := gin.H{"status": movie.Status, "protocol": movie.SourceProtocol}
+	if result.UnreadableNFO > 0 {
+		// NFO 在但读不出来：元数据被有意保留，操作者必须知道这次没读到文件。
+		response["nfo_unreadable"] = true
+		response["warning"] = "NFO 存在但无法解析，已保留原元数据"
+	}
+	c.JSON(200, response)
 }
 
 func saveUploadedWebP(header *multipart.FileHeader, destination string) error {

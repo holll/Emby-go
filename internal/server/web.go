@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-//go:embed web/login.html web/index.html web/login.js web/app.js web/navigation.js web/webhook-settings.js web/log-settings.js web/style.css web/favicon.ico web/vendor/artplayer.min.js
+//go:embed web/login.html web/index.html web/login.js web/app.js web/navigation.js web/webhook-settings.js web/log-settings.js web/image-cache-settings.js web/dashboard.js web/dashboard.css web/style.css web/favicon.ico web/vendor/artplayer.min.js
 var webFiles embed.FS
 
 // assetETags 嵌入静态资源的内容 ETag。文件在构建期固化，启动算一次即可。
@@ -22,7 +22,7 @@ var assetETags = buildAssetETags()
 
 func buildAssetETags() map[string]string {
 	names := []string{
-		"web/login.js", "web/app.js", "web/navigation.js", "web/webhook-settings.js", "web/log-settings.js", "web/style.css",
+		"web/login.js", "web/app.js", "web/navigation.js", "web/webhook-settings.js", "web/log-settings.js", "web/image-cache-settings.js", "web/dashboard.js", "web/dashboard.css", "web/style.css",
 		"web/vendor/artplayer.min.js", "web/favicon.ico",
 	}
 	tags := make(map[string]string, len(names))
