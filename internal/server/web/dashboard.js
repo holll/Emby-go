@@ -30,13 +30,13 @@
       ['requests', 'errors_4xx', 'errors_5xx', 'p50_ms', 'p95_ms'].every(key => point[key] === null || finite(point[key])) &&
       typeof point.p50_overflow === 'boolean' && typeof point.p95_overflow === 'boolean');
   }
-  function chart(points, lines, unit, label) {
+  function chart(points, lines, unit, label, size = 646) {
     const values = points.flatMap(point => lines.map(line => point.observed && finite(point[line.key]) ? point[line.key] : null)).filter(finite);
     if (!values.length) return `<div class="dash-chart-empty">${unit === '次' ? '暂无请求观测' : '暂无延迟样本'}<span>无观测或超出有限桶的数据不绘制为零；详见数据表。</span></div>`;
-    const max = Math.max(1, ...values), left = 46, top = 20, width = 580, height = 154;
+    const max = Math.max(1, ...values), left = 46, top = 20, width = size - 66, height = 154;
     const x = index => left + index / Math.max(1, points.length - 1) * width;
     const y = value => top + height - value / max * height;
-    const grid = [0, 0.5, 1].map(ratio => `<line class="dash-gridline" x1="${left}" x2="${left + width}" y1="${y(max * ratio)}" y2="${y(max * ratio)}"/><text class="dash-axis" x="${left - 8}" y="${y(max * ratio) + 4}" text-anchor="end">${escape(new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(max * ratio))}</text>`).join('');
+    const grid = (size < 400 ? [0, 1] : [0, 0.5, 1]).map(ratio => `<line class="dash-gridline" x1="${left}" x2="${left + width}" y1="${y(max * ratio)}" y2="${y(max * ratio)}"/><text class="dash-axis" x="${left - 8}" y="${y(max * ratio) + 4}" text-anchor="end">${escape(new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(max * ratio))}</text>`).join('');
     const paths = lines.map(line => {
       let drawing = false;
       const path = points.map((point, index) => {
@@ -48,7 +48,7 @@
       const dots = points.map((point, index) => point.observed && finite(point[line.key]) ? `<circle class="dash-line-${line.tone}" cx="${x(index).toFixed(2)}" cy="${y(point[line.key]).toFixed(2)}" r="2.5"/>` : '').join('');
       return `<path class="dash-line dash-line-${line.tone}${line.dashed ? ' dash-dashed' : ''}" d="${path}"/>${dots}`;
     }).join('');
-    return `<svg viewBox="0 0 646 210" role="img" aria-label="${escape(label)}"><title>${escape(label)}；横轴为分钟，纵轴单位${escape(unit)}。完整数值见下方数据表。</title>${grid}${paths}<text class="dash-axis" x="${left}" y="199">${escape(clock(points[0]?.start))}</text><text class="dash-axis" x="${left + width}" y="199" text-anchor="end">${escape(clock(points[points.length - 1]?.start))}</text></svg>`;
+    return `<svg viewBox="0 0 ${size} 210" role="img" aria-label="${escape(label)}"><title>${escape(label)}；横轴为分钟，纵轴单位${escape(unit)}。完整数值见下方数据表。</title>${grid}${paths}<text class="dash-axis" x="${left}" y="199">${escape(clock(points[0]?.start))}</text><text class="dash-axis" x="${left + width}" y="199" text-anchor="end">${escape(clock(points[points.length - 1]?.start))}</text></svg>`;
   }
   const kinds = { scan: '媒体扫描', reindex: '重建索引', probe: '媒体探测', scrape: '元数据刮削', scrape_avatars: '补演员头像', avatars: '补演员头像', translate: '独立翻译', analyze: '媒体分析', webhook: '通知投递', edit: '元数据编辑', other: '其他任务' };
   const states = { running: '执行中', queued: '排队中', succeeded: '已完成', success: '已完成', failed: '失败', skipped: '已跳过', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
@@ -59,7 +59,7 @@
     const doc = host.ownerDocument || global.document;
     host.innerHTML = `<section id="overview-dashboard" class="dashboard" aria-label="运行监控首页" aria-live="off">
       <header class="dash-heading"><div><p class="dash-kicker">EMBY-GO / CONTROL PLANE</p><h2>运行观测<span>每一帧数据，都有据可查。</span></h2></div><div class="dash-update"><span class="dash-state" data-dash="state" role="status" aria-live="polite">正在获取运行快照…</span><span data-dash="updated">尚未收到数据</span></div></header>
-      <div class="dash-toolbar"><div class="dash-windows" role="group" aria-label="统计窗口">${[5, 15, 60].map(value => `<button type="button" class="btn" data-window="${value}" aria-pressed="${value === 15}">${value} 分钟</button>`).join('')}</div><div class="dash-controls"><button type="button" class="btn" data-dash="pause" aria-pressed="false">暂停更新</button><button type="button" class="btn" data-dash="refresh">立即刷新</button><button type="button" class="btn" data-dash="wide" aria-pressed="false">大屏视图</button></div></div>
+      <div class="dash-toolbar"><div class="dash-windows" role="group" aria-label="统计窗口">${[5, 15, 60].map(value => `<button type="button" class="btn" data-window="${value}" aria-pressed="${value === 15}">${value} 分钟</button>`).join('')}</div><details class="dash-options"><summary>更新与视图</summary><div class="dash-controls"><button type="button" class="btn" data-dash="pause" aria-pressed="false">暂停更新</button><button type="button" class="btn" data-dash="refresh">立即刷新</button><button type="button" class="btn" data-dash="wide" aria-pressed="false">大屏视图</button></div></details></div>
       <p class="dash-feedback" data-dash="feedback" role="status" aria-live="polite"></p>
       <div class="dash-kpis" aria-label="核心运行指标">${[['p95', 'P95 请求延迟', 'ms', '直方图桶上界估计'], ['requests', '窗口请求量', '次', 'JSON 控制面请求'], ['errors', '服务端错误', '次 / 5xx', '不含媒体流与图片'], ['heap', 'Go 堆已分配', 'MiB', '非进程 RSS / 内存上限']].map(([key, name, unit, note]) => `<article class="dash-kpi dash-kpi-${key}"><h3>${name}</h3><p><strong data-dash="${key}">—</strong><span>${unit}</span></p><small data-dash="${key}-note">${note}</small></article>`).join('')}</div>
       <div class="dash-charts"><section class="dash-panel" aria-labelledby="dash-traffic-title"><div class="dash-panel-head"><div><p class="dash-kicker">TRAFFIC</p><h3 id="dash-traffic-title">请求与服务端错误</h3></div><span>次 / 分钟</span></div><div class="dash-legend"><span class="dash-key dash-key-blue">请求</span><span class="dash-key dash-key-amber">5xx 错误</span></div><div class="dash-chart" data-dash="traffic">尚未收到数据</div></section>
@@ -85,8 +85,8 @@
       text('heap', decimal(data.runtime.heap_alloc_bytes / 1048576));
       text('updated', `快照 ${clock(data.generated_at)}`);
       text('window-info', `窗口 ${clock(data.window_start)} — ${clock(data.window_end)} · ${data.window_minutes} 分钟 · 浏览器本地时间 · 实例 ${data.instance_id}`);
-      html('traffic', chart(data.series, [{ key: 'requests', tone: 'blue' }, { key: 'errors_5xx', tone: 'amber', dashed: true }], '次', '逐分钟请求与 5xx 错误趋势'));
-      html('latency', chart(data.series, [{ key: 'p95_ms', tone: 'cyan' }, { key: 'p50_ms', tone: 'muted', dashed: true }], '毫秒', '逐分钟 P95 与 P50 延迟趋势'));
+      html('traffic', chart(data.series, [{ key: 'requests', tone: 'blue' }, { key: 'errors_5xx', tone: 'amber', dashed: true }], '次', '逐分钟请求与 5xx 错误趋势', node('traffic').getBoundingClientRect?.().width || 646));
+      html('latency', chart(data.series, [{ key: 'p95_ms', tone: 'cyan' }, { key: 'p50_ms', tone: 'muted', dashed: true }], '毫秒', '逐分钟 P95 与 P50 延迟趋势', node('latency').getBoundingClientRect?.().width || 646));
       html('samples', data.series.map(point => `<tr><th scope="row">${escape(clock(point.start))}${point.observed ? '' : ' · 无观测'}</th><td>${count(point.requests)}</td><td>${count(point.errors_4xx)}</td><td>${count(point.errors_5xx)}</td><td>${latency(point.p50_ms, point.p50_overflow)}</td><td>${latency(point.p95_ms, point.p95_overflow)}</td></tr>`).join(''));
       if (mediaInstance !== data.instance_id) { mediaSnapshot = null; mediaInstance = data.instance_id; }
       const media = data.media;
@@ -104,7 +104,7 @@
       text('uptime', `运行 ${duration(data.runtime.uptime_seconds)}`);
       html('runtime', [['Goroutines', count(data.runtime.goroutines)], ['Go 堆使用', `${decimal(data.runtime.heap_inuse_bytes / 1048576)} MiB`], ['Go 向系统申请', `${decimal(data.runtime.go_sys_bytes / 1048576)} MiB`], ['GC 次数', count(data.runtime.num_gc)]].map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join(''));
       text('running', `· ${count(data.tasks.running)} 项执行中`);
-      html('tasks', data.tasks.recent.length ? `<ul class="dash-task-list">${data.tasks.recent.slice(0, 10).map(task => `<li><div><strong>${escape(kinds[task.kind] || task.kind || '任务')}</strong><small>${escape(clock(task.started_at))} · ${task.ended_at ? escape(clock(task.ended_at)) : '尚未结束'}</small></div><span class="dash-task-state">${escape(states[task.status] || task.status || '未知')}</span></li>`).join('')}</ul>` : '<p class="dash-note">暂无任务记录</p>');
+      html('tasks', data.tasks.recent.length ? `<ul class="dash-task-list">${data.tasks.recent.slice(0, 10).map(task => `<li><div><strong>${escape(kinds[task.kind] || task.kind || '任务')}</strong><small>${escape(clock(task.started_at))} · ${task.ended_at ? escape(clock(task.ended_at)) : '尚未结束'}</small></div><span class="dash-task-state" data-state="${escape(task.status)}">${escape(states[task.status] || task.status || '未知')}</span></li>`).join('')}</ul>` : '<p class="dash-note">暂无任务记录</p>');
     }
     function cancelRead() {
       serial++; reading = false;
@@ -185,9 +185,16 @@
     }));
     function stop() {
       if (!active) return;
-      active = false; cancelRead(); setWide(false);
+      active = false; resize?.disconnect(); cancelRead(); setWide(false);
       doc.removeEventListener('visibilitychange', onVisibility); doc.removeEventListener('fullscreenchange', onFullscreen); doc.removeEventListener('keydown', onKey);
     }
+    let chartWidth = '';
+    const resize = typeof global.ResizeObserver === 'function' ? new global.ResizeObserver(() => {
+      const width = [node('traffic').clientWidth, node('latency').clientWidth].join(':');
+      if (width !== chartWidth) { chartWidth = width; if (current() && snapshot) global.requestAnimationFrame(() => { if (current()) patch(snapshot); }); }
+    }) : null;
+    resize?.observe(node('traffic'));
+    resize?.observe(node('latency'));
     doc.addEventListener('visibilitychange', onVisibility); doc.addEventListener('fullscreenchange', onFullscreen); doc.addEventListener('keydown', onKey);
     if (doc.hidden) status('页面在后台 · 尚未读取'); else void read(false);
     return stop;

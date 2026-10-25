@@ -12,9 +12,10 @@ function section(start, end) {
   assert.ok(from >= 0 && to > from);
   return source.slice(from, to);
 }
-function sandbox(values) {
+function sandbox(values = {}) {
   return vm.createContext({ URLSearchParams, AbortController, token: 'fixture-token', me: null,
     TRANSLATE_HINT: '翻译来源提示',
+    pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 页面清理会调用磁盘日志轮询的停止函数；被截取的代码段不包含该定义。
     stopLogsPolling() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
@@ -2344,12 +2345,83 @@ test('手动执行禁调度的翻译计划也必须确认范围，保持enabled�
   const box = sandbox({ id: '42', items: [task], TRANSLATE_HINT: 'source hint', accepted: false,
     el: { disabled: false, addEventListener(_, fn) { click = fn; } },
     confirm: text => { confirmations.push(text); return box.accepted; },
-    api: async (url, options) => calls.push({ url, ...options }), toast: message => messages.push(message) });
+    gen: 1, pageGen: 1, scheduledRunHolds: new Map(), scheduledWatchStop: null,
+    document: { querySelector: () => ({ textContent: '', isConnected: true }) },
+    setTimeout: () => 1, clearTimeout() {}, renderTaskLog: async () => {},
+    api: async (url, options) => { calls.push({ url, ...options }); return {}; }, toast: message => messages.push(message) });
   vm.runInContext(section('function translationPayload(', 'function translationWidget('), box);
-  vm.runInContext(section("      el.addEventListener('click', async () => {\n        if (el.disabled)", "    } else if (role === 'edit')"), box);
+  vm.runInContext(section('      const holdKey =', "    } else if (role === 'edit')"), box);
   await click(); assert.equal(calls.length, 0); assert.match(confirmations[0], /媒体库 7/); assert.match(confirmations[0], /plot/); assert.match(confirmations[0], /20/);
   box.accepted = true; await click(); assert.equal(calls[0].url, '/scheduled/42/run'); assert.equal(task.enabled, false);
-  task.params = '[]'; await click(); assert.equal(calls.length, 1); assert.match(messages.at(-1), /参数无法确认/);
+  box.scheduledRunHolds.clear(); box.el.disabled = false;
+  task.params = '[]'; const before = calls.filter(c => c.url.endsWith('/run')).length;
+  await click(); assert.equal(calls.filter(c => c.url.endsWith('/run')).length, before); assert.match(messages.at(-1), /参数无法确认/);
+});
+
+function scheduledRunFixture({ failure = 0, observeFailure = false, pending = false } = {}) {
+  let click, resolvePost, now = 1000, next = 0;
+  const timers = new Map(), calls = [], messages = [], signals = [];
+  const status = { textContent: '', isConnected: true }, cell = { innerHTML: '' };
+  const el = { disabled: false, isConnected: true, addEventListener(_, fn) { click = fn; } };
+  const box = sandbox({ id: '42', items: [{ id: 42, type: 'scan' }], gen: 1, el,
+    Date: { now: () => now }, scheduledRunHolds: new Map(), scheduledWatchStop: null,
+    setTimeout(fn, delay) { const id = ++next; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },
+    document: { querySelector: selector => selector === '#scheduled-observation' ? status : cell },
+    renderTaskLog: async options => { signals.push(options.signal); if (observeFailure) throw Error('offline'); },
+    api: async (url, options = {}) => { calls.push({ url, options });
+      if (url.endsWith('/run')) { if (pending) await new Promise(resolve => { resolvePost = resolve; }); if (failure) throw Object.assign(Error('rejected'), { status: failure }); return {}; }
+      return { items: [{ id: 42, last_status: 'success', last_message: 'latest', last_run_at: '' }] };
+    }, runBadge: value => value, esc: String, fmtTime: String, toast: message => messages.push(message) });
+  vm.runInContext(section('      const holdKey =', "    } else if (role === 'edit')"), box);
+  return { box, el, status, cell, calls, messages, signals, timers, click: () => click(), resolve: () => resolvePost(),
+    async flush() { for (let i = 0; i < 8; i++) await Promise.resolve(); },
+    async tick(delay) { now += delay; const due = [...timers].filter(([, t]) => t.delay === delay); for (const [id, timer] of due) { timers.delete(id); timer.fn(); } await this.flush(); } };
+}
+
+test('计划执行单次POST、接受不等于完成，刷新最近记录并有界观察和解锁', async () => {
+  const env = scheduledRunFixture({ pending: true }); const first = env.click(); await env.click();
+  assert.equal(env.calls.length, 1); assert.equal(env.el.disabled, true);
+  env.resolve(); await first; await env.flush(); await env.click();
+  assert.equal(env.calls.filter(c => c.url.endsWith('/run')).length, 1);
+  assert.match(env.status.textContent, /不等于执行成功/); assert.match(env.status.textContent, /不能确认/);
+  assert.match(env.cell.innerHTML, /latest/); assert.equal(env.calls.filter(c => c.url === '/scheduled').length, 1);
+  await env.tick(5000); assert.equal(env.calls.filter(c => c.url === '/scheduled').length, 2);
+  await env.tick(30000); assert.match(env.status.textContent, /观察已结束/);
+  assert.equal(env.signals[0].aborted, true); assert.equal(env.box.scheduledWatchStop, null);
+  const reads = env.calls.length; await env.tick(5000); assert.equal(env.calls.length, reads);
+  await env.tick(30001); assert.equal(env.el.disabled, false);
+});
+
+test('计划观察读取失败不误报执行失败，网络未知不重发，明确4xx才可重试', async () => {
+  const read = scheduledRunFixture({ observeFailure: true }); await read.click(); await read.flush();
+  assert.match(read.status.textContent, /观察读取失败/); assert.match(read.status.textContent, /不是执行失败/);
+  assert.equal(read.box.scheduledWatchStop, null); assert.equal(read.el.disabled, true);
+  for (const failure of [500, 409]) {
+    const env = scheduledRunFixture({ failure }); await env.click(); await env.flush();
+    assert.match(env.status.textContent, failure === 500 ? /结果未知/ : /未被接受/);
+    assert.equal(env.el.disabled, failure === 500); assert.equal(env.calls.length, 1);
+    if (failure === 500) { await env.click(); assert.equal(env.calls.length, 1); }
+  }
+});
+
+test('计划POST与观察跨页面或身份退出后不得更新反馈，停止时中断读取', async () => {
+  for (const change of [env => env.box.pageGen++, env => { env.box.localStorage = { getItem: () => 'other' }; }]) {
+    const env = scheduledRunFixture({ pending: true }); const request = env.click(); change(env); env.resolve(); await request;
+    assert.equal(env.status.textContent, ''); assert.equal(env.calls.length, 1); assert.equal(env.messages.length, 0);
+  }
+  const env = scheduledRunFixture(); await env.click(); await env.flush();
+  env.box.scheduledWatchStop(); assert.equal(env.signals[0].aborted, true);
+  const reads = env.calls.length; await env.tick(5000); assert.equal(env.calls.length, reads);
+});
+
+test('无浮层提示不查询空选择器，错误持久且成功不覆盖浮层错误', () => {
+  const nodes = [], feedback = { hidden: true, classList: { contains: () => true }, textContent: 'keep' };
+  const box = sandbox({ document: { createElement: () => ({ classList: { add() {} }, setAttribute() {}, addEventListener() {}, appendChild() {} }),
+    querySelector: selector => { assert.notEqual(selector, ''); return { querySelector: () => feedback }; } },
+    topOverlaySelector: () => '', toasts: { appendChild: node => nodes.push(node) }, setTimeout() { throw Error('error must persist'); } });
+  vm.runInContext(section('function toast(', '// debounce'), box); box.toast('persistent', 'error'); assert.equal(nodes.length, 1);
+  box.topOverlaySelector = () => '#detail-overlay'; box.setTimeout = () => {};
+  box.toast('later success'); assert.equal(feedback.textContent, 'keep');
 });
 
 // 增量扫描：只模拟DOM/API/时钟，不访问真实库，不自动允许空库删除。

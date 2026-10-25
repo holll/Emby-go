@@ -47,7 +47,23 @@ function toast(message, type = 'ok') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
   el.textContent = message;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  const selector = typeof topOverlaySelector === 'function' ? topOverlaySelector() : '';
+  const overlay = selector ? document.querySelector(selector) : null;
+  const feedback = overlay?.querySelector('.overlay-feedback');
+  if (feedback && (type === 'error' || !feedback.classList.contains('is-error'))) {
+    feedback.hidden = false;
+    feedback.textContent = message;
+    feedback.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    feedback.classList.toggle('is-error', type === 'error');
+  }
   toasts.appendChild(el);
+  if (type === 'error') {
+    const dismiss = document.createElement('button');
+    dismiss.className = 'btn btn-sm'; dismiss.textContent = '关闭提示';
+    dismiss.addEventListener('click', () => el.remove()); el.appendChild(dismiss);
+    return;
+  }
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 3200);
 }
 
@@ -163,6 +179,8 @@ function setMeta(name) {
   crumbEl.textContent = meta.crumb;
   document.querySelectorAll('.nav-item').forEach(btn => {
     btn.classList.toggle('is-active', btn.dataset.page === name);
+    if (btn.dataset.page === name) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
   });
 }
 
@@ -789,6 +807,28 @@ function renderEditRecovery(panel, id, result, onRecovered, isCurrent) {
 /* 遮罩焦点：z-index 顺序与 Esc/Tab 行为一致（FE-04）。 */
 const overlayFocusStack = [];
 const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay'];
+let overlayBackground = null;
+function syncOverlayIsolation() {
+  const top = topOverlaySelector();
+  if (!document.body?.style) return;
+  if (top && !overlayBackground) {
+    overlayBackground = { overflow: document.body.style.overflow, nodes: [] };
+    for (const node of document.body.children || []) {
+      if (OVERLAY_LAYERS.includes('#' + node.id) || node.id === 'toasts' || node.tagName === 'SCRIPT') continue;
+      overlayBackground.nodes.push([node, node.inert]); node.inert = true;
+    }
+    document.body.style.overflow = 'hidden';
+  }
+  for (const selector of OVERLAY_LAYERS) {
+    const node = document.querySelector(selector);
+    if (node) node.inert = !!top && selector !== top;
+  }
+  if (!top && overlayBackground) {
+    for (const [node, inert] of overlayBackground.nodes) node.inert = inert;
+    document.body.style.overflow = overlayBackground.overflow;
+    overlayBackground = null;
+  }
+}
 
 function overlayVisible(selector) {
   const overlay = document.querySelector(selector);
@@ -823,6 +863,11 @@ function overlayContains(overlay, element) {
 function overlayPush(selector) {
   const overlay = document.querySelector(selector);
   if (!overlay) return;
+  syncOverlayIsolation();
+  if (typeof overlay.querySelector === 'function' && !overlay.querySelector('.overlay-feedback')) {
+    const feedback = document.createElement('p'); feedback.className = 'overlay-feedback'; feedback.hidden = true;
+    overlay.firstElementChild?.prepend(feedback);
+  }
   const active = document.activeElement;
   const trigger = active && active !== document.body ? active : null;
   if (!overlayFocusStack.some(entry => entry.selector === selector)) overlayFocusStack.push({ selector, trigger });
@@ -841,6 +886,7 @@ function overlayFocusFirst(selector) {
 }
 
 function overlayPop(selector) {
+  syncOverlayIsolation();
   for (let i = overlayFocusStack.length - 1; i >= 0; i--) {
     if (overlayFocusStack[i].selector !== selector) continue;
     const { trigger } = overlayFocusStack.splice(i, 1)[0];
@@ -883,7 +929,9 @@ async function openDetail(item) {
   const gen = pageGen;
   const session = ++detailGen;
   const isCurrent = () => gen === pageGen && session === detailGen;
-  detailDrawer.innerHTML = '<div class="detail-body"><p class="hint">加载中…</p></div>';
+  const shell = body => `<div class="detail-toolbar"><button id="detail-close" class="icon-btn" aria-label="关闭详情 (Esc)">✕</button></div><p class="overlay-feedback" hidden></p><div id="detail-content">${body}</div>`;
+  detailDrawer.innerHTML = shell('<div class="detail-body" role="status">加载中…</div>');
+  document.querySelector('#detail-close').addEventListener('click', closeDetail);
   detailOverlay.hidden = false;
   overlayPush('#detail-overlay');
   let data;
@@ -891,7 +939,8 @@ async function openDetail(item) {
     data = await api(`/items/${item.id}/detail`);
   } catch (error) {
     if (!isCurrent()) return;
-    detailDrawer.innerHTML = `<div class="detail-body"><p class="hint">${esc(error.message || error)}</p></div>`;
+    document.querySelector('#detail-content').innerHTML = `<div class="detail-body"><p role="alert">${esc(error.message || error)}</p><button id="detail-retry" class="btn">重试加载</button></div>`;
+    document.querySelector('#detail-retry').addEventListener('click', () => openDetail(item));
     return;
   }
   if (!isCurrent()) return;
@@ -915,10 +964,9 @@ async function openDetail(item) {
   const lockedFields = data.locked_fields || [];
   const lockedNames = new Set(lockedFields.map(name => name.toLowerCase()));
 
-  detailDrawer.innerHTML = `
+  document.querySelector('#detail-content').innerHTML = `
     <div class="detail-hero">
       ${backdrop ? `<img class="detail-backdrop" src="${esc(backdrop)}"${backdropSrcset ? ` srcset="${esc(backdropSrcset)}"` : ''} alt="">` : ''}
-      <button id="detail-close" class="icon-btn detail-close" title="关闭 (Esc)">✕</button>
       <div class="detail-hero-body">
         ${poster ? `<img class="detail-poster" width="104" height="156" src="${esc(poster)}"${posterSrcset ? ` srcset="${esc(posterSrcset)}"` : ''} alt="">` : ''}
         <div class="detail-hero-text">
@@ -1030,7 +1078,6 @@ async function openDetail(item) {
       </section>
     </div>`;
 
-  document.querySelector('#detail-close').addEventListener('click', closeDetail);
   const playBtn = document.querySelector('#detail-play');
   if (playBtn) playBtn.addEventListener('click', () => { closeDetail(); openPlayer(item); });
   document.querySelector('#detail-probe').addEventListener('click', async () => {
@@ -1543,12 +1590,15 @@ function renderSelfPassword() {
 
 /* ---------------------------------------------------------------- 任务日志 */
 // 原独立的「任务」页已并入计划任务页下半部分：这里只负责渲染日志区块 + 绑定刷新/立即扫描。
-async function renderTaskLog() {
+async function renderTaskLog(options = {}) {
   const box = document.querySelector('#task-log');
+  const gen = pageGen;
+  const current = () => gen === pageGen && document.querySelector('#task-log') === box && (!options.isCurrent || options.isCurrent());
   if (!box) return;
   let data;
-  try { data = await api('/tasks'); }
-  catch (e) { box.innerHTML = `<p class="hint" style="color:var(--danger)">${esc(e.message)}</p>`; return; }
+  try { data = await api('/tasks', options.signal ? { signal: options.signal } : {}); }
+  catch (e) { if (current()) box.innerHTML = `<p role="alert">${esc(e.message)}</p>`; if (options.isCurrent) throw e; return; }
+  if (!current()) return;
   const running = data.running;
   const items = data.items || [];
   const runLabel = s => RUN_STATUS_TEXT[s] || s;
@@ -2141,8 +2191,14 @@ const CRON_PRESETS = [
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
 const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译' };
-const RUN_STATUS_TEXT = { success: '成功', failed: '失败', skipped: '跳过', running: '进行中' };
+const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
+let scheduledFocus = null;
+let scheduledWatchStop = null;
+let scheduledRender = 0;
+// A run endpoint acknowledges dispatch only: suppress repeat submissions during the
+// bounded observation window, including same-page redraws. Never infer completion.
+const scheduledRunHolds = new Map();
 let scheduledEditId = null; // 正在编辑的任务 id（null = 新建）
 
 // 后端时间统一为 RFC3339（UTC），这里转成本地可读形式展示。
@@ -2181,9 +2237,12 @@ function scheduledFormParams(kind, editing, stored, visible) {
 }
 
 async function pageScheduled() {
-  const gen = pageGen;
+  scheduledWatchStop?.(); scheduledWatchStop = null;
+  const render = ++scheduledRender;
+  const gen = pageGen, identity = token;
   const [data, libs] = await Promise.all([api('/scheduled'), api('/libraries')]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
+  if (render !== scheduledRender) return;
   const items = data.items || [];
   const types = { ...TASK_TYPE_TEXT, ...(data.types || {}) };
   const libraries = libs.items || [];
@@ -2204,17 +2263,17 @@ async function pageScheduled() {
         <div class="panel-actions"><button id="sched-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button></div>
       </div>
       ${items.length ? `
-        <div class="table-wrap"><table>
+        <div class="table-wrap scheduled-table"><table>
           <thead><tr><th>名称</th><th>类型</th><th>表达式</th><th>下次执行</th><th>上次结果</th><th>启用</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${items.map(item => `<tr>
-            <td><strong class="title">${esc(item.name)}</strong></td>
-            <td><span class="protocol">${esc(TASK_TYPE_TEXT[item.type] || item.type)}</span></td>
-            <td class="mono">${esc(item.cron)}</td>
-            <td class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
-            <td>${runBadge(item.last_status)}
+            <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
+            <td data-label="类型"><span class="protocol">${esc(TASK_TYPE_TEXT[item.type] || item.type)}</span></td>
+            <td data-label="表达式" class="mono">${esc(item.cron)}</td>
+            <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
+            <td data-label="上次结果" data-scheduled-result="${esc(item.id)}">${runBadge(item.last_status)}
               <small class="hint" style="margin:2px 0 0;display:block">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
-            <td><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"${item.enabled ? ' checked' : ''}><i></i></label></td>
-            <td><div class="row-actions">
+            <td data-label="启用"><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"${item.enabled ? ' checked' : ''}><i></i></label></td>
+            <td data-label="操作"><div class="row-actions">
               <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="立即执行一次">${icon('play')}<span>执行</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>
               <button class="icon-btn danger" data-role="del" data-id="${esc(item.id)}" title="删除">${icon('trash')}</button>
@@ -2280,7 +2339,7 @@ async function pageScheduled() {
           <button id="task-scan" class="btn btn-accent btn-sm">${icon('film')}<span>立即扫描</span></button>
         </div>
       </div>
-      <div id="task-log"><p class="hint">加载中…</p></div>
+      <p id="scheduled-observation" role="status" aria-live="polite"></p><div id="task-log"><p class="hint">加载中…</p></div>
     </section>`;
 
   const typeEl = document.querySelector('#s-type');
@@ -2355,8 +2414,11 @@ async function pageScheduled() {
     cronEl.value = button.dataset.cron;
     checkCron();
   }));
+  if (scheduledFocus) {
+    document.querySelector(scheduledFocus)?.focus(); scheduledFocus = null;
+  }
   if (document.querySelector('#sched-cancel')) {
-    document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledEditId = null; refreshPage(pageScheduled, gen); });
+    document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledFocus = `[data-role="edit"][data-id="${editing.id}"]`; scheduledEditId = null; refreshPage(pageScheduled, gen); });
   }
   document.querySelector('#sched-refresh').addEventListener('click', pageScheduled);
   // 任务日志区块（原「任务」页并入这里）：立即扫描用顶部的全局扫描链路，刷新只重绘日志。
@@ -2405,14 +2467,18 @@ async function pageScheduled() {
     try {
       if (editing) {
         await api('/scheduled/' + editing.id, { method: 'PATCH', headers: { 'If-Match': editing.config_etag }, body: JSON.stringify(body) });
+        if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
         toast('计划任务已保存');
         scheduledEditId = null;
       } else {
         await api('/scheduled', { method: 'POST', body: JSON.stringify(body) });
+        if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
         toast(`计划任务「${body.name}」已创建`);
       }
+      scheduledFocus = editing ? `[data-role="edit"][data-id="${editing.id}"]` : '#scheduled-editor > summary';
       refreshPage(pageScheduled, gen);
     } catch (e) {
+      if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
       toast(e.message, 'error');
       if (e.status === 412) {
         if (conflict) { conflict.hidden = false; conflict.textContent = '配置已被其他操作修改。当前输入未保存，请先复制需要保留的内容，再刷新核对；不会自动覆盖。'; }
@@ -2430,8 +2496,24 @@ async function pageScheduled() {
         catch (e) { toast(e.message, 'error'); if (editing) el.checked = !el.checked; else refreshPage(pageScheduled, gen); }
       });
     } else if (role === 'run') {
+      const holdKey = `${identity}:${id}`;
+      const held = () => (scheduledRunHolds.get(holdKey) || 0) > Date.now();
+      const release = () => {
+        if (held()) return;
+        scheduledRunHolds.delete(holdKey);
+        if (el.isConnected) el.disabled = false;
+      };
+      if (held()) {
+        el.disabled = true;
+        // A redraw during the POST must not unlock its replacement button.
+        const unlock = () => {
+          if (!el.isConnected || gen !== pageGen || render !== scheduledRender) return;
+          if (held()) setTimeout(unlock, 1000); else release();
+        };
+        setTimeout(unlock, 1000);
+      }
       el.addEventListener('click', async () => {
-        if (el.disabled) return;
+        if (el.disabled || held()) return;
         const task = items.find(item => String(item.id) === String(id));
         if (task?.type === 'translate') {
           let p;
@@ -2444,12 +2526,63 @@ async function pageScheduled() {
           if (!confirm(`手动执行翻译计划「${task.name}」：${range}，字段 ${(p.fields || ['title']).join('/')}，数量 ${p.limit || '不限'}。\n${TRANSLATE_HINT}\n本次执行不改变自动调度开关。确认？`)) return;
         }
         el.disabled = true;
-        try { await api(`/scheduled/${id}/run`, { method: 'POST' }); toast('已触发执行，结果见下方任务日志；翻译详情可在独立翻译页查看'); }
-        catch (e) { toast(e.message, 'error'); }
-        finally { el.disabled = false; }
+        scheduledRunHolds.set(holdKey, Infinity);
+        try {
+          await api(`/scheduled/${id}/run`, { method: 'POST' });
+          scheduledRunHolds.set(holdKey, Date.now() + 30000);
+          setTimeout(release, 30001);
+          if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
+          const status = document.querySelector('#scheduled-observation');
+          status.textContent = '执行请求已接受，不等于执行成功。正在观察最新记录（最多 30 秒）；接口没有返回执行 ID，不能确认记录与本次请求的关联。';
+          scheduledWatchStop?.();
+          let stopped = false, timer = null, attempts = 0;
+          const controller = new AbortController();
+          const deadline = setTimeout(() => {
+            if (current()) status.textContent = '请求已接受；30 秒观察已结束。以上为最新记录，不保证属于本次执行；请手动刷新，独立翻译详情请到翻译页查看。';
+            scheduledWatchStop?.();
+          }, 30000);
+          const stop = () => {
+            stopped = true; clearTimeout(timer); clearTimeout(deadline); controller.abort();
+            if (scheduledWatchStop === stop) scheduledWatchStop = null;
+          };
+          scheduledWatchStop = stop;
+          const current = () => !stopped && gen === pageGen && render === scheduledRender && token === identity && localStorage.getItem('emby_token') === identity && status.isConnected;
+          const observe = async () => {
+            if (!current()) return;
+            attempts++;
+            try {
+              await renderTaskLog({ signal: controller.signal, isCurrent: current });
+              if (!current()) return;
+              const latest = await api('/scheduled', { signal: controller.signal });
+              if (!current()) return;
+              const result = latest.items?.find(item => String(item.id) === String(id));
+              const cell = document.querySelector(`[data-scheduled-result="${id}"]`);
+              if (result && cell) cell.innerHTML = `${runBadge(result.last_status)}<small class="hint">${esc(fmtTime(result.last_run_at))} · ${esc(result.last_message || '')}</small>`;
+            } catch (error) {
+              if (!current()) return;
+              status.textContent = `请求已接受；观察读取失败：${error.message}。不是执行失败，可手动刷新记录。`;
+              scheduledWatchStop?.(); return;
+            }
+            if (!current()) return;
+            if (attempts < 7) timer = setTimeout(observe, 5000);
+            else status.textContent = '请求已接受；30 秒观察已结束。以上为最新记录，不保证属于本次执行；请手动刷新，独立翻译详情请到翻译页查看。';
+          };
+          void observe();
+          toast('执行请求已接受；尚未确认成功');
+        }
+        catch (e) {
+          if (e.status >= 400 && e.status < 500) scheduledRunHolds.delete(holdKey);
+          else { scheduledRunHolds.set(holdKey, Date.now() + 30000); setTimeout(release, 30001); }
+          if (gen === pageGen && render === scheduledRender && token === identity && localStorage.getItem('emby_token') === identity) {
+            toast(e.message, 'error');
+            const status = document.querySelector('#scheduled-observation');
+            if (status) status.textContent = e.status >= 400 && e.status < 500 ? '执行请求未被接受，请核对错误后重试。' : '执行请求结果未知；不会自动重发。请刷新记录核对，30 秒内禁止重复触发。';
+          }
+        }
+        finally { if (!held()) el.disabled = false; }
       });
     } else if (role === 'edit') {
-      el.addEventListener('click', () => { scheduledEditId = Number(id); refreshPage(pageScheduled, gen); });
+      el.addEventListener('click', () => { scheduledFocus = '#s-name'; scheduledEditId = Number(id); refreshPage(pageScheduled, gen); });
     } else if (role === 'del') {
       el.addEventListener('click', async () => {
         if (!confirm('删除该计划任务？已产生的影片数据不受影响。')) return;
@@ -2737,6 +2870,7 @@ let pageGen = 0;
 async function page(name) {
   // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
   createdAPIKey = null; // 导航销毁仅在创建页暂存的管理员密钥原文。
+  if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
@@ -2754,6 +2888,7 @@ async function page(name) {
   if (!fn) { content.innerHTML = `<div class="panel">${empty('模块即将开放', '请先使用上方导航。')}</div>`; return; }
   try {
     await fn();
+    if (gen === pageGen && typeof titleEl !== 'undefined') { titleEl.setAttribute?.('tabindex', '-1'); titleEl.focus?.({ preventScroll: true }); }
   } catch (error) {
     // 已经切到别的页面了，这个错误属于上一次导航，别把新页面替换成错误页。
     if (gen !== pageGen) return;
@@ -3142,6 +3277,7 @@ async function runScan(libraryId) {
 }
 
 function clearSessionView() {
+  if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   createdAPIKey = null;
   settingsCategory = 'account';

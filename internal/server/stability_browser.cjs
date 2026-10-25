@@ -54,10 +54,11 @@ async function main() {
     assert.ok(liveSnapshot.requests.total>0,'real login/JSON requests are measured');
     assert.ok(liveSnapshot.requests.p95_ms>0 || liveSnapshot.requests.p95_overflow,'real latency samples, not demo values');
     assert.equal(liveSnapshot.series.length,15);
-    for(const width of [1440,768,390,360]){
+    for(const width of [1440,768,390,360,320]){
       await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<860});
-      const state=await evaluate("(()=>{const r=document.querySelector('#overview-dashboard');return {root:!!r,overflow:document.documentElement.scrollWidth>innerWidth+1,p95:document.querySelector('[data-dash=\"p95\"]').textContent,charts:r.querySelectorAll('svg[role=\"img\"]').length,controls:[...r.querySelectorAll('.dash-toolbar button')].map(b=>{const q=b.getBoundingClientRect();return {width:q.width,height:q.height}}),errors:__errors.slice()};})()");
-      assert.equal(state.root,true);assert.equal(state.overflow,false,'dashboard width '+width);assert.notEqual(state.p95,'—');assert.equal(state.charts,2);assert.deepEqual(state.errors,[]);
+      await wait("[...document.querySelectorAll('.dash-axis')].length>0 && [...document.querySelectorAll('.dash-axis')].every(n=>parseFloat(getComputedStyle(n).fontSize)*n.getScreenCTM().a>=11.99)");
+      const state=await evaluate("(()=>{const r=document.querySelector('#overview-dashboard');return {root:!!r,overflow:document.documentElement.scrollWidth>innerWidth+1,p95:document.querySelector('[data-dash=\"p95\"]').textContent,charts:r.querySelectorAll('svg[role=\"img\"]').length,axes:[...r.querySelectorAll('.dash-axis')].map(n=>parseFloat(getComputedStyle(n).fontSize)*n.getScreenCTM().a),controls:[...r.querySelectorAll('.dash-toolbar button')].filter(b=>b.getClientRects().length).map(b=>{const q=b.getBoundingClientRect();return {width:q.width,height:q.height}}),errors:__errors.slice()};})()");
+      assert.equal(state.root,true);assert.equal(state.overflow,false,'dashboard width '+width);assert.notEqual(state.p95,'—');assert.equal(state.charts,2);assert.ok(state.axes.every(size=>size>=11.99),'axis CSS size '+width);assert.deepEqual(state.errors,[]);
       assert.ok(state.controls.every(b=>b.width>=43.99&&b.height>=43.99),'dashboard touch targets '+width);
     }
     await evaluate("document.querySelector('[data-window=\"5\"]').click()");
@@ -87,6 +88,22 @@ async function main() {
     assert.match(await evaluate("document.querySelector('#content').innerText"),/Mobile stability sample/);
     const menu=await evaluate("(()=>{const b=document.querySelector('#nav-toggle');b.focus();b.click();const opened=b.getAttribute('aria-expanded')==='true';document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return {opened,closed:b.getAttribute('aria-expanded')==='false',restored:document.activeElement===b,overflow:document.documentElement.scrollWidth>innerWidth+1,errors:__errors};})()");
     assert.equal(menu.opened,true);assert.equal(menu.closed,true);assert.equal(menu.restored,true);assert.equal(menu.overflow,false);assert.deepEqual(menu.errors,[]);
+    await evaluate("page('scheduled')");
+    await wait("document.querySelector('#sched-form')");
+    await evaluate(`(()=>{document.querySelector('#scheduled-editor').open=true;document.querySelector('#s-name').value='Isolated mobile schedule';document.querySelector('#s-type').value='scan';document.querySelector('#s-type').dispatchEvent(new Event('change'));document.querySelector('#s-cron').value='0 3 * * *';document.querySelector('#s-enabled').checked=false;document.querySelector('#sched-form').requestSubmit();})()`);
+    await wait("document.querySelector('[data-role=\"run\"]')");
+    await evaluate("document.querySelector('[data-role=\"edit\"]').click()");
+    await wait("document.activeElement.id==='s-name'");
+    await evaluate("document.querySelector('#s-name').value='Updated isolated schedule';document.querySelector('#sched-form').requestSubmit()");
+    await wait("document.querySelector('.scheduled-table').textContent.includes('Updated isolated schedule')");
+    assert.equal(await evaluate("document.activeElement.dataset.role"),'edit');
+    await evaluate("document.querySelector('[data-role=\"run\"]').click()");
+    await wait("document.querySelector('#scheduled-observation').textContent.includes('请求已接受')");
+    assert.match(await evaluate("document.querySelector('#scheduled-observation').textContent"),/不等于执行成功/);
+    await wait("document.querySelector('#task-log').textContent.includes('成功') || document.querySelector('#task-log').textContent.includes('进行中')");
+    await evaluate("page('overview')");
+    await wait("document.querySelector('#overview-dashboard')");
+    assert.equal(await evaluate("scheduledWatchStop"),null);
     if(process.env.EMBY_DASHBOARD_ARTIFACT_DIR){
       // Optional review artifacts contain only this temporary test service, not demo telemetry or production data.
       const output=path.resolve(process.env.EMBY_DASHBOARD_ARTIFACT_DIR);fs.mkdirSync(output,{recursive:true});
@@ -101,7 +118,7 @@ async function main() {
         fs.writeFileSync(path.join(output,'dashboard-'+width+'.png'),Buffer.from(shot.data,'base64'));
       }
     }
-    console.log('PASS real HTTP dashboard at 1440/768/390/360px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall');
+    console.log('PASS real HTTP dashboard at 1440/768/390/360/320px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall');
   } finally {
     process.removeListener('SIGINT', interrupted);
     if(ws)ws.close();
