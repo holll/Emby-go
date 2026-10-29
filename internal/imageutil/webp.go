@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 
 	_ "image/jpeg"
 	_ "image/png"
@@ -30,10 +31,87 @@ const maxDecodePixels = 50_000_000 // 5000 万像素，约 8200×6100
 // errImageTooLarge 表示图片声明的像素数超出 maxDecodePixels。
 var errImageTooLarge = errors.New("imageutil: 图片尺寸超出上限")
 
+// errDecodePanic 表示标准库解码器在畸形输入上 panic 了（历史版本里 png/jpeg
+// 都出现过越界、除零这类崩溃）。它被当作普通解码失败处理：调用方回退原图。
+var errDecodePanic = errors.New("imageutil: 解码图片时崩溃")
+
+// decodeImage / decodeImageConfig 是 image.Decode / image.DecodeConfig 的
+// 包级接缝。存在的唯一目的是让测试能换成会 panic 的实现，从而验证下面的
+// recover 守卫真的生效（畸形图片并不保证每次都能触发标准库 panic）。
+var (
+	decodeImage       = image.Decode
+	decodeImageConfig = image.DecodeConfig
+)
+
+// maxPooledRGBABytes 单个 RGBA 缓冲进入池的容量上限。超过就交给 GC：
+// 4000×3000 的 RGBA 要 48 MB，常驻下来比每次重新分配更亏。
+const maxPooledRGBABytes = 8 << 20
+
+// maxStripBytes 一次转换的源图条带字节上限（1 MiB；1920 宽时约 136 行）。
+// 条带越小越省峰值内存，越大 draw.Draw 的调用开销越少。
+const maxStripBytes = 1 << 20
+
+// rgbaPool 复用缩略图管线的 RGBA 中转缓冲（源图条带 + 缩放目标）。
+// 池里的对象一律以「已归零的容量」形态存放，取用时由 resetRGBA 按本次
+// 尺寸重设 Rect/Stride 并截断 Pix，所以不会把上一张图的像素带进下一张。
+var rgbaPool = sync.Pool{
+	New: func() any { return new(image.RGBA) },
+}
+
+// getRGBA 取一块干净的 RGBA 画布：Rect=(0,0,width,height)、Stride=4*width、
+// len(Pix) == 4*Stride*height。归还用 putRGBA。
+func getRGBA(width, height int) *image.RGBA {
+	img, _ := rgbaPool.Get().(*image.RGBA)
+	return resetRGBA(img, width, height)
+}
+
+// resetRGBA 把缓冲整理成 width×height 的画布。
+//
+// image.RGBA 的不变式是 len(Pix) >= 4*Stride*Rect.Dy()，而池里取出的缓冲是
+// 上一次请求的形状，Stride 可能 != 4*width、Pix 可能更长或更短。所以必须
+// 显式重算 Stride、把 Pix 截到恰好 4*Stride*height，再改 Rect —— 只改 Rect
+// 不改 Stride 会让行下标错位，只靠截断不改 Stride 会让上一张图的残留像素
+// 从更宽的旧行里渗进本张图。
+func resetRGBA(img *image.RGBA, width, height int) *image.RGBA {
+	if img == nil {
+		img = new(image.RGBA)
+	}
+	stride := 4 * width
+	size := stride * height
+	if cap(img.Pix) < size {
+		img.Pix = make([]byte, size)
+	}
+	img.Pix = img.Pix[:size]
+	img.Stride = stride
+	img.Rect = image.Rect(0, 0, width, height)
+	return img
+}
+
+// putRGBA 把缓冲归还池里；过大的缓冲直接丢弃，避免大图把内存钉死在池中。
+func putRGBA(img *image.RGBA) {
+	if img == nil || cap(img.Pix) > maxPooledRGBABytes {
+		return
+	}
+	img.Rect = image.Rectangle{}
+	img.Stride = 0
+	img.Pix = img.Pix[:0]
+	rgbaPool.Put(img)
+}
+
 // decodeLimited 先按图片头校验尺寸，再回到流开头做真正的解码。
 // 调用方的上限只管字节数，这一层才是防解压炸弹的那道闸。
-func decodeLimited(rs io.ReadSeeker) (image.Image, error) {
-	config, _, err := image.DecodeConfig(rs)
+//
+// recover 的边界：只包「读头 + 解码」这两步，也就是唯一由不可信输入驱动的
+// 环节。Downscale/编码是自家代码，那里的 panic 属于真 bug，不该被原谅成
+// 「图片坏了」（media.go 的 leader defer 会保证 flight 不因此泄漏）。
+func decodeLimited(rs io.ReadSeeker) (img image.Image, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			img = nil
+			err = fmt.Errorf("%w: %v", errDecodePanic, r)
+		}
+	}()
+	config, _, err := decodeImageConfig(rs)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +125,7 @@ func decodeLimited(rs io.ReadSeeker) (image.Image, error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	img, _, err := image.Decode(rs)
+	img, _, err = decodeImage(rs)
 	return img, err
 }
 
@@ -106,21 +184,40 @@ func Thumbnail(srcPath string, maxWidth, maxHeight, quality int) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	scaled := Downscale(img, maxWidth, maxHeight)
-	if scaled == img {
+	scaled, release, ok := scalePooled(img, maxWidth, maxHeight)
+	if !ok {
 		return nil, nil
 	}
+	// 编码把像素读完之后才能归还缓冲：release 放在 defer 里，编码失败也不漏。
+	defer release()
 	return EncodeWebPBuffer(scaled, quality)
 }
 
 // Downscale 按盒子平均把图片缩小到不超过 maxWidth×maxHeight（宽高任一 <=0 表示该维度不限）。
 // 只缩小不放大：不需要缩小时原样返回。盒子平均在缩小时比双线性更少摩尔纹，
 // 且一次遍历即可完成，适合做缩略图。
+//
+// 这是「调用方持有结果」的公共形式：源图要转换时分配一份全尺寸 RGBA、目标图
+// 每次新分配。缩略图管线走 scalePooled，两者输出的像素完全一致。
 func Downscale(src image.Image, maxWidth, maxHeight int) image.Image {
 	bounds := src.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
-	if width <= 0 || height <= 0 {
+	targetWidth, targetHeight, ok := scaleTarget(width, height, maxWidth, maxHeight)
+	if !ok {
 		return src
+	}
+	// 转成 RGBA 后直接按下标取像素：逐像素走 image.Image 接口在缩略图尺寸下也偏慢。
+	source := toRGBA(src)
+	destination := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+	boxScale(source, destination, width, height, targetWidth, targetHeight, 0, targetHeight, 0)
+	return destination
+}
+
+// scaleTarget 按 maxWidth/maxHeight 算目标尺寸；不需要缩放（或源图尺寸非法）时
+// ok=false，调用方原样使用源图。
+func scaleTarget(width, height, maxWidth, maxHeight int) (targetWidth, targetHeight int, ok bool) {
+	if width <= 0 || height <= 0 {
+		return 0, 0, false
 	}
 	scale := 1.0
 	if maxWidth > 0 && width > maxWidth {
@@ -130,28 +227,39 @@ func Downscale(src image.Image, maxWidth, maxHeight int) image.Image {
 		scale = math.Min(scale, float64(maxHeight)/float64(height))
 	}
 	if scale >= 1 {
-		return src
+		return 0, 0, false
 	}
-	targetWidth := max(1, int(float64(width)*scale+0.5))
-	targetHeight := max(1, int(float64(height)*scale+0.5))
+	return max(1, int(float64(width)*scale+0.5)), max(1, int(float64(height)*scale+0.5)), true
+}
 
-	// 转成 RGBA 后直接按下标取像素：逐像素走 image.Image 接口在缩略图尺寸下也偏慢。
-	source := toRGBA(src)
-	destination := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
-	for y := range targetHeight {
-		startY, endY := y*height/targetHeight, (y+1)*height/targetHeight
-		if endY <= startY {
-			endY = startY + 1
-		}
+// rowSpan 是第 y 个输出行覆盖的源行区间 [start, end)，列方向同理见 colSpan。
+func rowSpan(y, height, targetHeight int) (int, int) {
+	start, end := y*height/targetHeight, (y+1)*height/targetHeight
+	if end <= start {
+		end = start + 1
+	}
+	return start, end
+}
+
+func colSpan(x, width, targetWidth int) (int, int) {
+	start, end := x*width/targetWidth, (x+1)*width/targetWidth
+	if end <= start {
+		end = start + 1
+	}
+	return start, end
+}
+
+// boxScale 把 src 的前 width×height 个像素按盒子平均缩进 dst 的 [yFrom, yTo) 行。
+// srcRowBase 是 src 第 0 行对应的源图行号：源图按条带转换时，一条条带只覆盖
+// 一段源行，条带内的行号要减去这个基准。dst 必须已按目标尺寸重置。
+func boxScale(src, dst *image.RGBA, width, height, targetWidth, targetHeight, yFrom, yTo, srcRowBase int) {
+	for y := yFrom; y < yTo; y++ {
+		startY, endY := rowSpan(y, height, targetHeight)
 		for x := range targetWidth {
-			startX, endX := x*width/targetWidth, (x+1)*width/targetWidth
-			if endX <= startX {
-				endX = startX + 1
-			}
+			startX, endX := colSpan(x, width, targetWidth)
 			var red, green, blue, alpha, count uint64
 			for sy := startY; sy < endY; sy++ {
-				// toRGBA 已把原点归零，行下标就是 sy*Stride。
-				row := source.Pix[sy*source.Stride:]
+				row := src.Pix[(sy-srcRowBase)*src.Stride:]
 				for sx := startX; sx < endX; sx++ {
 					offset := sx * 4
 					red += uint64(row[offset])
@@ -161,14 +269,56 @@ func Downscale(src image.Image, maxWidth, maxHeight int) image.Image {
 					count++
 				}
 			}
-			offset := y*destination.Stride + x*4
-			destination.Pix[offset] = uint8(red / count)
-			destination.Pix[offset+1] = uint8(green / count)
-			destination.Pix[offset+2] = uint8(blue / count)
-			destination.Pix[offset+3] = uint8(alpha / count)
+			offset := y*dst.Stride + x*4
+			dst.Pix[offset] = uint8(red / count)
+			dst.Pix[offset+1] = uint8(green / count)
+			dst.Pix[offset+2] = uint8(blue / count)
+			dst.Pix[offset+3] = uint8(alpha / count)
 		}
 	}
-	return destination
+}
+
+// scalePooled 是缩略图管线用的 Downscale：像素输出与 Downscale 逐字节一致，
+// 但中间缓冲（非 RGBA 源的转换缓冲、目标图）全部来自 sync.Pool。
+//
+// 非 RGBA 源不做「先整张转 RGBA」的全尺寸复制，而是按 maxStripBytes 切成源图
+// 条带：一次只把当前输出行需要的源行用 draw.Draw 转进条带再累加。draw.Draw
+// 是逐点运算，条带切分只影响内存占用，不影响任何一个像素的值。
+// 返回值 ok=false 表示无需缩放；release 必须调用（可能为 nil）。
+func scalePooled(src image.Image, maxWidth, maxHeight int) (scaled *image.RGBA, release func(), ok bool) {
+	bounds := src.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	targetWidth, targetHeight, ok := scaleTarget(width, height, maxWidth, maxHeight)
+	if !ok {
+		return nil, nil, false
+	}
+	destination := getRGBA(targetWidth, targetHeight)
+	// 解码器给的 *image.RGBA 已经是紧凑的 RGBA 视图，直接用，不再复制一份。
+	if rgba, isRGBA := src.(*image.RGBA); isRGBA {
+		boxScale(rgba, destination, width, height, targetWidth, targetHeight, 0, targetHeight, 0)
+		return destination, func() { putRGBA(destination) }, true
+	}
+
+	stripRows := max(1, maxStripBytes/(4*width))
+	var strip *image.RGBA
+	for y := 0; y < targetHeight; {
+		firstRow, _ := rowSpan(y, height, targetHeight)
+		last := y
+		for last < targetHeight {
+			_, end := rowSpan(last, height, targetHeight)
+			if last > y && end-firstRow > stripRows {
+				break
+			}
+			last++
+		}
+		_, bandEnd := rowSpan(last-1, height, targetHeight)
+		strip = resetRGBA(strip, width, bandEnd-firstRow)
+		// 条带首行对应源图的 firstRow 行：draw.Draw 逐点搬运，原点偏移量进 sp。
+		draw.Draw(strip, strip.Bounds(), src, image.Point{X: bounds.Min.X, Y: bounds.Min.Y + firstRow}, draw.Src)
+		boxScale(strip, destination, width, height, targetWidth, targetHeight, y, last, firstRow)
+		y = last
+	}
+	return destination, func() { putRGBA(strip); putRGBA(destination) }, true
 }
 
 // toRGBA 返回 RGBA 像素视图：已是 *image.RGBA 时直接复用，否则转换一次。

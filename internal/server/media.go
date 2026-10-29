@@ -244,7 +244,20 @@ func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 			return nil, false
 		}
 	}
-	data, ok := a.generateThumbnail(c, key, path, width, height, quality)
+	// leader 生成期间一旦 panic（解码器崩溃、编码器 bug），finishThumbFlight 就
+	// 不会执行：该 key 的 flight 永久残留、done 永不 close，之后所有同 key 请求
+	// 都阻塞在 <-flight.done 直到客户端 ctx 超时，这张图在进程生命周期内彻底
+	// 不可用。defer 保证注销一定发生（follower 拿 ok=false 走回退原图），
+	// 再把 panic 原样抛出，保留 monitor/日志对异常的记录。
+	data, ok := func() (data []byte, ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				a.finishThumbFlight(key, flight, nil, false)
+				panic(r)
+			}
+		}()
+		return a.generateThumbnail(c, key, path, width, height, quality)
+	}()
 	a.finishThumbFlight(key, flight, data, ok)
 	return data, ok
 }
