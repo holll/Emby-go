@@ -43,7 +43,7 @@ func TestSecondaryIndexQueryPlans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		if _, err := tx.Exec("INSERT INTO movies(library_id,source_path,status,title,created_at,updated_at) VALUES(?,?, 'success',?, '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
 			1+i%2, "/tmp/lib/f"+strconv.Itoa(i)+".strm", "标题 "+strconv.Itoa(i)); err != nil {
 			t.Fatal(err)

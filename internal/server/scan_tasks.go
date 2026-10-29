@@ -241,11 +241,9 @@ func (a *App) adminSubmitScan(c *gin.Context) {
 		c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode, "replayed": true})
 		return
 	}
-	a.workerWG.Add(1)
-	go func() {
-		defer a.workerWG.Done()
+	a.workerWG.Go(func() {
 		a.runAsyncScan(task.ID, task.LibraryID, mode, allowEmpty, marker)
-	}()
+	})
 	c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode})
 }
 

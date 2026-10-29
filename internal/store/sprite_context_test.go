@@ -91,7 +91,7 @@ func TestSpriteIndependentDatabaseWritersCAS(t *testing.T) {
 	}
 	close(start)
 	success, rejected := 0, 0
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		err := <-results
 		if err == nil {
 			success++

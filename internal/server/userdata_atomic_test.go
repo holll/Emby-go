@@ -31,7 +31,7 @@ func userSettingRequest(h http.Handler, route userSettingRoute, token string) *h
 }
 
 func TestUserSettingsAtomicAPI(t *testing.T) {
-	for op := 0; op < 3; op++ {
+	for op := range 3 {
 		for _, stage := range []string{"global", "library", "userdata", "commit"} {
 			t.Run(fmt.Sprintf("%d/%s", op, stage), func(t *testing.T) {
 				f := newAdminDeleteFixture(t)

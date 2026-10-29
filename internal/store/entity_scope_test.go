@@ -1,7 +1,7 @@
 package store
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -31,7 +31,7 @@ func TestEntityVisibleScopesNamesAndArt(t *testing.T) {
 	for _, kind := range []string{"Genre", "Tag", "Studio", "Person"} {
 		t.Run(kind, func(t *testing.T) {
 			got, err := s.EntityNamesVisible(kind, 0, []int64{public}, "Shared")
-			if err != nil || !reflect.DeepEqual(got, []string{"Common", "Public"}) {
+			if err != nil || !slices.Equal(got, []string{"Common", "Public"}) {
 				t.Fatalf("names=%v err=%v", got, err)
 			}
 			art, err := s.EntityPosterVisible(kind, "Common", 0, []int64{public}, "Shared")
@@ -53,7 +53,7 @@ func TestEntityVisibleScopesNamesAndArt(t *testing.T) {
 				}
 			}
 			got, err = s.EntityNamesVisible(kind, 0, nil, "*")
-			if err != nil || !reflect.DeepEqual(got, []string{"Common", "Public", "Secret"}) {
+			if err != nil || !slices.Equal(got, []string{"Common", "Public", "Secret"}) {
 				t.Fatalf("admin names=%v err=%v", got, err)
 			}
 		})

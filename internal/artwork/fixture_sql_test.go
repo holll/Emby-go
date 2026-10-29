@@ -27,7 +27,7 @@ func TestArtworkFixtureSQLBusyTimeoutPerConnection(t *testing.T) {
 	defer cancel()
 	// Hold both connections simultaneously, forcing a newly opened second
 	// connection rather than reusing one initialized by a single Exec.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		conn, err := db.Conn(ctx)
 		if err != nil {
 			t.Fatal(err)

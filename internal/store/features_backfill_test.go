@@ -9,7 +9,7 @@ import (
 func TestFeatureBackfillStatusAndCancel(t *testing.T) {
 	s, libID := newFeatureStore(t)
 	s.waitFeaturesReady()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		upsertFixtureMovie(t, s, libID, Movie{
 			LibraryID: libID, SourcePath: "/tmp/av/bf" + string(rune('a'+i)) + ".strm",
 			Status: "success", Title: "回填" + string(rune('a'+i)),

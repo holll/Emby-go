@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,9 +48,7 @@ func actorIndexVersions(t *testing.T, f indexedDeleteFixture) map[string]string 
 func assertActorIndexBumps(t *testing.T, f indexedDeleteFixture, before map[string]string, libs ...int64) {
 	t.Helper()
 	want := make(map[string]string)
-	for k, v := range before {
-		want[k] = v
-	}
+	maps.Copy(want, before)
 	keys := []string{"g:version"}
 	for _, id := range libs {
 		keys = append(keys, fmt.Sprintf("lib:%d:version", id))

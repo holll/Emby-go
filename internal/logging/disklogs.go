@@ -356,10 +356,7 @@ func readAfter(root *os.Root, files []string, cur diskCursor, limit int) (DiskLo
 				hasMore = true
 				break
 			}
-			n := int64(diskLogChunk)
-			if n > size-start {
-				n = size - start
-			}
+			n := min(int64(diskLogChunk), size-start)
 			if n > remain {
 				n = int64(remain)
 			}
@@ -472,10 +469,7 @@ func tailRefs(f *os.File, day string, end int64, limit int) ([]lineRef, int64, b
 	newlines := 0
 	data := make([]byte, 0, diskLogChunk)
 	for windowStart > 0 && newlines <= limit && total < diskLogScanBytes {
-		n := int64(diskLogChunk)
-		if n > windowStart {
-			n = windowStart
-		}
+		n := min(int64(diskLogChunk), windowStart)
 		if total+int(n) > diskLogScanBytes {
 			n = int64(diskLogScanBytes - total)
 		}
@@ -498,7 +492,7 @@ func tailRefs(f *os.File, day string, end int64, limit int) ([]lineRef, int64, b
 	completeEnd := windowStart + int64(lastNL) + 1
 	refs := make([]lineRef, 0, limit)
 	start := windowStart
-	for _, segment := range strings.Split(string(data[:lastNL]), "\n") {
+	for segment := range strings.SplitSeq(string(data[:lastNL]), "\n") {
 		length := int64(len(segment))
 		if length > 0 {
 			refs = append(refs, lineRef{Day: day, Start: start, End: start + length})
@@ -623,8 +617,8 @@ func slogTextField(line, key string) (string, bool) {
 			}
 			return rest[1:], true
 		}
-		if end := strings.IndexByte(rest, ' '); end >= 0 {
-			return rest[:end], true
+		if before, _, ok := strings.Cut(rest, " "); ok {
+			return before, true
 		}
 		return rest, true
 	}

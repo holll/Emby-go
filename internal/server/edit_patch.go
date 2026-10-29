@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -18,7 +19,7 @@ func decodeEditPatch(body io.Reader) (editRequest, error) {
 		return req, err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return req, fmt.Errorf("one JSON object required")
 	}
 	if len(raw) == 0 {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -167,7 +168,7 @@ func retained(t *testing.T, s *store.Store) {
 		}
 	}
 	grants, err := s.UserLibraryIDs(7)
-	if err != nil || !reflect.DeepEqual(grants, []int64{11}) {
+	if err != nil || !slices.Equal(grants, []int64{11}) {
 		t.Fatalf("grants=%v err=%v", grants, err)
 	}
 	other, err := s.UserLibraryIDs(9)
@@ -196,7 +197,7 @@ func retained(t *testing.T, s *store.Store) {
 
 func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 	path, lib := legacyFixture(t)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		s, err := store.Open(path)
 		if err != nil {
 			t.Fatal(err)

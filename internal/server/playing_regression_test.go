@@ -46,7 +46,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 					rawID = virtualPartID(id, 2)
 				}
 				stopped := strings.HasSuffix(strings.ToLower(event), "stopped")
-				for i := 0; i < 2; i++ {
+				for range 2 {
 					before := a.db.Version("g:version")
 					key := movieDetailCacheKey(before, 1, fmt.Sprint(id))
 					a.cache.Set(key, []byte("stale"), time.Hour)

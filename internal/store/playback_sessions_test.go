@@ -133,17 +133,15 @@ func TestRecordPlaybackConcurrentStopsCountOnce(t *testing.T) {
 	record(t, s, id, "race", PlaybackStart, 0)
 	var wg sync.WaitGroup
 	counted := make(chan bool, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			res, err := s.RecordPlaybackEvent(PlaybackEvent{SessionKey: "race", MovieID: id, Kind: PlaybackStopped, PositionTicks: 77, Now: time.Now()})
 			if err != nil {
 				t.Errorf("concurrent stop: %v", err)
 				return
 			}
 			counted <- res.Counted
-		}()
+		})
 	}
 	wg.Wait()
 	close(counted)

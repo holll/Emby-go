@@ -194,7 +194,7 @@ func TestEnsureFeaturesBackfillsExistingMovies(t *testing.T) {
 func TestSimilarCandidatesMarksSeriesPriority(t *testing.T) {
 	s, libID := newFeatureStore(t)
 	actors := make([]ActorRef, 0, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		actors = append(actors, ActorRef{Name: "Actor " + string(rune('A'+i))})
 	}
 	src, err := s.IndexMovie(Movie{LibraryID: libID, SourcePath: "/tmp/av/src.strm", Status: "success", Title: "Src", Collection: "Series S", Genres: []string{"Drama"}}, 1, time.Now(), actors)

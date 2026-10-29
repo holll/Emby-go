@@ -13,9 +13,7 @@ const statsAnalyzeInterval = 7 * 24 * time.Hour
 // 幂等：重复调用只启动一次。
 func (a *App) startMaintenance() {
 	a.maintenanceOnce.Do(func() {
-		a.workerWG.Add(1)
-		go func() {
-			defer a.workerWG.Done()
+		a.workerWG.Go(func() {
 			a.runStatsAnalyze()
 			ticker := time.NewTicker(statsAnalyzeInterval)
 			defer ticker.Stop()
@@ -27,7 +25,7 @@ func (a *App) startMaintenance() {
 					a.runStatsAnalyze()
 				}
 			}
-		}()
+		})
 	})
 }
 

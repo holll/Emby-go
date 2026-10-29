@@ -78,7 +78,7 @@ func TestDispatcherDisabledAndTotalBudget(t *testing.T) {
 
 func TestDispatcherValidationLimits(t *testing.T) {
 	var targets []Target
-	for i := 0; i < MaxTargets+1; i++ {
+	for i := range MaxTargets + 1 {
 		targets = append(targets, testTarget(fmt.Sprintf("wh_%02d", i), "", "item.updated"))
 	}
 	if _, err := NewDispatcher(targets, DefaultEventBudget); err == nil {

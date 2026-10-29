@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -90,7 +91,7 @@ func TestSelectAllExactKeepsOrder(t *testing.T) {
 
 func TestPickCandidatesPrefersExact(t *testing.T) {
 	results := make([]metatube.MovieSearchResult, 0, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		results = append(results, metatube.MovieSearchResult{Provider: "p", ID: string(rune('a' + i)), Number: "ZZZ-00" + string(rune('0'+i))})
 	}
 	// 精确命中的那条排在第 7 位，截断后必须仍在结果里。
@@ -628,8 +629,8 @@ func TestApplyAddsVersionMarkTagAndBadge(t *testing.T) {
 	var mu sync.Mutex
 	badges := map[string]string{} // 图片类型 → 请求里的 badge 参数
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/images/") {
-			kind := strings.TrimPrefix(r.URL.Path, "/v1/images/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/v1/images/"); ok {
+			kind := after
 			if index := strings.Index(kind, "/"); index > 0 {
 				kind = kind[:index]
 			}
@@ -681,10 +682,5 @@ func TestApplyAddsVersionMarkTagAndBadge(t *testing.T) {
 }
 
 func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -175,7 +176,7 @@ func lockedTags(text string, manual bool) map[string]bool {
 		"Collections": {"set"}, "ProviderIds": {"uniqueid"}, "Taglines": {"tagline"},
 	}
 	all := strings.EqualFold(ScrapedTagValue(text, "lockdata"), "true")
-	for _, name := range strings.Split(ScrapedTagValue(text, "lockedfields"), "|") {
+	for name := range strings.SplitSeq(ScrapedTagValue(text, "lockedfields"), "|") {
 		for field, tags := range mapping {
 			if strings.EqualFold(strings.TrimSpace(name), field) {
 				for _, tag := range tags {
@@ -302,7 +303,7 @@ func directElements(text string) ([]directElement, int, xml.Name, error) {
 	for {
 		start := int(decoder.InputOffset())
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -365,7 +366,7 @@ func findClosingMovie(text string) (int, error) {
 
 // childIndent 取原文顶层子标签的缩进，新插入的标签沿用同一风格（默认 2 空格）。
 func childIndent(text string) string {
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		trimmed := strings.TrimLeft(line, " \t")
 		if trimmed == "" || !strings.HasPrefix(trimmed, "<") {
 			continue
@@ -402,8 +403,7 @@ func upsertScalar(text, tag, value, indent string) string {
 func upsertScalarIn(text, tag, value, indent, beforeClose string) string {
 	replacement := "<" + tag + ">" + escape(value) + "</" + tag + ">"
 	elements := elementsNamed(text, tag)
-	for i := len(elements) - 1; i >= 0; i-- {
-		element := elements[i]
+	for _, element := range slices.Backward(elements) {
 		text = text[:element.start] + replacement + text[element.end:]
 	}
 	if len(elements) > 0 {
@@ -433,8 +433,8 @@ func blockPattern(tag string) *regexp.Regexp {
 // 仅当标签独占一行时清除该行空白，不吞相邻标签、注释或扩展内容。
 func replaceBlocks(text, tag string, rendered []string, indent string) string {
 	elements := elementsNamed(text, tag)
-	for i := len(elements) - 1; i >= 0; i-- {
-		start, end := elements[i].start, elements[i].end
+	for _, element := range slices.Backward(elements) {
+		start, end := element.start, element.end
 		lineStart := strings.LastIndexByte(text[:start], '\n') + 1
 		lineEnd := strings.IndexByte(text[end:], '\n')
 		if lineEnd >= 0 && strings.TrimSpace(text[lineStart:start]) == "" && strings.TrimSpace(text[end:end+lineEnd]) == "" {
@@ -584,8 +584,7 @@ func uniqueIDPattern(kind string) *regexp.Regexp {
 func upsertUniqueID(text, kind, value, indent string) string {
 	replacement := `<uniqueid type="` + kind + `">` + escape(value) + "</uniqueid>"
 	elements := uniqueIDElements(text, kind)
-	for i := len(elements) - 1; i >= 0; i-- {
-		element := elements[i]
+	for _, element := range slices.Backward(elements) {
 		text = text[:element.start] + replacement + text[element.end:]
 	}
 	if len(elements) > 0 {

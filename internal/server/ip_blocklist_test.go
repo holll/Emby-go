@@ -161,15 +161,13 @@ func TestIPBlocklistConcurrentCountersAndWriteFailure(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			w := blocklistCall(a, "", "GET", "/api/health", "", "198.51.100.7:88", "")
 			if w.Code != 403 {
 				t.Errorf("concurrent status %d", w.Code)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := a.ipBlocks.total.Load(); got != 20 {

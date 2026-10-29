@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -262,18 +263,14 @@ func normalizeParams(kind string, raw map[string]any) (string, error) {
 		}
 		// Retain opaque fields so conditional editors do not destroy future
 		// options. Missing mode remains absent for stable legacy ETags.
-		for key, value := range raw {
-			out[key] = value
-		}
+		maps.Copy(out, raw)
 		out["library_id"] = libraryID
 		if _, present := raw["mode"]; present {
 			out["mode"] = string(mode)
 		}
 	case "reindex":
 		// Mode/scope never alter reindex execution, but opaque options round-trip.
-		for key, value := range raw {
-			out[key] = value
-		}
+		maps.Copy(out, raw)
 	case "probe":
 		out["library_id"] = paramInt64(raw, "library_id")
 		status, err := scheduledProbeStatus(raw)
@@ -545,13 +542,11 @@ func (a *App) adminRunScheduledTask(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
-	a.workerWG.Add(1)
-	go func() {
-		defer a.workerWG.Done()
+	a.workerWG.Go(func() {
 		if err := a.sched.RunNow(id); err != nil {
 			slog.Warn("立即执行计划任务失败", "task_id", id, "error", err)
 		}
-	}()
+	})
 	c.JSON(http.StatusAccepted, gin.H{"status": "started"})
 }
 

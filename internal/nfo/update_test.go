@@ -592,14 +592,14 @@ func TestSetActorThumbConcurrent(t *testing.T) {
 	const n = 8
 	var body strings.Builder
 	body.WriteString("<movie>\n")
-	for i := 0; i < n; i++ {
+	for i := range n {
 		body.WriteString("  <actor>\n    <name>演员" + strconv.Itoa(i) + "</name>\n  </actor>\n")
 	}
 	body.WriteString("</movie>\n")
 	path := writeTempNFO(t, body.String())
 
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -613,7 +613,7 @@ func TestSetActorThumbConcurrent(t *testing.T) {
 	wg.Wait()
 
 	got := readTempNFO(t, path)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		want := "<thumb>https://cdn/" + strconv.Itoa(i) + ".jpg</thumb>"
 		if !strings.Contains(got, want) {
 			t.Errorf("并发写丢了第 %d 个演员的 thumb:\n%s", i, got)

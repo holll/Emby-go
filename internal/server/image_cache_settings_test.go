@@ -151,7 +151,7 @@ func TestImageCacheSettingsUsageAndTrim(t *testing.T) {
 func TestImageCacheSettingsDisabledAndCorruptFallback(t *testing.T) {
 	a, _, path := authorityApp(t)
 	a.Close()
-	disabled, err := newApp(config.Config{DBPath: path, ImageCache: config.ImageCacheConfig{Enabled: boolPtr(false)}}, cache.NewMemory(16))
+	disabled, err := newApp(config.Config{DBPath: path, ImageCache: config.ImageCacheConfig{Enabled: new(false)}}, cache.NewMemory(16))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,4 +214,5 @@ func TestImageCacheSettingsAsset(t *testing.T) {
 	}
 }
 
-func boolPtr(v bool) *bool { return &v }
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }

@@ -58,7 +58,7 @@ func TestDiagnosticProbeActualSafePathsDistinctAndFloodBounded(t *testing.T) {
 	if count != 2 {
 		t.Fatal(count)
 	}
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		requestUnknown(t, r, fmt.Sprintf("/Users/12/canary-unknown-%d", i))
 	}
 	// Path detail increases key cardinality, but existing write and memory budgets

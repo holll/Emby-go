@@ -84,7 +84,7 @@ func TestScheduledTranslationExecutionScopeProgressAndFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < translationBatchSize+3; i++ {
+	for i := range translationBatchSize + 3 {
 		status := "pending"
 		if i == translationBatchSize+2 {
 			status = "manual"

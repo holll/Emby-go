@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 )
@@ -95,7 +96,7 @@ func (s *Store) EntityPosterVisible(kind, name string, libraryID int64, visible 
 	}
 	var path string
 	err := s.db.QueryRow("SELECT movies.poster_path FROM movies WHERE "+where+" ORDER BY movies.id DESC LIMIT 1", args...).Scan(&path)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return path, err

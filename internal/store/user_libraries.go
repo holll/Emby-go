@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"errors"
+)
 
 // SetUserLibraries 覆盖式设置某用户可见的媒体库。
 func (s *Store) SetUserLibraries(userID int64, libraryIDs []int64) error {
@@ -43,7 +46,7 @@ func (s *Store) CanAccessLibrary(userID int64, admin bool, libraryID int64) (boo
 	var one int
 	err := s.db.QueryRow(`SELECT 1 FROM user_libraries WHERE user_id=? AND library_id=?`, userID, libraryID).Scan(&one)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err

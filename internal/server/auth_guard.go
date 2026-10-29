@@ -617,10 +617,7 @@ func authRateLimitedRetry(c *gin.Context, retry time.Duration) {
 	if retry <= 0 {
 		retry = time.Second
 	}
-	seconds := int(math.Ceil(retry.Seconds()))
-	if seconds < 1 {
-		seconds = 1
-	}
+	seconds := max(int(math.Ceil(retry.Seconds())), 1)
 	c.Header("Retry-After", strconv.Itoa(seconds))
 	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 		"error": "尝试次数过多，请稍后再试", "code": "AUTH_RATE_LIMITED", "retryable": true,

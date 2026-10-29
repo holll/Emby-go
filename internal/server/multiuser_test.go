@@ -131,7 +131,7 @@ func TestUserDataIsolationByUser(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
 			SessionKey: "viewer-session", UserID: viewer.ID, MovieID: movieID,
 			Kind: store.PlaybackStopped, PositionTicks: 100, Now: time.Now(),

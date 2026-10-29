@@ -71,7 +71,7 @@ func TestMovieParentRoundTrip(t *testing.T) {
 			for _, route := range []string{"/Items/", "/Users/1/Items/"} {
 				path := prefix + route + strconv.FormatInt(ids[i], 10)
 				// Repeat to cover both generation and a warm detail response cache.
-				for attempt := 0; attempt < 2; attempt++ {
+				for range 2 {
 					d := get(path, token)
 					if d.ID != strconv.FormatInt(ids[i], 10) || d.Type != "Movie" || d.Parent != want {
 						t.Fatalf("%s: unexpected movie DTO %+v; want parent=%s", path, d, want)
@@ -193,7 +193,7 @@ func TestMovieParentCacheUpgrade(t *testing.T) {
 	}
 	lib := libs[0]
 	var victim int64
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		id, err := a.db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(lib.Path, fmt.Sprintf("cache-%d.strm", i)), Title: fmt.Sprintf("Parent cache %d", i), Status: "success", Year: 2020, Genres: []string{"Drama"}}, 1, time.Unix(1, 0), nil)
 		if err != nil {
 			t.Fatal(err)
@@ -214,7 +214,7 @@ func TestMovieParentCacheUpgrade(t *testing.T) {
 		fmt.Sprintf("/emby/Items/%d/Similar?Limit=1", victim),
 	} {
 		writes, warm := recorder.responseWrites.Load(), recorder.warmReads.Load()
-		for n := 0; n < 2; n++ {
+		for range 2 {
 			status, body := embyDo(t, ts, http.MethodGet, path, token, "")
 			if status != 200 {
 				t.Fatalf("%s: %d %s", path, status, body)

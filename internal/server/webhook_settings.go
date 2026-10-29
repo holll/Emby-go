@@ -130,7 +130,7 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 	var req webhookSettingsRequest
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err != nil || len(raw) > 16384 || dec.Decode(&req) != nil || dec.Decode(new(any)) != io.EOF ||
+	if err != nil || len(raw) > 16384 || dec.Decode(&req) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) ||
 		req.Enabled == nil || req.Events == nil || req.Format == nil || req.TimeoutSeconds == nil || req.AllowPrivate == nil {
 		webhookSettingsError(c, 400, "WEBHOOK_INVALID_CONFIG", "Webhook 配置格式无效")
 		return

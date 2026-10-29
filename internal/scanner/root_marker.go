@@ -26,7 +26,7 @@ func ValidateRootMarkerOptions(opts ScanOptions) error {
 	if filepath.IsAbs(path) || filepath.VolumeName(path) != "" {
 		return fmt.Errorf("%w: marker path must be relative", ErrRootMarker)
 	}
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(path), "/") {
 		if part == ".." {
 			return fmt.Errorf("%w: parent traversal is forbidden", ErrRootMarker)
 		}

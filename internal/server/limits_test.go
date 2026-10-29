@@ -121,7 +121,7 @@ func mustAttach(t *testing.T, g *authGuard, ticket *authTicket, username string)
 func TestAuthGuardComboBlocksRepeatedGuesses(t *testing.T) {
 	g := newAuthGuard(authGuardConfig{})
 	const ip = "198.51.100.7"
-	for i := 0; i < authComboFailureLimit; i++ {
+	for range authComboFailureLimit {
 		ticket := mustAdmit(t, g, ip)
 		mustAttach(t, g, ticket, "admin")
 		g.Finish(ticket, authOutcomeInvalidPassword)
@@ -136,7 +136,7 @@ func TestAuthGuardComboBlocksRepeatedGuesses(t *testing.T) {
 func TestAuthGuardSuccessClearsAccountAndComboOnly(t *testing.T) {
 	g := newAuthGuard(authGuardConfig{})
 	const ip = "198.51.100.7"
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		ticket := mustAdmit(t, g, ip)
 		mustAttach(t, g, ticket, "admin")
 		g.Finish(ticket, authOutcomeInvalidPassword)
@@ -160,7 +160,7 @@ func TestAuthGuardAccountCooldownIsBounded(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	g.now = func() time.Time { return now }
 	// 账号维度要跨来源累积：同一 IP/账号组合会在 5 次后被组合阈值先挡住。
-	for i := 0; i < authAccountFailureLimit; i++ {
+	for i := range authAccountFailureLimit {
 		ip := fmt.Sprintf("198.51.100.%d", i+1)
 		ticket := mustAdmit(t, g, ip)
 		mustAttach(t, g, ticket, "admin")
@@ -186,7 +186,7 @@ func TestAuthGuardInflightReservationsShareBudget(t *testing.T) {
 	g := newAuthGuard(authGuardConfig{})
 	const ip = "198.51.100.7"
 	tickets := make([]*authTicket, 0, authComboFailureLimit)
-	for i := 0; i < authComboFailureLimit; i++ {
+	for range authComboFailureLimit {
 		ticket := mustAdmit(t, g, ip)
 		mustAttach(t, g, ticket, "admin")
 		tickets = append(tickets, ticket)
@@ -205,7 +205,7 @@ func TestAuthGuardIPFailureSprayAcrossAccounts(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	g.now = func() time.Time { return now }
 	const ip = "198.51.100.7"
-	for i := 0; i < authIPFailureLimit; i++ {
+	for i := range authIPFailureLimit {
 		ticket := mustAdmit(t, g, ip)
 		if retry := g.AttachAccount(ticket, fmt.Sprintf("spray-%d", i)); retry > 0 {
 			t.Fatalf("第 %d 次在阈值前被拒绝：%v", i+1, retry)
@@ -222,7 +222,7 @@ func TestAuthGuardIPFailureSprayAcrossAccounts(t *testing.T) {
 func TestAuthGuardIPRequestBurst(t *testing.T) {
 	g := newAuthGuard(authGuardConfig{})
 	const ip = "198.51.100.7"
-	for i := 0; i < defaultAuthIPRequestBurst; i++ {
+	for range defaultAuthIPRequestBurst {
 		ticket := mustAdmit(t, g, ip)
 		g.Finish(ticket, authOutcomeInterrupted)
 	}
@@ -233,7 +233,7 @@ func TestAuthGuardIPRequestBurst(t *testing.T) {
 
 func TestAuthSuccessClearsAccountBudgetButNotIPSpray(t *testing.T) {
 	a := limitsInitializedApp(t)
-	for i := 0; i < authComboFailureLimit-1; i++ {
+	for i := range authComboFailureLimit - 1 {
 		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
 		}
@@ -249,7 +249,7 @@ func TestAuthSuccessClearsAccountBudgetButNotIPSpray(t *testing.T) {
 
 func TestAuthRateLimitedResponseShape(t *testing.T) {
 	a := limitsInitializedApp(t)
-	for i := 0; i < authComboFailureLimit; i++ {
+	for i := range authComboFailureLimit {
 		if w := limitsLogin(a, "admin", "wrong-password"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status=%d body=%s", i+1, w.Code, w.Body.String())
 		}

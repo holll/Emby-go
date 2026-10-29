@@ -64,7 +64,7 @@ func TestNoRouteRetriesFailedPersistence(t *testing.T) {
 			if _, err := db.Exec(ddl); err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 2; i++ {
+			for i := range 2 {
 				requestUnknown(t, r, fmt.Sprintf("/Users/canary-%d?token=canary-query", i))
 				assertProbeRetryState(t, a, db, 0, 0)
 			}
@@ -131,9 +131,8 @@ func TestNoRouteInFlightReservationDeduplicatesAndReleases(t *testing.T) {
 		t.Fatal("first write did not enter gate")
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 24; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); requestUnknown(t, r, "/Users/canary-first") }()
+	for range 24 {
+		wg.Go(func() { requestUnknown(t, r, "/Users/canary-first") })
 	}
 	duplicates := make(chan struct{})
 	go func() { wg.Wait(); close(duplicates) }()
@@ -162,7 +161,7 @@ func TestNoRouteInFlightReservationDeduplicatesAndReleases(t *testing.T) {
 func TestNoRouteFailedWriteDoesNotConsumeBoundedSlot(t *testing.T) {
 	a, db, r := probeRetryFixture(t)
 	a.probeMu.Lock()
-	for i := 0; i < 127; i++ {
+	for i := range 127 {
 		a.probeSeen[fmt.Sprint(i)] = probeSeenEntry{seenAt: time.Now()}
 	}
 	a.probeMu.Unlock()

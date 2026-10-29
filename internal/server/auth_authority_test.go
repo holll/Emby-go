@@ -131,7 +131,7 @@ func TestAuthConsultsStoreAfterCredentialDeletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			// New requests after the committed delete must never use stale positives.
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				if w := authorityRequest(r, token); w.Code != http.StatusUnauthorized {
 					t.Fatalf("deleted credential status=%d", w.Code)
 				}

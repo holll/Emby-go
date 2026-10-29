@@ -139,7 +139,7 @@ func TestCollectionListHonorsLibraryGrants(t *testing.T) {
 		if lib.ID == other.ID {
 			name = "Private"
 		}
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			_, err := a.db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(lib.Path, fmt.Sprintf("scope-%d.strm", i)), Title: name, Collection: name, Status: "success"}, 1, time.Unix(1, 0), nil)
 			if err != nil {
 				t.Fatal(err)

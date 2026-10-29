@@ -116,7 +116,7 @@ func TestBatchReadLateErrorsReturnNoPartialMap(t *testing.T) {
 			f := newIndexedDeleteFixture(t)
 			f.s.db.SetMaxOpenConns(1)
 			ids := []int64{f.victim}
-			for i := 0; i < 499; i++ {
+			for i := range 499 {
 				ids = append(ids, int64(100000+i))
 			}
 			ids = append(ids, f.survivor)

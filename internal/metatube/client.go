@@ -125,8 +125,7 @@ func (e *APIError) Error() string {
 
 // IsNotFound 判断是否为「没有结果」（搜索无命中时后端返回 404）。
 func IsNotFound(err error) bool {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr.StatusCode == http.StatusNotFound || apiErr.Code == http.StatusNotFound
 	}
 	return false
@@ -147,8 +146,7 @@ func IsFatal(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		// 服务有响应：只有鉴权失败属于环境性问题。
 		return apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden
 	}

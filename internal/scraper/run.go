@@ -198,10 +198,8 @@ func (s *Scraper) runMoviesInto(ctx context.Context, movies []store.Movie, opts 
 	jobs := make(chan store.Movie)
 	workers := s.cfg.Workers()
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			// 熔断后不直接退出：派发方可能还在阻塞投递，排空 channel 才不会死锁
 			//（与探测任务的处理方式一致）。
 			for movie := range jobs {
@@ -211,7 +209,7 @@ func (s *Scraper) runMoviesInto(ctx context.Context, movies []store.Movie, opts 
 				result := s.scrapeOne(ctx, movie, opts)
 				emit(result)
 			}
-		}()
+		})
 	}
 	for _, movie := range movies {
 		if ctx.Err() != nil || st.aborted.Load() {

@@ -125,7 +125,7 @@ func TestProbeTxStatementFailureRollsBackAndRetry(t *testing.T) {
 			if _, err := s.db.Exec(fault.trigger); err != nil {
 				t.Fatal(err)
 			}
-			for attempt := 0; attempt < 2; attempt++ {
+			for range 2 {
 				if err := s.Probe("POST", "/rejected", "q=1", "rejected-body"); err == nil || !strings.Contains(err.Error(), "fixture-probe-"+fault.name) {
 					t.Fatalf("expected %s rejection: %v", fault.name, err)
 				}
@@ -137,10 +137,7 @@ func TestProbeTxStatementFailureRollsBackAndRetry(t *testing.T) {
 			if err := s.Probe("POST", "/retry", "", "retry-body"); err != nil {
 				t.Fatalf("retry after statement rejection: %v", err)
 			}
-			wantCount := fault.seed + 1
-			if wantCount > 1000 {
-				wantCount = 1000
-			}
+			wantCount := min(fault.seed+1, 1000)
 			if got := indexedDeleteCount(t, s, "SELECT COUNT(*) FROM api_probe"); got != wantCount {
 				t.Fatalf("retry count=%d want=%d", got, wantCount)
 			}

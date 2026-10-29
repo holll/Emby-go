@@ -114,11 +114,9 @@ func TestWaitBackgroundHonorsDeadline(t *testing.T) {
 
 func TestWaitBackgroundWaitsWorkers(t *testing.T) {
 	app := newShutdownApp(t)
-	app.workerWG.Add(1)
-	go func() {
+	app.workerWG.Go(func() {
 		time.Sleep(30 * time.Millisecond)
-		app.workerWG.Done()
-	}()
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

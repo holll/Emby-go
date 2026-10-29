@@ -122,7 +122,7 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		nfoPath = nfo.SidecarPath(movie.SourcePath, len(movie.AdditionalParts) > 0)
 	}
 	if meta, err := nfo.Read(nfoPath); err == nil {
-		for _, field := range strings.Split(meta.LockedFields, "|") {
+		for field := range strings.SplitSeq(meta.LockedFields, "|") {
 			if field = strings.TrimSpace(field); field != "" {
 				lockedFields = append(lockedFields, field)
 			}

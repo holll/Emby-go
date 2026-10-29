@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -139,9 +140,9 @@ func normalizeImageEdge(edge int) int {
 	if edge < imageEdgeBuckets[0] {
 		return edge
 	}
-	for i := len(imageEdgeBuckets) - 1; i >= 0; i-- {
-		if edge >= imageEdgeBuckets[i] {
-			return imageEdgeBuckets[i]
+	for _, imageEdgeBucket := range slices.Backward(imageEdgeBuckets) {
+		if edge >= imageEdgeBucket {
+			return imageEdgeBucket
 		}
 	}
 	return imageEdgeBuckets[0]
@@ -376,7 +377,7 @@ func queryInt(c *gin.Context, keys ...string) int {
 
 // ifNoneMatchHit 判断 If-None-Match 是否命中当前 tag（支持多值、弱校验与 *）。
 func ifNoneMatchHit(header, tag string) bool {
-	for _, part := range strings.Split(header, ",") {
+	for part := range strings.SplitSeq(header, ",") {
 		part = strings.TrimSpace(part)
 		part = strings.TrimPrefix(part, "W/")
 		part = strings.Trim(part, `"`)
@@ -463,11 +464,7 @@ func (a *App) imageInfo(c *gin.Context) {
 			poster = stat.Poster
 		} else {
 			// Stable representative from visible collections only.
-			names := make([]string, 0, len(stats))
-			for name := range stats {
-				names = append(names, name)
-			}
-			sort.Strings(names)
+			names := slices.Sorted(maps.Keys(stats))
 			for _, name := range names {
 				if stats[name].Poster != "" {
 					poster = stats[name].Poster

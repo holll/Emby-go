@@ -76,7 +76,7 @@ func TestMarkIndexedManualSuccessPreservesIndexAndRepeatedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	protected := manualIndexProtectedSnapshot(t, f)
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		before := indexedDeleteVersions(t, f)
 		started := time.Now()
 		if err := f.s.MarkIndexedManual(manualIndexSource, manualIndexNFO); err != nil {
@@ -151,7 +151,7 @@ INSERT INTO kv VALUES('lib:0:version','17'),('lib:9:version','23');`); err != ni
 func TestMarkIndexedManualUnknownSourceRollsBackVersions(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
 	before := indexSnapshot(t, f.s)
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		if err := f.s.MarkIndexedManual("/fixture/missing.strm", manualIndexNFO); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("missing source: %v", err)
 		}

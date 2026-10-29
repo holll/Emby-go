@@ -17,8 +17,7 @@ func backendHealthLogFields(err error) []any {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return []any{"reason", "timeout"}
 	}
-	var apiErr *metatube.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*metatube.APIError](err); ok {
 		return []any{"reason", "http_status", "status", apiErr.StatusCode}
 	}
 	return []any{"reason", "request_failed"}

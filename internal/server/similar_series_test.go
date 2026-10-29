@@ -30,7 +30,7 @@ func TestSimilarSeriesComesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	actors := make([]store.ActorRef, 0, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		actors = append(actors, store.ActorRef{Name: "Actor " + strconv.Itoa(i)})
 	}
 	index := func(title, collection string, withActors bool) int64 {

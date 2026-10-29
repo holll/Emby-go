@@ -27,7 +27,7 @@ func TestMonitorHistogramAndWindow(t *testing.T) {
 	}
 	// 90 observations <=10ms, five <=20ms, five >60s: P95 upper bound
 	// is 20ms (not the newest bucket or arithmetic mean).
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		duration := 10 * time.Millisecond
 		status := 200
 		if i >= 90 {
@@ -45,7 +45,7 @@ func TestMonitorHistogramAndWindow(t *testing.T) {
 	if c.Total != 100 || c.Errors4xx != 5 || c.Errors5xx != 5 || c.P50 == nil || *c.P50 != 10 || c.P95 == nil || *c.P95 != 20 || c.P95Overflow || c.SampledSeconds != 30 || c.Rate == nil || *c.Rate != 100.0/30 {
 		t.Fatalf("distribution %+v", c)
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		m.record(start.Add(2*time.Second), time.Minute+time.Nanosecond, 503)
 	}
 	overflow := m.snapshot(start.Add(time.Minute), 5)
@@ -127,17 +127,15 @@ func TestMonitorConcurrentRecordAndSnapshot(t *testing.T) {
 	const workers = 16
 	const n = 1000
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < n; j++ {
+	for range workers {
+		wg.Go(func() {
+			for j := range n {
 				m.record(now, 2*time.Millisecond, http.StatusOK)
 				if j%50 == 0 {
 					m.snapshot(now, 60)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := m.snapshot(now, 5).counts.Total; got != workers*n {

@@ -225,7 +225,7 @@ func TestScanRegistryConcurrentDigestValidation(t *testing.T) {
 	}
 	out := make(chan outcome, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -286,7 +286,7 @@ func TestScanConcurrentHTTPReplayReturnsOneTask(t *testing.T) {
 	const count = 12
 	start := make(chan struct{})
 	out := make(chan response, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		go func() {
 			<-start
 			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/admin/tasks/scan?mode=incremental", nil)
@@ -309,7 +309,7 @@ func TestScanConcurrentHTTPReplayReturnsOneTask(t *testing.T) {
 	}
 	close(start)
 	var taskID int64
-	for i := 0; i < count; i++ {
+	for range count {
 		resp := <-out
 		if resp.err != nil || resp.status != 202 || resp.task.TaskID <= 0 {
 			t.Fatalf("parallel response %+v", resp)

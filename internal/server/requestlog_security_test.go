@@ -108,7 +108,7 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 	r := gin.New()
 	r.Use(requestLoggerTo(&output), requestContentLoggerTo(&output))
 	r.NoRoute(a.noRoute)
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		body := &diagnosticUnreadBody{}
 		req := httptest.NewRequest("POST", "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10", body)
 		w := httptest.NewRecorder()

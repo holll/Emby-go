@@ -17,7 +17,7 @@ func TestRunStreamsCandidatesAcrossBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 250; i++ {
+	for i := range 250 {
 		if _, err := sc.store.UpsertMovie(store.Movie{
 			LibraryID: lib.ID, SourcePath: fmt.Sprintf("/tmp/av/x%03d.strm", i),
 			Status: "pending",
@@ -45,7 +45,7 @@ func TestRunStreamsHonorsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := sc.store.UpsertMovie(store.Movie{
 			LibraryID: lib.ID, SourcePath: fmt.Sprintf("/tmp/av/y%d.strm", i),
 			Status: "pending",

@@ -562,10 +562,7 @@ func (s *Store) reconcileScanInventory(ctx context.Context, lib Library, checkPa
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			end := start + 500
-			if end > len(deleteIDs) {
-				end = len(deleteIDs)
-			}
+			end := min(start+500, len(deleteIDs))
 			batch := deleteIDs[start:end]
 			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
 			args := make([]any, 0, len(batch))
@@ -612,10 +609,7 @@ func InvalidateScanGroupsForPathsTx(tx *sql.Tx, libraryID int64, paths []string)
 		return nil
 	}
 	for start := 0; start < len(unique); start += 400 {
-		end := start + 400
-		if end > len(unique) {
-			end = len(unique)
-		}
+		end := min(start+400, len(unique))
 		batch := unique[start:end]
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
 		args := make([]any, 0, len(batch)+2)

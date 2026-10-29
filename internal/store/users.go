@@ -335,10 +335,7 @@ func (s *Store) ValidateAccessTokenUser(token string, now time.Time, ttl time.Du
 		return 0, false, nil
 	}
 	if ttl > 0 {
-		threshold := ttl - 24*time.Hour
-		if threshold < 0 {
-			threshold = 0
-		}
+		threshold := max(ttl-24*time.Hour, 0)
 		if expiry.Sub(now) < threshold {
 			_, _ = s.db.Exec("UPDATE access_tokens SET expires_at=? WHERE token=?", now.Add(ttl).Unix(), digest)
 		}

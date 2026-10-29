@@ -74,7 +74,7 @@ func TestScheduledSpritesPagedScopeIntervalsAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 202; i++ {
+	for i := range 202 {
 		_, err = f.a.db.IndexMovie(store.Movie{LibraryID: f.lib, SourcePath: fmt.Sprintf("/fixture/scheduled-%d.strm", i), Title: fmt.Sprint(i), Status: "success"}, 1, time.Now(), nil)
 		if err != nil {
 			t.Fatal(err)

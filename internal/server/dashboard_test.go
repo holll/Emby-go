@@ -19,15 +19,13 @@ func TestDashboardSummarySingleflightStaleAndUnavailable(t *testing.T) {
 		return dashboardMedia{Total: &n, Success: &n, Manual: &n, Pending: &n, Libraries: &n}, nil
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 32 {
+		wg.Go(func() {
 			v := app.dashboardMediaSnapshot()
 			if !v.Available || v.Stale || v.Total == nil || *v.Total != 7 {
 				t.Errorf("bad concurrent media %+v", v)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if calls.Load() != 1 {
@@ -108,7 +106,7 @@ func TestDashboardResponseWindowsAndPrivacy(t *testing.T) {
 func TestDashboardTasksBoundedAndMediaDatabaseFailure(t *testing.T) {
 	app, _, _ := asyncScanFixture(t)
 	app.taskMu.Lock()
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		app.tasks = append(app.tasks, task{ID: int64(i), Type: "probe", Status: "running"})
 	}
 	app.taskMu.Unlock()

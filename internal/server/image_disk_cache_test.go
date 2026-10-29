@@ -194,10 +194,8 @@ func TestImageDiskCacheReusesVariants(t *testing.T) {
 	base := genCount()
 	var wg sync.WaitGroup
 	failures := make(chan string, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			resp, err := http.Get(ts.URL + imagePath + "?maxWidth=120")
 			if err != nil {
 				failures <- err.Error()
@@ -208,7 +206,7 @@ func TestImageDiskCacheReusesVariants(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				failures <- "status " + strconv.Itoa(resp.StatusCode)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(failures)

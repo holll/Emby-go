@@ -118,8 +118,7 @@ func TestAvatarWebPConcurrentWritersPublishCompleteImage(t *testing.T) {
 	errs := make(chan error, count)
 	var wg sync.WaitGroup
 	for n := range count {
-		wg.Add(1)
-		go func() { defer wg.Done(); <-start; errs <- writeWebP(inputs[n], dest) }()
+		wg.Go(func() { <-start; errs <- writeWebP(inputs[n], dest) })
 	}
 	close(start)
 	wg.Wait()

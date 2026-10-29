@@ -119,10 +119,7 @@ func deleteSourcePathsTx(tx *sql.Tx, libraryID int64, missing []string) error {
 	}
 	const chunk = 500
 	for start := 0; start < len(missing); start += chunk {
-		end := start + chunk
-		if end > len(missing) {
-			end = len(missing)
-		}
+		end := min(start+chunk, len(missing))
 		batch := missing[start:end]
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
 		args := make([]any, 0, len(batch)+1)

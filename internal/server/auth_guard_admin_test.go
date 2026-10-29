@@ -65,7 +65,7 @@ func TestSecurityAuthLimitsAndUnlock(t *testing.T) {
 	}
 
 	// 5 次错误密码触发组合阈值，第 6 次必须在解析密码前被拒。
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if code, _, _ := do("POST", "/Users/AuthenticateByName", `{"Username":"victim","Pw":"wrong-password"}`, ""); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: %d", i+1, code)
 		}

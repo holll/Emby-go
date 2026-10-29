@@ -680,10 +680,7 @@ func (s *Store) ensureFeatures() error {
 	defer s.featuresRunning.Store(false)
 	const batchSize = 200
 	for start := 0; start < len(ids); start += batchSize {
-		end := start + batchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
+		end := min(start+batchSize, len(ids))
 		// Route maintenance writes through writeTx so they share the in-process
 		// writer lock with scans: a deferred read-then-write transaction racing a
 		// feature batch otherwise fails with SQLITE_BUSY_SNAPSHOT.
@@ -713,7 +710,7 @@ func (s *Store) ensureFeatures() error {
 func (s *Store) kvValue(key string) (string, error) {
 	var value string
 	err := s.db.QueryRow("SELECT value FROM kv WHERE key=?", key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, err
@@ -738,7 +735,7 @@ func refreshFeaturesTx(tx *sql.Tx, movieID int64) error {
 	err := tx.QueryRow(`SELECT COALESCE(genres,''), COALESCE(tags,''), COALESCE(studios,''),
 		COALESCE(director,''), COALESCE(series,''), COALESCE(collection,'')
 		FROM movies WHERE id=?`, movieID).Scan(&genres, &tags, &studios, &director, &series, &collection)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
@@ -940,13 +937,7 @@ func (s *Store) SimilarCandidates(src Movie, limit int) ([]ScoredMovie, error) {
 // 特征对排序没有区分作用，直接跳过。小库给下限、大库给上限，
 // 避免小库因占比把特征全跳掉，也避免超大库上单条特征仍要扫几万条 postings。
 func (s *Store) commonFeatureThreshold() int {
-	threshold := s.visibleMovieCount() / 10
-	if threshold < 8 {
-		threshold = 8
-	}
-	if threshold > 2000 {
-		threshold = 2000
-	}
+	threshold := min(max(s.visibleMovieCount()/10, 8), 2000)
 	return threshold
 }
 
@@ -956,7 +947,7 @@ func (s *Store) featureTooCommon(kind, value string, threshold int) (bool, error
 	var one int
 	err := s.db.QueryRow("SELECT 1 FROM movie_features WHERE kind=? AND value=? LIMIT 1 OFFSET ?",
 		kind, value, threshold).Scan(&one)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -1345,7 +1336,7 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 // DataUser 读取指定账户的 UserData；账户缺省按初始管理员（1）处理。
 func (s *Store) DataUser(userID, id int64) (UserData, error) {
 	d, err := readUserData(s.db, userID, id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return UserData{}, nil
 	}
 	return d, err
@@ -1428,7 +1419,7 @@ func (s *Store) ActorAvatar(name string) (ActorRef, error) {
 	var actor ActorRef
 	err := s.db.QueryRow("SELECT name, COALESCE(avatar_url,''), COALESCE(avatar_tag,'') FROM actors WHERE name=?",
 		strings.TrimSpace(name)).Scan(&actor.Name, &actor.AvatarURL, &actor.AvatarTag)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ActorRef{}, nil
 	}
 	return actor, err
@@ -1699,14 +1690,14 @@ func (s *Store) Probes(limit int) ([]map[string]any, error) {
 	}
 	return out, rows.Err()
 }
-func NotFound(err error) bool   { return err == sql.ErrNoRows }
+func NotFound(err error) bool   { return errors.Is(err, sql.ErrNoRows) }
 func (m Movie) IsVisible() bool { return m.Status == "success" || m.Status == "manual" }
 
 // splitTerms 把查询参数拆成去空白的项。Emby 的 Genres/Tags/Studios 形如 "a|b"，
 // GenreIds/PersonIds 等形如 "a,b"；这里两种分隔符都接受。
 func splitTerms(value string) []string {
 	var out []string
-	for _, p := range strings.Split(strings.ReplaceAll(value, "|", ","), ",") {
+	for p := range strings.SplitSeq(strings.ReplaceAll(value, "|", ","), ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
@@ -1867,7 +1858,7 @@ func (s *Store) EntityPoster(kind, name string, libraryID int64, collection stri
 	query += " ORDER BY id DESC LIMIT 1"
 	var path string
 	err := s.db.QueryRow(query, args...).Scan(&path)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return path, err
@@ -1883,13 +1874,13 @@ func (s *Store) RepresentativeArt(libraryID int64) (string, error) {
 	if err == nil {
 		return path, nil
 	}
-	if err != sql.ErrNoRows {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
 	err = s.db.QueryRow(`SELECT poster_path FROM movies
 		WHERE library_id=? AND status IN ('success','manual') AND poster_path<>''
 		ORDER BY id DESC LIMIT 1`, libraryID).Scan(&path)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return path, err
@@ -1901,7 +1892,7 @@ func (s *Store) CollectionPoster(collection string) (string, error) {
 	err := s.db.QueryRow(`SELECT poster_path FROM movies
 		WHERE collection=? AND status IN ('success','manual') AND poster_path<>''
 		ORDER BY id DESC LIMIT 1`, collection).Scan(&path)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return path, err
@@ -2231,7 +2222,7 @@ func (s *Store) RecordScheduledResult(id int64, status, message string) error {
 func (s *Store) Setting(key string) (string, error) {
 	var value string
 	err := s.db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, err

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"emby-go/internal/config"
@@ -85,7 +86,7 @@ func loadWebhookTargets(db *store.Store, fallback config.WebhookConfig) ([]webho
 		var stored webhookTargetsConfig
 		dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
 		dec.DisallowUnknownFields()
-		if dec.Decode(&stored) != nil || dec.Decode(new(any)) != io.EOF || stored.Version != 2 ||
+		if dec.Decode(&stored) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) || stored.Version != 2 ||
 			len(stored.Targets) > webhook.MaxTargets {
 			return nil, nil, config.WebhookConfig{}, true, errors.New("webhook multi-target settings invalid")
 		}
@@ -240,7 +241,7 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 	var req webhookTargetsUpdateRequest
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err != nil || len(raw) > webhookTargetsBodyLimit || dec.Decode(&req) != nil || dec.Decode(new(any)) != io.EOF {
+	if err != nil || len(raw) > webhookTargetsBodyLimit || dec.Decode(&req) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) {
 		webhookSettingsError(c, http.StatusBadRequest, "WEBHOOK_INVALID_CONFIG", "Webhook 目标配置格式无效")
 		return
 	}
@@ -334,10 +335,5 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 }
 
 func containsWebhookEvent(events []string, want string) bool {
-	for _, event := range events {
-		if event == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(events, want)
 }

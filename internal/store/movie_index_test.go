@@ -3,7 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,7 +227,7 @@ func TestIndexMovieConcurrentWritersStayWhole(t *testing.T) {
 	start := make(chan struct{})
 	errs := make(chan error, writers)
 	var wg sync.WaitGroup
-	for n := 0; n < writers; n++ {
+	for n := range writers {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -257,7 +257,7 @@ func TestIndexMovieConcurrentWritersStayWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(actors) != 1 || actors[0].Name != m.Title || !reflect.DeepEqual(m.Genres, []string{m.Title}) {
+	if len(actors) != 1 || actors[0].Name != m.Title || !slices.Equal(m.Genres, []string{m.Title}) {
 		t.Fatalf("mixed commit: movie=%+v actors=%+v", m, actors)
 	}
 	var actorFeatures int

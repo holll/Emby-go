@@ -91,7 +91,7 @@ func artworkObject(r io.Reader) ([]byte, map[string]json.RawMessage, error) {
 		return nil, nil, errors.New("invalid request")
 	}
 	var extra any
-	if dec.Decode(&extra) != io.EOF {
+	if !errors.Is(dec.Decode(&extra), io.EOF) {
 		return nil, nil, errors.New("invalid request")
 	}
 	return data, raw, nil
@@ -421,7 +421,7 @@ func (a *App) adminArtworkCancel(c *gin.Context) {
 		return
 	}
 	var extra any
-	if dec.Decode(&extra) != io.EOF {
+	if !errors.Is(dec.Decode(&extra), io.EOF) {
 		apiError(c, 400, "invalid cancel request")
 		return
 	}

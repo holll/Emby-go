@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -164,8 +165,8 @@ func canonicalPath(path string) (string, error) {
 	for {
 		resolved, err := filepath.EvalSymlinks(current)
 		if err == nil {
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
+			for _, s := range slices.Backward(suffix) {
+				resolved = filepath.Join(resolved, s)
 			}
 			return resolved, nil
 		}

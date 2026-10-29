@@ -88,12 +88,12 @@ func (w *RingWriter) Write(p []byte) (int, error) {
 	if now == nil {
 		now = time.Now
 	}
-	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		entry := Entry{Time: now().Format(time.RFC3339), Level: "INFO", Message: SanitizeText(line)}
-		for _, field := range strings.Fields(line) {
+		for field := range strings.FieldsSeq(line) {
 			switch {
 			case strings.HasPrefix(field, "time="):
 				entry.Time = strings.Trim(strings.TrimPrefix(field, "time="), `"`)

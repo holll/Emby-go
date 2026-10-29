@@ -231,8 +231,7 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		return
 	}
 	taskID := a.startTask("probe")
-	a.workerWG.Add(1)
-	go func() { defer a.workerWG.Done(); _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) }()
+	a.workerWG.Go(func() { _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) })
 	slog.Info("媒体信息探测已启动", "task_id", taskID, "movies", plan.movies, "files", len(plan.targets), "only_missing", plan.onlyMissing)
 	c.JSON(http.StatusAccepted, gin.H{"task_id": taskID, "total": len(plan.targets), "movies": plan.movies})
 }
@@ -423,9 +422,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	touched := make(chan int64, len(targets))
 	var wg sync.WaitGroup
 	for i := 0; i < a.cfg.ProbeWorkers(); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 熔断/取消后不直接 return，而是继续排空 channel：
 			// worker 一旦退出，还在阻塞投递的派发循环将永远等不到接收者而死锁。
 			for target := range jobs {
@@ -434,7 +431,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 				}
 				a.probeOne(ctx, taskID, ffprobe, target, onlyMissing, touched)
 			}
-		}()
+		})
 	}
 	// 派发时也提前检查，减少熔断后仍需排空的条目数。
 	for _, target := range targets {

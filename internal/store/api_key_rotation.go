@@ -109,8 +109,8 @@ func APIKeyPublicID(stableID string) string { return "ak_" + stableID }
 // parseAPIKeyPublicID 接受 ak_<stable> 或裸 stable id；其他形式原样返回。
 func parseAPIKeyPublicID(id string) string {
 	id = strings.TrimSpace(id)
-	if strings.HasPrefix(id, "ak_") {
-		return strings.TrimPrefix(id, "ak_")
+	if after, ok := strings.CutPrefix(id, "ak_"); ok {
+		return after
 	}
 	return id
 }

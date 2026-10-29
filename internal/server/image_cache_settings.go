@@ -101,7 +101,7 @@ func (a *App) adminSaveImageCacheSettings(c *gin.Context) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 1024))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || dec.Decode(new(any)) != io.EOF || req.MaxBytes == nil || *req.MaxBytes < 0 || *req.MaxBytes > imageCacheMaxBytesLimit {
+	if dec.Decode(&req) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) || req.MaxBytes == nil || *req.MaxBytes < 0 || *req.MaxBytes > imageCacheMaxBytesLimit {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid image cache settings"})
 		return
 	}

@@ -133,7 +133,7 @@ func TestRescanProtocolDeletionNeedsNoTailBump(t *testing.T) {
 	if _, err := s.Movie(id); err != nil {
 		t.Fatalf("non-destructive recovery deleted: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		result, err := RescanOne(s, lib, path)
 		if err != nil || result.Skipped != 1 || s.Version("g:version") != "2" {
 			t.Fatalf("rescan %d result=%+v err=%v version=%s", i, result, err, s.Version("g:version"))

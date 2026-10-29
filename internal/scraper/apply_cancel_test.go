@@ -104,14 +104,12 @@ func TestDownloadImageConcurrentUniqueTemp(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	errs := make(chan error, workers)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			<-start
 			_, err := s.downloadImage(context.Background(), metatube.MovieInfo{Provider: "p", ID: "1"}, "primary", dest, "", true)
 			errs <- err
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -36,7 +36,7 @@ func TestScheduledCASCompetingWriters(t *testing.T) {
 	close(start)
 	wins, conflicts := 0, 0
 	winner := ""
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		r := <-results
 		if r.err == nil {
 			wins++

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -215,12 +216,7 @@ func TestMediaHelper(t *testing.T) {
 	}
 	args := os.Args[1:]
 	has := func(x string) bool {
-		for _, a := range args {
-			if a == x {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(args, x)
 	}
 	if !has("-protocol_whitelist") || !has(protocols) {
 		os.Exit(2)
@@ -246,7 +242,7 @@ func TestScreenshotProtocolAndPositions(t *testing.T) {
 	wrapper := filepath.Join(t.TempDir(), "media")
 	script := "#!/bin/sh\nexec \"" + exe + "\" -test.run=TestMediaHelper -- \"$@\"\n"
 	os.WriteFile(wrapper, []byte(script), 0700)
-	for _, seconds := range []*float64{nil, ptr(3)} {
+	for _, seconds := range []*float64{nil, new(float64(3))} {
 		b, e := screenshot(context.Background(), "https://trusted.example/movie", Request{PositionSeconds: seconds}, Options{FFmpegPath: wrapper, FFprobePath: wrapper})
 		if e != nil {
 			t.Fatal(e)
@@ -261,7 +257,9 @@ func TestScreenshotProtocolAndPositions(t *testing.T) {
 		}
 	}
 }
-func ptr(v float64) *float64 { return &v }
+
+//go:fix inline
+func ptr(v float64) *float64 { return new(v) }
 func TestRealFFmpegHTTP(t *testing.T) {
 	ff, e := exec.LookPath("ffmpeg")
 	if e != nil {
@@ -346,7 +344,7 @@ func TestRefreshErrorRetry(t *testing.T) {
 }
 
 func TestValidationAndOutputCap(t *testing.T) {
-	for _, req := range []Request{{MovieID: 1, Mode: "x"}, {MovieID: 1, Mode: "screenshot", PositionSeconds: ptr(-1)}, {MovieID: 1, Mode: "screenshot", PositionPercent: ptr(100)}, {MovieID: 1, Mode: "screenshot", PositionSeconds: ptr(1), PositionPercent: ptr(2)}} {
+	for _, req := range []Request{{MovieID: 1, Mode: "x"}, {MovieID: 1, Mode: "screenshot", PositionSeconds: new(float64(-1))}, {MovieID: 1, Mode: "screenshot", PositionPercent: new(float64(100))}, {MovieID: 1, Mode: "screenshot", PositionSeconds: new(float64(1)), PositionPercent: new(float64(2))}} {
 		if validate(req) == nil {
 			t.Fatal(req)
 		}

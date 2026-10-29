@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -382,7 +383,7 @@ func TestTranslateExistingLegacyAndSharedRefresh(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 		}
-		if !reflect.DeepEqual(req.Text, []string{"legacy source"}) {
+		if !slices.Equal(req.Text, []string{"legacy source"}) {
 			t.Errorf("translated wrong sidecar: %v", req.Text)
 		}
 		_, _ = w.Write([]byte(`{"translations":[{"text":"translated legacy"}]}`))

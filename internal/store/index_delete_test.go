@@ -65,7 +65,7 @@ func assertIndexedDeleteVersions(t *testing.T, f indexedDeleteFixture, before [3
 	t.Helper()
 	want := before
 	if bump {
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			n, err := strconv.Atoi(before[i])
 			if err != nil {
 				t.Fatal(err)
@@ -233,7 +233,7 @@ func TestReconcileMissingSourcesChunkRollbackAndCompleteInventory(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	for i := 0; i < 502; i++ {
+	for i := range 502 {
 		path := fmt.Sprintf("/fixture/delete/bulk-%04d.strm", i)
 		if i == 501 {
 			path = "/fixture/delete/keep.strm"

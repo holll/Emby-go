@@ -538,7 +538,7 @@ func installPoster(root *os.Root, temp, target string, overwrite bool) error {
 }
 
 func createTemp(root *os.Root, dir string) (*os.File, error) {
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		name := filepath.Join(dir, fmt.Sprintf(".artwork-%s.tmp", rand.Text()))
 		f, e := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		if e == nil {

@@ -90,10 +90,7 @@ func (a *App) runScheduledSprites(parent context.Context, task scheduler.Task) e
 			return 0, 0, false, nil
 		}
 		if len(page) == 0 {
-			size := 200
-			if remaining < size {
-				size = remaining
-			}
+			size := min(remaining, 200)
 			var e error
 			page, e = a.db.ScheduledSpriteTargets(ctx, p.LibraryID, after, maxID, size)
 			if e != nil {

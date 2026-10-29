@@ -138,12 +138,12 @@ func Downscale(src image.Image, maxWidth, maxHeight int) image.Image {
 	// 转成 RGBA 后直接按下标取像素：逐像素走 image.Image 接口在缩略图尺寸下也偏慢。
 	source := toRGBA(src)
 	destination := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
-	for y := 0; y < targetHeight; y++ {
+	for y := range targetHeight {
 		startY, endY := y*height/targetHeight, (y+1)*height/targetHeight
 		if endY <= startY {
 			endY = startY + 1
 		}
-		for x := 0; x < targetWidth; x++ {
+		for x := range targetWidth {
 			startX, endX := x*width/targetWidth, (x+1)*width/targetWidth
 			if endX <= startX {
 				endX = startX + 1

@@ -72,7 +72,7 @@ func TestRunSnapshotsDatabaseAndNFO(t *testing.T) {
 func TestRunPrunesOnlyTimestampedBackups(t *testing.T) {
 	dbPath, _, outDir := fixture(t)
 	base := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if _, err := Run(Options{DBPath: dbPath, OutDir: outDir, Retain: 7, NFORoot: true, Now: base.Add(time.Duration(i) * time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +172,7 @@ func TestRunSnapshotUnderConcurrentWritesIsIntact(t *testing.T) {
 		}
 	}()
 	outDir := filepath.Join(root, "backups")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		result, err := Run(Options{DBPath: dbPath, OutDir: outDir, Now: time.Unix(int64(100+i), 0)})
 		if err != nil {
 			close(stop)

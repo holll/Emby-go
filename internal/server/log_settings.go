@@ -52,7 +52,7 @@ func (a *App) adminSaveLogSettings(c *gin.Context) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 1024))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || dec.Decode(new(any)) != io.EOF || req.Days == nil || *req.Days < 0 || *req.Days > logging.MaxRetentionDays {
+	if dec.Decode(&req) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) || req.Days == nil || *req.Days < 0 || *req.Days > logging.MaxRetentionDays {
 		c.JSON(400, gin.H{"error": "invalid log retention settings"})
 		return
 	}

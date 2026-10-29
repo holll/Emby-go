@@ -113,8 +113,8 @@ func TestFindImage(t *testing.T) {
 func TestDownscale(t *testing.T) {
 	// 左半红、右半蓝：缩放后左右两色必须仍然分开。
 	src := image.NewRGBA(image.Rect(0, 0, 100, 50))
-	for y := 0; y < 50; y++ {
-		for x := 0; x < 100; x++ {
+	for y := range 50 {
+		for x := range 100 {
 			pixel := color.RGBA{R: 255, A: 255}
 			if x >= 50 {
 				pixel = color.RGBA{B: 255, A: 255}

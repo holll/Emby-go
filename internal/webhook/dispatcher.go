@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -173,10 +174,8 @@ func (d *Dispatcher) Subscribed(event string) bool {
 		if !target.spec.Enabled {
 			continue
 		}
-		for _, subscribed := range target.spec.Events {
-			if subscribed == event {
-				return true
-			}
+		if slices.Contains(target.spec.Events, event) {
+			return true
 		}
 	}
 	return false
@@ -236,10 +235,7 @@ func (d *Dispatcher) Send(ctx context.Context, event Event) Result {
 				outcomes[i] = TargetOutcome{ID: target.spec.ID, Name: target.spec.Name, Status: TargetSkippedBudget, ErrorCode: "budget_exhausted"}
 				return
 			}
-			targetBudget := time.Duration(target.spec.TimeoutSeconds) * time.Second
-			if targetBudget > remaining {
-				targetBudget = remaining
-			}
+			targetBudget := min(time.Duration(target.spec.TimeoutSeconds)*time.Second, remaining)
 			runCtx, cancel := context.WithTimeout(ctx, targetBudget)
 			err := target.sender.Send(runCtx, event)
 			cancel()

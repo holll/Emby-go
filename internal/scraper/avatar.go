@@ -136,16 +136,14 @@ func (s *Scraper) runAvatars(ctx context.Context, names []string,
 	jobs := make(chan string)
 	var wg sync.WaitGroup
 	for i := 0; i < s.cfg.Workers(); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for name := range jobs {
 				if ctx.Err() != nil || aborted.Load() {
 					continue
 				}
 				emit(s.scrapeAvatar(ctx, name))
 			}
-		}()
+		})
 	}
 	for _, name := range names {
 		if ctx.Err() != nil || aborted.Load() {

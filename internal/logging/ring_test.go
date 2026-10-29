@@ -9,7 +9,7 @@ import (
 // TestRingKeepsNewestAndBounds 验证环形缓冲只保留最近条目且按时间正序输出。
 func TestRingKeepsNewestAndBounds(t *testing.T) {
 	ring := &Ring{entries: make([]Entry, 3)}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		ring.add(Entry{Message: string(rune('a' + i))})
 	}
 	got := ring.Snapshot(0)

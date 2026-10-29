@@ -120,7 +120,7 @@ func diagnosticItemTypes(value string) bool {
 	if value == "" || len(value) > 128 {
 		return false
 	}
-	for _, kind := range strings.Split(value, ",") {
+	for kind := range strings.SplitSeq(value, ",") {
 		switch kind {
 		case "Movie", "BoxSet", "CollectionFolder", "Folder", "Series", "Season", "Episode":
 		default:

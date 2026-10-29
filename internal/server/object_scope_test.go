@@ -104,7 +104,7 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 			assertStatus(w.method, w.path, 404)
 		}
 	}
-	for pass := 0; pass < 2; pass++ {
+	for range 2 {
 		assertEmpty(userPath+"/Suggestions", token)
 		for _, p := range entityPaths {
 			assertEmpty(p, token)
@@ -114,7 +114,7 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 	if err := a.db.SetUserLibraries(uid, []int64{public.ID}); err != nil {
 		t.Fatal(err)
 	}
-	for pass := 0; pass < 2; pass++ {
+	for range 2 {
 		for _, p := range append([]string{userPath + "/Suggestions?Limit=1"}, entityPaths...) {
 			s, b := embyDo(t, ts, "GET", p, token, "")
 			if s != 200 || !strings.Contains(string(b), "ZVisible") || strings.Contains(string(b), "APrivate") || strings.Contains(string(b), "Private Movie") {

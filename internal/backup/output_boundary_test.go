@@ -67,7 +67,7 @@ func TestRunRejectsOverlappingOutputBeforeWriting(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				_, err := Run(Options{DBPath: dbPath, OutDir: outDir, NFORoot: true, Retain: 1, Now: now})
 				if err == nil || !strings.Contains(err.Error(), "overlaps") {
 					t.Fatalf("expected overlap error, got %v", err)
@@ -114,7 +114,7 @@ func TestRunAllowsSeparateSiblingOutputAndSymlink(t *testing.T) {
 					t.Skip(err)
 				}
 			}
-			for i := 0; i < 2; i++ {
+			for i := range 2 {
 				result, err := Run(Options{DBPath: dbPath, OutDir: out, NFORoot: true, Retain: 1, Now: time.Unix(int64(i), 0)})
 				if err != nil || result.NFOCount != 2 {
 					t.Fatalf("result=%+v err=%v", result, err)

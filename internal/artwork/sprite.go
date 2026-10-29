@@ -541,7 +541,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 			_ = removeSpriteDirectory(movieRoot, generation, genInfo)
 		}
 	}()
-	m := spriteDiskManifest{SpriteManifest: SpriteManifest{Version: 1, Generation: generation, MovieID: req.MovieID, Width: spriteWidth, Height: spriteHeight, Cols: spriteCols, Rows: spriteRows, Count: count, IntervalMs: interval, DurationMs: duration, SheetCount: (count + 99) / 100}, State: source.state(generation, old.Revision+1), Created: time.Now().UnixNano()}
+	m := spriteDiskManifest{Version: 1, Generation: generation, MovieID: req.MovieID, Width: spriteWidth, Height: spriteHeight, Cols: spriteCols, Rows: spriteRows, Count: count, IntervalMs: interval, DurationMs: duration, SheetCount: (count + 99) / 100, State: source.state(generation, old.Revision+1), Created: time.Now().UnixNano()}
 	bif, err := newSpriteBIF(genRoot, "index.bif", count)
 	if err != nil {
 		return res, err
@@ -554,11 +554,8 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 			return res, err
 		}
 		sheet := image.NewRGBA(image.Rect(0, 0, spriteWidth*spriteCols, spriteHeight*spriteRows))
-		pageCount := count - done
-		if pageCount > 100 {
-			pageCount = 100
-		}
-		for cell := 0; cell < pageCount; cell++ {
+		pageCount := min(count-done, 100)
+		for cell := range pageCount {
 			if err = source.verify(ctx); err != nil {
 				return res, err
 			}

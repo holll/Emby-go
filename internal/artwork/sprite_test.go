@@ -20,8 +20,8 @@ import (
 
 func spritePicture(c color.Color) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
-	for y := 0; y < 180; y++ {
-		for x := 0; x < 320; x++ {
+	for y := range 180 {
+		for x := range 320 {
 			img.Set(x, y, c)
 		}
 	}
@@ -108,7 +108,7 @@ func TestSpriteGenerateBIFSheetsMetadataAndRead(t *testing.T) {
 	if _, err = spriteDecode(sheet, 3200, 1800); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		frame, err := ReadSpriteFrame(ctx, db, m.ID, manifest.Generation, i, opts.RootDir)
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestSpriteRetentionAndSourceBoundaries(t *testing.T) {
 	opts := spriteTestOptions(t, dir, "0.5")
 	ctx := context.Background()
 	var generations []string
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		res, err := GenerateSprite(ctx, db, SpriteRequest{MovieID: m.ID, Overwrite: true}, opts)
 		if err != nil {
 			t.Fatal(err)

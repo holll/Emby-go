@@ -26,7 +26,7 @@ func TestRejectUnsafeTokensAndTimestampOverflow(t *testing.T) {
 		}
 	}
 	for _, v := range []float64{math.NaN(), math.Inf(1), math.MaxFloat64, maxSeekSeconds * 2} {
-		if err := validate(Request{MovieID: 1, Mode: "screenshot", PositionSeconds: ptr(v)}); err == nil {
+		if err := validate(Request{MovieID: 1, Mode: "screenshot", PositionSeconds: new(v)}); err == nil {
 			t.Errorf("accepted seconds %v", v)
 		}
 	}
@@ -34,7 +34,7 @@ func TestRejectUnsafeTokensAndTimestampOverflow(t *testing.T) {
 		t.Fatal("mixed mode accepted")
 	}
 	for _, raw := range []string{"data:image/jpeg;base64,x", "file:///etc/passwd", "concat:https://x|https://y", "http://:80/x", "http:///x", "https://user@host/x", "https://host/x\x00", "https://host/x\r\nHeader: x"} {
-		if _, err := screenshot(context.Background(), raw, Request{PositionSeconds: ptr(0)}, Options{}); err == nil {
+		if _, err := screenshot(context.Background(), raw, Request{PositionSeconds: new(float64(0))}, Options{}); err == nil {
 			t.Errorf("accepted STRM %q", raw)
 		}
 	}

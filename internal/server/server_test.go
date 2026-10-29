@@ -326,7 +326,7 @@ func TestCoreAPI(t *testing.T) {
 	if nullStopResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("null stopped: %d", nullStopResp.StatusCode)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		stopReq, _ := http.NewRequest("POST", ts.URL+"/Sessions/Playing/Stopped", strings.NewReader(`{"ItemId":"1","PositionTicks":10}`))
 		stopReq.Header.Set("X-Emby-Token", token)
 		stopReq.Header.Set("Content-Type", "application/json")

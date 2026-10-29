@@ -79,7 +79,7 @@ func TestDashboardRealHTTPContractAndSampling(t *testing.T) {
 	for _, resource := range []string{"/web/dashboard.js", "/web/dashboard.css", "/api/admin/status"} {
 		get(resource, "dash-owner-token", 200)
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		snapshot()
 	}
 	if got := counts(snapshot()); got["total"] != before["total"] {

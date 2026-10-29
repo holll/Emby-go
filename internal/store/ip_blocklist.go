@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -57,10 +58,8 @@ func NormalizeIPBlockNetwork(raw string) (netip.Prefix, error) {
 		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 	}
 	p = p.Masked()
-	for _, local := range []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")} {
-		if p.Overlaps(local) {
-			return netip.Prefix{}, ErrIPBlockUnsafe
-		}
+	if slices.ContainsFunc([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}, p.Overlaps) {
+		return netip.Prefix{}, ErrIPBlockUnsafe
 	}
 	if p.Addr().IsUnspecified() {
 		return netip.Prefix{}, errors.New("unspecified address ranges cannot be blocked")
@@ -95,10 +94,8 @@ func decodeIPBlockRules(raw string) ([]IPBlockRule, error) {
 		if _, err := time.Parse(time.RFC3339Nano, rule.CreatedAt); err != nil {
 			return nil, errors.New("invalid IP block creation time")
 		}
-		for _, prior := range prefixes {
-			if p.Overlaps(prior) {
-				return nil, ErrIPBlockConflict
-			}
+		if slices.ContainsFunc(prefixes, p.Overlaps) {
+			return nil, ErrIPBlockConflict
 		}
 		prefixes = append(prefixes, p)
 	}
@@ -135,7 +132,7 @@ func (s *Store) MutateIPBlockRules(ctx context.Context, network, note string, re
 		return nil, errors.New("note must be at most 200 bytes without control characters")
 	}
 	network = prefix.String()
-	for attempt := 0; attempt < 8; attempt++ {
+	for range 8 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

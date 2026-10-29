@@ -118,7 +118,7 @@ func TestDiagnosticClearAuthenticatedLifecycle(t *testing.T) {
 	}
 	assertProbeRetryState(t, a, db, 2, 2)
 	diagnosticClearAssertHTTP(t, diagnosticClearRequest(a, diagnosticClearToken), http.StatusNoContent)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		before := diagnosticClearSnapshot(t, a, db)
 		diagnosticClearAssertHTTP(t, diagnosticClearRequest(a, diagnosticClearToken), http.StatusNoContent)
 		assertProbeRetryState(t, a, db, 0, 0)
@@ -141,7 +141,7 @@ func TestDiagnosticClearDeleteFailurePreservesGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := diagnosticClearSnapshot(t, a, db)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		w := diagnosticClearRequest(a, diagnosticClearToken)
 		diagnosticClearAssertHTTP(t, w, http.StatusInternalServerError)
 		if w.Body.String() != `{"code":"INTERNAL","error":"probe history clear failed"}` {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,8 +259,7 @@ func ReadBytes(b []byte) (MovieMeta, error) {
 		return MovieMeta{}, err
 	}
 	if root.Space == "" && root.Local == "movie" {
-		for i := len(elements) - 1; i >= 0; i-- {
-			element := elements[i]
+		for _, element := range slices.Backward(elements) {
 			if element.name.Space != "" {
 				text = text[:element.start] + text[element.end:]
 			}
@@ -357,7 +357,7 @@ func rejectFileInfoOutsideText(text string) error {
 	for {
 		start := int(decoder.InputOffset())
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {

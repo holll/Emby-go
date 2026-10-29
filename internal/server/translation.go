@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strconv"
 	"sync"
@@ -137,9 +138,7 @@ func normalizeTranslationParams(raw map[string]any) (map[string]any, error) {
 	}
 	// Keep opaque/hidden parameters intact for conditional editor round trips.
 	out := make(map[string]any, len(raw)+1)
-	for k, v := range raw {
-		out[k] = v
-	}
+	maps.Copy(out, raw)
 	out["fields"] = req.Fields
 	if req.LibraryID > 0 {
 		out["library_id"] = req.LibraryID
@@ -261,9 +260,8 @@ func (a *App) beginTranslation(total int) (context.Context, int64, error) {
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	taskID := a.startTask("translate")
 	a.translation.cancel = cancel
-	a.translation.status = translationStatus{TaskID: taskID, scrapeStatus: scrapeStatus{
-		Running: true, Kind: "translate", Total: total, StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}}
+	a.translation.status = translationStatus{TaskID: taskID,
+		Running: true, Kind: "translate", Total: total, StartedAt: time.Now().UTC().Format(time.RFC3339)}
 	return ctx, taskID, nil
 }
 
@@ -386,8 +384,7 @@ func (a *App) adminTranslationRun(c *gin.Context) {
 	}
 	// Capture the accepted generation, not a later task's snapshot.
 	accepted := a.translationSnapshot()
-	a.workerWG.Add(1)
-	go func() { defer a.workerWG.Done(); _ = a.executeTranslation(ctx, taskID, cfg, req) }()
+	a.workerWG.Go(func() { _ = a.executeTranslation(ctx, taskID, cfg, req) })
 	c.JSON(http.StatusAccepted, accepted)
 }
 
@@ -431,7 +428,7 @@ func (a *App) adminTranslationCancel(c *gin.Context) {
 		return
 	}
 	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		apiError(c, http.StatusBadRequest, "invalid cancel request")
 		return
 	}

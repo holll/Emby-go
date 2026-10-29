@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -108,11 +109,9 @@ func TestMovieQueryOptionsBothScopes(t *testing.T) {
 		} {
 			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
 				q := url.Values{"ParentId": {scope.parent}, "IncludeItemTypes": {"Movie"}}
-				for k, v := range tc.query {
-					q[k] = v
-				}
+				maps.Copy(q, tc.query)
 				// Repeat ordinary queries to exercise cache hits as well as initial reads.
-				for repeat := 0; repeat < 2; repeat++ {
+				for repeat := range 2 {
 					status, raw := embyDo(t, ts, http.MethodGet, "/emby/Items?"+q.Encode(), token, "")
 					var result struct {
 						Items []struct{ Name string }

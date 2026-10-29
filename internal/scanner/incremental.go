@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -195,11 +197,7 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 	}
 	report(0, "")
 
-	keys := make([]string, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(groups))
 
 	expected := make(map[string]int64)
 	committedKeys := make([]string, 0, len(keys))
@@ -330,9 +328,7 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 		result.Updated += commit.Updated
 		result.Deleted += commit.Deleted
 		result.IndexChanged = result.Added+result.Updated+result.Deleted > 0
-		for path, id := range commit.MovieIDs {
-			expected[path] = id
-		}
+		maps.Copy(expected, commit.MovieIDs)
 		result.GroupsDone = index + 1
 		report(index+1, key)
 	}
@@ -584,7 +580,7 @@ type nfoFileInput struct {
 }
 
 func readNFOFile(path string) (nfoFileInput, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		before, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			return nfoFileInput{path: path, missing: true}, nil
@@ -693,7 +689,7 @@ func (inputs *groupInputs) fingerprint() (string, error) {
 	sort.Slice(snapshot.Sources, func(i, j int) bool { return snapshot.Sources[i].Path < snapshot.Sources[j].Path })
 	seenNFO := make(map[string]bool)
 	for key, file := range inputs.nfos {
-		kind := strings.SplitN(key, ":", 2)[0]
+		kind, _, _ := strings.Cut(key, ":")
 		if seenNFO[kind+file.path] {
 			continue
 		}
@@ -761,13 +757,7 @@ func (inputs *groupInputs) stillMatches() bool {
 			return false
 		}
 		for _, image := range images {
-			found := false
-			for _, old := range inputs.images {
-				if old == image {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(inputs.images, image)
 			if !found {
 				return false
 			}
@@ -893,7 +883,7 @@ func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string
 
 func readMemberInput(item candidate) (memberInput, error) {
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		before, err := os.Stat(item.path)
 		if err != nil {
 			return memberInput{}, err

@@ -79,7 +79,7 @@ func TestEditedNFOPartialSuccessAndRecovery(t *testing.T) {
 			if _, err := fixture.Exec(stage.undo); err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				recovered, result := embyCall(t, ts, "POST", path+"/recover-edit", token, string(recovery))
 				if recovered.StatusCode != 200 || result["status"] != "success" || result["indexed"] != true {
 					t.Fatalf("recovered=%d %+v", recovered.StatusCode, result)

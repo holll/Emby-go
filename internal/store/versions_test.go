@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ func storedVersion(t *testing.T, s *Store, key string) string {
 	t.Helper()
 	var value string
 	err := s.db.QueryRow("SELECT value FROM kv WHERE key=?", key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ""
 	}
 	if err != nil {
@@ -160,9 +161,8 @@ func TestVersionConcurrentBumpsKeepDomainsConsistent(t *testing.T) {
 	start := make(chan struct{})
 	errs := make(chan error, writers)
 	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); <-start; errs <- s.BumpVersion(7) }()
+	for range writers {
+		wg.Go(func() { <-start; errs <- s.BumpVersion(7) })
 	}
 	close(start)
 	wg.Wait()

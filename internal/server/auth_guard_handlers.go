@@ -34,8 +34,7 @@ func (a *App) credentialLimited(h gin.HandlerFunc) gin.HandlerFunc {
 // credentialBindTooLarge 把 MaxBytesReader 触发的超限错误映射为 413；否则
 // chunked 请求可以绕过 Content-Length 预检，最终只得到含糊的 400。
 func credentialBindTooLarge(c *gin.Context, err error) bool {
-	var maxBytes *http.MaxBytesError
-	if errors.As(err, &maxBytes) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
 			"error": "credentials payload too large", "code": "AUTH_BODY_TOO_LARGE",
 		})

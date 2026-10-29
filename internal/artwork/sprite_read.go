@@ -29,10 +29,7 @@ func validateSpriteManifest(m spriteDiskManifest) error {
 	}
 	total := m.BIFBytes
 	for page, s := range m.Sheets {
-		count := m.Count - page*100
-		if count > 100 {
-			count = 100
-		}
+		count := min(m.Count-page*100, 100)
 		if s.File != fmt.Sprintf("sheet-%03d.jpg", page) || s.Count != count || s.Width != spriteWidth*spriteCols || s.Height != spriteHeight*spriteRows || s.Bytes <= 0 || s.Bytes > spriteMaxSheetBytes || !spriteHex(s.SHA256, 64) {
 			return errors.New("invalid sprite sheet record")
 		}
@@ -450,7 +447,7 @@ func removeSpriteDirectory(parent *os.Root, dir string, expected ...os.FileInfo)
 	for _, entry := range entries {
 		name := entry.Name()
 		valid := name == "manifest.json" || name == "index.bif"
-		for i := 0; i < 6; i++ {
+		for i := range 6 {
 			valid = valid || name == fmt.Sprintf("sheet-%03d.jpg", i)
 		}
 		info, e := root.Lstat(name)

@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -427,11 +429,7 @@ func (a *App) boxsetFolderDTO(collections map[string]store.CollectionStat) gin.H
 		"BackdropImageTags": []string{},
 		"UserData":          gin.H{"UnplayedItemCount": len(collections), "PlaybackPositionTicks": 0, "IsFavorite": false, "Played": false},
 	}
-	names := make([]string, 0, len(collections))
-	for name := range collections {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(collections))
 	for _, name := range names {
 		if poster := collections[name].Poster; poster != "" {
 			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
@@ -566,12 +564,7 @@ func (a *App) similar(c *gin.Context) {
 		if admin {
 			return true
 		}
-		for _, id := range visible {
-			if id == libraryID {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(visible, libraryID)
 	}
 	if !src.IsVisible() || !canView(src.LibraryID) {
 		apiError(c, http.StatusNotFound, "not found")
@@ -696,13 +689,7 @@ func (a *App) similar(c *gin.Context) {
 // similarPoolSize 候选池大小：最终只要 limit 条，但年份/番号前缀这类加分只在候选内部
 // 排序，取松一点避免它们把本该入选的片子挤出池子。
 func similarPoolSize(limit int) int {
-	pool := limit * 6
-	if pool < 60 {
-		pool = 60
-	}
-	if pool > 400 {
-		pool = 400
-	}
+	pool := min(max(limit*6, 60), 400)
 	return pool
 }
 
@@ -775,10 +762,8 @@ func sameBrand(x, y store.Movie) bool {
 		if studio == "" {
 			continue
 		}
-		for _, other := range y.Studios {
-			if studio == other {
-				return true
-			}
+		if slices.Contains(y.Studios, studio) {
+			return true
 		}
 	}
 	return false
@@ -1281,7 +1266,7 @@ func (f itemFields) key() string {
 func requestedFields(c *gin.Context) itemFields {
 	raw := strings.ToLower(c.Query("Fields"))
 	has := func(name string) bool {
-		for _, part := range strings.Split(raw, ",") {
+		for part := range strings.SplitSeq(raw, ",") {
 			if strings.TrimSpace(part) == name {
 				return true
 			}
@@ -1385,11 +1370,9 @@ func (a *App) collectionStats(c *gin.Context, libraryID int64) (map[string]store
 }
 
 func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) {
-	for _, kind := range splitQueryTypes(c.Query("ExcludeItemTypes")) {
-		if kind == "BoxSet" {
-			a.emptyItems(c)
-			return
-		}
+	if slices.Contains(splitQueryTypes(c.Query("ExcludeItemTypes")), "BoxSet") {
+		a.emptyItems(c)
+		return
 	}
 	lib, _ := parseParentScope(c.Query("ParentId"))
 	stats, ok := a.collectionStats(c, lib)
@@ -1414,7 +1397,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 		seen := make(map[int64]bool)
 		var movieIDs []int64
 		for _, values := range members {
-			for _, raw := range strings.Split(values, ",") {
+			for raw := range strings.SplitSeq(values, ",") {
 				raw = strings.TrimSpace(raw)
 				id, err := strconv.ParseInt(raw, 10, 64)
 				if err == nil && id > 0 && !strings.HasPrefix(raw, "+") && !seen[id] {
@@ -1425,10 +1408,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 		}
 		// Bound SQL placeholders for large member lists and avoid N+1 lookups.
 		for len(movieIDs) > 0 {
-			n := len(movieIDs)
-			if n > 500 {
-				n = 500
-			}
+			n := min(len(movieIDs), 500)
 			movies, err := a.db.MoviesByIDs(movieIDs[:n])
 			if err != nil {
 				itemDataUnavailable(c)
@@ -1452,7 +1432,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	}
 	wanted := make(map[string]bool)
 	for _, values := range ids {
-		for _, id := range strings.Split(values, ",") {
+		for id := range strings.SplitSeq(values, ",") {
 			wanted[strings.TrimSpace(id)] = true
 		}
 	}
@@ -1472,10 +1452,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	if start > len(names) {
 		start = len(names)
 	}
-	end := start + limit
-	if end > len(names) {
-		end = len(names)
-	}
+	end := min(start+limit, len(names))
 	items := make([]gin.H, 0, end-start)
 	for _, name := range names[start:end] {
 		items = append(items, a.boxsetItemFrom(name, stats[name]))
@@ -1485,7 +1462,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 
 func splitQueryTypes(v string) []string {
 	var out []string
-	for _, t := range strings.Split(v, ",") {
+	for t := range strings.SplitSeq(v, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			out = append(out, t)
 		}
@@ -1495,7 +1472,7 @@ func splitQueryTypes(v string) []string {
 
 // firstSortKey 取 SortBy 逗号列表的首项作主排序键。
 func firstSortKey(v string) string {
-	for _, part := range strings.Split(v, ",") {
+	for part := range strings.SplitSeq(v, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			return part
 		}
@@ -1564,10 +1541,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	if start > len(names) {
 		start = len(names)
 	}
-	end := start + limit
-	if end > len(names) {
-		end = len(names)
-	}
+	end := min(start+limit, len(names))
 	items := make([]gin.H, 0, end-start)
 	for _, name := range names[start:end] {
 		item := gin.H{

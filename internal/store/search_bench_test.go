@@ -31,7 +31,7 @@ func searchBenchFixture(b *testing.B) *Store {
 			return
 		}
 		const n = 5000
-		for i := 0; i < n; i++ {
+		for i := range n {
 			title := fmt.Sprintf("测试影片 %d", i)
 			if i%3 == 0 {
 				title = fmt.Sprintf("Perf Movie %d", i)

@@ -60,7 +60,7 @@ func requestToken(c *gin.Context) string {
 			(strings.EqualFold(authorization[:i], "Emby") || strings.EqualFold(authorization[:i], "MediaBrowser")) {
 			authorization = strings.TrimSpace(authorization[i+1:])
 		}
-		for _, part := range strings.Split(authorization, ",") {
+		for part := range strings.SplitSeq(authorization, ",") {
 			key, value, found := strings.Cut(strings.TrimSpace(part), "=")
 			if found && strings.EqualFold(key, "Token") {
 				token = strings.Trim(strings.TrimSpace(value), "\\\"")

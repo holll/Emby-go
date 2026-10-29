@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,7 +29,7 @@ func BenchmarkStabilityBrowseDuringScan(b *testing.B) {
 			if err := os.Mkdir(media, 0755); err != nil {
 				b.Fatal(err)
 			}
-			for i := 0; i < 200; i++ {
+			for i := range 200 {
 				base := filepath.Join(media, fmt.Sprintf("S-%04d", i))
 				if err := os.WriteFile(base+".strm", []byte("https://media.invalid/sample.mp4\n"), 0600); err != nil {
 					b.Fatal(err)
@@ -154,7 +154,7 @@ func BenchmarkStabilityBrowseDuringScan(b *testing.B) {
 			if len(latencies) == 0 {
 				b.Fatal("no concurrent browse samples")
 			}
-			sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+			slices.Sort(latencies)
 			b.ReportMetric(float64(scans.Nanoseconds())/float64(b.N)/1e6, "scan-ms/op")
 			b.ReportMetric(float64(latencies[(len(latencies)-1)/2].Nanoseconds())/1e6, "browse-p50-ms")
 			b.ReportMetric(float64(latencies[(len(latencies)-1)*95/100].Nanoseconds())/1e6, "browse-p95-ms")

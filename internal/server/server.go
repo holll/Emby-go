@@ -332,9 +332,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		}
 		a.imageCacheMaxBytes = saved
 	}
-	a.startupWG.Add(1)
-	go func() {
-		defer a.startupWG.Done()
+	a.startupWG.Go(func() {
 		removed, freed, err := a.imgDisk.Trim()
 		if err != nil {
 			slog.Debug("缩略图缓存启动清理失败", "error", err)
@@ -343,7 +341,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		if removed > 0 {
 			slog.Info("缩略图缓存启动清理完成", "removed", removed, "freed_bytes", freed)
 		}
-	}()
+	})
 	a.analyzeStats = db.Analyze
 	a.serverName = cfg.ServerName
 	if a.serverName == "" {
@@ -417,11 +415,9 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 
 	// 启动自检：MetaTube 不可达只告警不阻断启动（与 ffprobe 探测的做法一致）——
 	// 元数据服务是外部依赖，它挂了不该让整个媒体库服务起不来。
-	a.startupWG.Add(1)
-	go func() {
-		defer a.startupWG.Done()
+	a.startupWG.Go(func() {
 		a.checkScrapeBackend()
-	}()
+	})
 	if err := a.applyLogRetention(retentionDays); err != nil {
 		slog.Warn("历史日志清理未完成，将在下个日志日重试")
 	}

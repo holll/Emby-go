@@ -1,7 +1,7 @@
 package store
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -22,7 +22,7 @@ func TestCollectionStatsVisibleScopesAllMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stats) != 1 || stats["Shared"].Count != 1 || stats["Shared"].Poster != "visible.jpg" || !reflect.DeepEqual(stats["Shared"].Genres, []string{"Public"}) {
+	if len(stats) != 1 || stats["Shared"].Count != 1 || stats["Shared"].Poster != "visible.jpg" || !slices.Equal(stats["Shared"].Genres, []string{"Public"}) {
 		t.Fatalf("scoped stats leaked metadata: %+v", stats)
 	}
 	stats, err = s.CollectionStatsVisible(2, 0, []int64{lib})

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,8 +35,8 @@ func spriteSeed(t *testing.T, f translationFixture) artwork.SpriteManifest {
 	probe := filepath.Join(dir, "ffprobe")
 	ffmpeg := filepath.Join(dir, "ffmpeg")
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
-	for y := 0; y < 180; y++ {
-		for x := 0; x < 320; x++ {
+	for y := range 180 {
+		for x := range 320 {
 			img.Set(x, y, color.RGBA{uint8(x), uint8(y), 80, 255})
 		}
 	}
@@ -125,7 +126,7 @@ func TestSpritesPermissionsStrictInputsAndIdentity(t *testing.T) {
 	}
 	latest := translationCall(f.a, f.token, "GET", "/api/admin/sprites/status", "")
 	var got spriteStatus
-	if json.Unmarshal(latest.Body.Bytes(), &got) != nil || got.TaskID != s.TaskID || got.InstanceID != s.InstanceID || got.FramesDone != 1 || !reflect.DeepEqual(got.MovieIDs, []int64{f.movie}) {
+	if json.Unmarshal(latest.Body.Bytes(), &got) != nil || got.TaskID != s.TaskID || got.InstanceID != s.InstanceID || got.FramesDone != 1 || !slices.Equal(got.MovieIDs, []int64{f.movie}) {
 		t.Fatalf("latest %s", latest.Body.String())
 	}
 	stale := fmt.Sprintf(`{"task_id":%d,"instance_id":"old-instance"}`, s.TaskID)

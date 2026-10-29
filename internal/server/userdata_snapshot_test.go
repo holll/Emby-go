@@ -12,7 +12,7 @@ import (
 )
 
 func TestUserSettingsResponseReadFailureRollsBack(t *testing.T) {
-	for op := 0; op < 3; op++ {
+	for op := range 3 {
 		for _, event := range []string{"INSERT", "UPDATE"} {
 			t.Run(fmt.Sprintf("%d/%s", op, event), func(t *testing.T) {
 				f := newAdminDeleteFixture(t)

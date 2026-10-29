@@ -24,7 +24,7 @@ func (s *Store) writeTxContext(ctx context.Context, write func(*sql.Tx) error) e
 	}
 	defer s.writeMu.Unlock()
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if err = ctx.Err(); err != nil {
 			return err
 		}

@@ -75,7 +75,7 @@ func stripProviderSuffix(number string) string {
 	for changed := true; changed; {
 		changed = false
 		for _, suffix := range providerSuffixes {
-			if trimmed := strings.TrimSuffix(number, "-"+suffix); trimmed != number {
+			if trimmed, ok := strings.CutSuffix(number, "-"+suffix); ok {
 				number, changed = trimmed, true
 			}
 		}

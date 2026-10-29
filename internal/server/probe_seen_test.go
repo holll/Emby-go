@@ -46,7 +46,7 @@ func TestObserveProbeDedupesWithinTTLAndExpires(t *testing.T) {
 func TestObserveProbeEvictsOldestWhenFull(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	a := probeObserveApp(func() time.Time { return now })
-	for i := 0; i < probeSeenLimit; i++ {
+	for i := range probeSeenLimit {
 		a.probeSeen[fmt.Sprintf("GET /old-%d", i)] = probeSeenEntry{seenAt: now.Add(-time.Duration(i+1) * time.Minute)}
 	}
 	const key = "GET /system/new"
@@ -107,7 +107,7 @@ func TestObserveProbeTokenBurstIsCapped(t *testing.T) {
 func TestObserveProbeDropsExpiredEntriesWhileEvicting(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	a := probeObserveApp(func() time.Time { return now })
-	for i := 0; i < probeSeenLimit; i++ {
+	for i := range probeSeenLimit {
 		a.probeSeen[fmt.Sprintf("GET /stale-%d", i)] = probeSeenEntry{seenAt: now.Add(-probeSeenTTL - time.Minute)}
 	}
 	if write, _ := a.observeProbe("GET /system/fresh", now); !write {

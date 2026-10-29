@@ -16,7 +16,7 @@ func TestBuildVersionAPI(t *testing.T) {
 	app := newShutdownApp(t)
 
 	// 版本无需凭据或初始化；代理和客户端不得缓存旧二进制信息。
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 		r.Header.Set("If-None-Match", `"old-build"`)

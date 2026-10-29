@@ -310,10 +310,7 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool, ma
 			actors = append(actors, nfo.Actor{Name: name, Type: "Actor"})
 		}
 	}
-	runtime := info.Runtime
-	if runtime <= 0 {
-		runtime = 0
-	}
+	runtime := max(info.Runtime, 0)
 	// 番号先归一化：强制大写、统一分隔符，再补上破折号
 	//（abf_018 / ABF 018 / ABF018 → ABF-018，T28036 → T28-036），<num> 与标题前缀都用它。
 	// <title>/<sorttitle> 统一为「番号 标题」：库内条目按番号聚拢、排序也按番号走；

@@ -22,7 +22,7 @@ func BenchmarkScanComparison(b *testing.B) {
 					root := b.TempDir()
 					sources := make([]string, count)
 					nfos := make([]string, count)
-					for i := 0; i < count; i++ {
+					for i := range count {
 						base := fmt.Sprintf("Film-%03d", i)
 						sourceBase := base
 						if cd {

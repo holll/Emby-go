@@ -587,7 +587,7 @@ func TestProbeCircuitBreaker(t *testing.T) {
 	deadURL := broken.URL + "/nope.mp4"
 	root := t.TempDir()
 	const count = 60 // 远多于熔断阈值
-	for i := 0; i < count; i++ {
+	for i := range count {
 		base := filepath.Join(root, "m"+strconv.Itoa(i))
 		writeFile(t, base+".strm", deadURL+"\n")
 		writeFile(t, base+".nfo", "<movie><title>M"+strconv.Itoa(i)+"</title></movie>\n")

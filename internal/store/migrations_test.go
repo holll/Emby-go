@@ -50,7 +50,7 @@ INSERT INTO actors(name,avatar_url,updated_at) VALUES('legacy actor','https://ex
 INSERT INTO movie_actors(movie_id,actor_name) VALUES(1,'legacy actor');
 INSERT INTO settings(key,value) VALUES('fixture-setting','retained');
 INSERT INTO scheduled_tasks(name,type,cron,params,created_at,updated_at) VALUES('legacy task','scan','0 8 * * *','{"library_id":1}','t0','t0')`)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		s, err := Open(path)
 		if err != nil {
 			t.Fatalf("Open pass %d: %v", i, err)
