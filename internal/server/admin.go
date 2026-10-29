@@ -40,6 +40,11 @@ func (a *App) adminLibraries(c *gin.Context) {
 		apiError(c, 500, e.Error())
 		return
 	}
+	intervals, e := a.db.LibrarySpriteIntervals(c.Request.Context())
+	if e != nil {
+		apiError(c, 500, "library preview settings unavailable")
+		return
+	}
 	// 保留 Library 原本的 Id/Name/Path 键名并额外带 count，
 	// 前端既有代码（lib.Id / lib.Name）不受影响。
 	items := make([]gin.H, 0, len(v))
@@ -51,11 +56,12 @@ func (a *App) adminLibraries(c *gin.Context) {
 			cover = "/Items/" + externalLibraryID(lib.ID) + "/Images/Primary"
 		}
 		items = append(items, gin.H{
-			"Id":    lib.ID,
-			"Name":  lib.Name,
-			"Path":  lib.Path,
-			"count": counts[lib.ID],
-			"cover": cover,
+			"Id":                      lib.ID,
+			"Name":                    lib.Name,
+			"Path":                    lib.Path,
+			"count":                   counts[lib.ID],
+			"cover":                   cover,
+			"sprite_interval_seconds": intervals[lib.ID],
 		})
 	}
 	c.JSON(200, gin.H{"items": items, "total": len(items)})

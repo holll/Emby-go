@@ -30,6 +30,7 @@ import (
 const defaultMemoryCacheEntries = 4096
 
 type App struct {
+	sprites           spriteState
 	cfg               config.Config
 	db                *store.Store
 	router            *gin.Engine
@@ -167,6 +168,7 @@ type App struct {
 	scrapeCancel context.CancelFunc
 
 	translation translationState
+	artwork     artworkState
 }
 
 // scanStatus 管理端可轮询的扫描进度快照。
@@ -515,6 +517,12 @@ func (a *App) routes() {
 	r.HEAD("/favicon.ico", a.favicon)
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
+	r.GET("/web/artwork.js", a.webAsset)
+	r.GET("/web/artwork.css", a.webAsset)
+	r.GET("/web/sprites.js", a.webAsset)
+	r.GET("/web/sprites.css", a.webAsset)
+	r.GET("/api/items/:id/sprites", noStore, a.requireAuth, a.webSpriteManifest)
+	r.GET("/api/items/:id/sprites/sheets/:page", noStore, a.requireAuth, a.webSpriteSheet)
 	r.GET("/web/navigation.js", a.webAsset)
 	r.GET("/web/dashboard.js", a.webAsset)
 	r.GET("/web/dashboard.css", a.webAsset)
@@ -544,6 +552,7 @@ func (a *App) routes() {
 	admin.GET("/security/auth-limits", a.adminAuthLimits)
 	admin.POST("/security/unlock", a.credentialLimited(a.adminUnlockAuth))
 	admin.POST("/libraries", a.adminAddLibrary)
+	admin.PUT("/libraries/:id/sprites", a.adminLibrarySprites)
 	admin.DELETE("/libraries/:id", a.adminDeleteLibrary)
 	admin.POST("/libraries/:id/move", a.adminMoveLibrary)
 	admin.POST("/libraries/:id/cover", a.adminLibraryCover)
@@ -607,6 +616,15 @@ func (a *App) routes() {
 	admin.POST("/translate/run", a.adminTranslationRun)
 	admin.GET("/translate/status", a.adminTranslationStatus)
 	admin.POST("/translate/cancel", a.adminTranslationCancel)
+	admin.GET("/sprites/capabilities", a.adminSpriteCapabilities)
+	admin.POST("/sprites/run", a.adminSpriteRun)
+	admin.GET("/sprites/status", a.adminSpriteStatus)
+	admin.POST("/sprites/cancel", a.adminSpriteCancel)
+	admin.POST("/artwork/run", a.adminArtworkRun)
+	admin.GET("/artwork/status", a.adminArtworkStatus)
+	admin.POST("/artwork/cancel", a.adminArtworkCancel)
+	admin.GET("/artwork/capabilities", a.adminArtworkCapabilities)
+	admin.GET("/artwork/candidates", a.adminArtworkCandidates)
 	// 计划任务（cron）：保存/启停后调度器即时重建，无需重启。
 	admin.GET("/scheduled", a.adminScheduledTasks)
 	admin.POST("/scheduled", a.adminCreateScheduledTask)
@@ -678,6 +696,11 @@ func (a *App) embyRoutes() []embyRoute {
 		{"GET", "/Items", true, a.rootItems},
 		{"GET", "/Users/:uid/Items/:id", true, a.item},
 		{"GET", "/Items/:id", true, a.item},
+		{"GET", "/Items/:id/ThumbnailSet", true, a.spriteThumbnailSet},
+		{"GET", "/Items/:id/Images/Thumbnail", true, a.spriteThumbnail},
+		{"GET", "/Items/:id/Images/Thumbnail/:index", true, a.spriteThumbnail},
+		{"GET", "/Videos/:id/index.bif", true, a.spriteBIF},
+		{"HEAD", "/Videos/:id/index.bif", true, a.spriteBIF},
 		{"GET", "/Items/:id/Images/:kind", false, a.image},
 		{"GET", "/Items/:id/Images/:kind/:index", false, a.image},
 		{"GET", "/Items/:id/Images", true, a.imageInfo},
@@ -721,8 +744,8 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 		handlers := make([]gin.HandlerFunc, 0, 3)
 		// 图片端点除外：serveImage 自己带 public/max-age 与 ETag，挂 noStore 会把
 		// 海报墙的缓存打掉（每张图全量重下）；其余 API 一律禁止缓存。
-		// imageInfo（/Items/:id/Images 结尾、无斜杠）不在排除之列，走 noStore。
-		if !strings.Contains(route.path, "/Images/") {
+		// imageInfo 和受保护的视频时间点预览不在排除之列；鉴权失败也禁止缓存。
+		if !strings.Contains(route.path, "/Images/") || strings.Contains(route.path, "/Images/Thumbnail") {
 			handlers = append(handlers, noStore)
 		}
 		if route.auth {

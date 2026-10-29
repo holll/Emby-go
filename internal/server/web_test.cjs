@@ -16,8 +16,8 @@ function sandbox(values = {}) {
   return vm.createContext({ URLSearchParams, AbortController, token: 'fixture-token', me: null,
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
-    // 页面清理会调用磁盘日志轮询的停止函数；被截取的代码段不包含该定义。
-    stopLogsPolling() {}, scanClose: { hidden: true, addEventListener() {} },
+    // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
+    stopLogsPolling() {}, stopLibrarySprites() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }

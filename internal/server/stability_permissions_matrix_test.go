@@ -15,6 +15,7 @@ func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 	policies := map[string]string{
 		"POST /api/admin/security/unlock":          "reauth-admission",
 		"POST /api/admin/libraries":                "request-snapshot",
+		"PUT /api/admin/libraries/:id/sprites":     "admission",
 		"DELETE /api/admin/libraries/:id":          "request-snapshot",
 		"POST /api/admin/libraries/:id/move":       "request-snapshot",
 		"POST /api/admin/libraries/:id/cover":      "request-snapshot",
@@ -46,6 +47,10 @@ func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 		"POST /api/admin/scrape/cancel":            "admission",
 		"POST /api/admin/translate/run":            "admission",
 		"POST /api/admin/translate/cancel":         "admission",
+		"POST /api/admin/sprites/run":              "admission",
+		"POST /api/admin/sprites/cancel":           "admission",
+		"POST /api/admin/artwork/run":              "admission",
+		"POST /api/admin/artwork/cancel":           "admission",
 		"POST /api/admin/scheduled":                "configuration-snapshot",
 		"POST /api/admin/scheduled/validate":       "request-snapshot",
 		"PUT /api/admin/scheduled/:id":             "configuration-snapshot",

@@ -59,7 +59,7 @@ var errScrapeIndexRefresh = errors.New("刮削文件已保存，但索引刷新�
 func (a *App) claimNFO(kind string) bool {
 	a.nfoGate.Lock()
 	defer a.nfoGate.Unlock()
-	if a.nfoOwner != "" && (a.nfoOwner != kind || kind == "edit") {
+	if a.nfoOwner != "" && (a.nfoOwner != kind || kind == "edit" || kind == "artwork" || kind == "sprites") {
 		return false
 	}
 	a.nfoOwner = kind
@@ -101,6 +101,10 @@ func (a *App) nfoBusyOwner() string {
 		return "翻译"
 	case "edit":
 		return "元数据编辑或重读源"
+	case "artwork":
+		return "图片操作"
+	case "sprites":
+		return "视频预览生成"
 	}
 	return ""
 }

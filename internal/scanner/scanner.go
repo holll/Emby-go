@@ -275,15 +275,16 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 			actors = append(actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
 		}
 		// 图片与元数据同一趟写入，避免成功影片入库两次。
-		movie.PosterPath = imageutil.FindPoster(movie.OutputDir)
-		movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
-		movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
 		// 人工录入的分类要留住：扫库/重扫不覆盖已有的 manual，
 		// 只有自动刮削成功（Apply 写入后由调用方显式改状态）才会变成已刮削。
 		if opts.manualPaths[item.path] {
 			movie.Status = "manual"
 		}
 	}
+	// Artwork exists independently of NFO metadata, including pending movies.
+	movie.PosterPath = imageutil.FindMoviePoster(movie.OutputDir, movie.SourcePath)
+	movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
+	movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
 	if unreadablePath != "" {
 		// 侧车存在但读不出来：这不是「删掉元数据」的信号。已索引的行保留旧元数据
 		// 与可见状态，只跟随文件刷新派生列；原因写进 last_scrape_error。

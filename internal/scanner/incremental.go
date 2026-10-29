@@ -27,7 +27,7 @@ const (
 
 // scanFingerprintVersion invalidates every baseline when the interpretation of
 // inputs changes: stacking rules, NFO precedence or snapshot fields.
-const scanFingerprintVersion int64 = 2
+const scanFingerprintVersion int64 = 3
 
 var (
 	// ErrScanIncomplete means the inventory could not be proven complete. No
@@ -67,6 +67,7 @@ type nfoSnapshot struct {
 }
 
 type imageSnapshot struct {
+	Source  string `json:"source"`
 	Kind    string `json:"kind"`
 	Path    string `json:"path"`
 	Present bool   `json:"present"`
@@ -551,7 +552,7 @@ func readGroupInputs(lib store.Library, key string, group []candidate) (*groupIn
 			inputs.nfos["shared:"+shared] = sharedInput
 		}
 		record.movie = store.Movie{LibraryID: lib.ID, SourcePath: record.member.path, OutputDir: filepath.Dir(record.member.path), Status: "pending", AdditionalParts: partPaths(record.parts)}
-		images, err := snapshotImages(record.movie.OutputDir)
+		images, err := snapshotImages(record.movie.OutputDir, record.movie.SourcePath)
 		if err != nil {
 			return nil, err
 		}
@@ -633,9 +634,20 @@ func sameInventory(a, b map[string][]candidate) bool {
 func (n nfoFileInput) missingOrInvalid() bool { return !n.present || n.parseErr != nil }
 
 // snapshotImages mirrors imageutil's ordered selection, but does not hide I/O errors.
-func snapshotImages(dir string) ([]imageSnapshot, error) {
+func snapshotImages(dir, sourcePath string) ([]imageSnapshot, error) {
 	var result []imageSnapshot
 	for _, kind := range []string{"poster", "backdrop", "landscape"} {
+		if kind == "poster" && sourcePath != "" {
+			path := filepath.Join(dir, filepath.Base(sourcePath)+".poster.jpg")
+			info, err := os.Lstat(path)
+			if err == nil && info.Mode().IsRegular() {
+				result = append(result, imageSnapshot{Source: sourcePath, Kind: kind, Path: path, Present: true, Size: info.Size(), MtimeNS: info.ModTime().UnixNano()})
+				continue
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
 		stems := []string{kind}
 		if kind == "poster" {
 			stems = []string{"poster", "folder", "cover", "default"}
@@ -643,7 +655,7 @@ func snapshotImages(dir string) ([]imageSnapshot, error) {
 		if kind == "backdrop" {
 			stems = []string{"fanart"}
 		}
-		entry := imageSnapshot{Kind: kind}
+		entry := imageSnapshot{Source: sourcePath, Kind: kind}
 		for _, stem := range stems {
 			for _, ext := range []string{".webp", ".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG", ".WebP", ".WEBP"} {
 				path := filepath.Join(dir, stem+ext)
@@ -654,7 +666,7 @@ func snapshotImages(dir string) ([]imageSnapshot, error) {
 				if err != nil {
 					return nil, err
 				}
-				entry = imageSnapshot{Kind: kind, Path: path, Present: true, Size: info.Size(), MtimeNS: info.ModTime().UnixNano()}
+				entry = imageSnapshot{Source: sourcePath, Kind: kind, Path: path, Present: true, Size: info.Size(), MtimeNS: info.ModTime().UnixNano()}
 				break
 			}
 			if entry.Present {
@@ -696,13 +708,16 @@ func (inputs *groupInputs) fingerprint() (string, error) {
 	})
 	seenImage := make(map[string]bool)
 	for _, image := range inputs.images {
-		if seenImage[image.Kind+image.Path] {
+		if seenImage[image.Source+"\x00"+image.Kind+"\x00"+image.Path] {
 			continue
 		}
-		seenImage[image.Kind+image.Path] = true
+		seenImage[image.Source+"\x00"+image.Kind+"\x00"+image.Path] = true
 		snapshot.Images = append(snapshot.Images, image)
 	}
 	sort.Slice(snapshot.Images, func(i, j int) bool {
+		if snapshot.Images[i].Source != snapshot.Images[j].Source {
+			return snapshot.Images[i].Source < snapshot.Images[j].Source
+		}
 		if snapshot.Images[i].Kind != snapshot.Images[j].Kind {
 			return snapshot.Images[i].Kind < snapshot.Images[j].Kind
 		}
@@ -741,7 +756,7 @@ func (inputs *groupInputs) stillMatches() bool {
 		}
 	}
 	for _, record := range inputs.records {
-		images, err := snapshotImages(record.movie.OutputDir)
+		images, err := snapshotImages(record.movie.OutputDir, record.movie.SourcePath)
 		if err != nil {
 			return false
 		}
@@ -849,15 +864,20 @@ func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string
 			for _, actor := range selected.meta.Actors {
 				record.actors = append(record.actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
 			}
-			for _, image := range inputs.images {
-				switch image.Kind {
-				case "poster":
-					record.movie.PosterPath = image.Path
-				case "backdrop":
-					record.movie.BackdropPath = image.Path
-				case "landscape":
-					record.movie.LandscapePath = image.Path
-				}
+		}
+		// Primary artwork is independent of metadata. Match the record rather
+		// than assigning the final sibling's private poster to every movie.
+		for _, image := range inputs.images {
+			if image.Source != record.movie.SourcePath {
+				continue
+			}
+			switch image.Kind {
+			case "poster":
+				record.movie.PosterPath = image.Path
+			case "backdrop":
+				record.movie.BackdropPath = image.Path
+			case "landscape":
+				record.movie.LandscapePath = image.Path
 			}
 		}
 		setSource(&record.movie, member.content)

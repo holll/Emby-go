@@ -208,6 +208,18 @@ func FindPoster(dir string) string {
 	return ""
 }
 
+// FindMoviePoster prefers the private poster for one STRM over directory-wide
+// artwork. Keeping the complete STRM basename avoids changing sibling movies.
+func FindMoviePoster(dir, sourcePath string) string {
+	if sourcePath != "" {
+		path := filepath.Join(dir, filepath.Base(sourcePath)+".poster.jpg")
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			return path
+		}
+	}
+	return FindPoster(dir)
+}
+
 // FindImage 返回目录中指定命名（如 fanart / landscape）的已有图片；找不到返回空串。
 func FindImage(dir, base string) string {
 	return findImage(dir, base)

@@ -1,0 +1,30 @@
+/* Existing dark console tokens and native typography, isolated to cover maintenance. */
+/* The drawer's auto grid track must shrink below siblings' intrinsic text width. */
+.detail-drawer .detail-body { grid-template-columns: minmax(0, 1fr); }
+.detail-drawer .detail-maintenance { min-width: 0; }
+.artwork-panel { min-width: 0; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line-strong); }
+.artwork-panel h3 { margin: 0; overflow-wrap: anywhere; }
+.artwork-panel, .artwork-panel * { box-sizing: border-box; }
+.artwork-panel h3 small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.artwork-section { min-width: 0; margin-top: 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--panel-2); }
+.artwork-section summary { display: list-item; min-height: 44px; padding: 10px 16px; cursor: pointer; font-weight: 600; }
+.artwork-fields { display: grid; gap: 12px; min-width: 0; padding: 8px 16px 16px; }
+.artwork-fields label { display: grid; gap: 8px; min-width: 0; }
+.artwork-fields input:not([type=checkbox]), .artwork-fields select { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+.artwork-fields .artwork-check { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.artwork-check input { flex: 0 0 auto; width: 20px; height: 20px; }
+.artwork-panel .btn { min-width: 44px; min-height: 44px; white-space: normal; }
+.artwork-panel :focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+.artwork-panel .hint { margin: 0; }
+.artwork-state, .artwork-error { margin: 12px 0; overflow-wrap: anywhere; }
+.artwork-error { color: var(--text); padding: 12px; border-left: 3px solid var(--danger); background: var(--danger-soft); }
+.artwork-actions, .artwork-candidates { display: grid; gap: 8px; min-width: 0; }
+.artwork-candidates:empty { display: none; }
+.artwork-candidate { display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 44px; width: 100%; padding: 8px; text-align: left; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); cursor: pointer; transition: background 120ms ease; }
+.artwork-candidate:not(:disabled):hover, .artwork-candidate:not(:disabled):active { background: var(--surface-hover); }
+.artwork-candidate img { flex: 0 0 88px; width: 88px; height: 124px; object-fit: contain; background: var(--bg-soft); border-radius: var(--radius-xs); }
+.artwork-candidate span { display: grid; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.artwork-candidate small { color: var(--muted); }
+.artwork-candidate:disabled { opacity: .6; cursor: default; }
+@media (max-width: 480px) { .artwork-fields { padding: 8px 12px 12px; } .artwork-panel h3 small { display: block; margin-top: 4px; } }
+@media (prefers-reduced-motion: reduce) { .artwork-candidate { transition: none; } }

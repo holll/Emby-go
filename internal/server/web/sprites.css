@@ -1,0 +1,66 @@
+/* Independent preview generation, retaining the existing dark console tokens. */
+.sprites-panel { min-width: 0; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line-strong); }
+.sprites-panel, .sprites-panel * { box-sizing: border-box; }
+.sprites-panel h3 { margin: 0; overflow-wrap: anywhere; }
+.sprites-panel h3 small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.sprites-panel .hint { margin: 8px 0; }
+.sprites-fields, .sprites-actions { display: grid; gap: 8px; min-width: 0; }
+.sprites-fields { margin-top: 12px; }
+.sprites-fields label { display: grid; gap: 8px; min-width: 0; }
+.sprites-fields input:not([type=checkbox]) { min-width: 0; width: 100%; min-height: 44px; font-size: 16px; }
+.sprites-fields .sprites-check { display: flex; align-items: center; min-height: 44px; gap: 8px; cursor: pointer; }
+.sprites-check input { flex: 0 0 auto; width: 20px; height: 20px; }
+.sprites-panel .btn, .sprites-timeline .btn { min-height: 44px; min-width: 44px; white-space: normal; }
+.sprites-state, .sprites-error { margin: 12px 0; overflow-wrap: anywhere; }
+.sprites-error { padding: 12px; color: var(--text); background: var(--danger-soft); border-left: 3px solid var(--danger); }
+.sprites-panel :focus-visible, .sprites-timeline :focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+.sprites-player-preview { position: absolute; bottom: 64px; z-index: 70; max-width: calc(100% - 16px); overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); color: var(--text); background: var(--panel); pointer-events: none; box-shadow: var(--shadow); }
+.sprites-player-preview[hidden], .sprites-timeline[hidden] { display: none; }
+.sprites-player-picture { background-repeat: no-repeat; background-color: #000; }
+.sprites-player-preview > span { display: block; padding: 4px 8px; text-align: center; font: 12px var(--font-mono); }
+.sprites-timeline { flex: 0 0 auto; min-width: 0; padding: 8px 16px 12px; border-top: 1px solid var(--line); color: var(--text); background: var(--panel); }
+.sprites-timeline label { display: grid; min-width: 0; font-size: 13px; }
+.sprites-timeline input[type=range] { display: block; min-width: 0; width: 100%; min-height: 44px; margin: 0; padding: 0; accent-color: var(--accent); touch-action: pan-y; }
+.sprites-timeline-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.sprites-timeline output { font: 13px var(--font-mono); }
+.sprites-timeline .hint { margin: 8px 0 0; overflow-wrap: anywhere; }
+.sprites-preview-shell .player-stage { max-height: calc(100vh - 260px); max-height: calc(100dvh - 260px); }
+@media (max-width: 480px) { .sprites-panel h3 small { display: block; margin-top: 4px; } .sprites-timeline { padding-inline: 12px; } .sprites-player-preview { bottom: 48px; } }
+.library-sprite-open { min-height: 44px; min-width: 44px; }
+/* Keep library actions on shared edges rather than ragged, right-aligned wraps. */
+.library-table table { table-layout: fixed; }
+.library-table th:nth-child(2) { width: 26%; }
+.library-table th:nth-child(3) { width: 30%; }
+.library-table th.lib-id { width: 56px; }
+.library-table .lib-cell, .library-table .lib-cell > div { min-width: 0; }
+.library-table .title, .library-table .lib-path { overflow-wrap: anywhere; }
+.library-table .lib-path { max-width: 100%; white-space: normal; }
+.library-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 8px; }
+.library-actions > button { width: 100%; min-width: 0; min-height: 44px; margin: 0; padding: 8px; white-space: normal; }
+@media (max-width: 650px) {
+  .table-wrap.library-table { margin: 0; overflow: visible; max-width: 100%; }
+  .table-wrap.library-table table:not(.log-table):not(.user-table), .library-table tbody { display: block; min-width: 0; width: 100%; }
+  .library-table thead { display: none; }
+  .library-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
+  .library-table tbody td { min-width: 0; padding: 0; border: 0; }
+  .library-table .library-name-cell { grid-column: 1; grid-row: 1; }
+  .library-table .library-order-cell { grid-column: 2; grid-row: 1; align-self: center; }
+  .library-table .lib-order { display: flex; gap: 8px; justify-content: flex-end; }
+  .library-table .lib-cell, .library-table .lib-cell > div { min-width: 0; }
+  .library-table .title { overflow-wrap: anywhere; }
+  .library-table .library-path-cell, .library-table .library-actions-cell { grid-column: 1 / -1; }
+  .library-table .library-path-cell::before { content: '目录路径'; display: block; margin-bottom: 4px; color: var(--muted); font: 12px var(--font-sans); }
+  .library-table .lib-path { max-width: 100%; overflow-wrap: anywhere; }
+  .library-table .library-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .library-actions > button { width: 100%; min-width: 0; margin: 0; height: 44px; padding: 8px; white-space: normal; }
+}
+.library-sprites { min-width: 0; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-strong); overflow-wrap: anywhere; }
+.library-sprites, .library-sprites * { box-sizing: border-box; }
+.library-sprites h3 { margin: 0; }
+.library-sprites form { display: grid; gap: 12px; max-width: 520px; min-width: 0; }
+.library-sprites label { display: grid; gap: 8px; min-width: 0; }
+.library-sprites [hidden] { display: none; }
+.library-sprites input, .library-sprites select { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+.library-sprites .btn { min-height: 44px; min-width: 44px; white-space: normal; }
+.library-sprites :focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .sprites-panel *, .sprites-timeline * { scroll-behavior: auto; } }

@@ -210,30 +210,34 @@ async function pageOverview() {
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
+let librarySpritesStop = null, libraryPageGen = 0;
+function stopLibrarySprites() { librarySpritesStop?.(); librarySpritesStop = null; }
 async function pageLibraries() {
-  const gen = pageGen;
+  const gen = pageGen, identity = token, requestGen = ++libraryPageGen;
+  stopLibrarySprites();
+  const current = () => gen === pageGen && requestGen === libraryPageGen && token === identity && localStorage.getItem('emby_token') === identity;
   const data = await api('/libraries');
-  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
+  if (!current()) return; // 导航、重读或身份变化后，不接入迟到结果。
   const items = data.items || [];
   const total = data.total ?? items.length;
   content.innerHTML = `
     <section class="panel">
       <div class="panel-head"><h2>媒体库</h2><span class="hint" style="margin:0">共 ${esc(total)} 个 · 顺序即 Emby 客户端里的库顺序</span></div>
       ${items.length ? `
-        <div class="table-wrap"><table>
+        <div class="table-wrap library-table"><table>
           <thead><tr>
-            <th style="width:56px">顺序</th>
+            <th style="width:88px">顺序</th>
             <th>媒体库</th>
             <th>路径</th>
             <th class="lib-id">ID</th>
             <th style="text-align:right">操作</th>
           </tr></thead>
           <tbody>${items.map((item, index) => `<tr>
-            <td><div class="lib-order">
+            <td class="library-order-cell"><div class="lib-order">
               <button class="icon-btn" data-lib-move="up" data-lib="${esc(item.Id)}" title="上移"${index === 0 ? ' disabled' : ''}>${icon('arrow-up')}</button>
               <button class="icon-btn" data-lib-move="down" data-lib="${esc(item.Id)}" title="下移"${index === items.length - 1 ? ' disabled' : ''}>${icon('arrow-down')}</button>
             </div></td>
-            <td><div class="lib-cell">
+            <td class="library-name-cell"><div class="lib-cell">
               ${item.cover
                 ? `<img class="lib-cover" loading="lazy" src="${esc(item.cover)}?maxWidth=120" alt="">`
                 : `<span class="lib-cover-fallback">${icon('film')}</span>`}
@@ -242,16 +246,18 @@ async function pageLibraries() {
                 <span class="sub"><span class="lib-count">${esc(item.count ?? 0)}<small>部影片</small></span></span>
               </div>
             </div></td>
-            <td class="mono"><span class="lib-path">${esc(item.Path)}</span></td>
+            <td class="mono library-path-cell"><span class="lib-path">${esc(item.Path)}</span></td>
             <td class="num lib-id">${esc(item.Id)}</td>
-            <td><div class="row-actions">
+            <td class="library-actions-cell"><div class="row-actions library-actions">
               <button class="btn btn-sm" data-lib-cover="${esc(item.Id)}" title="上传封面图片">${icon('image')}<span>封面</span></button>
-              ${item.cover ? `<button class="icon-btn" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}</button>` : ''}
+              ${item.cover ? `<button class="btn btn-sm" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}<span>移除封面</span></button>` : ''}
+              ${me?.is_admin ? `<button type="button" class="btn btn-sm library-sprite-open" data-lib-sprites="${esc(item.Id)}" aria-expanded="false" aria-controls="library-sprite-settings">预览设置</button>` : ''}
               <button class="btn btn-sm" data-lib-scan="${esc(item.Id)}" title="仅扫描该媒体库">${icon('refresh')}<span>扫描</span></button>
-              <button class="icon-btn danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}</button>
+              <button class="btn btn-sm btn-danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}<span>删除索引</span></button>
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有媒体库', '先在下方登记一个存放 .strm 的目录。')}
+      <div id="library-sprite-settings" hidden></div>
     </section>
     <section class="panel">
       <h2>添加媒体库</h2>
@@ -262,6 +268,25 @@ async function pageLibraries() {
       </form>
     </section>
     <input type="file" id="lib-cover-file" accept="image/*" hidden>`;
+  const spriteSettings = document.querySelector('#library-sprite-settings');
+  document.querySelectorAll('[data-lib-sprites]').forEach(button => button.addEventListener('click', () => {
+    if (!current() || !me?.is_admin) return;
+    const expanded = button.getAttribute('aria-expanded') === 'true';
+    stopLibrarySprites();
+    document.querySelectorAll('[data-lib-sprites]').forEach(node => node.setAttribute('aria-expanded', 'false'));
+    spriteSettings.hidden = expanded; spriteSettings.innerHTML = '';
+    if (expanded) return;
+    button.setAttribute('aria-expanded', 'true');
+    const library = items.find(item => String(item.Id) === button.dataset.libSprites);
+    if (!library) return;
+    if (typeof mountLibrarySprites !== 'function') { spriteSettings.textContent = '视频预览设置资源未加载，请刷新页面重试。'; return; }
+    librarySpritesStop = mountLibrarySprites(spriteSettings, { library, apiRequest: api,
+      isCurrent: () => current() && document.querySelector('#library-sprite-settings') === spriteSettings,
+      onSaved: value => { if (current()) library.sprite_interval_seconds = value; }
+    });
+    spriteSettings.querySelector('h3')?.focus({ preventScroll: true });
+    spriteSettings.scrollIntoView({ block: 'nearest' });
+  }));
   document.querySelector('#library-form').addEventListener('submit', async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target));
@@ -705,9 +730,13 @@ const detailDrawer = document.querySelector('#detail-drawer');
 
 let detailGen = 0;
 let detailTranslationStop = null;
+let detailArtworkStop = null;
+let detailSpritesStop = null;
 
 function closeDetail() {
   if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
+  if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
+  if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
   detailGen += 1;
   detailOverlay.hidden = true;
   detailDrawer.innerHTML = '';
@@ -926,6 +955,8 @@ function overlayTrapTab(event) {
 
 async function openDetail(item) {
   if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
+  if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
+  if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
   const gen = pageGen;
   const session = ++detailGen;
   const isCurrent = () => gen === pageGen && session === detailGen;
@@ -990,6 +1021,7 @@ async function openDetail(item) {
         <button id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit">${icon('edit')}<span>编辑元数据</span></button>
       </div>
 
+      ${typeof me !== 'undefined' && me?.is_admin ? '<div id="detail-artwork"></div><div id="detail-sprites"></div>' : ''}
       ${typeof me !== 'undefined' && me?.is_admin ? `<section class="detail-section"><h3>仅翻译</h3>${translationWidget('detail-translate')}</section>` : ''}
       <section class="detail-section" id="detail-edit" hidden>
         <h3>编辑元数据 <small>写入 NFO，保存后归入「手动录入」</small></h3>
@@ -1084,6 +1116,41 @@ async function openDetail(item) {
     await probeItem(m.id);
     if (isCurrent()) openDetail(item);
   });
+  const artworkRoot = document.querySelector('#detail-artwork');
+  if (artworkRoot && me?.is_admin) {
+    if (typeof mountArtwork === 'function') {
+      const identity = token, originalWall = wallGen;
+      detailArtworkStop = mountArtwork(artworkRoot, {
+        apiRequest: api, movie: m,
+        imageRequest: async (path, { signal }) => {
+          if (token !== identity || localStorage.getItem('emby_token') !== identity) throw new Error('登录状态已改变');
+          const response = await fetch(path, { signal, headers: { 'X-Emby-Token': identity } });
+          if (!response.ok) throw new Error('封面预览不可用');
+          return response.blob();
+        },
+        isCurrent: () => isCurrent() && token === identity && localStorage.getItem('emby_token') === identity && document.querySelector('#detail-artwork') === artworkRoot,
+        onComplete: status => {
+          if (!isCurrent() || token !== identity || localStorage.getItem('emby_token') !== identity) return;
+          if (wallGen === originalWall) reloadWall();
+          if (document.querySelector('#detail-edit')?.hidden !== false) openDetail(item);
+          else toast('封面已更新；元数据编辑草稿保持，退出编辑后重新打开详情核对');
+          if (status.index_refresh_failed) toast('封面文件已写入，但索引刷新失败；请核对封面，默认补缺可重试修复索引。', 'error');
+          else if (status.failed || status.error) toast('封面任务已结束，但存在失败；请检查源文件和服务配置。', 'error');
+        }
+      });
+    } else artworkRoot.innerHTML = '<p class="hint" role="status">封面维护资源未加载，请刷新页面重试。</p>';
+  }
+  const spritesRoot = document.querySelector('#detail-sprites');
+  if (spritesRoot && me?.is_admin) {
+    const identity = token;
+    if (typeof mountSprites === 'function') {
+      detailSpritesStop = mountSprites(spritesRoot, {
+        apiRequest: api, movie: m,
+        isCurrent: () => isCurrent() && token === identity && localStorage.getItem('emby_token') === identity && document.querySelector('#detail-sprites') === spritesRoot,
+        onComplete: () => { if (isCurrent() && token === identity) toast('视频预览已生成，重新打开播放器可使用最新时间轴预览；封面与元数据保持不变'); }
+      });
+    } else spritesRoot.innerHTML = '<p class="hint" role="status">视频预览资源未加载，请刷新页面重试。</p>';
+  }
   const translateRoot = document.querySelector('#detail-translate');
   if (translateRoot && me?.is_admin) {
     const originalWall = wallGen;
@@ -1185,8 +1252,10 @@ function entityIdOf(kind, name) {
 
 /* ---------------------------------------------------------------- 在线播放 */
 let artInstance = null;
+let spritePreviewStop = null;
 
 function closePlayer() {
+  spritePreviewStop?.(); spritePreviewStop = null;
   if (artInstance) { try { artInstance.destroy(); } catch { /* ignore */ } artInstance = null; }
   const overlay = document.querySelector('#player-overlay');
   if (overlay) overlay.hidden = true;
@@ -1202,6 +1271,7 @@ function streamURL(id, kind) {
 }
 
 function openPlayer(item) {
+  if (artInstance) closePlayer();
   const overlay = document.querySelector('#player-overlay');
   const title = item.Title || String(item.source_path || '').split(/[\\/]/).pop() || '播放';
   document.querySelector('#player-title').textContent = title;
@@ -1230,6 +1300,21 @@ function openPlayer(item) {
     theme: '#e0a44b',
     lang: 'zh-cn'
   });
+  if (globalThis.SpritePreview) {
+    const instance = artInstance, identity = token;
+    const request = async (path, { signal }, image) => {
+      if (token !== identity || localStorage.getItem('emby_token') !== identity) throw new Error('登录状态已改变');
+      const response = await fetch(path, { signal, headers: { 'X-Emby-Token': identity } });
+      if (!response.ok) { const error = new Error('视频预览不可用'); error.status = response.status; throw error; }
+      return image ? response.blob() : response.json();
+    };
+    spritePreviewStop = SpritePreview.mount(instance, {
+      movieID: item.id, stage,
+      requestJSON: (path, options) => request(path, options, false),
+      requestImage: (path, options) => request(path, options, true),
+      isCurrent: () => artInstance === instance && token === identity && localStorage.getItem('emby_token') === identity
+    });
+  }
   // 直链 302 在 HTTPS 页面可能被混合内容/跨域拦截；失败时回退服务端代理端点。
   artInstance.on('error', () => {
     if (usedProxy) { toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error'); return; }
@@ -2872,6 +2957,7 @@ async function page(name) {
   createdAPIKey = null; // 导航销毁仅在创建页暂存的管理员密钥原文。
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
+  stopLibrarySprites();
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
   stopLogsPolling();
@@ -3279,6 +3365,7 @@ async function runScan(libraryId) {
 function clearSessionView() {
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
+  stopLibrarySprites();
   createdAPIKey = null;
   settingsCategory = 'account';
   me = null;

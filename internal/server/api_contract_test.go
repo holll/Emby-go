@@ -69,6 +69,22 @@ func TestAPIContractCriticalRoutesRegistered(t *testing.T) {
 		"POST /api/admin/translate/run",
 		"GET /api/admin/translate/status",
 		"POST /api/admin/translate/cancel",
+		"GET /Items/:id/ThumbnailSet",
+		"GET /Items/:id/Images/Thumbnail",
+		"GET /Videos/:id/index.bif",
+		"HEAD /Videos/:id/index.bif",
+		"GET /api/items/:id/sprites",
+		"GET /api/items/:id/sprites/sheets/:page",
+		"PUT /api/admin/libraries/:id/sprites",
+		"POST /api/admin/sprites/run",
+		"GET /api/admin/sprites/status",
+		"POST /api/admin/sprites/cancel",
+		"GET /api/admin/sprites/capabilities",
+		"POST /api/admin/artwork/run",
+		"GET /api/admin/artwork/status",
+		"POST /api/admin/artwork/cancel",
+		"GET /api/admin/artwork/capabilities",
+		"GET /api/admin/artwork/candidates",
 	}
 	for _, key := range critical {
 		if !registered[key] {
