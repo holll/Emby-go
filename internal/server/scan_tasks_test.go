@@ -18,7 +18,8 @@ import (
 	"emby-go/internal/config"
 )
 
-// asyncScanFixture 起真实路由、初始化管理员并建一个含单个影片的空壳目录。
+// asyncScanFixture keeps real app/routes/library setup, but seeds an isolated
+// setup-only administrator/session: initialization/login are not under test here.
 func asyncScanFixture(t *testing.T) (*App, *httptest.Server, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -67,21 +68,16 @@ func asyncScanFixture(t *testing.T) (*App, *httptest.Server, string) {
 		raw, _ := io.ReadAll(resp.Body)
 		return resp, raw
 	}
-	if resp, raw := call(http.MethodPost, "/api/auth/initialize", "", `{"Username":"admin","Pw":"password-1234"}`, nil); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("initialize: %d %s", resp.StatusCode, raw)
-	}
-	_, raw := call(http.MethodPost, "/Users/AuthenticateByName", "", `{"Username":"admin","Pw":"password-1234"}`, nil)
-	var auth struct {
-		AccessToken string `json:"AccessToken"`
-	}
-	if err := json.Unmarshal(raw, &auth); err != nil || auth.AccessToken == "" {
-		t.Fatalf("登录失败: %v %s", err, raw)
+	owner := seedFixtureUser(t, app, "admin", "password-1234", true)
+	const token = "async-scan-fixture-session"
+	if err := app.db.SaveAccessTokenForUser(token, owner.ID, app.sessionExpiry(time.Now())); err != nil {
+		t.Fatal(err)
 	}
 	libBody := `{"Name":"Async","Path":"` + root + `"}`
-	if resp, raw := call(http.MethodPost, "/api/admin/libraries", auth.AccessToken, libBody, nil); resp.StatusCode != http.StatusOK {
+	if resp, raw := call(http.MethodPost, "/api/admin/libraries", token, libBody, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("add library: %d %s", resp.StatusCode, raw)
 	}
-	return app, ts, auth.AccessToken
+	return app, ts, token
 }
 
 func TestAsyncScanAcceptsAndCompletes(t *testing.T) {

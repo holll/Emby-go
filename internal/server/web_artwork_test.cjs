@@ -23,22 +23,19 @@ function fixture(api, confirm = () => true, options = {}) {
   const dispose = box.mountArtwork(host, { movie: { id: 19, Title: '<unsafe>' }, confirm, imageRequest: options.imageRequest, isCurrent: () => current, onComplete: () => completed++, apiRequest: (p, o) => { calls.push([p, o]); return p === '/artwork/status' ? Promise.resolve(options.latest || { task_id: 0, instance_id: 'test-instance', running: false, movie_ids: null }) : api(p, o); } });
   return { box, host, calls, timers, node, dispose, completed: () => completed, stale: () => { current = false; }, click: key => node(key).events.get('click')?.(), async tick(ms) { const entry = [...timers].find(([, t]) => t.ms === ms); assert.ok(entry, 'timer ' + ms); timers.delete(entry[0]); entry[1].fn(); await flush(); } };
 }
-test('real Chromium cover controls retain native keyboard focus, 44px targets and no overflow at mobile width', t => {
-  const { spawnSync } = require('node:child_process'), os = require('node:os');
-  const chrome = process.env.CHROME_BIN || '/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
-  if (!fs.existsSync(chrome)) { t.skip('Chromium unavailable; no installation'); return; }
+test('real Chromium cover controls retain native keyboard focus, 44px targets and no overflow at mobile width', async t => {
+  const { available, probe } = require('./web_browser_helper.cjs');
+  if (!available(t)) return;
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8') + fs.readFileSync(path.join(__dirname, 'web/artwork.css'), 'utf8');
   const doc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta charset="utf-8"><style>${css}body{padding:16px}#host{width:100%;max-width:343px}</style><div id="host"></div><script>${source}
     mountArtwork(document.querySelector('#host'), {movie:{id:19,Title:'A very long title '.repeat(20)},apiRequest:async path=>path.includes('capabilities')?({screenshot:true,provider:true}):({task_id:0,instance_id:'test-instance',running:false,movie_ids:null})});
     setTimeout(()=>{const button=document.querySelector('[data-art="screenshot"]'),select=document.querySelector('select'),input=document.querySelector('[data-art="position"]');button.focus(); const out={width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth,button:button.getBoundingClientRect().height,select:select.getBoundingClientRect().height,input:input.getBoundingClientRect().height,focus:document.activeElement===button,hidden:getComputedStyle(document.querySelector('[data-art="error"]')).display,gap:getComputedStyle(document.querySelector('.artwork-actions')).gap};document.body.innerHTML='<pre id="result"></pre>';document.querySelector('#result').textContent=JSON.stringify(out);},0);</script>`;
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-artwork-ui-'));
-  try {
-    for (const width of [375, 768, 1280]) {
-      const run = spawnSync(chrome, ['--headless','--no-sandbox','--disable-gpu','--no-first-run','--user-data-dir='+profile,'--window-size='+width+',900','--virtual-time-budget=1000','--dump-dom','data:text/html;base64,'+Buffer.from(doc).toString('base64')], {encoding:'utf8',timeout:20000});
-      assert.equal(run.status, 0, run.stderr); const match=run.stdout.match(/<pre id="result">([^<]+)<\/pre>/); assert.ok(match,run.stdout); const actual=JSON.parse(match[1]);
-      assert.equal(actual.overflow,false); assert.ok(actual.button>=44); assert.ok(actual.select>=44); assert.ok(actual.input>=44); assert.equal(actual.focus,true); assert.equal(actual.hidden,'none'); assert.equal(actual.gap,'8px');
-    }
-  } finally { assert.equal(path.dirname(profile), os.tmpdir()); assert.ok(path.basename(profile).startsWith('emby-artwork-ui-')); fs.rmSync(profile,{recursive:true,force:true,maxRetries:8,retryDelay:100}); }
+  const widths = [375, 768, 1280];
+  const results = await probe(t, doc, widths);
+  for (const [i, actual] of results.entries()) {
+    assert.equal(actual.width, widths[i]);
+    assert.equal(actual.overflow,false); assert.ok(actual.button>=44); assert.ok(actual.select>=44); assert.ok(actual.input>=44); assert.equal(actual.focus,true); assert.equal(actual.hidden,'none'); assert.equal(actual.gap,'8px');
+  }
 });
 
 const caps = { screenshot: true, provider: true };

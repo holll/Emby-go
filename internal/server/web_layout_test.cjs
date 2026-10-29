@@ -4,65 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
-const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const chrome = process.env.CHROME_BIN || '/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
+const { available, browser: launchBrowser } = require('./web_browser_helper.cjs');
 const web = path.join(__dirname, 'web');
 
 async function browser(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-layout-'));
-  const proc = spawn(chrome, ['--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', '--user-data-dir=' + path.join(dir, 'profile'), 'about:blank']);
-  const exited = new Promise(resolve => { proc.once('exit', resolve); proc.once('error', resolve); });
-  let ws;
-  t.after(async () => {
-    // Prefer Chromium's own shutdown, so renderers finish profile writes too.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ id: 0, method: 'Browser.close' })); } catch { /* fallback below */ }
-    }
-    const terminate = setTimeout(() => proc.kill(), 1000);
-    const forceKill = setTimeout(() => proc.kill('SIGKILL'), 2500);
-    try { await exited; } finally { clearTimeout(terminate); clearTimeout(forceKill); if (ws) ws.close(); }
-    assert.equal(path.dirname(dir), os.tmpdir());
-    assert.ok(path.basename(dir).startsWith('emby-layout-'));
-    // Chromium descendants may finish profile writes just after the browser
-    // process exits. Retry only transient filesystem errors, with a bounded
-    // backoff; never suppress a persistent cleanup failure.
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
-  });
-  const url = await new Promise((resolve, reject) => {
-    let text = '';
-    const timeout = setTimeout(() => reject(Error('Chromium CDP startup timeout: ' + text)), 15000);
-    proc.once('error', e => { clearTimeout(timeout); reject(e); });
-    proc.stderr.on('data', chunk => { text += chunk; const match = text.match(/DevTools listening on (ws:\/\/[^\s]+)/); if (match) { clearTimeout(timeout); resolve(match[1]); } });
-    proc.once('exit', code => { clearTimeout(timeout); reject(Error('Chromium exited ' + code + ': ' + text)); });
-  });
-  ws = new WebSocket(url);
-  await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', reject, { once: true }); });
-  let serial = 0;
-  const pending = new Map();
-  ws.addEventListener('message', event => {
-    const message = JSON.parse(event.data);
-    const entry = pending.get(message.id);
-    if (!entry) return;
-    pending.delete(message.id); clearTimeout(entry.timeout);
-    if (message.error) entry.reject(Error(JSON.stringify(message.error))); else entry.resolve(message.result);
-  });
-  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
-    const id = ++serial;
-    const timeout = setTimeout(() => { pending.delete(id); reject(Error('CDP timeout ' + method)); }, 15000);
-    pending.set(id, { resolve, reject, timeout });
-    ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-  });
-  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
-  const call = (method, params) => send(method, params, sessionId);
-  await call('Page.enable');
-  const evaluate = async expression => {
-    const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
-    return result.result.value;
-  };
+  const { call, evaluate, navigate, dir } = await launchBrowser(t);
   const fixture = `
     window.__calls = []; window.__errors = [];
     addEventListener('error', e => __errors.push(e.message));
@@ -105,13 +52,13 @@ async function browser(t) {
     return '<script>' + fs.readFileSync(path.join(web, name), 'utf8').replace(/<\/script/gi, '<\\/script') + '</script>';
   });
   const file = path.join(dir, 'index.html'); fs.writeFileSync(file, html);
-  await call('Page.navigate', { url: pathToFileURL(file).href });
+  await navigate(pathToFileURL(file).href);
   await evaluate(`(async()=>{for(let i=0;i<100;i++){if(document.querySelector('#overview-dashboard'))return;await new Promise(r=>setTimeout(r,20));}throw Error('boot did not render: '+document.body.innerText);})()`);
   return { call, evaluate, dir };
 }
 
 test('完整前端：桌面与移动端页面布局、渐进表单和触控导航', { timeout: 120000 }, async t => {
-  if (!fs.existsSync(chrome) || typeof WebSocket !== 'function') { t.skip('需要现有Chromium和Node WebSocket；不自动安装'); return; }
+  if (!available(t)) return;
   const { call, evaluate } = await browser(t);
   await call('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion', value:'reduce' }] });
   for (const width of [1440, 768, 390, 360, 320]) {
@@ -182,7 +129,7 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
 
 
 test('详情固定外壳：加载关闭、错误重试、长详情关闭、背景隔离、持久反馈与焦点归还', {timeout:60000}, async t => {
-  if (!fs.existsSync(chrome) || typeof WebSocket !== 'function') { t.skip('需要现有Chromium'); return; }
+  if (!available(t)) return;
   const {call,evaluate}=await browser(t);
   await call('Emulation.setDeviceMetricsOverride',{width:320,height:740,deviceScaleFactor:1,mobile:true});
   await evaluate("page('items')");

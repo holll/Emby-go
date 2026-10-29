@@ -2,8 +2,8 @@ package server
 
 import "testing"
 
-// seedOwner 确保 id=1 管理员存在：旧夹具直接写入 token/API key，
-// 认证现在要求账户行存在（fail-closed），测试也要按真实初始化顺序建账户。
+// seedOwner 为非登录契约测试预置真实账户：请求仍走完整身份和凭证校验。
+// 初始化/登录 API 与生产 bcrypt 成本由专门测试覆盖，不在每个夹具里重复执行。
 func seedOwner(t *testing.T, a *App) {
 	t.Helper()
 	ok, err := a.db.HasAdministrator()
@@ -13,7 +13,5 @@ func seedOwner(t *testing.T, a *App) {
 	if ok {
 		return
 	}
-	if err := a.db.InitializeAdministrator("admin", "fixture-pass-123"); err != nil {
-		t.Fatal(err)
-	}
+	seedFixtureUser(t, a, "admin", "fixture-pass-123", true)
 }

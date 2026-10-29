@@ -3,11 +3,13 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"emby-go/internal/config"
 	"emby-go/internal/store"
 	"github.com/gin-gonic/gin"
 )
@@ -18,15 +20,23 @@ func TestAdminRequestGenerationBarrier(t *testing.T) {
 	for _, mode := range []string{"password", "revoke-user", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "unchanged"} {
 		for _, action := range []string{"create", "update", "libraries", "delete"} {
 			t.Run(mode+"/"+action, func(t *testing.T) {
-				a, _, _ := asyncScanFixture(t)
-				actor, err := a.db.CreateUser("generation-admin", "password-1234", true)
+				// This matrix tests request/transaction re-admission, not app
+				// startup, HTTP login or password hashing during fixture setup.
+				// Open still performs the real migrations/schema checks/WAL setup.
+				path := filepath.Join(t.TempDir(), "generation.db")
+				db, err := store.Open(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				target, err := a.db.CreateUser("generation-target", "password-1234", false)
-				if err != nil {
-					t.Fatal(err)
-				}
+				t.Cleanup(func() {
+					if err := db.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				a := &App{db: db, cfg: config.Config{DBPath: path}}
+				seedFixtureUser(t, a, "admin", "password-1234", true)
+				actor := seedFixtureUser(t, a, "generation-admin", "password-1234", true)
+				target := seedFixtureUser(t, a, "generation-target", "password-1234", false)
 				if err := a.db.SaveAccessTokenForUser("generation-session", actor.ID, time.Now().Add(time.Hour)); err != nil {
 					t.Fatal(err)
 				}

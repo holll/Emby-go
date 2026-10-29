@@ -3,7 +3,6 @@ package artwork
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"image"
 	"image/color"
@@ -289,30 +288,60 @@ func TestRealFFmpegHTTP(t *testing.T) {
 }
 func TestRefreshErrorRetry(t *testing.T) {
 	db, m, dir := fixture(t)
-	raw, e := sql.Open("sqlite", filepath.Join(dir, "store.db"))
+	raw := openArtworkFixtureSQL(t, filepath.Join(dir, "store.db"))
+	if _, e := raw.Exec("CREATE TRIGGER fail_art BEFORE UPDATE OF poster_path ON movies BEGIN SELECT RAISE(ABORT,'injected refresh failure'); END"); e != nil {
+		t.Fatal(e)
+	}
+	var calls atomic.Int32
+	c := provider(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write(picture())
+	})
+	req := Request{MovieID: m.ID, Mode: "provider", Provider: "p", ProviderID: "i"}
+	res, e := Run(context.Background(), db, req, Options{Client: c})
+	path := m.SourcePath + ".poster.jpg"
+	if e != nil || !res.Changed || res.RefreshError == "" || res.PosterPath != path || calls.Load() != 1 {
+		t.Fatalf("%+v %v calls=%d", res, e, calls.Load())
+	}
+	preserved, e := os.ReadFile(path)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer raw.Close()
-	if _, e = raw.Exec("CREATE TRIGGER fail_art BEFORE UPDATE OF poster_path ON movies BEGIN SELECT RAISE(ABORT,'injected refresh failure'); END"); e != nil {
+	if _, e = jpeg.Decode(bytes.NewReader(preserved)); e != nil {
+		t.Fatalf("refresh failure did not preserve a valid JPEG: %v", e)
+	}
+	after, e := db.Movie(m.ID)
+	if e != nil {
 		t.Fatal(e)
 	}
-	c := provider(t, func(w http.ResponseWriter, r *http.Request) { w.Write(picture()) })
-	req := Request{MovieID: m.ID, Mode: "provider", Provider: "p", ProviderID: "i"}
-	res, e := Run(context.Background(), db, req, Options{Client: c})
-	if e != nil || !res.Changed || res.RefreshError == "" {
-		t.Fatalf("%+v %v", res, e)
-	}
-	after, _ := db.Movie(m.ID)
 	if !reflect.DeepEqual(m, after) {
-		t.Fatal("failed index changed metadata")
+		t.Fatalf("failed index changed metadata: before=%+v after=%+v", m, after)
 	}
 	if _, e = raw.Exec("DROP TRIGGER fail_art"); e != nil {
 		t.Fatal(e)
 	}
-	res, e = Run(context.Background(), db, req, Options{})
-	if e != nil || res.Reason != "index_repaired" || !res.Changed {
+	res, e = Run(context.Background(), db, req, Options{Client: c})
+	if e != nil || res.Reason != "index_repaired" || !res.Changed || res.RefreshError != "" || res.PosterPath != path {
 		t.Fatalf("%+v %v", res, e)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("index repair downloaded again: calls=%d", calls.Load())
+	}
+	repaired, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(preserved, repaired) {
+		t.Fatal("index repair changed the preserved image")
+	}
+	after, e = db.Movie(m.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	want := m
+	want.PosterPath = path
+	if !reflect.DeepEqual(want, after) {
+		t.Fatalf("index repair changed fields other than poster: want=%+v after=%+v", want, after)
 	}
 }
 

@@ -2102,10 +2102,9 @@ test('刮削inspect失败保留已有候选并提供重试，首次失败同样�
   }
 });
 
-test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位，标题与播放可聚焦', t => {
-  const { spawnSync } = require('node:child_process'), os = require('node:os');
-  const chrome = process.env.CHROME_BIN || '/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
-  if (!fs.existsSync(chrome)) { t.skip('未安装浏览器；不自动安装'); return; }
+test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位，标题与播放可聚焦', async t => {
+  const { available, probe } = require('./web_browser_helper.cjs');
+  if (!available(t)) return;
   const box = sandbox({ me: { is_admin: true }, esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
   vm.runInContext(section('function wallCard(', 'const WALL_PAGE_SIZE'), box);
   const card = box.wallCard({ id: 1, status: 'success', Title: 'test' }, null);
@@ -2115,20 +2114,11 @@ test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位
     const title=document.querySelector('.wall-title'),play=document.querySelector('.wall-play'); title.focus();const titleFocus=document.activeElement===title;play.focus();
     const selected=document.querySelector('[data-translate-select]'),r=selected.getBoundingClientRect(),selectionHit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===selected;
     const out={width:innerWidth,selectionHit,display:getComputedStyle(f).display,height:f.getBoundingClientRect().height,hits,titleFocus,playFocus:document.activeElement===play};document.head.innerHTML='';document.body.innerHTML='<pre id="result"></pre>';document.querySelector('#result').textContent=JSON.stringify(out);</script>`;
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-css-regression-'));
-  try {
-    for (const width of [1280, 500]) {
-      const run = spawnSync(chrome, ['--headless', '--no-sandbox', '--disable-gpu', '--no-first-run', '--user-data-dir=' + profile,
-        '--window-size=' + width + ',900', '--dump-dom', 'data:text/html;base64,' + Buffer.from(doc).toString('base64')], { encoding: 'utf8', timeout: 20000 });
-      assert.equal(run.status, 0, run.stderr); const match = run.stdout.match(/<pre id="result">([^<]+)<\/pre>/); assert.ok(match, run.stdout);
-      const actual = JSON.parse(match[1]); assert.equal(actual.width, width); assert.deepEqual(actual.hits, [true,true,true]); assert.equal(actual.selectionHit, true);
-      assert.equal(actual.display, 'none'); assert.equal(actual.height, 0); assert.equal(actual.titleFocus, true); assert.equal(actual.playFocus, true);
-    }
-  } finally {
-    assert.equal(path.dirname(profile), os.tmpdir()); assert.ok(path.basename(profile).startsWith('emby-css-regression-'));
-    // --dump-dom waits for the browser, but profile writers may finish later.
-    // Keep cleanup bounded and fail if the directory stays unremovable.
-    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+  const widths = [1280, 500];
+  const results = await probe(t, doc, widths);
+  for (const [i, actual] of results.entries()) {
+    assert.equal(actual.width, widths[i]); assert.deepEqual(actual.hits, [true,true,true]); assert.equal(actual.selectionHit, true);
+    assert.equal(actual.display, 'none'); assert.equal(actual.height, 0); assert.equal(actual.titleFocus, true); assert.equal(actual.playFocus, true);
   }
 });
 

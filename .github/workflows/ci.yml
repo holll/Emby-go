@@ -38,18 +38,17 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Coverage gate (≥70%)
+      # 一次未缓存的完整测试同时产出覆盖率，避免同一套测试顺序跑两遍。
+      - name: Test and coverage gate (≥70%)
         run: |
           set -o pipefail
-          go test -coverprofile=cover.out ./... 2>&1 | tee /tmp/test.log
+          go test -count=1 -coverprofile=cover.out ./... 2>&1 | tee /tmp/test.log
           total=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
           echo "total coverage: ${total}%"
           awk -v t="${total}" 'BEGIN { exit !(t+0 >= 70) }'
 
-      - name: Test
-        run: |
-          set -o pipefail
-          go test ./... -count=1 2>&1 | tee /tmp/test.log
+      - name: Validate exact test shard planner
+        run: python3 .github/scripts/test_shard_test.py
 
       # 失败时把具体测试名写进 annotations，便于在没有日志下载权限时定位。
       - name: Test failure details
@@ -64,22 +63,24 @@ jobs:
             echo "::error::$detail"
           fi
 
-  # modernc SQLite 与密码哈希在 race 下开销较高；按包隔离 runner，
-  # 避免 server/store 争用 CPU，并为完整测试集显式设置包级预算。
-  # 不过滤测试、不关闭 race；新增的封面/预览与扫描路径同样纳入检测。
+  # 保留全部 race 测试；server 按真实顶层测试清单做互斥、完备的进程分片，
+  # 避免 Gin/slog 全局状态被 t.Parallel 破坏，且不再依赖提高超时上限。
   race:
-    name: Race (${{ matrix.package }})
+    name: Race (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - ./internal/server
-          - ./internal/store
-          - ./internal/outbound
-          - ./internal/artwork
-          - ./internal/scanner
+        include:
+          - { name: server-1/4, package: ./internal/server, shard: 0, shards: 4 }
+          - { name: server-2/4, package: ./internal/server, shard: 1, shards: 4 }
+          - { name: server-3/4, package: ./internal/server, shard: 2, shards: 4 }
+          - { name: server-4/4, package: ./internal/server, shard: 3, shards: 4 }
+          - { name: store, package: ./internal/store, shard: 0, shards: 1 }
+          - { name: outbound, package: ./internal/outbound, shard: 0, shards: 1 }
+          - { name: artwork, package: ./internal/artwork, shard: 0, shards: 1 }
+          - { name: scanner, package: ./internal/scanner, shard: 0, shards: 1 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,10 +91,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Full package race tests
+      - name: Complete race partition
         run: |
           set -o pipefail
-          go test -race -count=1 -timeout=25m "${{ matrix.package }}" 2>&1 | tee /tmp/race-test.log
+          run_args=()
+          if [ "${{ matrix.shards }}" -gt 1 ]; then
+            # -race 同样用于发现阶段，复用随后运行的编译缓存。
+            pattern=$(GOFLAGS="${GOFLAGS:-} -race" python3 .github/scripts/test_shard.py --package "${{ matrix.package }}" --count "${{ matrix.shards }}" --index "${{ matrix.shard }}")
+            run_args=(-run "$pattern")
+          fi
+          go test -race -count=1 -timeout=10m "${run_args[@]}" "${{ matrix.package }}" 2>&1 | tee /tmp/race-test.log
 
       - name: Race failure details
         if: failure()
@@ -102,8 +109,8 @@ jobs:
             detail=$(awk '/^--- FAIL|^panic:|WARNING: DATA RACE/ { found=1 } found { print; lines++ } lines >= 20 { exit }' /tmp/race-test.log)
             if [ -z "$detail" ]; then detail='Race test process failed; see the full package log.'; fi
             detail=${detail//%/%25}
-            detail=${detail//$'\\r'/%0D}
-            detail=${detail//$'\\n'/%0A}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
             echo "::error::$detail"
           fi
 
@@ -136,6 +143,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Locate required Chromium
+        run: |
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
+          if [ -z "$chrome" ]; then echo '::error::Chromium is required; browser assertions must not be skipped'; exit 1; fi
+          printf 'CHROME_BIN=%s\n' "$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
 
       - name: Frontend VM tests
         run: |

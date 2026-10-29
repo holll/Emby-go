@@ -2,7 +2,6 @@ package artwork
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,11 +11,8 @@ func TestSpriteDisabledLibraryGenerationAndReads(t *testing.T) {
 	db, m, dir := fixture(t)
 	opts := spriteTestOptions(t, dir, "1")
 	ctx := context.Background()
-	raw, err := sql.Open("sqlite", filepath.Join(dir, "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
+	raw := openArtworkFixtureSQL(t, filepath.Join(dir, "store.db"))
+	var err error
 	setEnabled := func(value int) {
 		t.Helper()
 		if _, err := raw.Exec("UPDATE libraries SET enabled=? WHERE id=?", value, m.LibraryID); err != nil {
