@@ -215,15 +215,54 @@ func (a *App) posterTag(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		a.tagMu.Lock()
+		a.pruneTagsLocked(now)
 		a.tags[path] = tagEntry{tag: "0", ts: now, neg: true}
 		a.tagMu.Unlock()
 		return "0"
 	}
 	tag := strconv.FormatInt(info.ModTime().UnixNano(), 36)
 	a.tagMu.Lock()
+	a.pruneTagsLocked(now)
 	a.tags[path] = tagEntry{tag: tag, ts: now}
 	a.tagMu.Unlock()
 	return tag
+}
+
+// tagCacheLimit 是 tag 缓存条目数的上限（见 pruneTagsLocked）。
+const tagCacheLimit = 8192
+
+// pruneTagsLocked 把 tag 缓存压回 tagCacheLimit 以内，调用方须持 a.tagMu。
+//
+// 为什么需要（§2.3 #2）：tags 只在 invalidateImageTag 时删除，而路径来自库内
+// 影片行；库被删除/影片被移除后旧路径的条目会永久驻留 —— 长时间运行 + 反复
+// 重建库的实例上这是无界增长（每条 ~100B，十万级路径就是十几 MB）。
+//
+// 语义可以安全删除：条目只缓存"该路径文件的 mtime 派生标签"，删掉之后下次访问
+// 会重新 stat 得到同一个 tag（文件没变 → 同一个 tag；变了 → 本来就该变）。
+// 因此这里只做容量兜底，不做 LRU 记账：先清过期条目（5 分钟/负缓存 30 秒），
+// 仍然超限时按 map 迭代顺序丢弃 —— 顺序不重要，代价只是将来一次多余的 stat。
+func (a *App) pruneTagsLocked(now time.Time) {
+	if len(a.tags) < tagCacheLimit {
+		return
+	}
+	for p, e := range a.tags {
+		ttl := 5 * time.Minute
+		if e.neg {
+			ttl = 30 * time.Second
+		}
+		if now.Sub(e.ts) >= ttl {
+			delete(a.tags, p)
+		}
+	}
+	if over := len(a.tags) - tagCacheLimit; over > 0 {
+		for p := range a.tags {
+			if over <= 0 {
+				break
+			}
+			delete(a.tags, p)
+			over--
+		}
+	}
 }
 
 // imageTagsFor 一次解析一条影片所需的三个图片标签（Primary/Thumb/Backdrop）。
@@ -279,6 +318,7 @@ func (a *App) imageTagsFor(poster, landscape, backdrop string) (primary, thumb, 
 	}
 	if statAny {
 		a.tagMu.Lock()
+		a.pruneTagsLocked(now)
 		for i := range miss {
 			if !miss[i] {
 				continue

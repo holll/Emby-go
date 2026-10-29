@@ -551,6 +551,13 @@ func escapeLike(s string) string {
 	return b.String()
 }
 func parseStrings(v string) []string {
+	// 空列快路径（§2.2 P1-3）：movieCols 用 COALESCE(...,'') 把 NULL 归一成空串，
+	// 而 json.Unmarshal("") 本来就会失败、out 保持 nil —— 结果完全相同，但省掉
+	// 一次错误构造 + 一次解码尝试。列表页每行 5 列都走这里（movieScan），
+	// 一部没有任何标签/系列的影片就能省 5 次解析尝试。
+	if v == "" {
+		return nil
+	}
 	var out []string
 	_ = json.Unmarshal([]byte(v), &out)
 	return out
