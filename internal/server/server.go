@@ -134,6 +134,7 @@ type App struct {
 	probeRefillAt  time.Time
 	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
 
+	ipBlocks         ipBlockState
 	monitor          *requestMonitor
 	dashboardSummary dashboardSummaryCache
 	startAt          time.Time
@@ -293,6 +294,11 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 			}
 		}
 	}
+	blockRules, err := db.IPBlockRules(context.Background())
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("load IP block rules: %w", err)
+	}
 	a := &App{
 		cfg: cfg, db: db, cache: cacheStore, webhook: notifier, webhookConfig: effectiveWebhook,
 		webhookTargets: targetSpecs, webhookMulti: multiTarget, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
@@ -309,6 +315,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		scanTasks:    make(map[int64]*asyncScanTask),
 		scanTaskIdem: make(map[string]scanIdemEntry),
 	}
+	a.ipBlocks.publish(blockRules)
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	// 变体目录：启动时清一次（过期 + 超限），之后由写入侧按十分钟节流触发。
@@ -396,7 +403,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		slog.Warn("debug 原始请求日志已开启：密码、token、Cookie、请求体将写入 request 日志，请仅临时排障使用")
 	}
 	a.monitor = newRequestMonitor(a.startAt)
-	middlewares := append([]gin.HandlerFunc{a.monitor.middleware(), securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter())...)
+	middlewares := append([]gin.HandlerFunc{a.monitor.middleware(), securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter(), a.blocklistedIP())...)
 	r.Use(middlewares...)
 	a.router = r
 	a.routes()
@@ -521,6 +528,7 @@ func (a *App) routes() {
 	r.GET("/web/artwork.css", a.webAsset)
 	r.GET("/web/sprites.js", a.webAsset)
 	r.GET("/web/sprites.css", a.webAsset)
+	r.GET("/web/security.js", a.webAsset)
 	r.GET("/api/items/:id/sprites", noStore, a.requireAuth, a.webSpriteManifest)
 	r.GET("/api/items/:id/sprites/sheets/:page", noStore, a.requireAuth, a.webSpriteSheet)
 	r.GET("/web/navigation.js", a.webAsset)
@@ -550,6 +558,9 @@ func (a *App) routes() {
 	admin.GET("/libraries", a.adminLibraries)
 	// R1：认证防护的可观测与受保护应急解锁；解锁需交互会话 + 当前密码再认证。
 	admin.GET("/security/auth-limits", a.adminAuthLimits)
+	admin.GET("/security/ip-blocklist", a.adminIPBlocklist)
+	admin.POST("/security/ip-blocklist", a.adminMutateIPBlocklist)
+	admin.DELETE("/security/ip-blocklist", a.adminMutateIPBlocklist)
 	admin.POST("/security/unlock", a.credentialLimited(a.adminUnlockAuth))
 	admin.POST("/libraries", a.adminAddLibrary)
 	admin.PUT("/libraries/:id/sprites", a.adminLibrarySprites)
@@ -848,8 +859,8 @@ func (a *App) noRoute(c *gin.Context) {
 	path := c.Request.URL.Path
 	if !strings.HasPrefix(path, "/api/") && !isScannerProbe(path) {
 		// Unknown endpoint segments/query keys/body can contain arbitrary secrets.
-		// Aggregate by fixed resource family and standard method; never read a body.
-		method, safePath := diagnosticMethod(c.Request.Method), unmatchedDiagnosticPath(path)
+		// Keep verified static segments/decimal IDs; hash unknown segments. Never read a body.
+		method, safePath := diagnosticMethod(c.Request.Method), safeDiagnosticProbePath(path)
 		key := method + " " + safePath
 		write, epoch := a.observeProbe(key, a.probeClock())
 		if write {

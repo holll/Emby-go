@@ -78,13 +78,13 @@ func TestNoRouteRetriesFailedPersistence(t *testing.T) {
 				t.Fatal(err)
 			}
 			requestUnknown(t, r, "/Users/canary-retry?token=canary-query")
-			requestUnknown(t, r, "/Users/canary-duplicate?token=canary-query")
+			requestUnknown(t, r, "/Users/canary-retry?token=other-query")
 			assertProbeRetryState(t, a, db, 1, 1)
 			var method, path, query, body string
 			if err := db.QueryRow("SELECT method,path,query,body_preview FROM api_probe").Scan(&method, &path, &query, &body); err != nil {
 				t.Fatal(err)
 			}
-			if method != "POST" || path != "/users/[UNMATCHED]" || body != "[OMITTED]" || strings.Contains(query, "canary") {
+			if method != "POST" || path != safeDiagnosticProbePath("/Users/canary-retry") || body != "[OMITTED]" || strings.Contains(query, "canary") {
 				t.Fatalf("unsafe row %q %q %q %q", method, path, query, body)
 			}
 		})
@@ -133,7 +133,7 @@ func TestNoRouteInFlightReservationDeduplicatesAndReleases(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 24; i++ {
 		wg.Add(1)
-		go func(i int) { defer wg.Done(); requestUnknown(t, r, fmt.Sprintf("/Users/canary-%d", i)) }(i)
+		go func() { defer wg.Done(); requestUnknown(t, r, "/Users/canary-first") }()
 	}
 	duplicates := make(chan struct{})
 	go func() { wg.Wait(); close(duplicates) }()

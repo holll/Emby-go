@@ -24,6 +24,8 @@ type spriteRequest struct {
 	MovieIDs  []int64 `json:"movie_ids"`
 	Overwrite bool    `json:"overwrite"`
 	intervals map[int64]int
+	// next pages scheduled targets without retaining an unbounded ID list.
+	next func(context.Context) (movieID int64, interval int, ok bool, err error)
 }
 type spriteStatus struct {
 	InstanceID  string  `json:"instance_id"`
@@ -172,7 +174,7 @@ func (a *App) adminSpriteRun(c *gin.Context) {
 	go func() { defer a.workerWG.Done(); a.executeSprites(ctx, id, req, opts) }()
 	c.JSON(202, accepted)
 }
-func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, opts artwork.SpriteOptions) {
+func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, opts artwork.SpriteOptions) (runErr error) {
 	defer func() {
 		a.sprites.mu.Lock()
 		s := &a.sprites.status
@@ -189,6 +191,11 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 		if s.Error != "" {
 			taskErr = errors.New(s.Error)
 		}
+		if s.Cancelled {
+			runErr = context.Canceled
+		} else {
+			runErr = taskErr
+		}
 		if a.sprites.cancel != nil {
 			a.sprites.cancel()
 		}
@@ -201,8 +208,27 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 	if run == nil {
 		run = artwork.GenerateSprite
 	}
-	for _, movieID := range req.MovieIDs {
-		if ctx.Err() != nil {
+	index := 0
+	next := req.next
+	if next == nil {
+		next = func(context.Context) (int64, int, bool, error) {
+			if index == len(req.MovieIDs) {
+				return 0, 0, false, nil
+			}
+			movieID := req.MovieIDs[index]
+			index++
+			return movieID, req.intervals[movieID], true, nil
+		}
+	}
+	for ctx.Err() == nil {
+		movieID, interval, ok, err := next(ctx)
+		if err != nil {
+			a.sprites.mu.Lock()
+			a.sprites.status.Error = "视频预览任务目标读取失败"
+			a.sprites.mu.Unlock()
+			break
+		}
+		if !ok {
 			break
 		}
 		a.sprites.mu.Lock()
@@ -218,7 +244,7 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 			}
 			a.sprites.mu.Unlock()
 		}
-		result, err := run(ctx, a.db, artwork.SpriteRequest{MovieID: movieID, IntervalMs: int64(req.intervals[movieID]) * 1000, Overwrite: req.Overwrite}, opts)
+		result, err := run(ctx, a.db, artwork.SpriteRequest{MovieID: movieID, IntervalMs: int64(interval) * 1000, Overwrite: req.Overwrite}, opts)
 		a.sprites.mu.Lock()
 		s := &a.sprites.status
 		s.Done++
@@ -234,6 +260,7 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 		}
 		a.sprites.mu.Unlock()
 	}
+	return nil
 }
 func (a *App) adminSpriteStatus(c *gin.Context) {
 	q := c.Request.URL.Query()

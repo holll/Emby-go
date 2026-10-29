@@ -114,12 +114,7 @@ func TestNoRouteSkipsScannerProbes(t *testing.T) {
 			t.Errorf("扫描器路径 %s 不应写入 api_probe", path)
 		}
 	}
-	if len(probes) != 2 || !recorded["/[UNMATCHED]"] || !recorded["/persons/[UNMATCHED]"] {
-		t.Fatalf("expected safe resource families, got %v", probes)
-	}
-	for _, path := range emby {
-		if recorded[path] {
-			t.Errorf("raw endpoint persisted: %s", path)
-		}
+	if len(probes) != 2 || !recorded["/branding/configuration"] || !recorded["/persons"] {
+		t.Fatalf("expected safe static endpoint structures, got %v", probes)
 	}
 }

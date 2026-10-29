@@ -170,7 +170,8 @@ const META = {
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
   translate: { title: '独立翻译', crumb: 'Archive / Translate' },
-  probe: { title: '接口探针', crumb: 'Archive / Probe' }
+  probe: { title: '接口探针', crumb: 'Archive / Probe' },
+  security: { title: '访问安全', crumb: 'Archive / Security' }
 };
 
 function setMeta(name) {
@@ -215,6 +216,7 @@ function stopLibrarySprites() { librarySpritesStop?.(); librarySpritesStop = nul
 async function pageLibraries() {
   const gen = pageGen, identity = token, requestGen = ++libraryPageGen;
   stopLibrarySprites();
+  stopSecurity();
   const current = () => gen === pageGen && requestGen === libraryPageGen && token === identity && localStorage.getItem('emby_token') === identity;
   const data = await api('/libraries');
   if (!current()) return; // 导航、重读或身份变化后，不接入迟到结果。
@@ -251,13 +253,13 @@ async function pageLibraries() {
             <td class="library-actions-cell"><div class="row-actions library-actions">
               <button class="btn btn-sm" data-lib-cover="${esc(item.Id)}" title="上传封面图片">${icon('image')}<span>封面</span></button>
               ${item.cover ? `<button class="btn btn-sm" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}<span>移除封面</span></button>` : ''}
-              ${me?.is_admin ? `<button type="button" class="btn btn-sm library-sprite-open" data-lib-sprites="${esc(item.Id)}" aria-expanded="false" aria-controls="library-sprite-settings">预览设置</button>` : ''}
+              ${me?.is_admin ? `<button type="button" class="btn btn-sm library-sprite-open" data-lib-sprites="${esc(item.Id)}" aria-haspopup="dialog" aria-controls="library-sprite-settings">预览设置</button>` : ''}
               <button class="btn btn-sm" data-lib-scan="${esc(item.Id)}" title="仅扫描该媒体库">${icon('refresh')}<span>扫描</span></button>
               <button class="btn btn-sm btn-danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}<span>删除索引</span></button>
             </div></td>
           </tr>`).join('')}</tbody>
         </table></div>` : empty('还没有媒体库', '先在下方登记一个存放 .strm 的目录。')}
-      <div id="library-sprite-settings" hidden></div>
+      <dialog id="library-sprite-settings" class="library-sprite-dialog" aria-label="媒体库视频预览设置"><div class="library-sprite-dialog-head"><h2>视频预览设置</h2><button type="button" class="btn" data-library-sprite-close aria-label="关闭视频预览设置">关闭</button></div><div data-library-sprite-body></div></dialog>
     </section>
     <section class="panel">
       <h2>添加媒体库</h2>
@@ -271,21 +273,28 @@ async function pageLibraries() {
   const spriteSettings = document.querySelector('#library-sprite-settings');
   document.querySelectorAll('[data-lib-sprites]').forEach(button => button.addEventListener('click', () => {
     if (!current() || !me?.is_admin) return;
-    const expanded = button.getAttribute('aria-expanded') === 'true';
     stopLibrarySprites();
-    document.querySelectorAll('[data-lib-sprites]').forEach(node => node.setAttribute('aria-expanded', 'false'));
-    spriteSettings.hidden = expanded; spriteSettings.innerHTML = '';
-    if (expanded) return;
-    button.setAttribute('aria-expanded', 'true');
     const library = items.find(item => String(item.Id) === button.dataset.libSprites);
     if (!library) return;
-    if (typeof mountLibrarySprites !== 'function') { spriteSettings.textContent = '视频预览设置资源未加载，请刷新页面重试。'; return; }
-    librarySpritesStop = mountLibrarySprites(spriteSettings, { library, apiRequest: api,
-      isCurrent: () => current() && document.querySelector('#library-sprite-settings') === spriteSettings,
+    const host = spriteSettings.querySelector('[data-library-sprite-body]');
+    const close = () => stopLibrarySprites();
+    const cancel = event => { event.preventDefault(); close(); };
+    const closeButton = spriteSettings.querySelector('[data-library-sprite-close]');
+    spriteSettings.addEventListener('cancel', cancel);
+    closeButton.addEventListener('click', close);
+    const dispose = typeof mountLibrarySprites === 'function' ? mountLibrarySprites(host, { library, apiRequest: api,
+      isCurrent: () => current() && spriteSettings.open && document.querySelector('#library-sprite-settings') === spriteSettings,
       onSaved: value => { if (current()) library.sprite_interval_seconds = value; }
-    });
-    spriteSettings.querySelector('h3')?.focus({ preventScroll: true });
-    spriteSettings.scrollIntoView({ block: 'nearest' });
+    }) : () => {};
+    if (typeof mountLibrarySprites !== 'function') host.textContent = '视频预览设置资源未加载，请刷新页面重试。';
+    librarySpritesStop = () => {
+      dispose(); spriteSettings.removeEventListener('cancel', cancel); closeButton.removeEventListener('click', close);
+      if (spriteSettings.open) spriteSettings.close();
+      host.innerHTML = '';
+      if (button.isConnected && current()) button.focus({ preventScroll: true });
+    };
+    spriteSettings.showModal();
+    closeButton.focus({ preventScroll: true });
   }));
   document.querySelector('#library-form').addEventListener('submit', async event => {
     event.preventDefault();
@@ -1328,31 +1337,53 @@ function openPlayer(item) {
 
 /* ---------------------------------------------------------------- 设置 */
 // 活动记录页 = 登录/播放审计（只读，管理员可见；保留 90 天且最多 5 万条）。
+let activityFilters = { ip: '', result: 'all' }, activityRender = 0;
 async function pageActivity() {
-  const gen = pageGen;
+  const gen = pageGen, identity = token, render = ++activityRender;
+  const current = () => gen === pageGen && render === activityRender && identity === token && localStorage.getItem('emby_token') === identity;
   if (!me || !me.is_admin) {
     content.innerHTML = `<section class="panel">${empty('仅管理员可用', '活动记录只对管理员开放。')}</section>`;
     return;
   }
+  const query = new URLSearchParams({ limit: '50', result: activityFilters.result });
+  if (activityFilters.ip) query.set('ip', activityFilters.ip);
   const [logins, plays] = await Promise.all([
-    api('/login-events?limit=50'), api('/playback-events?limit=50')
+    api('/login-events?' + query.toString()), api('/playback-events?limit=50')
   ]);
-  if (gen !== pageGen) return;
+  if (!current()) return;
   content.innerHTML = `
     <section class="panel" aria-labelledby="audit-title">
       <div class="panel-head"><h2 id="audit-title">活动记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="audit-refresh" class="btn btn-sm">刷新</button></div>
       <h3 style="margin:12px 0 6px">登录记录</h3>
-      ${(logins.events || []).length ? `<div class="table-wrap"><table>
+      <form id="audit-filter" class="field-grid audit-filter"><div class="field"><label for="audit-ip">来源 IP（精确匹配）</label><input id="audit-ip" type="text" inputmode="text" autocomplete="off" placeholder="IPv4 或 IPv6；留空为全部" value="${esc(activityFilters.ip)}"></div><div class="field"><label for="audit-result">登录结果</label><select id="audit-result">${[['all','全部结果'],['success','成功'],['failed','失败']].map(([value,text]) => `<option value="${value}"${activityFilters.result === value ? ' selected' : ''}>${text}</option>`).join('')}</select></div><div class="form-foot"><button class="btn" type="submit">应用筛选</button><button class="btn" id="audit-reset" type="button">清除筛选</button></div></form>
+      <p class="hint">仅筛选登录记录，由服务器精确匹配 IP；显示最新最多 50 条。播放记录不受此筛选影响。</p><p id="audit-error" role="alert" hidden></p>
+      ${(logins.events || []).length ? `<div class="table-wrap audit-table"><table>
         <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th></tr></thead>
-        <tbody>${logins.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.name || '—')}</td><td class="mono">${esc(e.ip || '—')}</td><td>${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
+        <tbody>${logins.events.map(e => `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.name || '—')}</td><td data-label="来源 IP" class="mono">${esc(e.ip || '—')}</td><td data-label="结果">${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
       </table></div>` : empty('暂无登录记录', '登录成功与失败都会记录。')}
       <h3 style="margin:18px 0 6px">播放记录</h3>
-      ${(plays.events || []).length ? `<div class="table-wrap"><table>
+      ${(plays.events || []).length ? `<div class="table-wrap audit-table"><table>
         <thead><tr><th>时间</th><th>账户</th><th>影片</th><th>事件</th><th>位置</th></tr></thead>
-        <tbody>${plays.events.map(e => `<tr><td class="mono">${esc(e.created_at)}</td><td>${esc(e.user_name || '—')}</td><td>${esc(e.movie_title || '#' + e.movie_id)}</td><td>${esc(e.kind)}</td><td class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
+        <tbody>${plays.events.map(e => `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.user_name || '—')}</td><td data-label="影片">${esc(e.movie_title || '#' + e.movie_id)}</td><td data-label="事件">${esc(e.kind)}</td><td data-label="位置" class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
       </table></div>` : empty('暂无播放记录', '播放/进度/停止事件会记录在这里。')}
     </section>`;
   document.querySelector('#audit-refresh')?.addEventListener('click', () => refreshPage(pageActivity, gen));
+  const form = document.querySelector('#audit-filter');
+  const apply = async reset => {
+    if (!current()) return;
+    const controls = [...form.querySelectorAll('button')];
+    activityFilters = reset ? { ip: '', result: 'all' } : { ip: document.querySelector('#audit-ip').value.trim(), result: document.querySelector('#audit-result').value };
+    controls.forEach(node => { node.disabled = true; });
+    try { await pageActivity(); if (gen === pageGen) document.querySelector('#audit-ip')?.focus({ preventScroll: true }); }
+    catch (error) {
+      if (gen !== pageGen || identity !== token || localStorage.getItem('emby_token') !== identity || !form.isConnected) return;
+      const warning = document.querySelector('#audit-error'); warning.hidden = false;
+      warning.textContent = error.status === 400 ? '请输入有效的 IPv4 或 IPv6 地址；不支持模糊匹配或 CIDR。' : '筛选读取失败，当前列表未更新，请重试。';
+      controls.forEach(node => { node.disabled = false; });
+    }
+  };
+  form.addEventListener('submit', event => { event.preventDefault(); void apply(false); });
+  document.querySelector('#audit-reset').addEventListener('click', () => { void apply(true); });
 }
 
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
@@ -1704,6 +1735,9 @@ async function renderTaskLog(options = {}) {
 }
 
 /* ---------------------------------------------------------------- 探针 */
+// 探针只在 noRoute 里落库，因此服务对这些请求的实际结果恒为 404 NOT_FOUND。
+// 不再显示 [UNMATCHED] 占位；路径已由后端脱敏，响应体从不记录。
+const PROBE_RESULT = '404 未实现';
 async function pageProbe() {
   const gen = pageGen;
   const data = await api('/probe');
@@ -1714,11 +1748,11 @@ async function pageProbe() {
       <div class="panel-head"><h2>未知接口探针</h2>
         <div class="panel-actions"><button id="clear-probes" class="btn btn-sm">清空记录</button></div>
       </div>
-      <p class="hint">记录客户端发来但本服务未注册的 Emby 请求，用于补齐端点。上限 1000 条。</p>
+      <p class="hint">记录客户端发来但本服务未注册的 Emby 请求，用于补齐端点。敏感路径片段已脱敏，查询参数与请求体不记录。上限 1000 条。</p>
       ${items.length ? `
         <div class="table-wrap"><table>
-          <thead><tr><th>方法</th><th>路径</th><th>时间</th></tr></thead>
-          <tbody>${items.map(item => `<tr><td><span class="protocol">${esc(item.method)}</span></td><td class="mono">${esc(item.path)}</td><td class="mono">${esc(item.created_at)}</td></tr>`).join('')}</tbody>
+          <thead><tr><th>方法</th><th>路径</th><th>结果</th><th>时间</th></tr></thead>
+          <tbody>${items.map(item => `<tr><td><span class="protocol">${esc(item.method)}</span></td><td class="mono">${esc(item.path)}</td><td><span class="badge" title="服务实际返回 404 NOT_FOUND；响应体不记录">${PROBE_RESULT}</span></td><td class="mono">${esc(item.created_at)}</td></tr>`).join('')}</tbody>
         </table></div>` : empty('暂无探针记录', '当客户端请求了未注册的 Emby 接口后会显示在这里。')}
     </section>`;
   document.querySelector('#clear-probes').addEventListener('click', async () => {
@@ -2275,7 +2309,7 @@ const CRON_PRESETS = [
   ['每周一 04:00', '0 4 * * 1'],
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
-const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译' };
+const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成' };
 const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
 let scheduledFocus = null;
@@ -2312,6 +2346,12 @@ function scheduledFormParams(kind, editing, stored, visible) {
     params.probe_status_contract = 'explicit-v1';
     params.status = visible.status;
     params.only_missing = visible.only_missing;
+  }
+  if (kind === 'sprites') {
+    if (!Number.isSafeInteger(visible.limit) || visible.limit < 0) throw new Error('雪碧图数量上限必须是非负整数');
+    params.limit = visible.limit;
+    params.overwrite = visible.overwrite === true;
+    delete params.interval_seconds; // 采样密度只沿用各媒体库设置。
   }
   if (kind === 'translate') {
     params.fields = visible.fields;
@@ -2402,6 +2442,8 @@ async function pageScheduled() {
           <label class="check"><input id="s-translate-plot" type="checkbox"> 简介（当前内容，可能已翻译）</label>
           <p class="hint">${esc(TRANSLATE_HINT)}</p></div>
         <div class="field" data-show="translate"><label for="s-translate-limit">数量上限（0 为不限）</label><input id="s-translate-limit" type="number" min="0" max="100000" step="1" value="0"></div>
+        <div class="field" data-show="sprites"><label for="s-sprites-limit">雪碧图数量上限（0 为不限）</label><input id="s-sprites-limit" type="number" min="0" max="1000000" step="1" value="0"></div>
+        <div class="field" data-show="sprites"><label class="check"><input id="s-sprites-overwrite" type="checkbox"> 覆盖已有视频预览</label><p class="hint">默认只补缺失预览。采样密度沿用各媒体库的预览设置；不会修改封面或元数据。</p></div>
         <div class="field"><label>启用</label>
           <label class="check"><input id="s-enabled" type="checkbox"${!editing || editing.enabled ? ' checked' : ''}> 保存后参与调度</label></div>
         <div class="field full"><label>常用预设</label>
@@ -2438,7 +2480,8 @@ async function pageScheduled() {
     document.querySelectorAll('[data-show="scan"]').forEach(el => { el.hidden = kind !== 'scan'; });
     document.querySelectorAll('[data-show="probe"]').forEach(el => { el.hidden = kind !== 'probe'; });
     document.querySelectorAll('[data-show="translate"]').forEach(el => { el.hidden = kind !== 'translate'; });
-    if (!editing && kind === 'translate') document.querySelector('#s-enabled').checked = false;
+    document.querySelectorAll('[data-show="sprites"]').forEach(el => { el.hidden = kind !== 'sprites'; });
+    if (!editing && ['translate', 'sprites'].includes(kind)) document.querySelector('#s-enabled').checked = false;
   }
 
   // 即时校验表达式并预览后续执行时间（后端解析，与调度用同一套规则）。
@@ -2476,6 +2519,16 @@ async function pageScheduled() {
       document.querySelector('#sched-submit').disabled = true;
       const warning = document.querySelector('#sched-conflict');
       warning.hidden = false; warning.textContent = '扫描模式参数无法读取，禁止用默认值覆盖。请核对原配置。';
+    }
+  }
+  if (editing?.type === 'sprites') {
+    const limit = params.limit ?? 0, overwrite = params.overwrite ?? false;
+    document.querySelector('#s-sprites-limit').value = String(limit);
+    document.querySelector('#s-sprites-overwrite').checked = overwrite === true;
+    if (!Number.isSafeInteger(limit) || limit < 0 || typeof overwrite !== 'boolean') {
+      paramsReadable = false; document.querySelector('#sched-submit').disabled = true;
+      const warning = document.querySelector('#sched-conflict');
+      warning.hidden = false; warning.textContent = '雪碧图参数无法读取，禁止用默认值覆盖。请核对原配置。';
     }
   }
   if (editing?.type === 'translate') {
@@ -2534,7 +2587,12 @@ async function pageScheduled() {
     if (kind === 'scan' && !['full', 'incremental'].includes(document.querySelector('#s-scan-mode').value)) {
       toast('请选择有效的扫描模式', 'error'); return;
     }
+    const spritesLimit = kind === 'sprites' ? Number(document.querySelector('#s-sprites-limit').value) : 0;
+    if (kind === 'sprites' && (!Number.isSafeInteger(spritesLimit) || spritesLimit < 0 || spritesLimit > 1000000 || !document.querySelector('#s-sprites-limit').value.trim())) {
+      toast('雪碧图数量上限必须是 0–1000000 的整数', 'error'); return;
+    }
     const taskParams = scheduledFormParams(kind, editing, params, {
+      ...(kind === 'sprites' ? { limit: spritesLimit, overwrite: document.querySelector('#s-sprites-overwrite').checked } : {}),
       library_id: Number(libraryValue) || 0,
       mode: kind === 'scan' ? document.querySelector('#s-scan-mode').value : undefined,
       status: document.querySelector('#s-status').value,
@@ -2698,8 +2756,10 @@ async function pageScheduled() {
 let logsTimer = null;
 let logsEpoch = 0;
 let logsVisibilityHandler = null;
+let logsRequestStop = null;
 
 function stopLogsPolling() {
+  logsRequestStop?.(); logsRequestStop = null;
   if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
   if (logsVisibilityHandler) {
     document.removeEventListener('visibilitychange', logsVisibilityHandler);
@@ -2734,7 +2794,6 @@ async function pageLogs() {
         </div></div>
       <p class="hint" style="margin:0 0 8px">来源：服务器磁盘 <code>app-YYYY-MM-DD.log</code>（最新在上）· 约 1 秒增量刷新，非 fsync 保证 · 无法确认安全的旧格式行只显示隐藏占位符</p>
       <p id="dl-status" class="hint" role="status" aria-live="polite">正在连接磁盘日志…</p>
-      <div id="dl-newbar" class="warning-block" role="status" hidden><button id="dl-newjump" class="btn btn-sm" type="button">有新日志，点击查看</button></div>
       <div id="dl-scroll" class="table-wrap" style="max-height:58vh;overflow:auto">
         <table class="log-table">
           <thead><tr><th style="width:190px">时间</th><th style="width:74px">级别</th><th>内容</th></tr></thead>
@@ -2748,7 +2807,6 @@ async function pageLogs() {
   const scroll = find('#dl-scroll');
   const body = find('#dl-body');
   const statusEl = find('#dl-status');
-  const newbar = find('#dl-newbar');
   const current = () => epoch === logsEpoch && gen === pageGen && identity === token
     && localStorage.getItem('emby_token') === identity && statusEl.isConnected;
   const setStatus = (text, error = false) => {
@@ -2777,22 +2835,27 @@ async function pageLogs() {
       added++;
     }
     if (!added) return 0;
+    state.items.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
     if (state.items.length > 1000) {
       state.items.splice(1000).forEach(item => state.ids.delete(item.id));
     }
-    state.items.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
     return added;
   };
 
-  let controller = null;
+  let controller = null, requestSequence = 0;
+  logsRequestStop = () => { requestSequence++; controller?.abort(); };
   const request = async (query) => {
     controller?.abort();
-    controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const active = new AbortController(), sequence = ++requestSequence;
+    controller = active;
+    const timer = setTimeout(() => active.abort(), 10000);
     try {
-      return await api('/logs/disk' + query, { signal: controller.signal });
+      const result = await api('/logs/disk' + query, { signal: active.signal });
+      if (sequence !== requestSequence) throw Object.assign(new Error('日志请求已取消'), { name: 'AbortError' });
+      return result;
     } finally {
       clearTimeout(timer);
+      if (controller === active) controller = null;
     }
   };
 
@@ -2804,13 +2867,12 @@ async function pageLogs() {
     state.nextBefore = data.next_before || '';
     state.hasMoreBefore = !!data.next_before;
     state.backoff = 1000;
-    newbar.hidden = true;
     render();
     setStatus(note, true);
   };
 
   const schedule = (delay) => {
-    if (!current()) return;
+    if (!current() || state.paused || document.hidden) return;
     if (logsTimer) clearTimeout(logsTimer);
     logsTimer = setTimeout(poll, delay);
   };
@@ -2831,7 +2893,7 @@ async function pageLogs() {
       else setStatus('已连接 · 每秒增量刷新');
       schedule(1000);
     } catch (e) {
-      if (!current()) return;
+      if (!current() || e.name === 'AbortError') return;
       state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
       setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
       schedule(state.backoff);
@@ -2855,16 +2917,17 @@ async function pageLogs() {
         const added = addItems(data.items || []);
         state.nextAfter = data.next_after || state.nextAfter;
         if (added) {
-          // 用户离开顶部阅读时暂停插入，只提示有新日志，避免抢滚动位置。
-          if (scroll.scrollTop > 8) newbar.hidden = false;
-          else render();
+          // Always show new entries. Preserve the reader's viewport when below the top.
+          const before = scroll.scrollTop, height = scroll.scrollHeight;
+          render();
+          scroll.scrollTop = before > 8 ? before + Math.max(0, scroll.scrollHeight - height) : 0;
         }
         state.backoff = 1000;
         if (!state.paused) setStatus('已连接 · 每秒增量刷新');
       }
       schedule(1000);
     } catch (e) {
-      if (!current() || e.status === 401) return;
+      if (!current() || e.status === 401 || e.name === 'AbortError') return;
       state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
       setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
       schedule(state.backoff);
@@ -2889,7 +2952,9 @@ async function pageLogs() {
   find('#dl-pause').addEventListener('click', () => {
     state.paused = !state.paused;
     find('#dl-pause').textContent = state.paused ? '继续' : '暂停';
+    find('#dl-pause').setAttribute('aria-pressed', String(state.paused));
     if (state.paused) {
+      logsRequestStop?.();
       if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
       setStatus('已暂停自动刷新；点击「继续」恢复。');
     } else {
@@ -2925,13 +2990,17 @@ async function pageLogs() {
       if (current()) render();
     }
   });
-  find('#dl-newjump').addEventListener('click', () => {
-    render();
-    scroll.scrollTop = 0;
-    newbar.hidden = true;
-  });
 
   await initial();
+}
+
+let securityStop = null;
+function stopSecurity() { if (securityStop) { securityStop(); securityStop = null; } }
+function pageSecurity() {
+  stopSecurity();
+  if (!me || !me.is_admin) { content.innerHTML = `<section class="panel">${empty('仅管理员可用', '访问安全管理仅对管理员开放。')}</section>`; return; }
+  const gen = pageGen, identity = token;
+  securityStop = window.mountIPBlocklist(content, { apiRequest: api, isCurrent: () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity });
 }
 
 /* ---------------------------------------------------------------- 路由 */
@@ -2945,7 +3014,8 @@ const pages = {
   scrape: pageScrape,
   translate: pageTranslate,
   scheduled: pageScheduled,
-  probe: pageProbe
+  probe: pageProbe,
+  security: pageSecurity
 };
 
 // pageGen 是本轮导航的代号。页面函数在 await 之后拿它比对：快速连点导航时，
@@ -2958,6 +3028,7 @@ async function page(name) {
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   stopLibrarySprites();
+  stopSecurity();
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
   stopLogsPolling();
@@ -3366,6 +3437,7 @@ function clearSessionView() {
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   stopLibrarySprites();
+  stopSecurity();
   createdAPIKey = null;
   settingsCategory = 'account';
   me = null;

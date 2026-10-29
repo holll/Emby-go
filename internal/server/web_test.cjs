@@ -17,7 +17,7 @@ function sandbox(values = {}) {
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
-    stopLogsPolling() {}, stopLibrarySprites() {}, scanClose: { hidden: true, addEventListener() {} },
+    stopLogsPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
@@ -1564,7 +1564,7 @@ test('多用户管理 UI 契约：用户管理、媒体库授权与活动记录�
   assert.match(source, /api\('\/users', \{ method: 'POST'/);
   assert.match(source, /\/users\/' \+ id \+ '\/libraries'/);
   assert.match(source, /<h2 id="audit-title">活动记录<\/h2>/);
-  assert.match(source, /api\('\/login-events\?limit=50'\)/);
+  assert.match(source, /api\('\/login-events\?' \+ query\.toString\(\)\)/);
   assert.match(source, /api\('\/playback-events\?limit=50'\)/);
   assert.match(source, /id="pw-form"/);
   assert.match(source, /fetch\('\/api\/auth\/password'/);
@@ -1655,8 +1655,13 @@ test('移动端表格：用户卡片化与日志堆叠', async () => {
   assert.match(source, /<table class="user-table">/);
   assert.match(source, /data-label="媒体库授权"/);
   assert.match(css, /\.user-table thead \{ display: none; \}/);
-  assert.match(css, /\.table-wrap table:not\(\.log-table\):not\(\.user-table\) \{ min-width: 560px; \}/);
+  // 宽表格的横向滚动只用于确实需要滚动的表；已卡片化的包装层必须排除，
+  // 否则 560px 的最小宽度会把移动端布局视口撑宽（innerWidth > 设备宽度）。
+  assert.match(css, /\.table-wrap:not\(\.security-table\):not\(\.audit-table\):not\(\.scheduled-table\):not\(\.library-table\) table:not\(\.log-table\):not\(\.user-table\) \{ min-width: 560px; \}/);
   assert.match(css, /\.log-table td:nth-child\(3\) \{ margin-top: 2px; word-break: break-word; \}/);
+  assert.match(css, /\.audit-table thead \{ display: none; \}/);
+  assert.match(source, /<div class="table-wrap audit-table"><table>/);
+  assert.match(source, /<td data-label="来源 IP" class="mono">/);
 });
 
 const webhookUI = fs.readFileSync(path.join(__dirname, 'web/webhook-settings.js'), 'utf8');
@@ -2264,7 +2269,7 @@ test('翻译表单空字段/空ID不POST、取消范围确认不POST；计划保
   const params = box.scheduledFormParams('translate', { type: 'translate' }, { fields: ['plot'], limit: 20, future: false }, { fields: ['title'], limit: 10, library_id: 3 });
   assert.deepEqual(JSON.parse(JSON.stringify(params)), { fields: ['title'], limit: 10, future: false, library_id: 3 });
   assert.deepEqual(JSON.parse(JSON.stringify(box.scheduledFormParams('translate', { type: 'probe' }, { status: 'all', only_missing: false }, { fields: ['title'], limit: 0, library_id: 0 }))), { fields: ['title'], limit: 0, library_id: 0 });
-  assert.match(source, /!editing && kind === 'translate'.*checked = false/);
+  assert.match(source, /!editing && \['translate', 'sprites'\]\.includes\(kind\).*checked = false/);
   assert.match(source, /取消“保存后参与调度”/); assert.match(source, /If-Match.*editing.config_etag/);
   assert.match(source, /data-show="translate"/);
 });
@@ -2308,11 +2313,15 @@ test('真实翻译计划PATCH保留unknown/limit/fields与If-Match；412禁旧�
   empty.fields['#s-translate-title'] = { checked: false }; empty.fields['#s-translate-plot'] = { checked: false }; empty.fields['#s-translate-limit'] = { value: '0' };
   vm.runInContext(section('function translationPayload(', 'function translationWidget('), empty.box);
   await empty.submit(); assert.equal(empty.calls.length, 0); assert.match(empty.messages[0], /字段/);
-  const visible = { library: [{ hidden: false }], scan: [{ hidden: false }], probe: [{ hidden: false }], translate: [{ hidden: true }] }, enabled = { checked: true };
+  const visible = { library: [{ hidden: false }], scan: [{ hidden: false }], probe: [{ hidden: false }], translate: [{ hidden: true }], sprites: [{ hidden: true }] }, enabled = { checked: true };
   const box = sandbox({ editing: null, typeEl: { value: 'translate' }, document: { querySelector: () => enabled, querySelectorAll: selector => visible[selector.match(/"([^"]+)"/)[1]] } });
   vm.runInContext(section('  function syncParams()', '  // 即时校验'), box); box.syncParams();
   assert.equal(enabled.checked, false); assert.equal(visible.probe[0].hidden, true); assert.equal(visible.translate[0].hidden, false);
+  assert.equal(visible.sprites[0].hidden, true);
   box.typeEl.value = 'probe'; box.syncParams(); assert.equal(visible.translate[0].hidden, true); assert.equal(visible.probe[0].hidden, false);
+  // 新增雪碧图计划类型也必须只显示自己的参数组，且新建默认不启用。
+  enabled.checked = true; box.typeEl.value = 'sprites'; box.syncParams();
+  assert.equal(visible.sprites[0].hidden, false); assert.equal(visible.probe[0].hidden, true); assert.equal(enabled.checked, false);
 });
 
 test('媒体墙轻量多选不触发详情/播放，最多1000，搜索reload清空旧选片', async () => {
@@ -2445,7 +2454,7 @@ test('扫描计划回填不静默覆盖坏mode，相关控件仅scan显示，旧
     assert.equal(node('#s-scan-mode').value, expected); assert.equal(box.paramsReadable, readable);
     if (!readable) { assert.equal(node('#sched-submit').disabled, true); assert.match(node('#sched-conflict').textContent, /扫描模式参数无法读取/); }
   }
-  const visible = Object.fromEntries(['library', 'scan', 'probe', 'translate'].map(k => [k, [{ hidden: false }]]));
+  const visible = Object.fromEntries(['library', 'scan', 'probe', 'translate', 'sprites'].map(k => [k, [{ hidden: false }]]));
   const box = sandbox({ typeEl: { value: 'scan' }, editing: true, document: { querySelectorAll: selector => visible[selector.match(/data-show="([^"]+)"/)[1]] } });
   vm.runInContext(section('  function syncParams()', '  // 即时校验表达式'), box);
   box.syncParams(); assert.equal(visible.scan[0].hidden, false); assert.equal(visible.probe[0].hidden, true);

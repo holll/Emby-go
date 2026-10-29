@@ -63,12 +63,17 @@ func safeHeaderDump(header http.Header) string {
 	return buf.String()
 }
 
-func requestDiagnostics(raw bool, requestLog, appLog io.Writer) []gin.HandlerFunc {
+func requestDiagnostics(raw bool, requestLog, appLog io.Writer, preflight ...gin.HandlerFunc) []gin.HandlerFunc {
+	// Policy decisions must precede any body reads (including debug capture) or
+	// size rejection. Logging/recovery still wrap denied requests.
 	if !raw {
-		return []gin.HandlerFunc{requestLoggerTo(requestLog), requestBodyLimit(), requestRecoveryTo(appLog)}
+		handlers := []gin.HandlerFunc{requestLoggerTo(requestLog), requestRecoveryTo(appLog)}
+		handlers = append(handlers, preflight...)
+		return append(handlers, requestBodyLimit())
 	}
-	return []gin.HandlerFunc{rawRequestLoggerTo(requestLog), rawRequestHeadersTo(requestLog),
-		rawRequestRecoveryTo(requestLog), requestBodyLimit(), rawRequestBodyTo(requestLog)}
+	handlers := []gin.HandlerFunc{rawRequestLoggerTo(requestLog), rawRequestRecoveryTo(requestLog)}
+	handlers = append(handlers, preflight...)
+	return append(handlers, rawRequestHeadersTo(requestLog), requestBodyLimit(), rawRequestBodyTo(requestLog))
 }
 
 // Raw diagnostics are deliberately opt-in. Do not send them to slog, the

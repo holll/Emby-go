@@ -13,6 +13,8 @@ import (
 func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 	a, _, _ := asyncScanFixture(t)
 	policies := map[string]string{
+		"POST /api/admin/security/ip-blocklist":    "admission",
+		"DELETE /api/admin/security/ip-blocklist":  "admission",
 		"POST /api/admin/security/unlock":          "reauth-admission",
 		"POST /api/admin/libraries":                "request-snapshot",
 		"PUT /api/admin/libraries/:id/sprites":     "admission",

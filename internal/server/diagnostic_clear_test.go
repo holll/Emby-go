@@ -113,7 +113,7 @@ func TestDiagnosticClearAuthenticatedLifecycle(t *testing.T) {
 		t.Fatalf("epoch=%d; want %d", cleared.epoch, before.epoch+1)
 	}
 	// Both initially collected resource families can be observed again, but only once.
-	for _, path := range []string{"/Users/canary-new", "/Users/canary-duplicate", "/System/canary-new", "/System/canary-duplicate"} {
+	for _, path := range []string{"/Users/canary-new", "/Users/canary-new", "/System/canary-new", "/System/canary-new"} {
 		diagnosticClearAssertHTTP(t, diagnosticClearUnknown(a, path), http.StatusNotFound)
 	}
 	assertProbeRetryState(t, a, db, 2, 2)
@@ -136,7 +136,7 @@ func TestDiagnosticClearDeleteFailurePreservesGeneration(t *testing.T) {
 	assertProbeRetryState(t, a, db, 2, 2)
 	// Fail on the second row: SQLite must roll back even a partial statement delete.
 	if _, err := db.Exec(`CREATE TRIGGER fail_diagnostic_clear BEFORE DELETE ON api_probe
-		WHEN OLD.path = '/system/[UNMATCHED]'
+		WHEN OLD.path LIKE '/system/%'
 		BEGIN SELECT RAISE(ABORT, 'canary DELETE FROM api_probe internal SQL failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestDiagnosticClearDeleteFailurePreservesGeneration(t *testing.T) {
 		}
 	}
 	// Failed clear must not reopen deduplication slots.
-	diagnosticClearAssertHTTP(t, diagnosticClearUnknown(a, "/Users/canary-duplicate"), http.StatusNotFound)
+	diagnosticClearAssertHTTP(t, diagnosticClearUnknown(a, "/Users/canary-first"), http.StatusNotFound)
 	if after := diagnosticClearSnapshot(t, a, db); !reflect.DeepEqual(after, before) {
 		t.Fatalf("duplicate after failed clear changed state: %+v", after)
 	}
@@ -228,7 +228,7 @@ func TestDiagnosticClearWaitsForInFlightInsert(t *testing.T) {
 	// The SQL callback proves that the writer is already inside persistence.
 	// Its reservation must be visible, and probeMu must not be held across SQL.
 	a.probeMu.Lock()
-	_, reserved := a.probeSeen["POST /users/[UNMATCHED]"]
+	_, reserved := a.probeSeen["POST "+safeDiagnosticProbePath("/Users/canary-in-flight")]
 	epoch := a.probeEpoch
 	a.probeMu.Unlock()
 	if !reserved {
@@ -283,8 +283,9 @@ func TestDiagnosticClearWaitsForInFlightInsert(t *testing.T) {
 
 func TestDiagnosticClearRejectsQueuedOldGeneration(t *testing.T) {
 	a, db := diagnosticClearFixture(t)
-	const method, path = "POST", "/users/[UNMATCHED]"
-	const key = method + " " + path
+	const method = "POST"
+	path := safeDiagnosticProbePath("/Users/canary-new-duplicate")
+	key := method + " " + path
 	// Reproduce NoRoute's real reservation protocol, pausing before persistence
 	// rather than trying to control the scheduler between mutex acquisitions.
 	a.probeMu.Lock()

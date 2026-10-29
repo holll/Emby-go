@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -20,7 +21,14 @@ type AdminUserUpdate struct {
 // The mandatory opaque credential proof binds the check to request authentication.
 // Do not replace this with an HTTP-layer preflight check.
 func (s *Store) adminUserTx(actorID int64, write func(*sql.Tx) error, proof User) error {
-	return s.writeTx(func(tx *sql.Tx) error {
+	return s.adminUserTxContext(context.Background(), actorID, write, proof)
+}
+
+// adminUserTxContext reserves SQLite's writer before checking the actor and
+// abandons that wait when the caller's request context is cancelled. Admission
+// must never outlive the request that asked for it while holding a lock.
+func (s *Store) adminUserTxContext(ctx context.Context, actorID int64, write func(*sql.Tx) error, proof User) error {
+	return s.writeTxContext(ctx, func(tx *sql.Tx) error {
 		admin, err := lockUserTx(tx, actorID)
 		if errors.Is(err, ErrUserNotFound) || (err == nil && !admin) {
 			return ErrAdminGenerationStale

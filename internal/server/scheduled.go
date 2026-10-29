@@ -33,6 +33,7 @@ var scheduledTypes = map[string]string{
 	"scrape":         "内置刮削",
 	"scrape_avatars": "演员头像补全",
 	"translate":      "独立翻译",
+	"sprites":        "雪碧图生成",
 }
 
 // scheduledView 计划任务列表项：定义 + 下次执行时间。
@@ -45,8 +46,10 @@ type scheduledView struct {
 // —— 执行器：把调度器回调接到具体的服务动作上 ——
 
 // runScheduledTask 执行一条计划任务。返回 scheduler.ErrBusy 表示同类任务未结束、本次跳过。
-func (a *App) runScheduledTask(_ context.Context, task scheduler.Task) error {
+func (a *App) runScheduledTask(ctx context.Context, task scheduler.Task) error {
 	switch task.Type {
+	case "sprites":
+		return a.runScheduledSprites(ctx, task)
 	case "scan", "reindex":
 		return a.runScheduledScan(task)
 	case "probe":
@@ -246,6 +249,12 @@ func scheduledScanParams(raw map[string]any) (int64, scanner.ScanMode, error) {
 func normalizeParams(kind string, raw map[string]any) (string, error) {
 	out := map[string]any{}
 	switch kind {
+	case "sprites":
+		params, err := parseScheduledSpriteParams(raw)
+		if err != nil {
+			return "", err
+		}
+		out["library_id"], out["limit"], out["overwrite"] = params.LibraryID, params.Limit, params.Overwrite
 	case "scan":
 		libraryID, mode, err := scheduledScanParams(raw)
 		if err != nil {
@@ -392,6 +401,9 @@ func (a *App) adminCreateScheduledTask(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
 	created, err := a.db.CreateScheduledTask(task)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, err.Error())
@@ -427,6 +439,9 @@ func (a *App) adminUpdateScheduledTask(c *gin.Context) {
 	task, err := validateScheduled(req)
 	if err != nil {
 		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !a.admitAdminOperation(c) {
 		return
 	}
 	task.ID = id

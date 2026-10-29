@@ -335,9 +335,14 @@ func (a *App) changePassword(c *gin.Context) {
 
 // adminLoginEvents 返回登录审计；user_id 可选，0/缺省表示全部用户。
 func (a *App) adminLoginEvents(c *gin.Context) {
+	ip, success, err := loginActivityFilters(c.Request.URL.Query())
+	if err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	userID, _ := strconv.ParseInt(c.Query("user_id"), 10, 64)
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	events, err := a.db.LoginEvents(userID, limit)
+	events, err := a.db.LoginEventsFiltered(userID, limit, ip, success)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "读取登录记录失败")
 		return

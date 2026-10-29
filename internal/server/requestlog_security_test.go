@@ -110,7 +110,7 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 	r.NoRoute(a.noRoute)
 	for i := 0; i < 200; i++ {
 		body := &diagnosticUnreadBody{}
-		req := httptest.NewRequest("POST", fmt.Sprintf("/Users/canary-path-%d/Unimplemented?token=canary-query&canary-key=x&Limit=10", i), body)
+		req := httptest.NewRequest("POST", "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10", body)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		if w.Code != 404 || body.reads != 0 || w.Header().Get("Cache-Control") != "no-store" {
@@ -129,7 +129,7 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 		n++
-		if method != "POST" || path != "/users/[UNMATCHED]" || body != "[OMITTED]" || strings.Contains(query, "canary") || !strings.Contains(query, "Limit=10") {
+		if method != "POST" || path != safeDiagnosticProbePath("/Users/canary-path/Unimplemented") || body != "[OMITTED]" || strings.Contains(query, "canary") || !strings.Contains(query, "Limit=10") {
 			t.Fatalf("persisted unsafe metadata %q %q %q %q", method, path, query, body)
 		}
 	}

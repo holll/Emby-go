@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"time"
@@ -12,6 +13,13 @@ import (
 // revocation; callers must not hold the transaction across that work.
 func (s *Store) AdmitAdminOperation(proof User) error {
 	return s.adminUserTx(proof.ID, func(*sql.Tx) error { return nil }, proof)
+}
+
+// AdmitAdminOperationContext is the request-bound form. Callers that already
+// hold a cross-request mutex must use it so a cancelled request cannot keep
+// waiting for the writer lock and block every other administrator.
+func (s *Store) AdmitAdminOperationContext(ctx context.Context, proof User) error {
+	return s.adminUserTxContext(ctx, proof.ID, func(*sql.Tx) error { return nil }, proof)
 }
 
 func (s *Store) AdminCreateAPIKey(proof User, name string) (APIKey, error) {

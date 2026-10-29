@@ -11,12 +11,12 @@ const web = path.join(__dirname, 'web');
 async function browser(t) {
   const { call, evaluate, navigate, dir } = await launchBrowser(t);
   const fixture = `
-    window.__calls = []; window.__errors = [];
+    window.__calls = []; window.__errors = []; window.__securityRules=[]; window.__logID=0;
     addEventListener('error', e => __errors.push(e.message));
     localStorage.setItem('emby_token','layout-fixture');
     window.confirm=()=>true;
     window.fetch=async (input, options={})=>{
-      const url=String(input), p=url.split('?')[0]; __calls.push({url,method:options.method||'GET'});
+      const url=String(input), p=url.split('?')[0]; __calls.push({url,method:options.method||'GET',body:options.body});
       let data={};
       if(p==='/Users/Me')data={Name:'owner',Policy:{IsAdministrator:true}};
       else if(p.endsWith('/libraries'))data={total:1,items:[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}]};
@@ -37,6 +37,15 @@ async function browser(t) {
         const minutes=Number(new URL(url,'http://fixture').searchParams.get('window')?.replace('m','')||15), now=Date.now();
         data={instance_id:'layout-fixture',started_at:new Date(now-120000).toISOString(),generated_at:new Date(now).toISOString(),retention_minutes:60,window_minutes:minutes,window_start:new Date(now-minutes*60000).toISOString(),window_end:new Date(now).toISOString(),requests:{total:60,errors_4xx:2,errors_5xx:1,rate_per_second:.5,p50_ms:2,p95_ms:20,p50_overflow:false,p95_overflow:false,sampled_seconds:120},latency:{unit:'ms',method:'histogram_upper_bound',max_finite_ms:60000,scope:'json_control_plane'},runtime:{uptime_seconds:120,goroutines:24,heap_alloc_bytes:8388608,heap_inuse_bytes:10485760,go_sys_bytes:16777216,num_gc:3},media:{available:true,stale:false,success:36,manual:4,pending:2,total:42,libraries:1,updated_at:new Date(now).toISOString()},tasks:{running:0,recent:[{id:1,kind:'scan',status:'success',started_at:new Date(now-10000).toISOString(),ended_at:new Date(now-5000).toISOString()}]},series:Array.from({length:minutes},(_,i)=>({start:new Date(now-(minutes-i-1)*60000).toISOString(),observed:i>=minutes-2,requests:i>=minutes-2?30:null,errors_4xx:i>=minutes-2?1:null,errors_5xx:i>=minutes-2?0:null,p50_ms:i>=minutes-2?2:null,p95_ms:i>=minutes-2?20:null,p50_overflow:false,p95_overflow:false}))};
       }
+      else if(p.endsWith('/security/ip-blocklist')){
+        if(options.method==='POST'){const body=JSON.parse(options.body);if(window.__securityFail)return {ok:false,status:409,json:async()=>({error:'<img src=x onerror=alert(1)>'})};__securityRules.push({...body,created_at:'2026-10-29T12:00:00Z',blocked:3});}
+        if(options.method==='DELETE'){const body=JSON.parse(options.body);__securityRules=__securityRules.filter(rule=>rule.network!==body.network);}
+        data={items:__securityRules,max_rules:256,total_blocked:3,client_ip:'192.0.2.10',stats_since:'2026-10-29T12:00:00Z'};
+      }
+      else if(p.endsWith('/login-events'))data={events:[{name:'<img src=x onerror=alert(1)>',ip:'203.0.113.5',success:false,created_at:'2026-10-29'}]};
+      else if(p.endsWith('/playback-events'))data={events:[]};
+      else if(p.endsWith('/probe'))data={items:[{method:'GET',path:'/Items/123/[redacted:123456789abc]',created_at:'2026-10-29'}]};
+      else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),ts:'2026-10-29T12:00:00Z',level:'info',msg:'auto-log-'+id}],next_after:String(id),next_before:String(id),has_more_before:false};}
       else if(p.endsWith('/tasks'))data={items:[]};
       else if(p.endsWith('/logs'))data={items:[]};
       else if(p.endsWith('/scrape/settings'))data={};
@@ -127,6 +136,57 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET'&&!c.url.endsWith('/scheduled/validate')).length`), 0, 'layout operations never submit business mutations');
 });
 
+
+test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自动更新、审计筛选与IP黑名单', {timeout:120000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  const output=process.env.EMBY_REPORT_ARTIFACT_DIR;
+  if(output){assert.ok(path.resolve(output).startsWith('/tmp/'));fs.mkdirSync(output,{recursive:true});}
+  async function shot(name){if(!output)return;const result=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(output,name+'.png'),Buffer.from(result.data,'base64'));}
+  async function openOptions(selector,name){
+    const point=await evaluate(`(()=>{const s=document.querySelector(${JSON.stringify(selector)});s.scrollIntoView({block:'center'});const r=s.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+    await call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point});
+    await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point});
+    await shot(name);
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  }
+  for(const width of [375,768,1280]){
+    await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<860});
+    await evaluate("page('libraries')");
+    const dialog=await evaluate(`(()=>{const b=document.querySelector('[data-lib-sprites]');b.focus();b.click();const d=document.querySelector('#library-sprite-settings');return {open:d.open,focus:d.contains(document.activeElement),scroll:document.documentElement.scrollWidth};})()`);
+    assert.equal(dialog.open,true);assert.equal(dialog.focus,true);assert.ok(dialog.scroll<=width+1);
+    await shot('preview-dialog-'+width);
+    const colors=await evaluate(`(()=>{const s=document.querySelector('[data-library-sprite="preset"]'),o=s.options[0];return {fg:getComputedStyle(o).color,bg:getComputedStyle(o).backgroundColor,scheme:getComputedStyle(s).colorScheme};})()`);
+    assert.equal(colors.bg,'rgb(32, 32, 36)');assert.equal(colors.fg,'rgb(255, 255, 255)');assert.equal(colors.scheme,'dark');
+    await openOptions('[data-library-sprite="preset"]','preview-options-'+width);
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    assert.equal(await evaluate(`document.activeElement.matches('[data-lib-sprites]')&&!document.querySelector('#library-sprite-settings').open`),true);
+    await evaluate("page('scheduled')");
+    const sprites=await evaluate(`(()=>{document.querySelector('#sched-form').closest('details').open=true;const s=document.querySelector('#s-type');s.value='sprites';s.dispatchEvent(new Event('change'));return {shown:!document.querySelector('#s-sprites-limit').closest('.field').hidden,text:document.querySelector('#sched-form').innerText,scroll:document.documentElement.scrollWidth};})()`);
+    assert.match(sprites.text,/雪碧图/);assert.ok(sprites.scroll<=width+1);await shot('scheduled-sprites-'+width);
+    await openOptions('#s-type','scheduled-options-'+width);
+    await evaluate("document.querySelector('.scan-tools').open=true");
+    await openOptions('#scan-mode','scan-options-'+width);
+    await evaluate("document.querySelector('.scan-tools').open=false");
+    await evaluate("page('security')");await evaluate(`(async()=>{for(let i=0;i<30&&!document.querySelector('[data-security="client"]').textContent;i++)await new Promise(r=>setTimeout(r,10));})()`);
+    await shot('security-'+width);assert.ok(await evaluate('document.documentElement.scrollWidth')<=width+1);
+  }
+  const security=await evaluate(`(async()=>{const q=k=>document.querySelector('[data-security="'+k+'"]');q('network').value='203.0.113.5';q('note').value='<img src=x onerror=alert(1)>';q('form').requestSubmit();await new Promise(r=>setTimeout(r,40));const result={row:q('rules').innerText,xss:!!q('rules').querySelector('img'),calls:__calls.filter(c=>c.method==='POST'&&c.url.includes('ip-blocklist')).length};q('rules').querySelector('button').click();await new Promise(r=>setTimeout(r,40));result.deleted=!q('rules').querySelector('button');result.body=JSON.parse(__calls.findLast(c=>c.method==='DELETE').body);return result;})()`);
+  assert.match(security.row,/<img/);assert.equal(security.xss,false);assert.equal(security.calls,1);assert.equal(security.deleted,true);assert.deepEqual(security.body,{network:'203.0.113.5'});
+  const denial=await evaluate(`(async()=>{__securityFail=true;const q=k=>document.querySelector('[data-security="'+k+'"]');q('network').value='127.0.0.1';q('form').requestSubmit();await new Promise(r=>setTimeout(r,40));return {error:q('error').textContent,draft:q('network').value,disabled:q('add').disabled};})()`);
+  assert.match(denial.error,/误封/);assert.doesNotMatch(denial.error,/<img/);assert.equal(denial.draft,'127.0.0.1');assert.equal(denial.disabled,false);
+  await evaluate("page('activity')");
+  const audit=await evaluate(`(async()=>{document.querySelector('#audit-ip').value='203.0.113.5';document.querySelector('#audit-result').value='failed';document.querySelector('#audit-filter').requestSubmit();await new Promise(r=>setTimeout(r,40));return {url:__calls.findLast(c=>c.url.includes('login-events')).url,xss:!!document.querySelector('#content img')};})()`);
+  assert.match(audit.url,/ip=203.0.113.5/);assert.match(audit.url,/result=failed/);assert.equal(audit.xss,false);await shot('audit-filter-1280');
+  await evaluate("page('probe')");assert.match(await evaluate("document.querySelector('#content').innerText"),/redacted:123456789abc/);
+  await evaluate("page('logs')");assert.equal(await evaluate("!!document.querySelector('#dl-newbar')"),false);
+  const before=await evaluate("__logID");await evaluate("new Promise(r=>setTimeout(r,1400))");assert.ok(await evaluate('__logID')>before);
+  const paused=await evaluate(`(()=>{document.querySelector('#dl-pause').click();return __logID;})()`);await evaluate('new Promise(r=>setTimeout(r,1300))');assert.equal(await evaluate('__logID'),paused);
+  await evaluate("document.querySelector('#dl-pause').click()");await evaluate('new Promise(r=>setTimeout(r,1400))');assert.ok(await evaluate('__logID')>paused);await shot('logs-auto-1280');
+  const errors=await evaluate('__errors');assert.deepEqual(errors,[]);
+});
 
 test('详情固定外壳：加载关闭、错误重试、长详情关闭、背景隔离、持久反馈与焦点归还', {timeout:60000}, async t => {
   if (!available(t)) return;
