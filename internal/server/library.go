@@ -226,6 +226,76 @@ func (a *App) posterTag(path string) string {
 	return tag
 }
 
+// imageTagsFor 一次解析一条影片所需的三个图片标签（Primary/Thumb/Backdrop）。
+//
+// 为什么不再逐条调 posterTag（P2-2）：每条 item 要取 3 个 tag，旧实现是 3 次
+// posterTag —— 每次各自 time.Now() + tagMu 加锁/解锁，实测 200 条一页要 600 次
+// 加锁 + 600 次取时钟，共约 58µs（BenchmarkPosterTagHitPerPage），占整页 0.5ms
+// 预算的 11%。这里合并成"一次取时钟 + 一次加锁读 + 一次加锁写"，且用定长数组
+// 记账，零额外分配。
+//
+// 语义与 posterTag 完全一致（同一份 tags map、同样的 5 分钟/30 秒 TTL、
+// stat 失败记 "0" 并写负缓存、stat 在锁外做），只是把三次合成一次；
+// posterTag 保留给只取单张图的位置（图片代理、详情页等）。
+func (a *App) imageTagsFor(poster, landscape, backdrop string) (primary, thumb, backdropTag string) {
+	paths := [3]string{poster, landscape, backdrop}
+	var tags [3]string
+	var miss [3]bool
+	now := time.Now()
+	a.tagMu.Lock()
+	if a.tags == nil {
+		a.tags = make(map[string]tagEntry)
+	}
+	for i, p := range paths {
+		if p == "" {
+			continue
+		}
+		if e, ok := a.tags[p]; ok {
+			ttl := 5 * time.Minute
+			if e.neg {
+				ttl = 30 * time.Second
+			}
+			if now.Sub(e.ts) < ttl {
+				tags[i] = e.tag
+				continue
+			}
+		}
+		miss[i] = true
+	}
+	a.tagMu.Unlock()
+
+	statAny := false
+	for i := range miss {
+		if !miss[i] {
+			continue
+		}
+		statAny = true
+		info, err := os.Stat(paths[i])
+		if err != nil {
+			tags[i] = "0"
+			continue
+		}
+		tags[i] = strconv.FormatInt(info.ModTime().UnixNano(), 36)
+	}
+	if statAny {
+		a.tagMu.Lock()
+		for i := range miss {
+			if !miss[i] {
+				continue
+			}
+			a.tags[paths[i]] = tagEntry{tag: tags[i], ts: now, neg: tags[i] == "0"}
+		}
+		a.tagMu.Unlock()
+	}
+
+	primary, thumb, backdropTag = tags[0], tags[1], tags[2]
+	if thumb == "" {
+		// 无宽图时 Thumb 回退主海报，保证给客户端的 Thumb 标记总是可取图。
+		thumb = primary
+	}
+	return primary, thumb, backdropTag
+}
+
 // invalidateImageTag 立即失效指定图片路径的 tag 缓存。
 //
 // posterTag 是 5 分钟进程内缓存，且 cache.Clear() 只清 Redis、清不到它——
@@ -682,7 +752,7 @@ func (a *App) similar(c *gin.Context) {
 		out = append(out, a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true))
 	}
 	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
-	a.cache.Set(simKey, body, 20*time.Second)
+	a.cachePut(simKey, body, 20*time.Second)
 	c.Data(http.StatusOK, "application/json", body)
 }
 
@@ -943,19 +1013,19 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 
 	imageTags := gin.H{}
 	backdrops := make([]string, 0, 1)
-	if m.PosterPath != "" {
-		imageTags["Primary"] = a.posterTag(m.PosterPath)
-	}
-	if m.LandscapePath != "" {
-		imageTags["Thumb"] = a.posterTag(m.LandscapePath)
-	} else if m.PosterPath != "" {
-		// 无宽图时 Thumb 回退主海报，保证给客户端的 Thumb 标记总是可取图。
-		imageTags["Thumb"] = a.posterTag(m.PosterPath)
-	}
-	if m.BackdropPath != "" {
-		tag := a.posterTag(m.BackdropPath)
-		backdrops = append(backdrops, tag)
-		imageTags["Backdrop"] = tag
+	if m.PosterPath != "" || m.LandscapePath != "" || m.BackdropPath != "" {
+		// 三个标签一次解析（一次加锁 + 一次取时钟），见 imageTagsFor 的说明。
+		primary, thumb, backdropTag := a.imageTagsFor(m.PosterPath, m.LandscapePath, m.BackdropPath)
+		if m.PosterPath != "" {
+			imageTags["Primary"] = primary
+		}
+		if m.LandscapePath != "" || m.PosterPath != "" {
+			imageTags["Thumb"] = thumb
+		}
+		if m.BackdropPath != "" {
+			backdrops = append(backdrops, backdropTag)
+			imageTags["Backdrop"] = backdropTag
+		}
 	}
 	// iPlay Android 对 ImageTags / BackdropImageTags 做无条件解引用：
 	// 二者必须恒为对象/数组（内容可空），缺失即列表页 NPE。
@@ -1235,7 +1305,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
-	a.respondItems(c, ms, total, start, key)
+	a.respondItemsWithFields(c, ms, total, start, key, fields)
 }
 
 // itemFields 客户端通过 ?Fields= 显式索取的可选字段集合。
@@ -1318,10 +1388,37 @@ func embyTime(raw string) string {
 	return parsed.UTC().Format("2006-01-02T15:04:05.0000000Z")
 }
 
+// cachePut 把响应体放进缓存，并在后端支持时**转移所有权**而不是复制。
+//
+// 为什么：列表 DTO 一页 200 条约 600KB，b 是 json.Marshal 刚产出的、之后只用于
+// 写响应的一次性字节；cache.Set 会为它再分配并拷贝一份同尺寸内存（P2-5）。
+// *cache.Memory 提供 SetBytes 接管所有权，其它后端（Redis）没有这个能力时
+// 退回 Set 的复制语义，行为与改造前完全一致。
+//
+// 调用方约定：把 b 交出来之后**只能只读地使用它**（写响应、解码），不得原地修改。
+// 本文件的调用点都紧跟着 respondMediaJSON/c.Data 这类只读写出，满足该约定。
+func (a *App) cachePut(key string, body []byte, ttl time.Duration) {
+	if ow, ok := a.cache.(interface {
+		SetBytes(string, []byte, time.Duration)
+	}); ok {
+		ow.SetBytes(key, body, ttl)
+		return
+	}
+	a.cache.Set(key, body, ttl)
+}
+
 // respondItems 统一输出影片分页结果。cacheKey 非空时写入 15s 缓存（供 itemsQuery 命中复用）。
 // UserData 与演员表按整页批量取回，避免逐片 N+1 查询。
+//
+// 这个入口自己解析 ?Fields=，供不关心缓存的调用方（测试、合集列表）使用；
+// 列表主路径走 respondItemsWithFields，避免同一请求解析两次（P2-3）。
 func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, cacheKey string) {
-	fields := requestedFields(c)
+	a.respondItemsWithFields(c, ms, total, start, cacheKey, requestedFields(c))
+}
+
+// respondItemsWithFields 与 respondItems 相同，但由调用方把已经解析好的
+// itemFields 传进来：itemsQuery 为拼缓存键已经解析过一次，没必要再解析一次。
+func (a *App) respondItemsWithFields(c *gin.Context, ms []store.Movie, total, start int, cacheKey string, fields itemFields) {
 	ids := movieIDs(ms)
 	dataMap, actorMap, ok := a.itemAssociations(c, ids)
 	if !ok {
@@ -1337,7 +1434,8 @@ func (a *App) respondItems(c *gin.Context, ms []store.Movie, total, start int, c
 	v := gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start}
 	b, _ := json.Marshal(v)
 	if cacheKey != "" {
-		a.cache.Set("items:"+cacheKey, b, 15*time.Second)
+		// b 交给缓存后只读使用，因此可以让缓存直接持有这块内存（P2-5）。
+		a.cachePut("items:"+cacheKey, b, 15*time.Second)
 	}
 	respondMediaJSON(c, b)
 }
@@ -1559,7 +1657,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 		items = append(items, item)
 	}
 	body, _ := json.Marshal(gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
-	a.cache.Set(cacheKey, body, 30*time.Second)
+	a.cachePut(cacheKey, body, 30*time.Second)
 	c.Data(http.StatusOK, "application/json", body)
 }
 
@@ -1678,7 +1776,7 @@ func (a *App) item(c *gin.Context) {
 	}
 	d, _ := a.db.DataUser(a.currentUserID(c), id)
 	b, _ := json.Marshal(a.embyItemDetail(m, d, nil))
-	a.cache.Set(key, b, time.Hour)
+	a.cachePut(key, b, time.Hour)
 	respondMediaJSON(c, b)
 }
 

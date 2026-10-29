@@ -67,8 +67,9 @@ type shard struct {
 // 且把 O(size) 的 []byte 克隆移到锁外 —— 命中路径的临界区与值大小无关。
 //
 // 安全前提（Get 锁外复制成立的条件，改动时务必维持）：
-//  1. Set 存入的是入参的私有副本（cp 在锁外构造后只读发布），调用方
-//     之后改自己的切片不影响缓存内容；
+//  1. 存进去的切片在发布之后永不被写：Set 存的是入参的私有副本（cp 在锁外
+//     构造、之后只读发布），调用方之后改自己的切片不影响缓存；SetBytes 存的
+//     就是入参本身，其调用方承诺交出后不再改动（所有权转移）；
 //  2. 库内没有任何 API 返回内部切片本身：Get 返回独立副本；
 //  3. 淘汰/TTL 过期只会 delete+Remove 整个 Element，从不原地修改 value。
 //
@@ -147,7 +148,30 @@ func (m *Memory) Get(key string) ([]byte, bool) {
 
 func (m *Memory) Set(key string, value []byte, ttl time.Duration) {
 	// 入参的私有副本在锁外构造，调用方 Set 之后仍可随意复用/改写 value。
-	cp := append([]byte(nil), value...)
+	m.store(key, append([]byte(nil), value...), ttl)
+}
+
+// SetBytes 与 Set 只有一点不同：它**接管** value 的所有权，不再复制一份。
+//
+// 调用方交出 value 之后不得再读写或复用它的底层数组；库内保证只读地持有它
+// （Get 仍然复制出去，淘汰/TTL 只摘链表节点，从不原地改写）。
+//
+// 为什么需要这个入口：列表页 DTO 一页 200 条约 600KB，响应体是 json.Marshal
+// 刚生成的、之后只用于写响应的一次性字节。Set 的防御性复制会让每个列表响应
+// 多分配并拷贝一份同尺寸内存（BenchmarkSet600K：614,464 B/op、2 allocs/op；
+// BenchmarkSetBytes600K：≈24 B/op、1 alloc/op），在 15 秒 TTL 的列表缓存上
+// 等于把一次响应体的分配翻倍。
+//
+// 契约边界（与 Set 的差别仅此一条）：Set 之后调用方可以随意改自己的切片；
+// SetBytes 之后不可以。其余全部一致：Get 返回独立副本、TTL、分片淘汰、
+// 容量上限、nil/空值语义。
+func (m *Memory) SetBytes(key string, value []byte, ttl time.Duration) {
+	m.store(key, value, ttl)
+}
+
+// store 是 Set/SetBytes 的共同插入路径。value 必须已经是"归缓存所有的只读切片"。
+func (m *Memory) store(key string, value []byte, ttl time.Duration) {
+	cp := value
 	s := m.shardFor(key)
 	s.mu.Lock()
 	// 过期时间在锁内、拷贝之后计算，与单锁版本"写入时刻开始计时"一致。

@@ -56,6 +56,21 @@ func BenchmarkSet600K(b *testing.B) {
 	benchSink = len(value)
 }
 
+// BenchmarkSetBytes600K 是服务端列表响应实际走的写入路径（P2-5）：
+// 响应体是 json.Marshal 刚产出的、之后只用于写响应的一次性字节，
+// 交给缓存时不需要再复制。与 BenchmarkSet600K 的差值就是省掉的那一份副本。
+func BenchmarkSetBytes600K(b *testing.B) {
+	c := NewMemory(64)
+	value := benchPayload()
+	b.SetBytes(benchValueBytes)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.SetBytes("items:bench", value, time.Hour)
+	}
+	benchSink = len(value)
+}
+
 // BenchmarkParallelGetHit 用 GOMAXPROCS 个 goroutine 并发命中同一个 600KB
 // 条目：分片锁下各 goroutine 只在锁内做 O(1) 工作，克隆并行进行。
 func BenchmarkParallelGetHit(b *testing.B) {

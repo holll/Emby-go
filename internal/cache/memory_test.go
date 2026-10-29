@@ -3,9 +3,11 @@ package cache
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // countEntries 汇总所有分片的条目数，用于校验全局容量上限。
@@ -244,4 +246,131 @@ func TestMemoryConcurrentAccess(t *testing.T) {
 	if n := c.countEntries(); n < 0 {
 		t.Fatal("map/order out of sync after concurrent access")
 	}
+}
+
+// storedValue 白盒取回某个 key 当前被缓存持有的底层切片（仅测试用）。
+func storedValue(t *testing.T, m *Memory, key string) []byte {
+	t.Helper()
+	s := m.shardFor(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.items[key]
+	if !ok {
+		t.Fatalf("key %q missing", key)
+	}
+	return e.Value.(entry).value
+}
+
+// TestMemorySetCopiesInput 守住 Set 的既有契约：存入的是私有副本，
+// 调用方在 Set 之后改自己的切片不能影响缓存内容（16 处调用方依赖这一点）。
+func TestMemorySetCopiesInput(t *testing.T) {
+	c := NewMemory(64)
+	body := []byte(`{"Items":[1,2,3]}`)
+	want := append([]byte(nil), body...)
+	c.Set("k", body, time.Minute)
+
+	if stored := storedValue(t, c, "k"); unsafe.SliceData(stored) == unsafe.SliceData(body) {
+		t.Fatal("Set must store a private copy, not the caller's slice")
+	}
+	for i := range body {
+		body[i] = 'x'
+	}
+	got, ok := c.Get("k")
+	if !ok || !bytes.Equal(got, want) {
+		t.Fatalf("cache content changed after caller mutated its input: %q", got)
+	}
+}
+
+// TestMemorySetBytesTransfersOwnership 是 P2-5 的核心断言：
+// SetBytes 之后缓存持有的就是调用方交出的那块内存（同一底层数组），
+// 即列表响应省掉了"marshal 一次 + Set 再复制一次"里的第二份拷贝；
+// 同时 Get 仍然返回独立副本，语义与 Set 一致。
+func TestMemorySetBytesTransfersOwnership(t *testing.T) {
+	c := NewMemory(64)
+	body := []byte(`{"Items":[]}`)
+	c.SetBytes("k", body, time.Minute)
+
+	stored := storedValue(t, c, "k")
+	if unsafe.SliceData(stored) != unsafe.SliceData(body) {
+		t.Fatal("SetBytes must adopt the caller's slice (ownership transfer), but a copy was made")
+	}
+	if len(stored) != len(body) {
+		t.Fatalf("stored length = %d, want %d", len(stored), len(body))
+	}
+	got, ok := c.Get("k")
+	if !ok || !bytes.Equal(got, body) {
+		t.Fatalf("Get after SetBytes = %q, want %q", got, body)
+	}
+	if unsafe.SliceData(got) == unsafe.SliceData(body) {
+		t.Fatal("Get must keep returning an independent copy even for SetBytes entries")
+	}
+	// 改 Get 返回的副本不得影响缓存（所有权在缓存手里）。
+	got[0] = 'X'
+	again, _ := c.Get("k")
+	if !bytes.Equal(again, body) {
+		t.Fatalf("mutating the returned copy leaked into the cache: %q", again)
+	}
+}
+
+// TestMemorySetBytesReplacementDoesNotRewriteOldBytes 守住"已发布字节不被后续写入改写"：
+// 同 key 再写一次只会替换链表节点（新数组），先前 Get 出去/交出去的那份内存
+// 内容必须保持原样 —— 服务端正是把这块内存同时交给缓存和响应写入。
+func TestMemorySetBytesReplacementDoesNotRewriteOldBytes(t *testing.T) {
+	c := NewMemory(64)
+	first := []byte("first-response-body")
+	c.SetBytes("k", first, time.Minute)
+	handed, _ := c.Get("k") // 相当于写响应用的那份字节
+
+	second := []byte("second-response-body")
+	c.SetBytes("k", second, time.Minute)
+	c.Set("k2", []byte("x"), time.Minute)
+	c.Delete("k2")
+
+	if !bytes.Equal(handed, []byte("first-response-body")) {
+		t.Fatalf("previously handed-out bytes were rewritten: %q", handed)
+	}
+	if got, _ := c.Get("k"); !bytes.Equal(got, second) {
+		t.Fatalf("new value not visible: %q", got)
+	}
+	// 同 key 的 Set（复制路径）与 SetBytes 必须能互相覆盖，且不共享内存。
+	c.Set("k", second, time.Minute)
+	if got, _ := c.Get("k"); !bytes.Equal(got, second) {
+		t.Fatalf("Set after SetBytes lost the value: %q", got)
+	}
+}
+
+// TestMemorySetBytesConcurrentGetStable 在 -race 下并发读同一个 SetBytes 条目，
+// 每次读都必须拿到完整、未撕裂的内容（缓存对这块内存只读）。
+func TestMemorySetBytesConcurrentGetStable(t *testing.T) {
+	c := NewMemory(64)
+	body := make([]byte, 64*1024)
+	for i := range body {
+		body[i] = byte(i * 7)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(body)
+	want := h.Sum64()
+	c.SetBytes("items:k", body, time.Minute)
+
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for range 50 {
+				got, ok := c.Get("items:k")
+				if !ok {
+					t.Errorf("goroutine %d: key missing", g)
+					return
+				}
+				h := fnv.New64a()
+				_, _ = h.Write(got)
+				if h.Sum64() != want {
+					t.Errorf("goroutine %d: content torn", g)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

@@ -1217,9 +1217,68 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 			return nil, err
 		}
 		m.AdditionalParts = parseStrings(parts)
+		if out == nil {
+			// P1-1：limit 就是本次最多可能返回的行数，一次性分配到位；首行才分配，
+			// 保持 0 行时返回 nil 切片（调用方按 nil 判断过"什么都不用做"）。
+			out = make([]Movie, 0, max(limit, 0))
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// sortColumn 把客户端的 SortBy 映射成固定的排序列，未知值回退 title。
+//
+// 用 switch 而不是 map 字面量（P2-4）：map 每次调用都要构造并逃逸到堆，
+// 且白名单本身是编译期常量，没有"运行期按值查表"的必要。
+func sortColumn(sortBy string) string {
+	switch strings.ToLower(sortBy) {
+	case "year":
+		return "year"
+	case "date":
+		return "premiered"
+	case "datecreated":
+		return "id"
+	case "communityrating":
+		return "rating"
+	default:
+		// title / sortname / random / 未知值 都按 title（与旧 allowed map 的取值一致）。
+		return "title"
+	}
+}
+
+// searchEntityFilters 把 genres/tags/studios 三个实体过滤条件按**固定顺序**
+// （genres → tags → studios）追加到 where，并返回扩充后的 args。
+//
+// P2-4：这里原本是 map[string]string 字面量 + range 拼 WHERE，两个问题：
+//  1. map 迭代顺序随机 ⇒ 同一组参数会拼出不同的 SQL 文本，SQLite 每次都当新语句
+//     处理，拿不到语句缓存，也复用不了已算好的查询计划；
+//  2. 每次搜索都要构造一个 map，escape 分析实测它逃逸到堆。
+//
+// 改成固定顺序的数组（栈上，不逃逸）后，同一组参数拼出的文本逐字节恒定。
+// 单独抽成函数是为了让这条性质能被测试直接断言（TestSearchEntityFilterTextStable）。
+func searchEntityFilters(where []string, args []any, genre, tags, studios string) ([]string, []any) {
+	for _, filter := range [...]struct{ field, value string }{
+		{"genres", genre},
+		{"tags", tags},
+		{"studios", studios},
+	} {
+		field, value := filter.field, filter.value
+		if value == "" {
+			continue
+		}
+		terms := splitTerms(value)
+		if len(terms) == 0 {
+			continue
+		}
+		clauses := make([]string, 0, len(terms))
+		for _, t := range terms {
+			clauses = append(clauses, field+" LIKE ? ESCAPE '\\'")
+			args = append(args, "%\""+escapeLike(strings.ReplaceAll(t, `"`, ""))+"\"%")
+		}
+		where = append(where, "("+strings.Join(clauses, " OR ")+")")
+	}
+	return where, args
 }
 
 func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
@@ -1285,21 +1344,7 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 			where = append(where, "CAST(year AS TEXT) IN ("+strings.Join(placeholders, ",")+")")
 		}
 	}
-	for field, value := range map[string]string{"genres": genre, "tags": tags, "studios": studios} {
-		if value == "" {
-			continue
-		}
-		terms := splitTerms(value)
-		if len(terms) == 0 {
-			continue
-		}
-		clauses := make([]string, 0, len(terms))
-		for _, t := range terms {
-			clauses = append(clauses, field+" LIKE ? ESCAPE '\\'")
-			args = append(args, "%\""+escapeLike(strings.ReplaceAll(t, `"`, ""))+"\"%")
-		}
-		where = append(where, "("+strings.Join(clauses, " OR ")+")")
-	}
+	where, args = searchEntityFilters(where, args, genre, tags, studios)
 	if person != "" {
 		terms := splitTerms(person)
 		if len(terms) > 0 {
@@ -1329,21 +1374,27 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 	if cond != "" {
 		clause = " WHERE " + cond
 	}
-	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies"+clause, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	allowed := map[string]string{
-		"title": "title", "year": "year", "date": "premiered", "sortname": "title",
-		"datecreated": "id", "random": "title", "communityrating": "rating",
-	}
-	column := allowed[strings.ToLower(sortBy)]
-	if column == "" {
-		column = "title"
-	}
+	column := sortColumn(sortBy)
 	direction := "ASC"
 	if desc {
 		direction = "DESC"
+	}
+	// P1-2（评估后不改，保留两次查询）：原本的想法是把 COUNT(*) 合并进数据查询，
+	// 例如 SELECT movieCols, COUNT(*) OVER () ... LIMIT ?。实测**反而慢 6~7 倍**
+	// （同一夹具、同机相邻窗口，见 BenchmarkSearchPage100WindowPrealloc 与
+	// BenchmarkSearchPage100CountOnly / DataOnlyLegacyScan）：
+	//   COUNT(*) 单独跑            ~2.2 ms
+	//   数据查询（LIMIT 100）      ~2.9 ms
+	//   两条相加（当前实现）       ~5.3 ms
+	//   COUNT(*) OVER () 合一条    ~32-40 ms
+	// 原因是窗口聚合的执行位置在 LIMIT 之前：SQLite 必须把整个命中集排序/物化到
+	// 临时结构里才能算出 COUNT(*) OVER ()，于是丢掉了"ORDER BY title + LIMIT 100
+	// 只取前 100 行就停"的提前退出；而单独一条 COUNT 尽管要全表扫一遍，扫的是
+	// 窄投影、不排序、不物化。所以这里保留两条语句，逐个消掉的是它们的分配成本，
+	// 而不是它们的条数。
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies"+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	args = append(args, limit, offset)
 	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies"+clause+" ORDER BY "+column+" "+direction+",id LIMIT ? OFFSET ?", args...)
@@ -1356,6 +1407,11 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 		m, e := movieScan(rows)
 		if e != nil {
 			return nil, 0, e
+		}
+		if out == nil {
+			// P1-1：total 已知，min(limit,total) 就是本次最多可能返回的行数（精确、不过配）。
+			// 旧实现无预分配，out = append(out, m) 的倍增扩容占搜索路径分配字节的 53.6%。
+			out = make([]Movie, 0, max(min(limit, total), 0))
 		}
 		out = append(out, m)
 	}
@@ -1603,6 +1659,10 @@ func (s *Store) LatestVisible(libraryID int64, visible []int64, limit, offset in
 		if err != nil {
 			return nil, err
 		}
+		if out == nil {
+			// P1-1：LIMIT 已定，最多 limit 行。
+			out = make([]Movie, 0, max(limit, 0))
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -1648,6 +1708,10 @@ func (s *Store) ResumedVisible(userID int64, visible []int64, limit, offset int)
 		m, err := movieScan(rows)
 		if err != nil {
 			return nil, 0, err
+		}
+		if out == nil {
+			// P1-1：total 已知，min(limit,total) 就是本次最多可能返回的行数（精确，不会过配）。
+			out = make([]Movie, 0, max(min(limit, total), 0))
 		}
 		out = append(out, m)
 	}
@@ -2367,6 +2431,10 @@ func (s *Store) queryMoviesForScrape(where string, args []any, limit int) ([]Mov
 		if err != nil {
 			return nil, err
 		}
+		if out == nil {
+			// P1-1：limit<=0 表示不限条数，此时 hint=0，退化为自然增长（不做上限猜测）。
+			out = make([]Movie, 0, max(limit, 0))
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -2419,12 +2487,20 @@ func (s *Store) ActorsMissingAvatar(libraryID int64, limit int) ([]string, error
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
+		if out == nil {
+			// P1-1：limit>0 时最多 limit 个名字；limit<=0 表示不限，hint 取 0。
+			out = make([]string, 0, max(limit, 0))
+		}
 		out = append(out, name)
 	}
 	return out, rows.Err()
 }
 
 // MoviesByActor 返回某演员参演的可见影片（头像任务要逐个改写它们的 NFO）。
+//
+// 注意（P1-1 评估后不改）：本查询没有 limit 上界，行数由该演员的参演影片数决定，
+// 调用方也拿不到任何容量提示；用固定常量猜只会在大片库上过度分配，先跑一次
+// COUNT 则多一次查询。此处保持 append 自然增长。
 func (s *Store) MoviesByActor(name string) ([]Movie, error) {
 	rows, err := s.db.Query("SELECT "+movieCols+` FROM movies
 		WHERE status IN ('success','manual')
