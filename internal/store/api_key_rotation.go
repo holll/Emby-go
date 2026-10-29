@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -150,12 +151,73 @@ func (s *Store) ResolveAPIKeyStableID(id string) (string, error) {
 	}
 	// 升级后被直接 INSERT 的旧格式行（测试/外部工具）没有 stable_id：补一
 	// 个稳定 ID，避免删除/轮转在空身份上静默失败。
-	stable, err = newAPIKeyStableID()
+	return s.backfillAPIKeyStableID(rowKey)
+}
+
+// apiKeyBackfillWaitBudget bounds how long the legacy stable_id backfill may
+// queue for the writer lock. The backfill is a request-path write, so it must
+// not inherit SQLite's 10s busy_timeout: 2s is short enough that a rotating
+// administrator gets a prompt (retryable) failure instead of a request parked
+// behind a long scan commit, and still long enough to absorb a normal commit.
+const apiKeyBackfillWaitBudget = 2 * time.Second
+
+// backfillAPIKeyStableID gives an old-format api_keys row (INSERTed without
+// stable_id by pre-upgrade code or external tooling) a stable identity.
+//
+// P2-11: this used to be a bare s.db.Exec. That write bypassed s.writeMu, so it
+// broke the "one in-process writer" invariant: racing a scan commit it either
+// died with SQLITE_BUSY after busy_timeout (a 500 "database is locked" on an
+// authentication/rotation path) or made the other writer's COMMIT fail. It now
+// runs inside s.writeTx, which is the only path that owns both the writer gate
+// and a pinned connection.
+//
+// Write frequency (why this is not a hot-path write): every INSERT this program
+// makes already sets stable_id (store.go CreateAPIKeyForUser,
+// admin_credentials.go AdminCreateAPIKey) and migration 15 backfilled all
+// pre-existing rows, so only rows written by external tools reach here, once
+// each — the UPDATE's guard makes that explicit, and the re-read inside the
+// transaction means concurrent resolvers of the same row converge on one ID
+// instead of overwriting each other.
+//
+// Worst-case added latency on the request path: apiKeyBackfillWaitBudget (2s)
+// while another writer holds the gate, and only for those legacy rows; modern
+// rows resolve entirely on the read path above and never touch this function.
+func (s *Store) backfillAPIKeyStableID(rowKey string) (string, error) {
+	candidate, err := newAPIKeyStableID()
 	if err != nil {
 		return "", err
 	}
-	if _, err := s.db.Exec("UPDATE api_keys SET stable_id=? WHERE key=?", stable, rowKey); err != nil {
-		return "", err
+	var stable string
+	// writeTxContext (not writeTx) so the wait is bounded: the callback may be
+	// re-run on SQLITE_BUSY, hence it re-reads the row every attempt and never
+	// writes a value it did not just verify was missing.
+	ctx, cancel := context.WithTimeout(context.Background(), apiKeyBackfillWaitBudget)
+	defer cancel()
+	err = s.writeTxContext(ctx, func(tx *sql.Tx) error {
+		stable = ""
+		err := tx.QueryRow("SELECT COALESCE(stable_id,'') FROM api_keys WHERE key=?", rowKey).Scan(&stable)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAPIKeyNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if stable != "" {
+			return nil
+		}
+		if _, err := tx.Exec("UPDATE api_keys SET stable_id=? WHERE key=? AND (stable_id IS NULL OR stable_id='')", candidate, rowKey); err != nil {
+			return err
+		}
+		// 以事务内读回的值为准：UPDATE 带了"只补空值"的守卫，外部工具可能已经在我们
+		// 读完那一行之后写过 stable_id，这时不能把没落库的候选 ID 当成身份返回。
+		return tx.QueryRow("SELECT COALESCE(stable_id,'') FROM api_keys WHERE key=?", rowKey).Scan(&stable)
+	})
+	if err != nil {
+		return "", fmt.Errorf("backfill api key stable id: %w", err)
+	}
+	if stable == "" {
+		// 行在事务内被并发删除（或从未有 stable_id 可回填）。
+		return "", ErrAPIKeyNotFound
 	}
 	return stable, nil
 }

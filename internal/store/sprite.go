@@ -150,14 +150,10 @@ func (s *Store) CompareAndSwapSpriteFiles(ctx context.Context, expected Movie, l
 			return err
 		}
 	}
-	for !s.writeMu.TryLock() {
-		timer := time.NewTimer(5 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+	// FIFO + ctx-aware (P2-13): a cancelled sprite job leaves the wait at once
+	// instead of polling TryLock every 5ms, and the token is never leaked.
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return err
 	}
 	defer s.writeMu.Unlock()
 	return s.spriteWriteTx(ctx, func(tx *sql.Tx) error {

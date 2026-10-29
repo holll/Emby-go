@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
-	"time"
 )
 
 var ErrArtworkChanged = errors.New("artwork source or index changed; retry")
@@ -56,17 +55,12 @@ func (s *Store) CompareAndSwapArtworkFiles(ctx context.Context, expected Movie, 
 		}
 	}
 	var version int64
-	// A long-running scan may hold the writer mutex. Do not leave a cancelled
+	// A long-running scan may hold the writer gate. Do not leave a cancelled
 	// artwork job waiting indefinitely for it, or spawn a goroutine that later
-	// acquires an abandoned lock.
-	for !s.writeMu.TryLock() {
-		timer := time.NewTimer(5 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+	// acquires an abandoned lock. LockContext parks in the gate's FIFO queue and
+	// returns on ctx.Done (P2-13); the token is never leaked on error.
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return err
 	}
 	defer s.writeMu.Unlock()
 	err := s.writeTxOnce(func(tx *sql.Tx) error {

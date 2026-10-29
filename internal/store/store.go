@@ -39,7 +39,9 @@ type Store struct {
 	// writeMu serializes in-process writers. Deferred BEGIN transactions that
 	// read before writing can otherwise hit SQLITE_BUSY_SNAPSHOT when a
 	// background writer (feature backfill, scanner commit) commits in between.
-	writeMu sync.Mutex
+	// It is a FIFO, context-aware channel semaphore (writerGate) rather than a
+	// sync.Mutex so waiters queue fairly and abandon the wait on ctx.Done (P2-13).
+	writeMu writerGate
 	// testDeleteMissingSourcesHook 仅测试使用（生产恒为 nil）：在
 	// DeleteMissingSources 的写事务内、清点 missing 之后、删除之前执行，用来
 	// 确定性地注入"并发 IndexMovie 刚好落在清点与删除之间"的时序。
