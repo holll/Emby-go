@@ -194,8 +194,51 @@ func (s *Scraper) translateFields(ctx context.Context, info metatube.MovieInfo) 
 	return title, plot, true
 }
 
+// imageCommitLock 是「某个图片目标路径一把锁」的条目。
+// refs 是正在持有或正在等待该锁的调用数，只在 imageCommitGuard 下读写。
+type imageCommitLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 // 唯一临时文件隔离编码，目标路径锁串行提交，兼容 Windows 的并发替换限制。
-var imageCommitLocks sync.Map
+//
+// 条目必须能回收：此前这是只增不删的 sync.Map，条目随「见过的图片路径数」永久驻留
+// （每条约 100B+），一部片 N 张图 × 全库影片，长跑进程会被历史路径数拖住。
+// 改为引用计数 + 归零摘除：驻留量只与「此刻在飞行的路径数」成正比。
+// 不能用有界 LRU 放锁——淘汰一把仍被持有的锁会让同一路径出现第二把 mutex，
+// 互斥语义当场失效（提交期 rename 撞车正是这把锁要防的）。
+var (
+	imageCommitGuard sync.Mutex
+	imageCommitLocks = make(map[string]*imageCommitLock)
+)
+
+// lockImageCommit 取得某个目标路径的提交权，返回的函数调用即释放。
+func lockImageCommit(key string) func() {
+	imageCommitGuard.Lock()
+	entry := imageCommitLocks[key]
+	if entry == nil {
+		entry = &imageCommitLock{}
+		imageCommitLocks[key] = entry
+	}
+	// 先加引用再等锁：只有 refs 归零的条目才会被摘除，所以「有人持有或排队」的
+	// 条目不会被后来者当成不存在而新建第二把锁（否则互斥就破了）。
+	entry.refs++
+	imageCommitGuard.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		imageCommitGuard.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			if current, ok := imageCommitLocks[key]; ok && current == entry {
+				delete(imageCommitLocks, key)
+			}
+		}
+		imageCommitGuard.Unlock()
+	}
+}
 
 // downloadImage 下载一张图并转 webp 落盘；只补缺失模式下已有文件则跳过（返回空路径）。
 // badge 非空时由后端把角标合成进图里再返回（只对主海报传）。
@@ -249,10 +292,9 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	if err != nil {
 		return "", err
 	}
-	value, _ := imageCommitLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
+	// 归一化到「绝对路径 + Clean」：同一目标的不同写法必须落到同一把提交锁。
+	release := lockImageCommit(filepath.Clean(key))
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

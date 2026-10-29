@@ -133,6 +133,15 @@ var (
 
 // Setup 初始化日志：slog 默认处理器改为「程序日志双写」。
 // debug 为真时 slog 级别降到 Debug（复用现有 debug 开关，不新增配置项）。
+//
+// 可重复调用（测试、嵌入式热重载）：新一代接管后必须关掉上一代，否则每个旧
+// writer 都留着已打开的 app/request 日志 fd，且与新一代指向同一路径，形成两个
+// 互不知情的写者。
+//
+// 契约：写者拿到的是 *DailyWriter 本身，Write/Close 共用其内部锁，所以「先换
+// current、再关上一代」对正在写的 goroutine 是安全的（写入会排在 Close 之后，
+// 届时 writer 惰性重开当天的文件，不会 panic）。Setup 仍应在启动阶段调用，
+// 不要在日志高流量时反复调用。
 func Setup(debug bool) *Loggers {
 	currentMu.Lock()
 	defer currentMu.Unlock()
@@ -140,7 +149,11 @@ func Setup(debug bool) *Loggers {
 	request := NewDailyWriter(Dir, "request", os.Stdout)
 	// 环形缓冲保留最近日志，供管理端 WebUI 的运行日志面板查询。
 	SetupTo(app, debug)
+	previous := current
 	current = &Loggers{app: app, request: request}
+	if previous != nil {
+		_ = previous.Close() // 日志问题不影响业务：关闭失败只丢一个 fd
+	}
 	return current
 }
 

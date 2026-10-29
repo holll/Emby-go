@@ -3,14 +3,18 @@
 package backup
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -33,6 +37,138 @@ type Result struct {
 	Pruned     []string
 	FinishedAt time.Time
 }
+
+// lockFileName 是输出目录上的互斥锁文件：同一 OutDir 同一时刻只允许一路备份。
+const lockFileName = ".embybackup.lock"
+
+// ErrOutputBusy 表示该输出目录已有另一路备份在进行（另一个进程或同进程另一路）。
+var ErrOutputBusy = errors.New("backup: 该输出目录已有备份正在进行")
+
+// lockStaleAfter 是「无法判断持锁者死活」时的陈旧锁兜底阈值。
+// 备份正常只需秒级，所以超过这个时长仍未释放的锁（写不全的锁文件、跨平台无法
+// 探测 pid、持锁 pid 已被复用等）可以安全接管，避免人工清理现场。
+const lockStaleAfter = 30 * time.Minute
+
+// acquireOutputLock 在输出目录上取互斥锁（O_CREATE|O_EXCL），返回释放函数。
+//
+// 为什么不只靠「stage 名加随机后缀」：随机后缀能防住 stage 撞车，但两路备份仍会
+// 各自 VACUUM、各自 os.RemoveAll(dir)、各自 rename 到同一个最终目录，后完成的把
+// 先完成的那份删掉；prune 也会被两路并发跑。所以同一输出目录同一时刻只允许一路。
+//
+// 陈旧锁策略：锁文件里写 pid + 启动时间。
+//  1. 持锁进程还活着 → 直接 ErrOutputBusy（无论锁多久，长备份是合法的）；
+//  2. 进程已确认不存在（kill -9、容器重启）→ 立即接管；
+//  3. 拿不到结论（锁文件被写坏、平台不支持信号 0、pid 已被别的进程复用）→
+//     按锁文件 mtime 判断，超过 lockStaleAfter 才接管，宁可等也不并发写。
+func acquireOutputLock(outDir string) (func(), error) {
+	path := filepath.Join(outDir, lockFileName)
+	file, err := createLockFile(path)
+	if errors.Is(err, os.ErrExist) {
+		if staleErr := dropStaleLock(path); staleErr != nil {
+			return nil, staleErr
+		}
+		file, err = createLockFile(path)
+		if errors.Is(err, os.ErrExist) {
+			// 两路同时判定「陈旧锁」并接管，O_EXCL 保证只有一路建成；
+			// 另一路按「有人持锁」报，而不是抛一个裸的 file exists。
+			return nil, fmt.Errorf("%w（%s）", ErrOutputBusy, path)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("backup: acquire lock: %w", err)
+	}
+	// 记录持锁者身份，供下一位（包括被 kill 后的下一次启动）判断可否接管。
+	if _, err := fmt.Fprintf(file, "pid=%d\nstart=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("backup: write lock: %w", err)
+	}
+	return func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}, nil
+}
+
+func createLockFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+}
+
+// dropStaleLock 决定已存在的锁能否接管：能接管就删掉锁文件（由调用方重新 O_EXCL
+// 创建，两路同时接管时必然只有一路成功），不能接管就返回 ErrOutputBusy。
+func dropStaleLock(path string) error {
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil // 对方刚好释放，直接重试创建
+		}
+		return fmt.Errorf("backup: inspect lock: %w", statErr)
+	}
+	pid := readLockPID(path)
+	alive, known := processAlive(pid)
+	if known && alive {
+		return fmt.Errorf("%w（%s，pid=%d）", ErrOutputBusy, path, pid)
+	}
+	if !known && time.Since(info.ModTime()) < lockStaleAfter {
+		// 拿不到结论就别抢：锁文件可能是别的机器上的合法备份（共享输出目录）。
+		return fmt.Errorf("%w（%s，无法确认持锁者存活）", ErrOutputBusy, path)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("backup: take over stale lock: %w", err)
+	}
+	return nil
+}
+
+// readLockPID 读出锁文件里的 pid；文件写不全或被改坏时返回 0（视为未知）。
+func readLockPID(path string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "pid=")
+		if !ok {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && pid > 0 {
+			return pid
+		}
+	}
+	return 0
+}
+
+// processAlive 判断 pid 对应的进程是否还在。known=false 表示本平台/本权限下
+// 无法下结论（调用方应改用时间兜底，而不是猜）。
+func processAlive(pid int) (alive, known bool) {
+	if pid <= 0 {
+		return false, false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false, true
+	}
+	// 信号 0 只做存在性检查，不投递任何信号。
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil {
+		return true, true
+	}
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+		return false, true
+	}
+	// EPERM 说明进程存在但不属于我们（同一输出目录被别的用户用着）→ 视为存活，
+	// 其它错误一律不下结论。
+	if errors.Is(err, syscall.EPERM) {
+		return true, true
+	}
+	return false, false
+}
+
+// 备份流程内的测试同步点：生产路径恒为 nil，开销只是一次 nil 判断。
+// 「两路同秒备份互相删掉对方 stage」只在「A 已写完快照、还没发布」这个窗口里
+// 出现，靠 sleep 碰时序既不可靠又慢，所以留钩子让测试精确插同步点。
+var (
+	testHookBeforeSnapshot func() // VACUUM 之前（此前已 MkdirAll 并清理过 stage）
+	testHookAfterSnapshot  func() // 快照校验通过之后、发布之前
+)
 
 // Run 执行一次备份。目录名使用 UTC 时间戳，重复执行会覆盖同名目录。
 func Run(opts Options) (Result, error) {
@@ -69,12 +205,22 @@ func Run(opts Options) (Result, error) {
 		now = time.Now()
 	}
 	dir := filepath.Join(opts.OutDir, now.UTC().Format("20060102T150405Z"))
+	// 输出目录上的互斥锁要在任何 mkdir/remove 之前拿到：stage 与最终目录都派生自
+	// 同一个秒级时间戳，两路同秒启动会共用一个 stage，后启者的 os.RemoveAll(stage)
+	// 会删掉先启者正在 VACUUM 的库，先启者随后把半成品 rename 成「完整备份」。
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return Result{}, fmt.Errorf("backup: output dir: %w", err)
+	}
+	releaseLock, err := acquireOutputLock(opts.OutDir)
+	if err != nil {
+		return Result{}, err
+	}
+	defer releaseLock()
 	// 先在隐藏暂存目录写完，成功后再改名：失败或崩溃不会留下半份备份，
 	// 也不会覆盖同名时间戳下已有的完整备份。
-	stage := filepath.Join(opts.OutDir, "."+now.UTC().Format("20060102T150405Z")+".tmp")
-	if err := os.RemoveAll(stage); err != nil {
-		return Result{}, fmt.Errorf("backup: clean staging: %w", err)
-	}
+	// stage 名字带随机后缀：不再与秒级时间戳一一对应，任何人（包括没拿到锁的旧版本、
+	// 手工清理、崩溃残留）都不可能与本路落到同一个目录上再互相删除。
+	stage := filepath.Join(opts.OutDir, "."+now.UTC().Format("20060102T150405Z")+"."+rand.Text()+".tmp")
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		return Result{}, fmt.Errorf("backup: %w", err)
 	}
@@ -84,6 +230,9 @@ func Run(opts Options) (Result, error) {
 			os.RemoveAll(stage)
 		}
 	}()
+	if testHookBeforeSnapshot != nil {
+		testHookBeforeSnapshot()
+	}
 	// 源库只读，busy_timeout 给在线写入者让路。
 	dest := filepath.Join(stage, "db.sqlite")
 	if _, err := db.Exec("VACUUM INTO ?", dest); err != nil {
@@ -91,6 +240,9 @@ func Run(opts Options) (Result, error) {
 	}
 	if err := checkSnapshot(dest); err != nil {
 		return Result{}, err
+	}
+	if testHookAfterSnapshot != nil {
+		testHookAfterSnapshot()
 	}
 	result := Result{Dir: dir, Database: filepath.Join(dir, "db.sqlite"), FinishedAt: now.UTC()}
 	if opts.NFORoot {

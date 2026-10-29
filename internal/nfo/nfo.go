@@ -6,11 +6,19 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// pathLock 是「某个 NFO 路径一把锁」的条目。
+// refs 是正在持有或正在等待这把锁的调用数，只在 pathLockGuard 下读写。
+type pathLock struct {
+	mu   sync.Mutex
+	refs int
+}
 
 // pathLocks 按 NFO 路径串行化「读全文 → 改局部 → 原子写」这一整段。
 //
@@ -18,17 +26,59 @@ import (
 // 会同时改写同一份 NFO；单条探测/手动刮削也可能与批量刮削撞上。没有这把锁，
 // 后写的会盖掉先写的（丢更新），而两者共用的 *.nfo.tmp 还会互相截断。
 //
-// 锁的粒度是「每个路径一把」，条目数与本库影片数同量级（数千），不值得为
-// 清理做引用计数；进程退出即随 map 释放。
-var pathLocks sync.Map // map[string]*sync.Mutex
+// 条目必须能回收：此前 map 只增不删，条目随「见过的路径数」永久驻留（每条约 100B+），
+// 长时间运行 + 库不断增删影片会一路涨。这里改为引用计数 + 归零摘除，驻留量只与
+// 「此刻在飞行的路径数」成正比，而不是历史路径总数。
+//
+// 注意不能用有界 LRU 缓存来放锁：淘汰一个仍被持有的锁会让同一路径出现第二把
+// mutex，互斥语义当场失效（等于没修），所以只能靠 refs 判活。
+var (
+	pathLockGuard sync.Mutex
+	pathLocks     = make(map[string]*pathLock)
+)
+
+// pathLockKey 把同一文件的不同写法归一成同一个 key。
+// 同一路径可能以相对路径、含 . 或 .. 的形式传进来（scanner 拼的、配置里写的、
+// 手工拼的）；按原始字符串开锁会让同一文件落到多把锁上，互斥形同虚设。
+func pathLockKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		// cwd 不可用（目录被删等极端情况）：退化为纯词法清理，
+		// 至少让 a/../b 与 a/b 归一，别退化成「每串一个锁」。
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(abs)
+}
 
 // lockNFOPath 取得某路径的独占权，返回的函数的调用即释放。
 // 用法：defer lockNFOPath(path)()
 func lockNFOPath(path string) func() {
-	value, _ := pathLocks.LoadOrStore(path, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	key := pathLockKey(path)
+	pathLockGuard.Lock()
+	entry := pathLocks[key]
+	if entry == nil {
+		entry = &pathLock{}
+		pathLocks[key] = entry
+	}
+	// 必须在等待锁之前加引用：只有 refs 归零的条目才会被摘除，
+	// 于是「有人持有或有人排队」的条目永远不会被后来的调用者当作不存在而
+	// 新建第二把锁——这是引用计数方案能保住互斥语义的关键顺序。
+	entry.refs++
+	pathLockGuard.Unlock()
+
+	entry.mu.Lock() // 不持 pathLockGuard 等待，避免全局互斥
+	return func() {
+		entry.mu.Unlock()
+		pathLockGuard.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			// 比较指针再删：防御性地避免摘掉别人新建的同名条目。
+			if current, ok := pathLocks[key]; ok && current == entry {
+				delete(pathLocks, key)
+			}
+		}
+		pathLockGuard.Unlock()
+	}
 }
 
 // Actor 对应 <actor>：Thumb 是头像的远端地址，头像真源就在这里——

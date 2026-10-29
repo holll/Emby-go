@@ -216,8 +216,16 @@ func Run(ctx context.Context, ffprobePath, target string, timeout time.Duration)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return Result{}, fmt.Errorf("探测超时（%s）", timeout)
+	// 先看 ctx 再看退出码：ctx 结束会杀掉 ffprobe，err 只剩「退出码 -1（无错误输出）」
+	// 这类残影。若直接当 ffprobe 故障上报，「调用方取消」就会被记成该条源探测失败：
+	// 批量探测里每条都在跑的 ffprobe 都会被取消，取消 100 条等于 100 次失败，
+	// 既污染失败列表，又推进连续失败计数触发「探测环境异常」熔断。
+	// 所以 ctx 的两种结束都原样返回（包装后调用方可 errors.Is 判定）。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return Result{}, fmt.Errorf("探测超时（%s）", timeout)
+		}
+		return Result{}, fmt.Errorf("探测被取消: %w", ctxErr)
 	}
 	if err != nil {
 		// 区分「ffprobe 根本没跑起来」与「跑起来了但报错」：两者的排查方向完全不同

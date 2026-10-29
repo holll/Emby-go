@@ -2,6 +2,10 @@ package probe
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -248,5 +252,50 @@ func TestParseSubtitles(t *testing.T) {
 	second := info.Subtitles[1]
 	if second.Forced != true || second.HearingImpaired != true || second.Default != false {
 		t.Errorf("第 2 条字幕轨的标记不对: %+v", second)
+	}
+}
+
+// TestRunDistinguishesContextCancel 验证「调用方取消」不被当成 ffprobe 故障。
+//
+// 批量探测被取消时，每条在跑的 ffprobe 都会被杀掉；若这类返回被记成该条的
+// FFPROBE_FAILED，失败列表与连续失败熔断计数都会被污染（取消 100 条 = 100 次失败，
+// 足以触发熔断，把一次人工取消报成「探测环境异常」）。
+func TestRunDistinguishesContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "started")
+	fake := filepath.Join(dir, "ffprobe")
+	// exec 让 sleep 顶替 sh 成为被 CommandContext 直接杀掉的进程，
+	// 否则孤儿 sleep 会一直占着 stdout 管道，取消后要等它自己退出才返回。
+	script := "#!/bin/sh\ntouch " + marker + "\nexec sleep 30\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, fake, "whatever.mp4", 30*time.Second)
+		done <- err
+	}()
+	// 等 fake ffprobe 真正跑起来再取消，不用 sleep 猜时序。
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake ffprobe 未启动")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("取消后返回 %v，期望 wrap context.Canceled 以便调用方区分", err)
+		}
+		if strings.Contains(err.Error(), "无法启动") || strings.Contains(err.Error(), "退出码") {
+			t.Fatalf("取消被误报为 ffprobe 失败: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run 在取消后没有及时返回")
 	}
 }

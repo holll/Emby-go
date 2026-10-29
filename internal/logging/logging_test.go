@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,4 +95,44 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("读取 %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// TestSetupClosesPreviousWriters 验证重复 Setup 关掉上一代 writer 的文件句柄。
+//
+// Setup 每调一次就新建两个 DailyWriter；不关旧的，每个旧 writer 都留着已打开的
+// app/request 日志 fd（测试与嵌入式热重载会反复调，泄漏会累积），而且旧句柄
+// 仍指向同一路径，形成两个互不知情的写者。
+func TestSetupClosesPreviousWriters(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// 恢复成不落盘的处理器，避免把全局 slog 留在临时目录里给后面的测试用。
+	t.Cleanup(func() { SetupTo(io.Discard, false) })
+
+	first := Setup(false)
+	for _, w := range []*DailyWriter{first.app, first.request} {
+		if _, err := w.Write([]byte("hello\n")); err != nil {
+			t.Fatalf("首代 writer 写入失败: %v", err)
+		}
+	}
+	first.app.mu.Lock()
+	appFile, requestFile := first.app.file, first.request.file
+	first.app.mu.Unlock()
+	if appFile == nil || requestFile == nil {
+		t.Fatal("首代 writer 没有打开日志文件，测试前提不成立")
+	}
+
+	second := Setup(false)
+	if second == first {
+		t.Fatal("Setup 应返回新一代 Loggers")
+	}
+	// 关闭后的 *os.File 再写必然失败；仍能写说明旧句柄没被关掉。
+	if _, err := appFile.Write([]byte("again\n")); err == nil {
+		t.Error("重复 Setup 未关闭旧 app writer 的文件句柄")
+	}
+	if _, err := requestFile.Write([]byte("again\n")); err == nil {
+		t.Error("重复 Setup 未关闭旧 request writer 的文件句柄")
+	}
+	// 新一代必须可用（不能因为关旧 writer 而把新 writer 也关掉）。
+	if _, err := second.app.Write([]byte("new\n")); err != nil {
+		t.Errorf("新一代 writer 写入失败: %v", err)
+	}
 }

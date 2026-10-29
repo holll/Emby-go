@@ -1,10 +1,12 @@
 package nfo
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sampleDetails() *StreamDetails {
@@ -214,5 +216,75 @@ func TestSaveFileInfoIndent(t *testing.T) {
 	raw2, _ := os.ReadFile(path2)
 	if !strings.Contains(string(raw2), "\n  <fileinfo>\n") {
 		t.Errorf("插入时 fileinfo 缩进不符:\n%s", raw2)
+	}
+}
+
+// TestLockNFOPathNormalizesPath 验证同一份 NFO 的不同写法落到同一把锁。
+//
+// 调用方传进来的路径形态并不统一（scanner 给的绝对路径、配置里的相对路径、
+// 手工拼出来的 a/../b）。如果按原始字符串开锁，同一文件会拿到多把互斥锁，
+// 于是「读全文 → 改局部 → 原子写」的互斥失效：两个演员同时改同一部片的 NFO
+// 就会丢更新，共用的 *.nfo.tmp 还会互相截断。
+func TestLockNFOPathNormalizesPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	abs, err := filepath.Abs("movie.nfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spelling := range []string{"movie.nfo", "./movie.nfo", "sub/../movie.nfo", abs} {
+		t.Run(spelling, func(t *testing.T) {
+			release := lockNFOPath(abs)
+			acquired := make(chan struct{})
+			go func() {
+				defer close(acquired)
+				releaseOther := lockNFOPath(spelling)
+				releaseOther()
+			}()
+			select {
+			case <-acquired:
+				release()
+				<-acquired
+				t.Fatalf("%q 与 %q 落到了不同锁：同一 NFO 可被两路同时持锁", spelling, abs)
+			case <-time.After(2 * time.Second):
+				// 期望路径：仍被挡住，释放后才拿得到。
+				release()
+				select {
+				case <-acquired:
+				case <-time.After(2 * time.Second):
+					t.Fatal("释放后仍拿不到锁，路径锁未真正工作")
+				}
+			}
+		})
+	}
+}
+
+// pathLockEntryCount 读出当前驻留的路径锁条目数（仅测试用）。
+func pathLockEntryCount() int {
+	pathLockGuard.Lock()
+	defer pathLockGuard.Unlock()
+	return len(pathLocks)
+}
+
+// TestLockNFOPathReleasesEntries 验证路径锁条目随释放回收，而不是永久驻留。
+//
+// 条目按「见过的路径」无限增长（每条约 100B+），长时间运行 + 库不断增删影片
+// 会让这张表一路涨到进程退出，属于慢性内存泄漏。
+func TestLockNFOPathReleasesEntries(t *testing.T) {
+	dir := t.TempDir()
+	if got := pathLockEntryCount(); got != 0 {
+		t.Fatalf("用例开始前已有 %d 个条目，测试前提不成立", got)
+	}
+	for i := range 200 {
+		path := filepath.Join(dir, fmt.Sprintf("movie-%02d.nfo", i))
+		release := lockNFOPath(path)
+		if got := pathLockEntryCount(); got != 1 {
+			release()
+			t.Fatalf("持有 %s 期间条目数 = %d，期望 1", path, got)
+		}
+		release()
+	}
+	if got := pathLockEntryCount(); got != 0 {
+		t.Fatalf("释放后仍驻留 %d 个路径锁条目：只增不删，内存随历史路径数增长", got)
 	}
 }
