@@ -142,6 +142,9 @@ with sync_playwright() as p:
         trigger.click();dialog=page.locator('#library-sprite-settings');expect(dialog).to_be_visible()
         assert page.evaluate('document.querySelector("#library-sprite-settings").contains(document.activeElement)')
         assert dialog.evaluate('(e)=>e.matches(":modal")') is True
+        dialog_box=dialog.evaluate('(e)=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width,scroll:e.scrollWidth,client:e.clientWidth}}')
+        assert dialog_box['left']>=0 and dialog_box['right']<=width+1 and dialog_box['scroll']<=dialog_box['client']+1,(dialog_box,width)
+        assert page.evaluate('innerWidth')<=width+1
         page.keyboard.press('Escape');expect(dialog).to_be_hidden()
         assert page.evaluate('document.activeElement&&document.activeElement.hasAttribute("data-lib-sprites")')
         assert page.evaluate('document.documentElement.scrollWidth')<=width
