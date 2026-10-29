@@ -17,8 +17,9 @@ func TestParseStringsFastPathMatchesDecode(t *testing.T) {
 		{"[]", []string{}}, // 空数组仍是"非 nil 空切片"，快路径不得改变
 		{`["剧情"]`, []string{"剧情"}},
 		{`["a","b"]`, []string{"a", "b"}},
-		{"null", nil},     // JSON null 解到切片指针仍是 nil
-		{"not json", nil}, // 坏数据保持旧行为：忽略错误、返回 nil
+		{`[ ]`, []string{}}, // 带空格的空数组仍走解码路径，语义相同
+		{"null", nil},       // JSON null 解到切片指针仍是 nil
+		{"not json", nil},   // 坏数据保持旧行为：忽略错误、返回 nil
 	}
 	for _, c := range cases {
 		got := parseStrings(c.in)
@@ -27,6 +28,9 @@ func TestParseStringsFastPathMatchesDecode(t *testing.T) {
 		}
 		if c.in == "[]" && got == nil {
 			t.Errorf(`parseStrings("[]") 返回 nil，改变了"非 nil 空切片"语义`)
+		}
+		if c.in == "[]" && len(got) != 0 {
+			t.Errorf(`parseStrings("[]") 应返回空切片，得到 %#v`, got)
 		}
 	}
 }

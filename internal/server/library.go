@@ -231,6 +231,11 @@ func (a *App) posterTag(path string) string {
 // tagCacheLimit 是 tag 缓存条目数的上限（见 pruneTagsLocked）。
 const tagCacheLimit = 8192
 
+// tagCacheSlack 是超过上限后仍允许继续插入的余量：清理是 O(len) 的整表扫描，
+// 若每次插入都扫一遍，饱和后一页 200 条（最多 ~600 次插入）就是几十万次 map
+// 迭代。留 1/4 余量后，每 2048 次插入才扫一次 8192 条 ≈ 每次插入 4 次 map 操作。
+const tagCacheSlack = tagCacheLimit / 4
+
 // pruneTagsLocked 把 tag 缓存压回 tagCacheLimit 以内，调用方须持 a.tagMu。
 //
 // 为什么需要（§2.3 #2）：tags 只在 invalidateImageTag 时删除，而路径来自库内
@@ -241,8 +246,11 @@ const tagCacheLimit = 8192
 // 会重新 stat 得到同一个 tag（文件没变 → 同一个 tag；变了 → 本来就该变）。
 // 因此这里只做容量兜底，不做 LRU 记账：先清过期条目（5 分钟/负缓存 30 秒），
 // 仍然超限时按 map 迭代顺序丢弃 —— 顺序不重要，代价只是将来一次多余的 stat。
+//
+// 触发条件是 tagCacheLimit+tagCacheSlack（摊销，见 tagCacheSlack 的说明），
+// 清理后压回 tagCacheLimit。命中路径完全不参与，仍是单次 map 查找。
 func (a *App) pruneTagsLocked(now time.Time) {
-	if len(a.tags) < tagCacheLimit {
+	if len(a.tags) < tagCacheLimit+tagCacheSlack {
 		return
 	}
 	for p, e := range a.tags {

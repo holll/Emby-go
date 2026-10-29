@@ -466,48 +466,79 @@ func (s *Store) Libraries() ([]Library, error) {
 // MoveLibrary 把媒体库在显示顺序里上移/下移一位（与相邻库交换位置）。
 // 这个顺序同时决定管理端列表和 Emby 客户端 /Users/{id}/Views 的库顺序。
 func (s *Store) MoveLibrary(id int64, up bool) error {
-	libs, err := s.Libraries()
-	if err != nil {
-		return err
-	}
-	index := -1
-	for i, l := range libs {
-		if l.ID == id {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		return sql.ErrNoRows
-	}
-	target := index - 1
-	if !up {
-		target = index + 1
-	}
-	if target < 0 || target >= len(libs) {
-		return nil // 已在两端：视为成功，前端按钮本身会置灰
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	// 先把当前顺序整体压实成 0..n-1 再交换相邻两项：存量库的 sort_order 可能
-	// 全是 0（迁移补列）或留有空洞，压实后不必再处理这两种情况。
-	for i, l := range libs {
-		if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", i, l.ID); err != nil {
-			_ = tx.Rollback()
+	// 走写门（P2 #10 同类残留：原来是裸 s.db.Begin()，既不进 writeMu，也不推进
+	// 版本，并发扫描时还可能拿到 SQLITE_BUSY 而不重试）。顺序表本身也在事务内
+	// 读：原来先 s.Libraries() 再开事务，两次排序之间若有库被增删就会索引错位。
+	var version int64
+	err := s.writeTx(func(tx *sql.Tx) error {
+		var err error
+		// 首条语句抢写锁，并推进本库的库级版本（顺序变了，客户端缓存要失效）。
+		version, err = bumpVersionTx(tx, id)
+		if err != nil {
 			return err
 		}
-	}
-	if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", target, libs[index].ID); err != nil {
-		_ = tx.Rollback()
+		libs, err := librariesTx(tx)
+		if err != nil {
+			return err
+		}
+		index := -1
+		for i, l := range libs {
+			if l.ID == id {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return sql.ErrNoRows
+		}
+		target := index - 1
+		if !up {
+			target = index + 1
+		}
+		if target < 0 || target >= len(libs) {
+			return nil // 已在两端：视为成功，前端按钮本身会置灰
+		}
+		// 先把当前顺序整体压实成 0..n-1 再交换相邻两项：存量库的 sort_order 可能
+		// 全是 0（迁移补列）或留有空洞，压实后不必再处理这两种情况。
+		for i, l := range libs {
+			if _, err := tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", i, l.ID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", target, libs[index].ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", index, libs[target].ID); err != nil {
+			return err
+		}
+		// 被换位的另一个库的库级版本也要推进（全局版本已由首条语句推进）。
+		return bumpLibraryVersionTx(tx, libs[target].ID)
+	})
+	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec("UPDATE libraries SET sort_order=? WHERE id=?", index, libs[target].ID); err != nil {
-		_ = tx.Rollback()
-		return err
+	if version > 0 {
+		s.publishVersion(version)
 	}
-	return tx.Commit()
+	return nil
+}
+
+// librariesTx 是 Libraries() 的事务内版本：顺序调整必须读自己事务里的快照。
+func librariesTx(tx *sql.Tx) ([]Library, error) {
+	rows, err := tx.Query("SELECT id,name,path FROM libraries WHERE enabled=1 ORDER BY sort_order,id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Library
+	for rows.Next() {
+		var v Library
+		if err := rows.Scan(&v.ID, &v.Name, &v.Path); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // LibraryCounts 返回每个媒体库的影片数量（管理端媒体库页展示用），
@@ -557,6 +588,12 @@ func parseStrings(v string) []string {
 	// 一部没有任何标签/系列的影片就能省 5 次解析尝试。
 	if v == "" {
 		return nil
+	}
+	// "[]" 同样跳过解码（additional_parts 的 DDL 默认就是 '[]'）：解出来是
+	// 非 nil 空切片，这里 make([]string, 0) 与该结果 reflect.DeepEqual 等价，
+	// 于是"没有附加片段"的影片每行省掉一次解码——movieScan 每行调 5 次本函数。
+	if v == "[]" {
+		return []string{}
 	}
 	var out []string
 	_ = json.Unmarshal([]byte(v), &out)

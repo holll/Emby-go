@@ -26,7 +26,7 @@ func TestTagCacheIsBounded(t *testing.T) {
 
 	// 灌到上限之上：8000 条"已过期"的陈旧路径 + 上面那张真实海报。
 	old := time.Now().Add(-time.Hour)
-	for i := 0; i < tagCacheLimit+2000; i++ {
+	for i := 0; i < tagCacheLimit+tagCacheSlack+2000; i++ {
 		a.tags[filepath.Join(dir, "gone", "p"+string(rune('a'+i%26))+itoa(i)+".jpg")] = tagEntry{tag: "x", ts: old}
 	}
 	// 上限是在"插入新条目"时兜底的（命中路径不扫描整表 —— 否则每次命中都要
@@ -72,4 +72,46 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+// 清理必须是摊销的：若每次插入都整表扫 8192 条，饱和后一页 200 条（最多 ~600
+// 次插入）就是几十万次 map 迭代。这里钉住"未超过 上限+余量 时一次都不扫"。
+func TestTagPruneIsAmortized(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{}
+	a.tags = make(map[string]tagEntry)
+
+	stale := time.Now().Add(-time.Hour)
+	for i := 0; i < tagCacheLimit+tagCacheSlack-1; i++ {
+		a.tags[filepath.Join(dir, "old", "p"+itoa(i)+".jpg")] = tagEntry{tag: "x", ts: stale}
+	}
+	before := len(a.tags)
+
+	// 一次 miss：未达触发线，插进去但不清理（旧的过期条目仍在）。
+	fresh := filepath.Join(dir, "amortized.jpg")
+	if err := os.WriteFile(fresh, []byte("jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.posterTag(fresh)
+
+	a.tagMu.Lock()
+	after := len(a.tags)
+	a.tagMu.Unlock()
+	if after != before+1 {
+		t.Fatalf("未达触发线却触发了清理：%d → %d（预期 %d）", before, after, before+1)
+	}
+
+	// 再插一次越过触发线：这一次才清理，并压回上限。
+	trigger := filepath.Join(dir, "trigger.jpg")
+	if err := os.WriteFile(trigger, []byte("jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.posterTag(trigger)
+
+	a.tagMu.Lock()
+	final := len(a.tags)
+	a.tagMu.Unlock()
+	if final > tagCacheLimit {
+		t.Fatalf("清理后未压回上限：%d > %d", final, tagCacheLimit)
+	}
 }
