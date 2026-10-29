@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"emby-go/internal/config"
@@ -76,8 +77,13 @@ type dispatchTarget struct {
 
 // Dispatcher 持有不可变目标快照与发送器；配置替换整体发布，旧快照可完成
 // 已开始的投递。Send 不使用请求上下文以外的后台队列。
+//
+// targets 只在 NewDispatcher 构造完成后发布一次，之后不再原地修改；Close 用
+// Swap(nil) 摘除快照。读者首行 Load() 一次即取得整份不可变快照，既不会与
+// Close 竞争 slice header（ptr/len/cap 三字撕裂），也不会读到"len 已变、data
+// 仍旧值"的越界状态。
 type Dispatcher struct {
-	targets []dispatchTarget
+	targets atomic.Pointer[[]dispatchTarget]
 	budget  time.Duration
 	slots   chan struct{}
 }
@@ -92,10 +98,18 @@ func NewDispatcher(targets []Target, budget time.Duration) (*Dispatcher, error) 
 		return nil, fmt.Errorf("webhook: at most %d targets", MaxTargets)
 	}
 	d := &Dispatcher{budget: budget, slots: make(chan struct{}, maxConcurrentTargets)}
+	// 先在私有切片里构造全部发送器；任一失败只关闭已建好的发送器，绝不发布
+	// 半成品快照。全部成功后才 Store 一次，读者要么看不到、要么看到完整集合。
+	snapshot := make([]dispatchTarget, 0, len(targets))
+	closeBuilt := func() {
+		for _, target := range snapshot {
+			target.sender.Close()
+		}
+	}
 	for _, target := range targets {
 		spec, err := normalizeTarget(target)
 		if err != nil {
-			d.Close()
+			closeBuilt()
 			return nil, err
 		}
 		cfg := config.WebhookConfig{
@@ -104,11 +118,12 @@ func NewDispatcher(targets []Target, budget time.Duration) (*Dispatcher, error) 
 		}
 		sender, err := New(cfg)
 		if err != nil {
-			d.Close()
+			closeBuilt()
 			return nil, fmt.Errorf("webhook: invalid target configuration")
 		}
-		d.targets = append(d.targets, dispatchTarget{spec: spec, sender: sender})
+		snapshot = append(snapshot, dispatchTarget{spec: spec, sender: sender})
 	}
+	d.targets.Store(&snapshot)
 	return d, nil
 }
 
@@ -170,7 +185,11 @@ func (d *Dispatcher) Subscribed(event string) bool {
 	if d == nil || !config.ValidWebhookEvent(event) {
 		return false
 	}
-	for _, target := range d.targets {
+	snapshot := d.targets.Load()
+	if snapshot == nil {
+		return false
+	}
+	for _, target := range *snapshot {
 		if !target.spec.Enabled {
 			continue
 		}
@@ -187,8 +206,15 @@ func (d *Dispatcher) Send(ctx context.Context, event Event) Result {
 	if d == nil {
 		return result
 	}
-	matched := make([]dispatchTarget, 0, len(d.targets))
-	for _, target := range d.targets {
+	// 只在入口 Load 一次：匹配列表与后续投递都基于同一份不可变快照，Close
+	// 摘除快照不影响已开始的这一批投递。
+	snapshot := d.targets.Load()
+	if snapshot == nil {
+		return result
+	}
+	targets := *snapshot
+	matched := make([]dispatchTarget, 0, len(targets))
+	for _, target := range targets {
 		if !target.spec.Enabled || !target.sender.Subscribed(event.Event) {
 			continue
 		}
@@ -307,12 +333,19 @@ func classifyTargetError(err error) string {
 }
 
 // Close 释放各发送器连接；幂等，不取消已开始投递。
+//
+// Swap(nil) 原子摘除快照：并发读者要么拿到旧快照（继续完成已开始的投递），
+// 要么拿到 nil（安全返回 disabled/false）。重复 Close 时 Swap 返回 nil，不会
+// 重复关闭同一个 sender。
 func (d *Dispatcher) Close() {
 	if d == nil {
 		return
 	}
-	for _, target := range d.targets {
+	old := d.targets.Swap(nil)
+	if old == nil {
+		return
+	}
+	for _, target := range *old {
 		target.sender.Close()
 	}
-	d.targets = nil
 }
