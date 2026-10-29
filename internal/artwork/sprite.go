@@ -621,15 +621,28 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 		return res, err
 	}
 	locked = true
-	err = db.CompareAndSwapSprite(ctx, source.movie, source.libraryRoot, old, m.State, func() error {
+	// verify re-reads the source, the generation directory and every sheet plus
+	// the BIF index (tens of megabytes). It is the store's Prepare phase, so it
+	// runs before writeMu and the SQLite write transaction are taken; leaving it
+	// inside the transaction pins both locks for the whole read (P1-4). The
+	// generation itself is already written and synced above, so the committed
+	// pointer UPDATE performed by the store is the only publish step left.
+	verify := func() error {
 		if e := source.verify(ctx); e != nil {
 			return e
 		}
 		if e := verifyGeneration(); e != nil {
 			return e
 		}
-		return validateSpriteFiles(ctx, r, m)
-	})
+		if e := validateSpriteFiles(ctx, r, m); e != nil {
+			return e
+		}
+		if phaseHook != nil {
+			phaseHook("prepare-done")
+		}
+		return nil
+	}
+	err = db.CompareAndSwapSpriteFiles(ctx, source.movie, source.libraryRoot, old, m.State, store.SpriteFiles{Prepare: verify})
 	if err != nil {
 		return res, err
 	}

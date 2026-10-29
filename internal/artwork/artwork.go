@@ -57,6 +57,13 @@ const maxImageBytes = 20 << 20
 const maxPixels = 20_000_000
 const protocols = "http,https,tcp,tls"
 
+// phaseHook is a test seam for the two-phase filesystem publish. It is called
+// with "prepare-done" once every read-only check of an artwork/sprite CAS has
+// finished and before the store asks for the writer lock, so a test can prove
+// that no filesystem read runs while writeMu is held. It must never change
+// behaviour.
+var phaseHook func(phase string)
+
 // Keep positions representable as a Go duration and comfortably within ffmpeg's
 // signed microsecond timestamp range. Avoid duration*pct overflowing first.
 const maxSeekSeconds = float64(math.MaxInt64) / float64(time.Second)
@@ -239,20 +246,32 @@ func Run(ctx context.Context, db *store.Store, req Request, opts Options) (res R
 			return res, nil
 		}
 	}
+	// verify re-reads every path the CAS decision depends on: the library root,
+	// the source STRM and both poster candidates, each hashed up to
+	// maxImageBytes. It is the store's Prepare phase, so it runs before writeMu
+	// and the SQLite write transaction are taken; leaving it inside the
+	// transaction pins both locks for the whole read (P1-4).
+	verify := func() error {
+		if e := ctx.Err(); e != nil {
+			return e
+		}
+		if e := checkRoot(); e != nil {
+			return e
+		}
+		if e := unchanged(files, sourceFile, original, targetFile, before); e != nil {
+			return e
+		}
+		if e := unchangedPoster(root, indexedPoster, indexedBefore); e != nil {
+			return e
+		}
+		if phaseHook != nil {
+			phaseHook("prepare-done")
+		}
+		return nil
+	}
 	// Recover a previously installed independent poster after an index error.
 	if !req.Overwrite && realImage(files, targetFile) {
-		err = db.CompareAndSwapArtwork(ctx, movie, lib.Path, res.PosterPath, func() error {
-			if e := ctx.Err(); e != nil {
-				return e
-			}
-			if e := checkRoot(); e != nil {
-				return e
-			}
-			if e := unchanged(files, sourceFile, original, targetFile, before); e != nil {
-				return e
-			}
-			return unchangedPoster(root, indexedPoster, indexedBefore)
-		})
+		err = db.CompareAndSwapArtworkFiles(ctx, movie, lib.Path, res.PosterPath, store.ArtworkFiles{Prepare: verify})
 		if err != nil {
 			return res, err
 		}
@@ -310,17 +329,12 @@ func Run(ctx context.Context, db *store.Store, req Request, opts Options) (res R
 		return res, err
 	}
 	installed := false
-	err = db.CompareAndSwapArtwork(ctx, movie, lib.Path, res.PosterPath, func() error {
+	// commit is the only filesystem work left inside the write transaction:
+	// os.Link/os.Rename of the temporary file that verify already validated.
+	// Nothing here may read a file, or writeMu and the SQLite write lock stay
+	// pinned for the whole read.
+	commit := func() error {
 		if e := ctx.Err(); e != nil {
-			return e
-		}
-		if e := checkRoot(); e != nil {
-			return e
-		}
-		if e := unchanged(files, sourceFile, original, targetFile, before); e != nil {
-			return e
-		}
-		if e := unchangedPoster(root, indexedPoster, indexedBefore); e != nil {
 			return e
 		}
 		if e := installPoster(files, tempName, targetFile, req.Overwrite); e != nil {
@@ -328,7 +342,8 @@ func Run(ctx context.Context, db *store.Store, req Request, opts Options) (res R
 		}
 		installed = true
 		return nil
-	})
+	}
+	err = db.CompareAndSwapArtworkFiles(ctx, movie, lib.Path, res.PosterPath, store.ArtworkFiles{Prepare: verify, Commit: commit})
 	if installed {
 		res.Changed = true
 	}

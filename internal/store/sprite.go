@@ -110,16 +110,45 @@ func (s *Store) spriteWriteTx(ctx context.Context, write func(*sql.Tx) error) er
 	return nil
 }
 
-// CompareAndSwapSprite commits only the independent preview pointer. Taking a
-// real SQLite write lock before reading the movie also excludes other processes,
-// not just writers using this Store's mutex. verify must not call Store methods.
-func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, libraryRoot string, old, next SpriteState, verify func() error) error {
+// SpriteFiles is the filesystem half of CompareAndSwapSpriteFiles, split in two
+// phases for the same reason as ArtworkFiles: a sprite generation is validated
+// by reading and hashing every sheet plus the BIF index (tens of megabytes), and
+// doing that inside the write transaction pins writeMu and the SQLite write lock
+// for the whole read.
+//
+// Prepare runs before the writer lock is taken and owns every filesystem read
+// (source fingerprint, generation identity, sheet/BIF validation). Commit runs
+// inside the write transaction and may only perform constant-time metadata
+// operations; publication of a sprite generation is the kv UPDATE the store
+// performs itself, so commit is normally nil. Neither callback may call Store
+// methods: writeMu is not reentrant (TryLock), so a callback that touches the
+// Store deadlocks on itself.
+type SpriteFiles struct {
+	Prepare func() error
+	Commit  func() error
+}
+
+// CompareAndSwapSpriteFiles commits only the independent preview pointer. Taking
+// a real SQLite write lock before reading the movie also excludes other
+// processes, not just writers using this Store's mutex. files.Prepare validates
+// the generation on disk outside that window; the callback may not call Store
+// methods.
+func (s *Store) CompareAndSwapSpriteFiles(ctx context.Context, expected Movie, libraryRoot string, old, next SpriteState, files SpriteFiles) error {
 	if expected.ID <= 0 || old.Revision < 0 || old.Revision == int64(^uint64(0)>>1) || next.Revision != old.Revision+1 || next.Generation == "" || next.LibraryID != expected.LibraryID || next.SourcePath != expected.SourcePath || next.LibraryRoot != libraryRoot {
 		return errors.New("invalid sprite CAS")
 	}
 	payload, err := json.Marshal(next)
 	if err != nil || len(payload) > 8192 {
 		return errors.New("invalid sprite state size")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Every filesystem read runs here, before writeMu is requested.
+	if files.Prepare != nil {
+		if err := files.Prepare(); err != nil {
+			return err
+		}
 	}
 	for !s.writeMu.TryLock() {
 		timer := time.NewTimer(5 * time.Millisecond)
@@ -132,6 +161,9 @@ func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, librar
 	}
 	defer s.writeMu.Unlock()
 	return s.spriteWriteTx(ctx, func(tx *sql.Tx) error {
+		if casTxBeginHook != nil {
+			casTxBeginHook()
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -173,8 +205,10 @@ func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, librar
 		if root != libraryRoot {
 			return ErrSpriteChanged
 		}
-		if verify != nil {
-			if err := verify(); err != nil {
+		if files.Commit != nil {
+			// Constant-time publish only; a filesystem read here would pin
+			// writeMu and the SQLite write lock for the whole read.
+			if err := files.Commit(); err != nil {
 				return err
 			}
 		}
@@ -184,4 +218,12 @@ func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, librar
 		_, err = tx.ExecContext(ctx, "UPDATE kv SET value=? WHERE key=?", string(payload), spriteKey(expected.ID))
 		return err
 	})
+}
+
+// CompareAndSwapSprite is the single-phase form, kept for callers that need no
+// Prepare phase. verify runs inside the write transaction, so it must stay
+// constant-time; filesystem reads belong in CompareAndSwapSpriteFiles' Prepare
+// phase.
+func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, libraryRoot string, old, next SpriteState, verify func() error) error {
+	return s.CompareAndSwapSpriteFiles(ctx, expected, libraryRoot, old, next, SpriteFiles{Commit: verify})
 }
