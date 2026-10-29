@@ -62,7 +62,7 @@ func TestMonitorHistogramAndWindow(t *testing.T) {
 	if latest.counts.Total != 1 {
 		t.Fatalf("ring rollover %+v", latest.counts)
 	}
-	if len(m.buckets) != 60 {
+	if len(m.shards) != monitorShards || len(m.shards[0].buckets) != monitorRetention || monitorRetention != 60 {
 		t.Fatal("unbounded retention")
 	}
 }

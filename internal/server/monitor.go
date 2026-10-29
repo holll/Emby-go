@@ -14,6 +14,12 @@ import (
 
 const monitorRetention = 60
 
+// monitorShards 是计数分片数。record 原先持一把全局锁，实测 1.9× 并发即饱和
+// （mutex profile 99.69% 延迟在 Unlock）；分片后同分钟的数据分散到多个槽，
+// snapshot 时再按分钟归并求和，对外口径（总量/4xx/5xx/分位）逐项不变。
+// 分片数固定，与 GOMAXPROCS 解耦：归并结果与分片数无关，便于测试与复现。
+const monitorShards = 8
+
 var monitorBoundsMS = [...]int64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000}
 
 type monitorBucket struct {
@@ -22,11 +28,60 @@ type monitorBucket struct {
 	total, errors4xx, errors5xx uint64
 	histogram                   [len(monitorBoundsMS) + 1]uint64
 }
+
+// monitorShard 是一组独立的分钟环 + 锁。每个分片各自维护「当前槽属于哪一分钟」
+// 的滚动语义，跨分片由 snapshot 归并。
+type monitorShard struct {
+	mu      sync.Mutex
+	buckets [monitorRetention]monitorBucket
+}
 type requestMonitor struct {
-	mu         sync.Mutex
 	started    time.Time
 	instanceID string
-	buckets    [monitorRetention]monitorBucket
+	shards     [monitorShards]monitorShard
+}
+
+// shardFor 按记录时刻的纳秒低位选分片：record 每个请求只调一次、时刻各不相同，
+// 于是并发请求自然摊到不同分片。刻意不用全局自增计数器或 TryLock 探测链选片
+// ——两者都要额外碰一条被所有 P 争用的缓存行/TryLock 原子写，2 核实测把分片
+// 收益全部吃回去（-cpu 2 反而比单锁慢 20%）。同一纳秒内的请求会落到同一分片，
+// 退化成改造前的行为（正确性不受影响，只是没赚到并行度）。
+func (m *requestMonitor) shardFor(at time.Time) *monitorShard {
+	return &m.shards[int(at.UnixNano())&(monitorShards-1)]
+}
+
+// mergeMonitorBucket 把 src 的计数累加进 dst。同一槽出现不同分钟时保留较新的
+// 那一分钟（并丢掉旧分钟的残留计数），与单槽实现里「切到新分钟即清零」一致。
+func mergeMonitorBucket(dst *monitorBucket, src *monitorBucket) {
+	if !src.initialized {
+		return
+	}
+	if !dst.initialized {
+		dst.minute, dst.initialized = src.minute, true
+	} else if dst.minute != src.minute {
+		if src.minute < dst.minute {
+			return
+		}
+		*dst = monitorBucket{minute: src.minute, initialized: true}
+	}
+	dst.total += src.total
+	dst.errors4xx += src.errors4xx
+	dst.errors5xx += src.errors5xx
+	for i, n := range src.histogram {
+		dst.histogram[i] += n
+	}
+}
+
+// monitorBucketFor 返回 elapsed 落到的直方图下标；超出最后边界时返回溢出槽
+// （下标等于边界个数，即直方图最后一个格子）。
+func monitorBucketFor(elapsed time.Duration) int {
+	bounds := monitorBoundsMS[:] // 切片化：range 数组会整块拷贝，切片只传头
+	for i, upper := range bounds {
+		if elapsed <= time.Duration(upper)*time.Millisecond {
+			return i
+		}
+	}
+	return len(bounds)
 }
 
 func newRequestMonitor(started time.Time) *requestMonitor {
@@ -91,12 +146,14 @@ func (m *requestMonitor) record(at time.Time, elapsed time.Duration, status int)
 	if index < 0 {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	b := &m.buckets[index]
-	if b.initialized && b.minute > minute {
+	bucket := monitorBucketFor(elapsed)
+	shard := m.shardFor(at)
+	shard.mu.Lock()
+	b := &shard.buckets[index]
+	if b.initialized && b.minute > minute { // Do not evict newer data on clock rollback.
+		shard.mu.Unlock()
 		return
-	} // Do not evict newer data on clock rollback.
+	}
 	if !b.initialized || b.minute != minute {
 		*b = monitorBucket{minute: minute, initialized: true}
 	}
@@ -107,14 +164,16 @@ func (m *requestMonitor) record(at time.Time, elapsed time.Duration, status int)
 	if status >= 500 && status < 600 {
 		b.errors5xx++
 	}
-	bucket := len(monitorBoundsMS)
-	for i, upper := range monitorBoundsMS {
-		if elapsed <= time.Duration(upper)*time.Millisecond {
-			bucket = i
-			break
-		}
+	// 直方图按局部切片写，越界（溢出格/异常值）一律计入最后一格。用无符号 guard
+	// 的 if/else 形态而不是「先夹取再写」：后者的下标夹取是赋值，编译器不跟踪，
+	// check_bce 仍会留下 IsInBounds；if/else 两个分支的下标都能被证明在界内。
+	hist := b.histogram[:]
+	if uint(bucket) >= uint(len(hist)) {
+		hist[len(hist)-1]++
+	} else {
+		hist[bucket]++
 	}
-	b.histogram[bucket]++
+	shard.mu.Unlock()
 }
 
 type monitorCounts struct {
@@ -173,15 +232,24 @@ func (m *requestMonitor) snapshot(now time.Time, minutes int) monitorSnapshot {
 	}
 	out.counts.SampledSeconds = math.Max(0, now.Sub(observedStart).Seconds())
 	var hist [len(monitorBoundsMS) + 1]uint64
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// 先按分钟槽归并所有分片（每分片只加锁一次），再照原逻辑逐分钟取数。
+	// 对外口径不变：某分钟的量 = 落在该分钟的所有分片之和。
+	var merged [monitorRetention]monitorBucket
+	for s := range m.shards {
+		shard := &m.shards[s]
+		shard.mu.Lock()
+		for i := range shard.buckets {
+			mergeMonitorBucket(&merged[i], &shard.buckets[i])
+		}
+		shard.mu.Unlock()
+	}
 	for minute := first; minute <= current; minute++ {
 		point := monitorPoint{Start: time.Unix(minute*60, 0).UTC().Format(time.RFC3339), Observed: minute >= m.started.Unix()/60 && !now.Before(m.started)}
 		if point.Observed {
 			var b monitorBucket
 			index := minute % monitorRetention
-			if index >= 0 && m.buckets[index].initialized && m.buckets[index].minute == minute {
-				b = m.buckets[index]
+			if index >= 0 && merged[index].initialized && merged[index].minute == minute {
+				b = merged[index]
 			}
 			total, e4, e5 := b.total, b.errors4xx, b.errors5xx
 			point.Requests, point.Errors4xx, point.Errors5xx = &total, &e4, &e5

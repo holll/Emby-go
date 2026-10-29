@@ -148,10 +148,6 @@ func (a *App) adminLibraryCover(c *gin.Context) {
 		apiError(c, 500, err.Error())
 		return
 	}
-	if err = os.Rename(dest+".tmp", dest); err != nil {
-		apiError(c, 500, err.Error())
-		return
-	}
 	a.invalidateImageTag(dest) // 同名文件被覆盖，立刻失效它的 tag 缓存
 	a.cache.Clear()            // libraryCoverPath 的结果按 g:version 缓存，必须清
 	slog.Info("上传媒体库封面", "library_id", lib.ID, "path", dest)
@@ -798,13 +794,58 @@ func (a *App) adminReread(c *gin.Context) {
 	c.JSON(200, response)
 }
 
+// atomicWriteStep 在临时文件写完、改名之前调用；测试用它卡住「写了一半」的窗口。
+type atomicWriteStep func(tmpPath, destination string)
+
+// writeFileAtomic 把 write 写到 destination 的同目录唯一临时名，再 rename 原子替换。
+//
+// 为什么要唯一临时名：改造前固定用 destination+".tmp"，两个写入者（两次上传、
+// 或上传与刮削器同时写同一张海报）会共用同一个临时文件——后到者 truncate/覆盖
+// 前一个还在写的内容，rename 后目标文件就可能是半截的。唯一临时名让每个写入者
+// 各写各的，读者在 rename 之前只会看到旧文件，rename 之后看到完整的新文件。
+// 失败时清理临时文件，不留垃圾。
+func writeFileAtomic(destination string, write func(tmpPath string) error, beforeRename atomicWriteStep) (err error) {
+	dir, base := filepath.Split(destination)
+	if dir == "" {
+		dir = "."
+	}
+	file, err := os.CreateTemp(dir, base+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(tmp)
+		return closeErr
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err = write(tmp); err != nil {
+		return err
+	}
+	// os.CreateTemp 建的是 0600，沿用改造前「os.Create 后 rename」的 0644，
+	// 免得改名后封面/缓存的权限被悄悄收紧。
+	if err = os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	if beforeRename != nil {
+		beforeRename(tmp, destination)
+	}
+	return os.Rename(tmp, destination)
+}
+
 func saveUploadedWebP(header *multipart.FileHeader, destination string) error {
 	file, err := header.Open()
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	return imageutil.EncodeWebP(file, destination+".tmp")
+	return writeFileAtomic(destination, func(tmpPath string) error {
+		return imageutil.EncodeWebP(file, tmpPath)
+	}, nil)
 }
 
 func (a *App) adminImage(c *gin.Context) {
@@ -828,10 +869,6 @@ func (a *App) adminImage(c *gin.Context) {
 	}
 	dest := filepath.Join(m.OutputDir, name)
 	if e = saveUploadedWebP(f, dest); e != nil {
-		apiError(c, 500, e.Error())
-		return
-	}
-	if e = os.Rename(dest+".tmp", dest); e != nil {
 		apiError(c, 500, e.Error())
 		return
 	}

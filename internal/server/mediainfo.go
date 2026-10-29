@@ -104,11 +104,11 @@ func saveMediaInfo(strmPath, source string, raw []byte) error {
 		return err
 	}
 	path := mediaInfoPath(strmPath)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(encoded, '\n'), 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// 临时名必须唯一：固定 path+".tmp" 时两次刮削（或刮削与清理）会写同一个
+	// 临时文件，后到者截断前者，改名后留下半截 JSON。
+	return writeFileAtomic(path, func(tmpPath string) error {
+		return os.WriteFile(tmpPath, append(encoded, '\n'), 0o644)
+	}, nil)
 }
 
 // mediaBaseName 取直链末尾的文件名，仅用于人工核对缓存归属。
