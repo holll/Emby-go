@@ -111,16 +111,22 @@ func (a *App) nfoBusyOwner() string {
 
 // —— 状态读写 ——
 
-func (a *App) beginScrape(kind string, total int) bool {
+// beginScrape 申请启动一类刮削任务：并发门 + 状态置位。
+// 关停窗口内返回 errServerShuttingDown：rootCtx 门在已持有的 scrapeTaskMu 内判断，
+// 保证「不会被 workerWG.Wait 覆盖的登记」发生在 Wait 之前。
+func (a *App) beginScrape(kind string, total int) error {
 	a.scrapeTaskMu.Lock()
 	defer a.scrapeTaskMu.Unlock()
+	if a.rootCtx.Err() != nil {
+		return errServerShuttingDown
+	}
 	if a.scrapeStatus.Running {
-		return false
+		return errScrapeBusy
 	}
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	a.scrapeCtx, a.scrapeCancel = ctx, cancel
 	a.scrapeStatus = scrapeStatus{Running: true, Kind: kind, Total: total, StartedAt: time.Now().UTC().Format(time.RFC3339)}
-	return true
+	return nil
 }
 
 func (a *App) updateScrapeProgress(progress scraper.Progress) {
@@ -190,6 +196,9 @@ func (a *App) scrapeContext() context.Context {
 func (a *App) adminScrapeProgress(c *gin.Context) {
 	a.scrapeTaskMu.RLock()
 	status := a.scrapeStatus
+	// Failures 是切片：浅拷贝后样本 append 会写进正在被 worker 追加的同底层数组，
+	// 与 JSON 编码并发即数据竞争（且可能看到半写状态）。整份深拷贝后再编码。
+	status.Failures = append([]string(nil), status.Failures...)
 	a.scrapeTaskMu.RUnlock()
 	c.JSON(http.StatusOK, status)
 }
@@ -238,6 +247,21 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
+	if !a.admitAdminOperation(c) {
+		return
+	}
+	// 关停门：登记门已关闭意味着正在 drain（srv.Shutdown 与 WaitBackground 并发跑），
+	// 此时再进真实逻辑会读库、占 NFO 通道并让 worker 与关库并发。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			release() // 提前返回（校验失败/空集）时归还登记，避免 workerWG 计数泄漏
+		}
+	}()
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
 		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
@@ -259,14 +283,17 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"total": 0, "message": "没有符合条件的影片"})
 		return
 	}
-	if !a.startScrapeTask(c, "scrape", total) {
+	if err := a.startScrapeTask("scrape", total); err != nil {
+		workerGateAPIError(c, err, http.StatusConflict)
 		return
 	}
-	a.workerWG.Go(func() {
+	started = true
+	go func() {
+		defer release()
 		_ = a.executeScrape(cfg, scraper.RunOptions{
 			LibraryID: req.LibraryID, OnlyMissing: onlyMissing, Limit: req.Limit, Overwrite: cfg.Overwrite,
 		})
-	})
+	}()
 	slog.Info("刮削任务已启动", "total", total, "library_id", req.LibraryID, "only_missing", onlyMissing, "overwrite", cfg.Overwrite)
 	c.JSON(http.StatusAccepted, gin.H{"total": total})
 }
@@ -334,6 +361,17 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
+	// 关停门：同 adminScrapeRun。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			release()
+		}
+	}()
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
 		apiError(c, http.StatusBadRequest, "尚未配置 MetaTube 地址或 token")
@@ -352,10 +390,15 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"total": 0, "message": "没有缺头像的演员（头像任务只补缺失，是幂等的）"})
 		return
 	}
-	if !a.startScrapeTask(c, "scrape_avatars", len(names)) {
+	if err := a.startScrapeTask("scrape_avatars", len(names)); err != nil {
+		workerGateAPIError(c, err, http.StatusConflict)
 		return
 	}
-	a.workerWG.Go(func() { _ = a.executeScrapeAvatars(cfg, req.LibraryID, req.Limit) })
+	started = true
+	go func() {
+		defer release()
+		_ = a.executeScrapeAvatars(cfg, req.LibraryID, req.Limit)
+	}()
 	slog.Info("演员头像任务已启动", "actors", len(names), "library_id", req.LibraryID)
 	c.JSON(http.StatusAccepted, gin.H{"total": len(names)})
 }
@@ -656,15 +699,11 @@ func (a *App) scraperFor(cfg scraper.Config) *scraper.Scraper {
 }
 
 // startScrapeTask 申请启动一类刮削任务（互斥 + 状态置位）。
-// 返回 false 时已写入 HTTP 错误响应。
+// 返回错误时调用方负责写 HTTP 响应：errScrapeBusy → 409，errServerShuttingDown → 503。
 //
 // 这里只做并发门（beginScrape），不再 claimNFO：NFO 通道的占用改由
 // executeScrape / executeScrapeAvatars 在自己的 goroutine 里 claim+defer release，
 // 保证「占用与释放」在同一个栈上，goroutine 起不来也不会把通道永久锁死。
-func (a *App) startScrapeTask(c *gin.Context, kind string, total int) bool {
-	if !a.beginScrape(kind, total) {
-		apiError(c, http.StatusConflict, errScrapeBusy.Error())
-		return false
-	}
-	return true
+func (a *App) startScrapeTask(kind string, total int) error {
+	return a.beginScrape(kind, total)
 }

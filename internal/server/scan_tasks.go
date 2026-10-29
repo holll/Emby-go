@@ -64,6 +64,12 @@ func (t asyncScanTask) finished() bool {
 func (a *App) registerScanTask(id int64, kind string, libraryID int64, mode scanner.ScanMode, allowEmpty bool, digest, idemKey string, now time.Time, markers ...scanRootMarker) (asyncScanTask, bool, error) {
 	a.scanTaskMu.Lock()
 	defer a.scanTaskMu.Unlock()
+	// 关停门：rootCtx 门在已持有的 scanTaskMu 内判断（与 artwork.go 同一写法），
+	// 保证「不会被 workerWG.Wait 覆盖的登记」一定发生在 Wait 之前：关停后
+	// 不再登记任务、不再占容量，也不再回放幂等结果（那些任务不会再被执行）。
+	if a.rootCtx.Err() != nil {
+		return asyncScanTask{}, false, errServerShuttingDown
+	}
 	a.pruneScanIdemLocked(now)
 	if idemKey != "" {
 		if entry, ok := a.scanTaskIdem[idemKey]; ok {
@@ -222,11 +228,25 @@ func (a *App) adminSubmitScan(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
+	// 关停门：登记门关闭（收到退出信号）时直接 503，不再分配 task_id、
+	// 不再写任务表——这些任务在 drain 期间不会再被执行。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			release()
+		}
+	}()
 	taskID := a.startTask("scan")
 	task, created, err := a.registerScanTask(taskID, "scan", libraryID, mode, allowEmpty, digest, key, now, marker)
 	if err != nil {
 		a.finishTaskBusy(taskID, err.Error())
 		switch {
+		case errors.Is(err, errServerShuttingDown):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "code": "SERVER_SHUTTING_DOWN"})
 		case errors.Is(err, errScanIdemConflict):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "IDEMPOTENCY_CONFLICT"})
 		case errors.Is(err, errScanBusy):
@@ -241,9 +261,11 @@ func (a *App) adminSubmitScan(c *gin.Context) {
 		c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode, "replayed": true})
 		return
 	}
-	a.workerWG.Go(func() {
+	started = true
+	go func() {
+		defer release()
 		a.runAsyncScan(task.ID, task.LibraryID, mode, allowEmpty, marker)
-	})
+	}()
 	c.JSON(http.StatusAccepted, gin.H{"task_id": task.ID, "status": task.Status, "library_id": task.LibraryID, "mode": task.Mode})
 }
 

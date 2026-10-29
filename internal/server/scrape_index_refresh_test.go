@@ -94,8 +94,8 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if !a.beginScrape("scrape", 1) {
-				t.Fatal("begin failed")
+			if err := a.beginScrape("scrape", 1); err != nil {
+				t.Fatalf("begin failed: %v", err)
 			}
 			backend := scrapeIndexBackend(t, a, canceled)
 			err = a.executeScrape(scraper.Config{BaseURL: backend.URL, Token: "fixture-token", Concurrency: 1, Overwrite: true}, scraper.RunOptions{LibraryID: lib.ID, Overwrite: true})
@@ -149,8 +149,8 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 			if e != nil || current.Title != "ABF-018 Updated" {
 				t.Fatalf("indexed data: %+v %v", current, e)
 			}
-			if !a.beginScrape("scrape", 0) {
-				t.Fatal("running gate leaked")
+			if err := a.beginScrape("scrape", 0); err != nil {
+				t.Fatalf("running gate leaked: %v", err)
 			}
 			a.endScrape(nil)
 			if a.scrapeStatus.IndexRefreshFailed || a.scrapeStatus.Error != "" {
@@ -198,8 +198,8 @@ func TestScrapeStaysRunningUntilIndexRefreshReturns(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := scrapeIndexBackend(t, a, false)
-	if !a.beginScrape("scrape", 1) {
-		t.Fatal("begin failed")
+	if err := a.beginScrape("scrape", 1); err != nil {
+		t.Fatalf("begin failed: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -230,7 +230,7 @@ func TestScrapeStaysRunningUntilIndexRefreshReturns(t *testing.T) {
 	if !status.Running || status.FinishedAt != "" || status.Success != 1 || task.Status != "running" || task.EndedAt != "" {
 		t.Fatalf("premature finish: %+v %+v", status, task)
 	}
-	if a.beginScrape("scrape", 0) {
+	if err := a.beginScrape("scrape", 0); err == nil {
 		t.Error("new scrape accepted during indexing")
 	}
 	unblock()

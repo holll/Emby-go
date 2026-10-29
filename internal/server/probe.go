@@ -213,8 +213,15 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
+	// 关停门：登记门已关闭（收到退出信号）就直接 503，不再进入 prepareProbe——
+	// 它要读库、自检 ffprobe 并占用 NFO 通道，drain 期间做这些只会白费并拖慢退出。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
 	plan, err := a.prepareProbe(req)
 	if err != nil {
+		release()
 		status := http.StatusInternalServerError
 		if errors.Is(err, errProbeBusy) {
 			status = http.StatusConflict
@@ -223,15 +230,20 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 		return
 	}
 	if len(plan.targets) == 0 {
+		release()
 		c.JSON(http.StatusOK, gin.H{"total": 0, "movies": 0, "message": "没有可探测的影片（探测需要影片已有 NFO）"})
 		return
 	}
-	if !a.beginProbe(len(plan.targets)) {
-		apiError(c, http.StatusConflict, errProbeBusy.Error())
+	if err := a.beginProbe(len(plan.targets)); err != nil {
+		release()
+		workerGateAPIError(c, err, http.StatusConflict)
 		return
 	}
 	taskID := a.startTask("probe")
-	a.workerWG.Go(func() { _ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing) })
+	go func() {
+		defer release()
+		_ = a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing)
+	}()
 	slog.Info("媒体信息探测已启动", "task_id", taskID, "movies", plan.movies, "files", len(plan.targets), "only_missing", plan.onlyMissing)
 	c.JSON(http.StatusAccepted, gin.H{"task_id": taskID, "total": len(plan.targets), "movies": plan.movies})
 }
@@ -239,6 +251,9 @@ func (a *App) adminProbeMedia(c *gin.Context) {
 func (a *App) adminProbeMediaProgress(c *gin.Context) {
 	a.probeTaskMu.RLock()
 	status := a.probeStatus
+	// Failures 必须深拷贝：浅拷贝只复制 slice header，worker 继续 append 时会写到
+	// 同一底层数组，与这里的 JSON 编码并发即数据竞争。
+	status.Failures = append([]string(nil), status.Failures...)
 	a.probeTaskMu.RUnlock()
 	c.JSON(http.StatusOK, status)
 }
@@ -376,19 +391,24 @@ var errProbeBusy = errors.New("媒体信息探测正在进行中")
 
 // beginProbe 创建本轮任务的可取消 context（挂在常驻 rootCtx 之下）并置运行态。
 // 探测会写与刮削/扫库相同的 NFO，故一并占用 NFO 写入通道。
-func (a *App) beginProbe(total int) bool {
+// 关停窗口内返回 errServerShuttingDown：rootCtx 门在已持有的 probeTaskMu 内判断，
+// 所以「不会被 workerWG.Wait 覆盖的登记」一定发生在 Wait 之前。
+func (a *App) beginProbe(total int) error {
 	a.probeTaskMu.Lock()
 	defer a.probeTaskMu.Unlock()
+	if a.rootCtx.Err() != nil {
+		return errServerShuttingDown
+	}
 	if a.probeStatus.Running {
-		return false
+		return errProbeBusy
 	}
 	if !a.claimNFO("probe") {
-		return false
+		return errProbeBusy
 	}
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	a.probeCtx, a.probeCancel = ctx, cancel
 	a.probeStatus = probeStatus{Running: true, Total: total, StartedAt: time.Now().UTC().Format(time.RFC3339)}
-	return true
+	return nil
 }
 
 // probing 仅用于提前拒绝，真正的互斥由 beginProbe 保证。

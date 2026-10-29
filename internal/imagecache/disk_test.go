@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -231,6 +233,69 @@ func TestDiskStatsAndSetMaxBytes(t *testing.T) {
 	}
 	if disabled.MaxBytes() != 0 || disconnectedMax(disabled) != 0 {
 		t.Fatal("disabled disk should report zero capacity")
+	}
+}
+
+// TestDiskBeginTrimIsExclusive 断言 §1.2 #1 的 trimming 令牌是独占的：
+// 同一时刻只有一路清理能持有它，第二路会被拒绝而不是再起一路目录 walk。
+// 这正是「连点保存 N 次 → N 路并发 walk」的回归点。
+func TestDiskBeginTrimIsExclusive(t *testing.T) {
+	disk := newTestDisk(t, t.TempDir(), 1<<20, 0, true)
+	release, ok := disk.BeginTrim()
+	if !ok {
+		t.Fatal("首次 BeginTrim 应拿到令牌")
+	}
+	if again, ok := disk.BeginTrim(); ok {
+		again()
+		t.Fatal("首路未结束时第二次 BeginTrim 应被拒绝")
+	}
+	release()
+	if again, ok := disk.BeginTrim(); !ok {
+		t.Fatal("归还令牌后应能重新获取")
+	} else {
+		again()
+	}
+	// 禁用实例永远不清理，因此也不该发出令牌。
+	if _, ok := Disabled().BeginTrim(); ok {
+		t.Fatal("禁用实例不应发出清理令牌")
+	}
+}
+
+// TestDiskBeginTrimConcurrentOnlyOneWinner 在 -race 下压测令牌：
+// 多个 goroutine 抢同一份令牌，任一时刻持有者必须 ≤1（用计数探针断言）。
+func TestDiskBeginTrimConcurrentOnlyOneWinner(t *testing.T) {
+	disk := newTestDisk(t, t.TempDir(), 1<<20, 0, true)
+	var holders, peak, wins atomic.Int64
+	const goroutines = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for round := 0; round < 20; round++ {
+				release, ok := disk.BeginTrim()
+				if !ok {
+					continue
+				}
+				wins.Add(1)
+				if current := holders.Add(1); current > peak.Load() {
+					peak.Store(current)
+				}
+				time.Sleep(time.Microsecond)
+				holders.Add(-1)
+				release()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if wins.Load() == 0 {
+		t.Fatal("竞争期间应至少有一路拿到令牌")
+	}
+	if got := peak.Load(); got > 1 {
+		t.Fatalf("同一时刻有 %d 路清理在跑，令牌未起到独占作用", got)
 	}
 }
 

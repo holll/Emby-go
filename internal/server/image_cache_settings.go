@@ -127,9 +127,44 @@ func (a *App) adminSaveImageCacheSettings(c *gin.Context) {
 	a.imageCacheMaxBytes = *req.MaxBytes
 	a.imgDisk.SetMaxBytes(*req.MaxBytes)
 	// 上限调小后立刻清理，但不让保存请求无限期等待——目录很大时后台继续。
+	// 清理走 startImageCacheTrim：登记进 workerWG（关停时会被 Wait 收齐），
+	// 并复用 imagecache 的 trimming CAS（已有一路在扫就跳过，不并发 walk）。
+	if done, started := a.startImageCacheTrim(); started {
+		timer := time.NewTimer(imageCacheTrimWait)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+		}
+	}
+	c.JSON(http.StatusOK, a.imageCacheSnapshot())
+}
+
+// startImageCacheTrim 在后台按当前设置清理一次缩略图缓存，返回「清理结束」信号。
+//
+// P2-1：此前保存设置每次都无条件新起一个 go func() 调 Trim——连点保存 N 次
+// 就是 N 路并发目录 walk，且这些 goroutine 不受 workerWG 管理（关停后仍在扫目录，
+// Close 关库时也拦不住）。现在：
+//   - BeginTrim() 复用 imagecache 内部的 trimming CAS，同一时刻只有一路在扫；
+//     拿不到令牌说明后台清理/上一次保存已经在扫，本次直接跳过（ok=false）。
+//   - beginWorker() 把这次 walk 登记进 workerWG：BeginShutdown/Close 会等它结束。
+//
+// 两者都不成立时不返回信号，调用方就不必等（保存请求照常返回当前统计）。
+func (a *App) startImageCacheTrim() (<-chan struct{}, bool) {
+	releaseTrim, ok := a.imgDisk.BeginTrim()
+	if !ok {
+		return nil, false
+	}
+	releaseWorker, err := a.beginWorker()
+	if err != nil {
+		releaseTrim() // 正在关停：不登记、不起 goroutine，把令牌还回去
+		return nil, false
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer releaseTrim()
+		defer releaseWorker()
 		removed, freed, err := a.imgDisk.Trim()
 		if err != nil {
 			slog.Warn("按新上限清理缩略图缓存失败", "error", err)
@@ -139,11 +174,7 @@ func (a *App) adminSaveImageCacheSettings(c *gin.Context) {
 			slog.Info("按新上限清理缩略图缓存", "removed", removed, "freed_bytes", freed)
 		}
 	}()
-	select {
-	case <-done:
-	case <-time.After(imageCacheTrimWait):
-	}
-	c.JSON(http.StatusOK, a.imageCacheSnapshot())
+	return done, true
 }
 
 // adminTrimImageCache 立即清理一次缓存目录（过期 + 超限），返回删除统计。
@@ -154,6 +185,9 @@ func (a *App) adminTrimImageCache(c *gin.Context) {
 		return
 	}
 	// 清理可能走几十万个文件，先不持 imageCacheMu，避免设置页读取被拖住。
+	// P2-3：这次 walk 由 imagecache 的 walkMu 串行化，不会与后台 trim 并发扫目录；
+	// 它是同步请求（要回 removed/freed），因此不去抢 trimming 令牌——抢不到就“跳过”
+	// 会让管理端点的返回语义变得不可预期。
 	removed, freed, err := a.imgDisk.Trim()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "image cache cleanup failed"})

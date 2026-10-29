@@ -62,8 +62,8 @@ func TestProbeReportsSavedFilesWithUnconfirmedVersions(t *testing.T) {
 				}
 			}
 			f.a.cache.Set("refresh:stale", []byte("stale"), time.Hour)
-			if !f.a.beginProbe(len(targets)) {
-				t.Fatal("cannot start")
+			if err := f.a.beginProbe(len(targets)); err != nil {
+				t.Fatalf("cannot start: %v", err)
 			}
 			taskID := f.a.startTask("probe")
 			// A missing executable guarantees this path must use saved raw output, not ffprobe/network.
@@ -131,8 +131,8 @@ func TestProbeReportsSavedFilesWithUnconfirmedVersions(t *testing.T) {
 				}
 			}
 			// A new run resets the additive failure field; already current files skip locally.
-			if !f.a.beginProbe(len(targets)) {
-				t.Fatal("cannot restart")
+			if err := f.a.beginProbe(len(targets)); err != nil {
+				t.Fatalf("cannot restart: %v", err)
 			}
 			if err := f.a.runProbe(f.a.startTask("probe"), "/fixture/does-not-exist-ffprobe", targets, true); err != nil {
 				t.Fatal(err)

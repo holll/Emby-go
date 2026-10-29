@@ -51,6 +51,11 @@ type Disk struct {
 	trimMu   sync.Mutex
 	lastTrim time.Time
 	trimming atomic.Bool
+	// walkMu 串行化整段目录 walk（P2-3）：Trim 全程持有它，因此并发的
+	// Trim/MaybeTrim 不会同时扫同一目录、不会重复计数、也不会互相覆盖 lastTrim。
+	// 它是独立于 trimMu 的一把锁——trimMu 只保护 maxBytes/ttl/lastTrim 的短临界区，
+	// 而 Trim 内部要通过 recordTrim 写 lastTrim，合并成一把锁会自死锁。
+	walkMu sync.Mutex
 }
 
 // Open 打开（必要时创建）变体目录。
@@ -217,10 +222,20 @@ type variant struct {
 
 // Trim 删掉过期变体，并在超限时按 mtime 从旧到新淘汰到 80% 水位。
 // 返回删除数量与释放字节数，供日志与测试使用。
+//
+// 并发（P2-3）：整段 walk 由 walkMu 串行化。此前 walk 在锁外跑，设置页保存 /
+// 启动清理 / 管理端点的直接 Trim() 会与 MaybeTrim 起的后台 trim 并发扫同一目录，
+// 造成重复删除计数、lastTrim 互相覆盖使十分钟节流失真（不损坏文件）。
+// 这里没把 walk 塞进 trimMu：Trim 末尾要 recordTrim 写 lastTrim，同锁自死锁。
+// 也没改成「单 owner goroutine + 请求 channel」：Trim 必须同步返回 removed/freed
+// （设置页与启动清理都要用），owner 会带来常驻 goroutine 的退出语义，
+// 而 walkMu 已经达到「同一时刻只有一路 walk」的效果，且不新增生命周期。
 func (d *Disk) Trim() (removed int, freed int64, err error) {
 	if !d.Enabled() {
 		return 0, 0, nil
 	}
+	d.walkMu.Lock()
+	defer d.walkMu.Unlock()
 	d.trimMu.Lock()
 	maxBytes, ttl := d.maxBytes, d.ttl
 	d.trimMu.Unlock()
@@ -271,6 +286,13 @@ func (d *Disk) Trim() (removed int, freed int64, err error) {
 		}
 		keep = append(keep, item)
 	}
+	// 淘汰阶段重读上限：walk 期间设置页可能已经把上限调小，用新值再判一次，
+	// 不必为此再走一遍目录。
+	d.trimMu.Lock()
+	if d.maxBytes > 0 {
+		maxBytes = d.maxBytes
+	}
+	d.trimMu.Unlock()
 	if maxBytes > 0 && total > maxBytes {
 		target := maxBytes * trimTargetPercent / 100
 		slices.SortFunc(keep, func(left, right variant) int {
@@ -291,6 +313,21 @@ func (d *Disk) Trim() (removed int, freed int64, err error) {
 	return removed, freed, nil
 }
 
+// BeginTrim 申请「本进程唯一的一路清理」令牌，返回的 release 必须调用（defer）。
+// ok=false 表示已有一路清理在跑：调用方应跳过本次——那一路会把目录扫完。
+//
+// 与 MaybeTrim 共用同一个 trimming CAS，因此手动 Trim（设置页保存、启动清理、
+// 管理端点）与后台 trim 不会同时 walk（P2-1：连点保存 N 次只会有一次真在扫）。
+func (d *Disk) BeginTrim() (release func(), ok bool) {
+	if !d.Enabled() {
+		return nil, false
+	}
+	if !d.trimming.CompareAndSwap(false, true) {
+		return nil, false
+	}
+	return func() { d.trimming.Store(false) }, true
+}
+
 // MaybeTrim 在后台触发一次清理，调用方不必等它结束。
 // 节流两层：十分钟内不重复触发，且同一时刻只有一个清理协程。
 func (d *Disk) MaybeTrim() {
@@ -307,11 +344,12 @@ func (d *Disk) MaybeTrim() {
 	if !due {
 		return
 	}
-	if !d.trimming.CompareAndSwap(false, true) {
+	release, ok := d.BeginTrim()
+	if !ok {
 		return
 	}
 	go func() {
-		defer d.trimming.Store(false)
+		defer release()
 		if _, _, err := d.Trim(); err != nil {
 			// 清理失败只影响容量，不影响正确性，不打日志以免刷屏。
 			_ = err

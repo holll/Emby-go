@@ -52,8 +52,8 @@ func TestAvatarPartialWriteReachesTaskAndProgress(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "fixture", "name": name, "provider": "fixture", "images": []string{backend.URL + "/picture.png"}}}})
 	}))
 	defer backend.Close()
-	if !a.beginScrape("scrape_avatars", 1) {
-		t.Fatal("begin failed")
+	if err := a.beginScrape("scrape_avatars", 1); err != nil {
+		t.Fatalf("begin failed: %v", err)
 	}
 	dir := filepath.Join(root, "avatars")
 	err = a.executeScrapeAvatars(scraper.Config{BaseURL: backend.URL, Token: "fixture", Concurrency: 1, AvatarsDir: dir}, lib.ID, 0)
@@ -93,8 +93,8 @@ func TestAvatarPartialWriteReachesTaskAndProgress(t *testing.T) {
 
 func TestAvatarPartialWriteIsVisibleAlongsideCancellation(t *testing.T) {
 	a, _, _ := authorityApp(t)
-	if !a.beginScrape("scrape_avatars", 1) {
-		t.Fatal("begin failed")
+	if err := a.beginScrape("scrape_avatars", 1); err != nil {
+		t.Fatalf("begin failed: %v", err)
 	}
 	a.scrapeTaskMu.RLock()
 	cancel := a.scrapeCancel
@@ -107,8 +107,8 @@ func TestAvatarPartialWriteIsVisibleAlongsideCancellation(t *testing.T) {
 	if !status.Cancelled || status.Running || status.Error != scraper.ErrAvatarWriteIncomplete.Error() {
 		t.Fatalf("cancellation hid saved output: %+v", status)
 	}
-	if !a.beginScrape("scrape_avatars", 0) {
-		t.Fatal("restart failed")
+	if err := a.beginScrape("scrape_avatars", 0); err != nil {
+		t.Fatalf("restart failed: %v", err)
 	}
 	a.endScrape(nil)
 	a.scrapeTaskMu.RLock()

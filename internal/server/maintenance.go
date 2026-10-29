@@ -13,7 +13,14 @@ const statsAnalyzeInterval = 7 * 24 * time.Hour
 // 幂等：重复调用只启动一次。
 func (a *App) startMaintenance() {
 	a.maintenanceOnce.Do(func() {
-		a.workerWG.Go(func() {
+		// 通过登记门启动：关停窗口内不再起新 worker（否则会与 workerWG.Wait 并发）。
+		release, err := a.beginWorker()
+		if err != nil {
+			slog.Warn("周期性统计维护未启动：服务正在关停", "error", err)
+			return
+		}
+		go func() {
+			defer release()
 			a.runStatsAnalyze()
 			ticker := time.NewTicker(statsAnalyzeInterval)
 			defer ticker.Stop()
@@ -25,7 +32,7 @@ func (a *App) startMaintenance() {
 					a.runStatsAnalyze()
 				}
 			}
-		})
+		}()
 	})
 }
 

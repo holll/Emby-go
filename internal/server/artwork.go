@@ -281,8 +281,17 @@ func (a *App) adminArtworkRun(c *gin.Context) {
 		apiError(c, 503, "server shutting down")
 		return
 	}
+	// 登记放在已持有的 artwork.mu 内、置运行态之前：关停窗口里既不会留下「Running
+	// 但没人跑」的状态，也不会出现 Add 与 workerWG.Wait 并发。
+	release, err := a.beginWorker()
+	if err != nil {
+		a.artwork.mu.Unlock()
+		apiError(c, 503, err.Error())
+		return
+	}
 	if a.artwork.status.Running || !a.claimNFO("artwork") {
 		a.artwork.mu.Unlock()
+		release()
 		apiError(c, 409, "图片或其他 NFO 写入任务正在进行中")
 		return
 	}
@@ -291,9 +300,8 @@ func (a *App) adminArtworkRun(c *gin.Context) {
 	accepted := artworkStatus{InstanceID: a.instanceID, TaskID: taskID, Mode: req.Mode, MovieIDs: append([]int64{}, ids...), Running: true, Total: len(ids)}
 	a.artwork.status = accepted
 	a.artwork.cancel = cancel
-	a.workerWG.Add(1)
 	a.artwork.mu.Unlock()
-	go func() { defer a.workerWG.Done(); a.executeArtwork(ctx, taskID, req, ids, opts) }()
+	go func() { defer release(); a.executeArtwork(ctx, taskID, req, ids, opts) }()
 	c.JSON(202, accepted)
 }
 

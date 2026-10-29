@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -141,6 +142,7 @@ type App struct {
 	ready            atomic.Bool    // readiness：收到退出信号后立即为 false
 	shutdownOnce     sync.Once      // BeginShutdown 幂等
 	closeOnce        sync.Once      // Close 幂等
+	workerGate       workerGate     // 「登记 worker」与「等待 worker 收齐」的互斥门，见 beginWorker
 	workerWG         sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
 	// 周期性统计信息维护（ANALYZE）。analyzeStats 可替换以便测试观察调用。
 	maintenanceOnce sync.Once
@@ -170,6 +172,87 @@ type App struct {
 
 	translation translationState
 	artwork     artworkState
+}
+
+// errServerShuttingDown 是关停窗口内拒绝新后台工作的统一错误。
+// 它同时是 503 的判据：handler 侧据此区分「服务正在关停」与真正的任务冲突。
+var errServerShuttingDown = errors.New("server shutting down")
+
+// workerGate 是「登记新 worker」与「等待 worker 收齐」之间的互斥门。
+//
+// 为什么需要它：sync.WaitGroup 只允许「计数从 0 变成 1」发生在 Wait 之前。
+// 关停窗口里若 handler 仍在 workerWG.Add(1)，而 WaitBackground/Close 正在
+// workerWG.Wait()，运行时就会 panic
+// 「sync: WaitGroup misuse: Add called concurrently with Wait」；
+// 也可能让 Wait 提前返回，随后 db.Close() 与仍在跑的 worker 相撞。
+//
+// 约定（两把门，方向互补）：
+//   - 登记门（本结构）：BeginShutdown 第一步关门；关门后 beginWorker 一律失败。
+//   - rootCtx 门：BeginShutdown 末步取消 rootCtx，各任务入口在已持有的状态锁内判它。
+//     BeginShutdown 内「关门」早于「取消 rootCtx」，所以 rootCtx 已取消 ⇒ 登记门必已关闭；
+//     反过来关门到取消之间还有极短窗口，靠 rootCtx 门兜住（两门都拒绝，不重复放行）。
+//
+// 只保护 Add/Wait 这一对，不参与任务状态；shuttingDown 单调置位、永不复位。
+type workerGate struct {
+	mu           sync.Mutex
+	shuttingDown bool
+}
+
+// beginWorker 登记一个后台 worker，返回释放函数（形如 defer release()）。
+// 登记门已关闭时返回 errServerShuttingDown，调用方应回 503 并**不**启动 goroutine。
+func (a *App) beginWorker() (func(), error) {
+	a.workerGate.mu.Lock()
+	defer a.workerGate.mu.Unlock()
+	if a.workerGate.shuttingDown {
+		return nil, errServerShuttingDown
+	}
+	a.workerWG.Add(1)
+	return a.workerWG.Done, nil
+}
+
+// beginWorkerHTTP 是 handler 侧适配层：登记门关闭时直接回 503 并返回 ok=false。
+// 关停后各入口因此统一表现为 503，而不是照常进入真实逻辑再失败。
+func (a *App) beginWorkerHTTP(c *gin.Context) (release func(), ok bool) {
+	release, err := a.beginWorker()
+	if err != nil {
+		apiError(c, http.StatusServiceUnavailable, err.Error())
+		return nil, false
+	}
+	return release, true
+}
+
+// workerGateAPIError 把「关停门/任务冲突」两类拒绝映射成状态码：
+// 关停一律 503（与 beginWorkerHTTP 一致），其余按调用方给的具体冲突码回。
+func workerGateAPIError(c *gin.Context, err error, conflictStatus int) {
+	status := conflictStatus
+	if errors.Is(err, errServerShuttingDown) {
+		status = http.StatusServiceUnavailable
+	}
+	apiError(c, status, err.Error())
+}
+
+// stopWorkerAdmission 永久关闭登记门。幂等；必须在任何 workerWG.Wait 之前调用。
+func (a *App) stopWorkerAdmission() {
+	a.workerGate.mu.Lock()
+	a.workerGate.shuttingDown = true
+	a.workerGate.mu.Unlock()
+}
+
+// workerAdmissionOpen 报告登记门是否仍开着（测试与断言用）。
+func (a *App) workerAdmissionOpen() bool {
+	a.workerGate.mu.Lock()
+	defer a.workerGate.mu.Unlock()
+	return !a.workerGate.shuttingDown
+}
+
+// waitWorkers 关门后等待全部后台 worker 结束（无预算版本，供 Close 使用）。
+// 关门之后不再有新的 Add，因此 Wait 期间计数只减不增：
+// 关门前已登记的 Add 一定先于 Wait 发生，关门后的登记请求一律被拒 —— 这正是
+// WaitGroup 要求的顺序，故不会触发 misuse panic，也不会漏等。
+// 前提：worker 必须响应 rootCtx 取消，否则这里会一直阻塞（调用方负责给预算）。
+func (a *App) waitWorkers() {
+	a.stopWorkerAdmission()
+	a.workerWG.Wait()
 }
 
 // scanStatus 管理端可轮询的扫描进度快照。
@@ -440,11 +523,17 @@ func (a *App) checkScrapeBackend() {
 	slog.Info("启动自检：MetaTube 可达")
 }
 
-// BeginShutdown 让 readiness 立即失败、停止新调度、取消可取消的后台任务。
+// BeginShutdown 让 readiness 立即失败、关闭 worker 登记门、停止新调度、取消可取消的后台任务。
 // 幂等，只做一次；真正等待使用 WaitBackground，超时由调用方决定强制退出。
+//
+// 顺序有约束：先 ready（对外立刻 503）→ 再关登记门（此后 beginWorker 一律失败，
+// 保证 Add 不再与 Wait 并发）→ 再停调度/取消任务 → 最后取消 rootCtx。
+// 「关登记门」必须早于「取消 rootCtx」：rootCtx 门是各任务入口的后备判据，
+// 它一旦生效说明登记门早已关闭，两门不会出现「rootCtx 已取消但仍能登记」的空档。
 func (a *App) BeginShutdown() {
 	a.shutdownOnce.Do(func() {
 		a.ready.Store(false)
+		a.stopWorkerAdmission()
 		if a.sched != nil {
 			done := a.sched.Stop()
 			a.schedMu.Lock()
@@ -468,6 +557,15 @@ func (a *App) BeginShutdown() {
 // WaitBackground 在 ctx 预算内等待启动自检、探测/刮削/立即执行 worker 与
 // 调度器在跑任务结束。必须先在调用方触发 BeginShutdown，避免等待后又登记新工作。
 func (a *App) WaitBackground(ctx context.Context) error {
+	return a.joinBackground(ctx)
+}
+
+// joinBackground 是 WaitBackground 的实现：关登记门 → 等 worker/启动自检/调度器。
+// ctx 带 deadline 时是有界等待（cmd/metatube 的 shutdownBudget），
+// ctx 为 Background 时是无界等待（Close 用，前提是 rootCtx 已取消）。
+func (a *App) joinBackground(ctx context.Context) error {
+	// 关门先于 Wait：否则等待期间新 handler 仍可 Add，正是 misuse panic 的来源。
+	a.stopWorkerAdmission()
 	a.schedMu.Lock()
 	schedDone := a.schedDone
 	a.schedMu.Unlock()
@@ -488,11 +586,24 @@ func (a *App) WaitBackground(ctx context.Context) error {
 	}
 }
 
-// Close 取消后台任务并关库；幂等，供 defer 与显式退出路径重复调用。
+// Close 取消后台任务、等后台工作收齐并关库；幂等，供 defer 与显式退出路径重复调用。
 func (a *App) Close() {
 	a.closeOnce.Do(func() {
 		a.BeginShutdown()
-		a.startupWG.Wait()
+		// P2-15：关库前必须等 worker 收齐，否则 worker 可能撞上已关闭的 DB
+		// （此前只等 startupWG，探测/刮削/扫描 worker 全部漏等）。
+		//
+		// 死锁论证（无界等待为何安全）：
+		//  1) 所有 worker 的取消源都是 rootCtx 或其派生 ctx，而 BeginShutdown 已取消
+		//     rootCtx，故 waitWorkers 不会无限等一个「必须靠关库才能退出」的 worker；
+		//  2) 关停路径本身有预算：cmd/metatube 先在 shutdownBudget（15s）内并发地
+		//     WaitBackground + srv.Shutdown，超时走 os.Exit(1) 强制退出、根本到不了这里；
+		//     能走到 Close 说明后台工作已收齐或从未启动；
+		//  3) Close 自身不持有任何任务锁（probeTaskMu/scrapeTaskMu/scanTaskMu/schedMu 等），
+		//     worker 的 defer 只碰任务状态与 DB，不会回调 Close，故不存在环形等待；
+		//  4) Close 也在测试的 t.Cleanup 里被调用：那时 worker 要么没启动，要么已随
+		//     BeginShutdown 结束，等待立即返回。
+		_ = a.joinBackground(context.Background())
 		a.closeWebhook()
 		a.db.Close()
 	})

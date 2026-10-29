@@ -377,14 +377,24 @@ func (a *App) adminTranslationRun(c *gin.Context) {
 		translationAPIError(c, err)
 		return
 	}
+	// 关停门：先登记 worker 再申请任务，避免「已置运行态却起不来 goroutine」。
+	// 登记失败统一回 503（translationAPIError 对未知错误回 500，故不交给它）。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
 	ctx, taskID, err := a.beginTranslation(total)
 	if err != nil {
+		release()
 		translationAPIError(c, err)
 		return
 	}
 	// Capture the accepted generation, not a later task's snapshot.
 	accepted := a.translationSnapshot()
-	a.workerWG.Go(func() { _ = a.executeTranslation(ctx, taskID, cfg, req) })
+	go func() {
+		defer release()
+		_ = a.executeTranslation(ctx, taskID, cfg, req)
+	}()
 	c.JSON(http.StatusAccepted, accepted)
 }
 

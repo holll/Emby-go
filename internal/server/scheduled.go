@@ -126,7 +126,10 @@ func (a *App) runScheduledProbe(task scheduler.Task) error {
 		slog.Info("计划任务探测跳过：没有可探测的影片", "task", task.Name)
 		return nil
 	}
-	if !a.beginProbe(len(plan.targets)) {
+	if err := a.beginProbe(len(plan.targets)); err != nil {
+		if errors.Is(err, errServerShuttingDown) {
+			return context.Canceled
+		}
 		return scheduler.ErrBusy
 	}
 	taskID := a.startTask("probe")
@@ -542,11 +545,17 @@ func (a *App) adminRunScheduledTask(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
-	a.workerWG.Go(func() {
+	// 关停门：drain 期间不再接受「立即执行」，否则 worker 会与 Wait/关库并发。
+	release, ok := a.beginWorkerHTTP(c)
+	if !ok {
+		return
+	}
+	go func() {
+		defer release()
 		if err := a.sched.RunNow(id); err != nil {
 			slog.Warn("立即执行计划任务失败", "task_id", id, "error", err)
 		}
-	})
+	}()
 	c.JSON(http.StatusAccepted, gin.H{"status": "started"})
 }
 
@@ -610,7 +619,10 @@ func (a *App) runScheduledScrape(task scheduler.Task) error {
 		slog.Info("计划任务刮削跳过：没有符合条件的影片", "task", task.Name)
 		return nil
 	}
-	if !a.beginScrape("scrape", total) {
+	if err := a.beginScrape("scrape", total); err != nil {
+		if errors.Is(err, errServerShuttingDown) {
+			return context.Canceled
+		}
 		return scheduler.ErrBusy
 	}
 	slog.Info("计划任务刮削启动", "task", task.Name, "total", total,
@@ -641,7 +653,10 @@ func (a *App) runScheduledScrapeAvatars(task scheduler.Task) error {
 		slog.Info("计划任务头像补全跳过：没有缺头像的演员", "task", task.Name)
 		return nil
 	}
-	if !a.beginScrape("scrape_avatars", len(names)) {
+	if err := a.beginScrape("scrape_avatars", len(names)); err != nil {
+		if errors.Is(err, errServerShuttingDown) {
+			return context.Canceled
+		}
 		return scheduler.ErrBusy
 	}
 	slog.Info("计划任务头像补全启动", "task", task.Name, "actors", len(names), "library_id", libraryID)

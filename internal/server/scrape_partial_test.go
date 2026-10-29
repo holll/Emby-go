@@ -25,8 +25,8 @@ func TestCanceledBatchRefreshesAlreadyWrittenNFO(t *testing.T) {
 	if _, err := app.scanLibraries(lib.ID, 0, scanner.ScanModeFull, false); err != nil {
 		t.Fatal(err)
 	}
-	if !app.beginScrape("scrape", 2) {
-		t.Fatal("无法启动刮削")
+	if err := app.beginScrape("scrape", 2); err != nil {
+		t.Fatalf("无法启动刮削: %v", err)
 	}
 	var firstID atomic.Int64
 	var searches atomic.Int32

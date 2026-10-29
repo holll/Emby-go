@@ -159,8 +159,16 @@ func (a *App) adminSpriteRun(c *gin.Context) {
 		apiError(c, 503, "server shutting down")
 		return
 	}
+	// 同 artwork：在已持有的 sprites.mu 内、置运行态之前登记 worker。
+	release, err := a.beginWorker()
+	if err != nil {
+		a.sprites.mu.Unlock()
+		apiError(c, 503, err.Error())
+		return
+	}
 	if a.sprites.status.Running || !a.claimNFO("sprites") {
 		a.sprites.mu.Unlock()
+		release()
 		apiError(c, 409, "媒体维护任务正在进行中")
 		return
 	}
@@ -169,9 +177,8 @@ func (a *App) adminSpriteRun(c *gin.Context) {
 	accepted := spriteStatus{InstanceID: a.instanceID, TaskID: id, MovieIDs: append([]int64{}, req.MovieIDs...), Running: true, Total: len(req.MovieIDs)}
 	a.sprites.status = accepted
 	a.sprites.cancel = cancel
-	a.workerWG.Add(1)
 	a.sprites.mu.Unlock()
-	go func() { defer a.workerWG.Done(); a.executeSprites(ctx, id, req, opts) }()
+	go func() { defer release(); a.executeSprites(ctx, id, req, opts) }()
 	c.JSON(202, accepted)
 }
 func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, opts artwork.SpriteOptions) (runErr error) {
@@ -346,7 +353,11 @@ func (a *App) webSpriteManifest(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"version": 1, "generation": m.Generation, "width": m.Width, "height": m.Height, "columns": m.Cols, "rows": m.Rows, "count": m.Count, "interval_ms": m.IntervalMs, "duration_ms": m.DurationMs, "sheet_count": len(m.Sheets), "sheets": sheets})
 }
-func (a *App) spriteReadSlot(c *gin.Context) bool {
+
+// spriteReadSlot 申请一个图片读取槽位，返回归还函数。
+// 归还函数闭包捕获本次拿到的 sem，而不是在释放时再读 a.sprites.readSem——
+// 后者是无锁读共享字段（数据竞争），且错误返回路径上可能把槽位还给了另一实例。
+func (a *App) spriteReadSlot(c *gin.Context) (release func(), ok bool) {
 	a.sprites.mu.Lock()
 	if a.sprites.readSem == nil {
 		a.sprites.readSem = make(chan struct{}, 2)
@@ -355,13 +366,12 @@ func (a *App) spriteReadSlot(c *gin.Context) bool {
 	a.sprites.mu.Unlock()
 	select {
 	case sem <- struct{}{}:
-		return true
+		return func() { <-sem }, true
 	default:
 		apiError(c, 503, "preview busy")
-		return false
+		return nil, false
 	}
 }
-func (a *App) releaseSpriteRead() { <-a.sprites.readSem }
 func (a *App) webSpriteSheet(c *gin.Context) {
 	id, ok := a.spriteTarget(c)
 	if !ok {
@@ -373,10 +383,11 @@ func (a *App) webSpriteSheet(c *gin.Context) {
 		apiError(c, 400, "invalid sprite identity")
 		return
 	}
-	if !a.spriteReadSlot(c) {
+	release, ok := a.spriteReadSlot(c)
+	if !ok {
 		return
 	}
-	defer a.releaseSpriteRead()
+	defer release()
 	data, err := artwork.ReadSpriteSheet(c.Request.Context(), a.db, id, c.Query("generation"), page, a.spriteRootDir())
 	if err != nil {
 		apiError(c, 404, "preview not found")
@@ -463,10 +474,11 @@ func (a *App) spriteThumbnail(c *gin.Context) {
 		apiError(c, 400, "invalid PositionTicks")
 		return
 	}
-	if !a.spriteReadSlot(c) {
+	release, ok := a.spriteReadSlot(c)
+	if !ok {
 		return
 	}
-	defer a.releaseSpriteRead()
+	defer release()
 	m, err := artwork.GetSpriteManifest(c.Request.Context(), a.db, id, a.spriteRootDir())
 	if err != nil {
 		apiError(c, 404, "preview not found")
@@ -518,10 +530,11 @@ func (a *App) spriteBIF(c *gin.Context) {
 	if !ok || !nativeSpriteQuery(c, id) {
 		return
 	}
-	if !a.spriteReadSlot(c) {
+	release, ok := a.spriteReadSlot(c)
+	if !ok {
 		return
 	}
-	defer a.releaseSpriteRead()
+	defer release()
 	m, err := artwork.GetSpriteManifest(c.Request.Context(), a.db, id, a.spriteRootDir())
 	if err != nil {
 		apiError(c, 404, "preview not found")
