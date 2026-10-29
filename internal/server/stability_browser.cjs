@@ -2,9 +2,8 @@
 // Live ephemeral App supplied by the Go test. No intercepted/stubbed fetch APIs.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { browser } = require('./web_browser_helper.cjs');
 
 async function main() {
   const base = new URL(process.env.EMBY_STABILITY_URL);
@@ -18,31 +17,20 @@ async function main() {
   await request('/api/auth/initialize', {Username:'mobile-admin', Pw:'mobile-stability-password'});
   const login = await request('/Users/AuthenticateByName', {Username:'mobile-admin', Pw:'mobile-stability-password'});
   assert.equal(typeof login.AccessToken, 'string');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-live-browser-'));
-  const proc = spawn(process.env.CHROME_BIN, ['--headless','--no-sandbox','--disable-gpu','--no-first-run','--remote-debugging-port=0','--user-data-dir='+path.join(dir,'profile'),'about:blank']);
-  // Register immediately: Chromium may exit before startup or cleanup awaits it.
-  const exited = new Promise(resolve => { proc.once('exit', resolve); proc.once('error', resolve); });
-  let ws;
-  const interrupted = () => { proc.kill(); if (ws) ws.close(); };
+  // Use the same cold-profile/background-service-disabled launch and explicit
+  // CDP session as the CSS tests. Startup remains bounded at 15000ms; one browser
+  // serves every viewport and all real HTTP mutations, without retry or skip.
+  const cleanups = [];
+  let cleanupPromise;
+  const cleanup = () => cleanupPromise ||= (async () => {
+    for (const dispose of cleanups.slice().reverse()) await dispose();
+  })();
+  const interrupted = () => { cleanup().catch(error => { console.error(error.stack); process.exitCode = 1; }); };
   process.once('SIGINT', interrupted);
   try {
-    const url = await new Promise((resolve,reject) => {
-      let text=''; const timer=setTimeout(()=>reject(Error('Chromium startup deadline')),15000);
-      proc.once('error', e=>{clearTimeout(timer);reject(e)});
-      proc.once('exit', code=>{clearTimeout(timer);reject(Error('Chromium exited '+code))});
-      proc.stderr.on('data', chunk=>{text+=chunk;const m=text.match(/DevTools listening on (ws:\/\/[^\s]+)/);if(m){clearTimeout(timer);resolve(m[1])}});
-    });
-    ws = new WebSocket(url);
-    await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true})});
-    let serial=0; const pending=new Map();
-    ws.addEventListener('message', event=>{const m=JSON.parse(event.data),p=pending.get(m.id);if(!p)return;pending.delete(m.id);clearTimeout(p.timer);if(m.error)p.reject(Error(JSON.stringify(m.error)));else p.resolve(m.result)});
-    ws.addEventListener('close',()=>{for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Chromium session closed'))}pending.clear()});
-    const send=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++serial;const timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP deadline: '+method))},15000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}))});
-    const {targetId}=await send('Target.createTarget',{url:'about:blank'});
-    const {sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
-    const call=(method,params)=>send(method,params,sessionId);
-    const evaluate=async expression=>{const r=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
-    await call('Page.enable');
+    const started = performance.now();
+    const { call, evaluate } = await browser({ after: dispose => cleanups.push(dispose) }, process.env.CHROME_BIN);
+    console.log('Chromium CDP ready in ' + Math.round(performance.now() - started) + 'ms (startup budget 15000ms)');
     await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
     await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
     // Seed only a real authenticated session. Native fetch, HTML, JS, CSS, and every
@@ -121,18 +109,11 @@ async function main() {
       }
     }
   } finally {
-    process.removeListener('SIGINT', interrupted);
-    // Ask Chromium to stop its renderers/profile writers before removing files.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ id: 0, method: 'Browser.close' })); } catch { /* bounded fallback below */ }
-    }
-    const terminate = setTimeout(() => proc.kill(), 1000);
-    const forceKill = setTimeout(() => proc.kill('SIGKILL'), 2500);
-    try { await exited; } finally { clearTimeout(terminate); clearTimeout(forceKill); if (ws) ws.close(); }
-    assert.equal(path.dirname(dir),os.tmpdir());assert.ok(path.basename(dir).startsWith('emby-live-browser-'));
-    // Descendants can finish filesystem writes just after the browser exits.
-    // Retry transient removal races; persistent cleanup errors must still fail.
-    fs.rmSync(dir,{recursive:true,force:true,maxRetries:8,retryDelay:100});
+    // Registered before startup awaits: failure and SIGINT share exactly one
+    // Browser.close/TERM/KILL/profile cleanup, including partially started Chrome.
+    // Keep the signal handler until cleanup completes so interruption cannot
+    // abandon a live child while its profile is still being closed.
+    try { await cleanup(); } finally { process.removeListener('SIGINT', interrupted); }
   }
   console.log('PASS real HTTP dashboard at 1440/768/390/360/320px: real request P95, window switching, pause/fullscreen cleanup; mobile create library → tap scan → indexed media wall; browser cleanup completed');
 }

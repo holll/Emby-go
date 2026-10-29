@@ -63,7 +63,7 @@ jobs:
             echo "::error::$detail"
           fi
 
-  # 保留全部 race 测试；server 按真实顶层测试清单做互斥、完备的进程分片，
+  # 保留全部 race 测试；server/store 按真实顶层测试清单做互斥、完备的进程分片，
   # 避免 Gin/slog 全局状态被 t.Parallel 破坏，且不再依赖提高超时上限。
   race:
     name: Race (${{ matrix.name }})
@@ -77,7 +77,10 @@ jobs:
           - { name: server-2/4, package: ./internal/server, shard: 1, shards: 4 }
           - { name: server-3/4, package: ./internal/server, shard: 2, shards: 4 }
           - { name: server-4/4, package: ./internal/server, shard: 3, shards: 4 }
-          - { name: store, package: ./internal/store, shard: 0, shards: 1 }
+          - { name: store-1/4, package: ./internal/store, shard: 0, shards: 4 }
+          - { name: store-2/4, package: ./internal/store, shard: 1, shards: 4 }
+          - { name: store-3/4, package: ./internal/store, shard: 2, shards: 4 }
+          - { name: store-4/4, package: ./internal/store, shard: 3, shards: 4 }
           - { name: outbound, package: ./internal/outbound, shard: 0, shards: 1 }
           - { name: artwork, package: ./internal/artwork, shard: 0, shards: 1 }
           - { name: scanner, package: ./internal/scanner, shard: 0, shards: 1 }

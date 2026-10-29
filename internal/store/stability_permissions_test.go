@@ -24,13 +24,10 @@ func TestStabilityPermissionsCredentialCommitMatrix(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer other.Close()
-				if _, err := s.CreateUser("owner", "password-1234", true); err != nil {
-					t.Fatal(err)
-				}
-				actor, err := s.CreateUser("actor", "password-1234", true)
-				if err != nil {
-					t.Fatal(err)
-				}
+				// Only seed setup accounts; authentication and the cross-Store
+				// credential commit/revocation paths below remain real.
+				seedFixtureUser(t, s, "owner", "password-1234", true)
+				actor := seedFixtureUser(t, s, "actor", "password-1234", true)
 				target, err := s.CreateAPIKeyForUser("target", 1)
 				if err != nil {
 					t.Fatal(err)
@@ -134,13 +131,8 @@ func TestStabilityPermissionsRoleTracksLongTermKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.CreateUser("owner", "password-1234", true); err != nil {
-		t.Fatal(err)
-	}
-	actor, err := s.CreateUser("actor", "password-1234", true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	seedFixtureUser(t, s, "owner", "password-1234", true)
+	actor := seedFixtureUser(t, s, "actor", "password-1234", true)
 	key, err := s.CreateAPIKeyForUser("script", actor.ID)
 	if err != nil {
 		t.Fatal(err)

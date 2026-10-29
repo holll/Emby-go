@@ -12,17 +12,11 @@ func TestAdminCredentialGenerationAcrossStores(t *testing.T) {
 	for _, mode := range []string{"password", "revoke-user", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "expiry", "key-delete", "key-password", "key-role-ABA"} {
 		t.Run(mode, func(t *testing.T) {
 			s := openUsersStore(t)
-			if err := s.InitializeAdministrator("owner", "password-1234"); err != nil {
-				t.Fatal(err)
-			}
-			actor, err := s.CreateUser("actor", "password-1234", true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			target, err := s.CreateUser("target", "password-1234", false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			// Password creation is setup, not the generation barrier under test.
+			// Keep real authentication, revocations and all mutations below.
+			seedFixtureAdministrator(t, s, "owner", "password-1234")
+			actor := seedFixtureUser(t, s, "actor", "password-1234", true)
+			target := seedFixtureUser(t, s, "target", "password-1234", false)
 			if err := s.SaveAccessTokenForUser("session", actor.ID, time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
