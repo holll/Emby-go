@@ -39,6 +39,46 @@ type requestMonitor struct {
 	started    time.Time
 	instanceID string
 	shards     [monitorShards]monitorShard
+	// minuteTexts 记忆化 series 每点的 RFC3339 时间串（见 monitorMinuteText）。
+	// 挂在实例上而不是包级，避免跨测试/跨实例泄漏，也便于同分钟窗口复用。
+	minuteTexts monitorMinuteText
+}
+
+// monitorMinuteText 缓存「Unix 分钟 → RFC3339 UTC 文本」。series 的时间戳恒为整分钟，
+// 同一分钟对应的输出串永不改变，所以缓存条目只会在槽位被别的分钟占用时失效，
+// 不需要淘汰策略。槽位取 minute%monitorRetention，与计数环下标一致：60 分钟窗口
+// 的 60 个点各占一槽，dashboard 连续取窗（每轮只滑动一分钟）命中 59/60。
+// 锁只覆盖这 60 个纯函数条目，与分片锁无嵌套关系。
+type monitorMinuteText struct {
+	mu    sync.Mutex
+	slots [monitorRetention]monitorMinuteEntry
+}
+
+type monitorMinuteEntry struct {
+	minute int64
+	text   string
+}
+
+// formatMonitorMinute 是缓存未命中时的唯一 Format 出口；负分钟（1970 之前）也走它，
+// 与改造前逐点 Format 完全同一调用，输出逐字节等价。
+func formatMonitorMinute(minute int64) string {
+	return time.Unix(minute*60, 0).UTC().Format(time.RFC3339)
+}
+
+func (t *monitorMinuteText) text(minute int64) string {
+	index := minute % monitorRetention
+	if index < 0 { // 负下标不进缓存，语义不变，只是不复用。
+		return formatMonitorMinute(minute)
+	}
+	t.mu.Lock()
+	e := &t.slots[index]
+	// 空串只可能是从未写入的槽（分钟 0 与零值分钟撞号），Format 结果恒非空，用它判空。
+	if e.text == "" || e.minute != minute {
+		e.minute, e.text = minute, formatMonitorMinute(minute)
+	}
+	text := e.text
+	t.mu.Unlock()
+	return text
 }
 
 // shardFor 按记录时刻的纳秒低位选分片：record 每个请求只调一次、时刻各不相同，
@@ -244,7 +284,7 @@ func (m *requestMonitor) snapshot(now time.Time, minutes int) monitorSnapshot {
 		shard.mu.Unlock()
 	}
 	for minute := first; minute <= current; minute++ {
-		point := monitorPoint{Start: time.Unix(minute*60, 0).UTC().Format(time.RFC3339), Observed: minute >= m.started.Unix()/60 && !now.Before(m.started)}
+		point := monitorPoint{Start: m.minuteTexts.text(minute), Observed: minute >= m.started.Unix()/60 && !now.Before(m.started)}
 		if point.Observed {
 			var b monitorBucket
 			index := minute % monitorRetention
