@@ -64,9 +64,48 @@ jobs:
             echo "::error::$detail"
           fi
 
-      # 认证限流、请求预算、出站策略与播放会话计数是并发敏感路径，额外跑 race。
-      - name: Race (auth/outbound/store)
-        run: go test -race -count=1 ./internal/server ./internal/outbound ./internal/store
+  # modernc SQLite 与密码哈希在 race 下开销较高；按包隔离 runner，
+  # 避免 server/store 争用 CPU，并为完整测试集显式设置包级预算。
+  # 不过滤测试、不关闭 race；新增的封面/预览与扫描路径同样纳入检测。
+  race:
+    name: Race (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ./internal/server
+          - ./internal/store
+          - ./internal/outbound
+          - ./internal/artwork
+          - ./internal/scanner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Full package race tests
+        run: |
+          set -o pipefail
+          go test -race -count=1 -timeout=25m "${{ matrix.package }}" 2>&1 | tee /tmp/race-test.log
+
+      - name: Race failure details
+        if: failure()
+        run: |
+          if [ -f /tmp/race-test.log ]; then
+            detail=$(awk '/^--- FAIL|^panic:|WARNING: DATA RACE/ { found=1 } found { print; lines++ } lines >= 20 { exit }' /tmp/race-test.log)
+            if [ -z "$detail" ]; then detail='Race test process failed; see the full package log.'; fi
+            detail=${detail//%/%25}
+            detail=${detail//$'\\r'/%0D}
+            detail=${detail//$'\\n'/%0A}
+            echo "::error::$detail"
+          fi
 
   vuln:
     runs-on: ubuntu-latest
