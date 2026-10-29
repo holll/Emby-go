@@ -52,10 +52,20 @@ func New(baseURL, token string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: baseURL,
 		token:   strings.TrimSpace(token),
-		http: outbound.NewClient(outbound.Options{
-			Timeout:    timeout,
-			AllowHosts: allowHosts,
-		}),
+		http:    outbound.NewClient(newClientOptions(timeout, allowHosts)),
+	}
+}
+
+// newClientOptions 把「单次请求超时」同时用作等响应头的预算。
+// outbound 的默认 ResponseHeaderTimeout 是 15s，而本包的 DefaultTimeout 是 30s：
+// 不显式传递就会变成「配置说 30s、实际 15s 就放弃」。经 CDN 或反代链路的
+// MetaTube 后端常有十几秒才回头的搜索请求，被 15s 掐断后管理端只会看到
+// 一次失败的刮削，看不出是预算问题。
+func newClientOptions(timeout time.Duration, allowHosts []string) outbound.Options {
+	return outbound.Options{
+		Timeout:               timeout,
+		AllowHosts:            allowHosts,
+		ResponseHeaderTimeout: timeout,
 	}
 }
 
