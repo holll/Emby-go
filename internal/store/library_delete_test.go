@@ -288,15 +288,30 @@ BEGIN INSERT INTO fixture_library_delete_child(parent_id) VALUES(999); END`); er
 	}
 }
 
-func TestDeleteIndexedLibraryLegacyRemainsUnversioned(t *testing.T) {
+// P2-10：DeleteLibrary 现在和 DeleteIndexedLibrary 走同一条版本化路径。原来它用
+// 裸 s.db.Begin 删行：绕过 writeMu、手写 rollback、而且删完不发布版本，缓存与
+// 客户端看不到"库被删了"。语义修正（本项要求）：成功删除必须 bump 全局版本与
+// 该库版本；库不存在时行为不变，仍返回 sql.ErrNoRows 且整体回滚、不发布版本。
+func TestDeleteLibraryBumpsVersionsAndRejectsMissing(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
 	versions := indexedDeleteVersions(t, f)
 	if err := f.s.DeleteLibrary(f.lib); err != nil {
 		t.Fatal(err)
 	}
 	assertIndexedDeleteCascades(t, f)
-	assertIndexedDeleteVersions(t, f, versions, false)
-	if n := indexedDeleteCount(t, f.s, "SELECT COUNT(*) FROM libraries WHERE id=?", f.lib); n != 0 {
-		t.Fatalf("legacy deletion retained target library: %d", n)
+	assertIndexedDeleteVersions(t, f, versions, true)
+	committed := indexedDeleteVersions(t, f)
+	snapshot := indexSnapshot(t, f.s)
+	if err := f.s.DeleteLibrary(f.lib); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleting a missing library: err=%v want sql.ErrNoRows", err)
+	}
+	if got := indexSnapshot(t, f.s); got != snapshot {
+		t.Fatalf("failed delete changed the snapshot\nbefore=%s\nafter=%s", snapshot, got)
+	}
+	if got := indexedDeleteVersions(t, f); got != committed {
+		t.Fatalf("failed delete published versions: %v want %v", got, committed)
+	}
+	if got := f.s.Version("g:version"); got != committed[0] {
+		t.Fatalf("published global version=%s want %s", got, committed[0])
 	}
 }

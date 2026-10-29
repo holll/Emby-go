@@ -32,13 +32,25 @@ type Store struct {
 	featuresRunning    atomic.Bool
 	featuresCancel     chan struct{}
 	featuresCancelOnce sync.Once
-	// visibleCount/visibleVersion 可见影片数缓存（见 visibleMovieCount）。
-	visibleCount   atomic.Int64
-	visibleVersion atomic.Int64
+	// visible 可见影片数缓存（见 visibleMovieCount）。版本号与计数必须作为
+	// 一个整体发布：分成两个 atomic 存储时，读者可能读到"版本 V+1、计数 V"，
+	// 从而把旧计数当成新版本的有效缓存。
+	visible atomic.Pointer[visibleCountSnapshot]
 	// writeMu serializes in-process writers. Deferred BEGIN transactions that
 	// read before writing can otherwise hit SQLITE_BUSY_SNAPSHOT when a
 	// background writer (feature backfill, scanner commit) commits in between.
 	writeMu sync.Mutex
+	// testDeleteMissingSourcesHook 仅测试使用（生产恒为 nil）：在
+	// DeleteMissingSources 的写事务内、清点 missing 之后、删除之前执行，用来
+	// 确定性地注入"并发 IndexMovie 刚好落在清点与删除之间"的时序。
+	testDeleteMissingSourcesHook func() error
+}
+
+// visibleCountSnapshot 是 visibleMovieCount 的发布单元：version 与 count 同属
+// 一次 Store，读者只需一次 Load 就能拿到自洽的一组值。
+type visibleCountSnapshot struct {
+	version int64
+	count   int64
 }
 
 type Library struct {
@@ -676,15 +688,25 @@ func (s *Store) ensureFeatures() error {
 	// 分批提交：每部一个事务在大库上要跑十几秒，整库一个事务又会长时间占着写锁，
 	// 与前台写入（扫描/刮削）撞上就是 SQLITE_BUSY。200 部一批把写锁窗口压到百毫秒级。
 	s.featuresTotal.Store(int64(len(ids)))
+	// Done 是"本次运行已提交的条数"：每次运行从 0 开始，失败后重跑不会继承
+	// 上一轮的部分进度，所以 Done 与 Total 始终在同一坐标系里（Done <= Total）。
+	s.featuresDone.Store(0)
 	s.featuresRunning.Store(true)
 	defer s.featuresRunning.Store(false)
 	const batchSize = 200
 	for start := 0; start < len(ids); start += batchSize {
 		end := min(start+batchSize, len(ids))
+		// writeTx retries SQLITE_BUSY by re-running this callback, so progress
+		// must be a pure function of the attempt: snapshot the committed count
+		// outside and restore it at the start of every attempt. Adding without
+		// that reset counts the same ids once per attempt and lets Done exceed
+		// Total on a contended database.
+		base := s.featuresDone.Load()
 		// Route maintenance writes through writeTx so they share the in-process
 		// writer lock with scans: a deferred read-then-write transaction racing a
 		// feature batch otherwise fails with SQLITE_BUSY_SNAPSHOT.
 		if err := s.writeTx(func(tx *sql.Tx) error {
+			s.featuresDone.Store(base)
 			for _, id := range ids[start:end] {
 				if s.featuresCanceled() {
 					return errFeaturesBackfillCanceled
@@ -714,19 +736,6 @@ func (s *Store) kvValue(key string) (string, error) {
 		return "", nil
 	}
 	return value, err
-}
-
-// refreshFeatures 重算一部影片的倒排特征（字段变化或演员变化后调用）。
-func (s *Store) refreshFeatures(movieID int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if err = refreshFeaturesTx(tx, movieID); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
 }
 
 // refreshFeaturesTx 在给定事务内重写一部影片的特征行：先删后插，保证与当前元数据一致。
@@ -960,18 +969,26 @@ func (s *Store) featureTooCommon(kind, value string, threshold int) (bool, error
 // 高频特征的判定要看占比，这个计数不能每请求都去 COUNT 一遍。
 func (s *Store) visibleMovieCount() int {
 	version := s.gversion.Load()
-	if s.visibleVersion.Load() == version {
-		if count := s.visibleCount.Load(); count > 0 {
-			return int(count)
-		}
+	if count, ok := cachedVisibleCount(s.visible.Load(), version); ok {
+		return int(count)
 	}
 	var count int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM movies WHERE status IN ('success','manual')").Scan(&count); err != nil || count <= 0 {
 		return 1
 	}
-	s.visibleCount.Store(int64(count))
-	s.visibleVersion.Store(version)
+	// One Store publishes version and count together; readers can never pair a
+	// new version with the previous count (see visibleCountSnapshot).
+	s.visible.Store(&visibleCountSnapshot{version: version, count: int64(count)})
 	return count
+}
+
+// cachedVisibleCount returns the cached count only when it belongs to version.
+// A snapshot for another version is a miss, never a partially valid pair.
+func cachedVisibleCount(snapshot *visibleCountSnapshot, version int64) (int64, bool) {
+	if snapshot == nil || snapshot.version != version || snapshot.count <= 0 {
+		return 0, false
+	}
+	return snapshot.count, true
 }
 
 // MoviesByIDs 批量取影片（按 id 集合，返回 id→影片映射）。
@@ -1028,41 +1045,51 @@ func (s *Store) DeleteMovie(id int64) error {
 
 // DeleteLibrary 删除媒体库及其影片索引（仅删库内记录，不触碰磁盘文件）。
 // userdata / movie_actors 通过外键 ON DELETE CASCADE 随影片一并清理。
+//
+// P2-10 版本语义修正：删除改走 writeVersioned（writeTx 内首条 bump 全局/库
+// 版本，提交成功后才发布）。此前用裸 s.db.Begin() 手写 rollback，绕过了 writeMu
+// 与版本发布，删库不失效任何版本键，缓存会继续返回已删除的库。返回值与错误码
+// 不变：库不存在仍返回 sql.ErrNoRows，且该事务回滚、不发布版本。
 func (s *Store) DeleteLibrary(id int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err = tx.Exec("DELETE FROM movies WHERE library_id=?", id); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	result, err := tx.Exec("DELETE FROM libraries WHERE id=?", id)
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if affected == 0 {
-		_ = tx.Rollback()
-		return sql.ErrNoRows
-	}
-	return tx.Commit()
+	return s.writeVersioned(id, func(tx *sql.Tx) error {
+		if _, err := tx.Exec("DELETE FROM movies WHERE library_id=?", id); err != nil {
+			return err
+		}
+		result, err := tx.Exec("DELETE FROM libraries WHERE id=?", id)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
-// DeleteMissingSources retains the legacy no-version contract. Scan uses
-// ReconcileMissingSources to atomically publish the authoritative inventory.
+// DeleteMissingSources retains the legacy no-version contract (it never bumps
+// versions). Scan uses ReconcileMissingSources to atomically publish the
+// authoritative inventory.
+//
+// P2-8：清点 missing 与删除必须在同一个 writeTx 内完成（照 ReconcileMissingSources
+// / index_delete.go 的写法）。此前先在事务外用 s.db 无锁读一份 missing 列表，
+// 再开事务按路径删除：并发的 IndexMovie 落在两者之间时，会把刚重建的行（连同
+// userdata / movie_actors）一起删掉。代价是空 inventory 也要占一次写事务（与
+// ReconcileMissingSources 一致），换来清点与删除共享同一快照 + busy 重试重算。
 func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{}) error {
-	// Close the read cursor before acquiring a pinned write connection.
-	missing, err := missingSourcePaths(s.db, libraryID, paths)
-	if err != nil || len(missing) == 0 {
-		return err
-	}
 	return s.writeTx(func(tx *sql.Tx) error {
+		missing, err := missingSourcePaths(tx, libraryID, paths)
+		if err != nil {
+			return err
+		}
+		if s.testDeleteMissingSourcesHook != nil {
+			if err := s.testDeleteMissingSourcesHook(); err != nil {
+				return err
+			}
+		}
 		return deleteSourcePathsTx(tx, libraryID, missing)
 	})
 }

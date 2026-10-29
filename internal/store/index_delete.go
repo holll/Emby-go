@@ -50,25 +50,10 @@ func (s *Store) DeleteIndexedMovieSnapshot(id int64) (Movie, error) {
 
 // DeleteIndexedLibrary only deletes database records, never files on disk.
 // Retain the library's version key so cached library responses become obsolete.
-// Legacy DeleteLibrary keeps its separate, unversioned contract.
+// DeleteLibrary now shares this versioned contract (P2-10), so both names point
+// at one implementation instead of a versioned and an unversioned copy.
 func (s *Store) DeleteIndexedLibrary(id int64) error {
-	return s.writeVersioned(id, func(tx *sql.Tx) error {
-		if _, err := tx.Exec("DELETE FROM movies WHERE library_id=?", id); err != nil {
-			return err
-		}
-		result, err := tx.Exec("DELETE FROM libraries WHERE id=?", id)
-		if err != nil {
-			return err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if count == 0 {
-			return sql.ErrNoRows
-		}
-		return nil
-	})
+	return s.DeleteLibrary(id)
 }
 
 // ReconcileMissingSources assumes paths is a complete inventory of the library.

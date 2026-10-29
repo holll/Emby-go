@@ -194,7 +194,10 @@ func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool
 	}
 	result := ScanGroupCommitResult{MovieIDs: make(map[string]int64)}
 	var version int64
-	err := s.writeTx(func(tx *sql.Tx) error {
+	// writeTxContext, not writeTx: a cancelled scan commit must abandon the
+	// writer-lock spin loop instead of holding the caller's goroutine until the
+	// current writer (possibly doing disk IO) finishes.
+	err := s.writeTxContext(ctx, func(tx *sql.Tx) error {
 		result = ScanGroupCommitResult{MovieIDs: make(map[string]int64)}
 		version = 0
 		if err := ctx.Err(); err != nil {
@@ -473,7 +476,9 @@ func (s *Store) reconcileScanInventory(ctx context.Context, lib Library, checkPa
 	}
 	result := ScanReconcileResult{}
 	var version int64
-	err := s.writeTx(func(tx *sql.Tx) error {
+	// See commitScanGroup: keep the caller's cancellation visible while this
+	// commit waits for the in-process writer lock and for a pooled connection.
+	err := s.writeTxContext(ctx, func(tx *sql.Tx) error {
 		result = ScanReconcileResult{}
 		version = 0
 		if err := ctx.Err(); err != nil {
