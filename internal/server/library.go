@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/avatar"
+	"emby-go/internal/cache"
 	"emby-go/internal/imageutil"
 	"emby-go/internal/store"
 )
@@ -386,13 +387,26 @@ func (a *App) dropNFOCache(nfoPath string) {
 // 上传件用独立文件名才能让「上传优先、移除后回退自动封面」有确定行为。
 const libraryCoverFileName = "library-cover.webp"
 
+// cachedBody 读进程内列表/详情缓存：Memory 后端支持零拷贝视图
+// （cache.Viewer），Redis 等后端退回带复制的 Get。
+//
+// 返回值只能立刻写进响应或转成 string，不得改写、append 或继续持有——见
+// cache.Memory.View 的三条契约。这省掉的是每次命中 600KB 的整值克隆：
+// BenchmarkGetHit600K 是 614,400 B/op、BenchmarkViewHit600K 是 0 B/op。
+func (a *App) cachedBody(key string) ([]byte, bool) {
+	if v, ok := a.cache.(cache.Viewer); ok {
+		return v.View(key)
+	}
+	return a.cache.Get(key)
+}
+
 // libraryCoverPath 返回媒体库封面路径，优先级：
 // 管理端上传 → 库根目录自带的 poster/folder/cover/default 图片（webp/jpg/jpeg/png 均可）
 // → 库内最近入库影片的代表图（宽图优先）。
 // 解析要多次 stat 媒体盘并可能回查库，按库版本号缓存（空结果同样缓存）。
 func (a *App) libraryCoverPath(l store.Library) string {
 	key := "libcover:" + a.db.Version("g:version") + ":" + strconv.FormatInt(l.ID, 10)
-	if b, ok := a.cache.Get(key); ok {
+	if b, ok := a.cachedBody(key); ok {
 		return string(b)
 	}
 	path := uploadedLibraryCover(l.Path)
@@ -696,7 +710,7 @@ func (a *App) similar(c *gin.Context) {
 	// 媒体库授权，不能跨账户复用。
 	grantKey := libraryScopeCacheKey(visible, admin)
 	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
-	if b, ok := a.cache.Get(simKey); ok {
+	if b, ok := a.cachedBody(simKey); ok {
 		c.Data(200, "application/json", b)
 		return
 	}
@@ -1344,7 +1358,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		grantKey = strings.Join(parts, ",")
 	}
 	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
-	if b, ok := a.cache.Get("items:" + key); ok {
+	if b, ok := a.cachedBody("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return
 	}
@@ -1674,7 +1688,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	cacheKey := "entities:scope-v1:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
 		strconv.FormatInt(a.currentUserID(c), 10) + ":" + libraryScopeCacheKey(visible, admin) + ":" +
 		strconv.FormatInt(libraryID, 10) + ":" + collection + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(limit)
-	if b, ok := a.cache.Get(cacheKey); ok {
+	if b, ok := a.cachedBody(cacheKey); ok {
 		c.Data(http.StatusOK, "application/json", b)
 		return
 	}
@@ -1818,7 +1832,7 @@ func (a *App) item(c *gin.Context) {
 	}
 	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
 	key := movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), rawID)
-	if b, ok := a.cache.Get(key); ok {
+	if b, ok := a.cachedBody(key); ok {
 		respondMediaJSON(c, b)
 		return
 	}

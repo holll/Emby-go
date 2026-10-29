@@ -146,6 +146,46 @@ func (m *Memory) Get(key string) ([]byte, bool) {
 	return append([]byte(nil), v.value...), true
 }
 
+// Viewer 是缓存后端的可选能力：返回内部持有的只读视图，而不是副本。
+//
+// 只有进程内的 Memory 能实现（Redis 后端跨网络，视图没有意义）。调用方在
+// 拿不到 Viewer 时应退回 Get。
+type Viewer interface {
+	View(string) ([]byte, bool)
+}
+
+// View 是 Get 的零拷贝版本：返回缓存自己持有的切片，不克隆。
+//
+// 契约比 Get 严格，三条都必须遵守：
+//  1. 返回值只读：不得改写、不得 append、不得再切片到 len 以外；
+//  2. 内容在本次调用后保持不变——缓存只会整体替换条目（store 写新的
+//     Element.Value），淘汰与 TTL 只摘链表节点，从不原地改写已发布的值；
+//  3. 有效期到同 key 的下一次 Set/SetBytes/Delete/淘汰/超时为止，典型用法是
+//     "立刻写进 HTTP 响应"。
+//
+// 为什么值得单开一个入口：列表 DTO 一页 200 条约 600KB，Get 每次命中都要克隆
+// 一整份（614,400 B/op、~130µs），而响应体只是被写进 socket 一次
+// （BenchmarkViewHit600K：0 B/op、~100ns）。需要持有或改写副本的调用方继续用 Get。
+func (m *Memory) View(key string) ([]byte, bool) {
+	s := m.shardFor(key)
+	s.mu.Lock()
+	e, ok := s.items[key]
+	if !ok {
+		s.mu.Unlock()
+		return nil, false
+	}
+	v := e.Value.(entry)
+	if !v.expires.IsZero() && time.Now().After(v.expires) {
+		delete(s.items, key)
+		s.order.Remove(e)
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.order.MoveToFront(e)
+	s.mu.Unlock()
+	return v.value, true
+}
+
 func (m *Memory) Set(key string, value []byte, ttl time.Duration) {
 	// 入参的私有副本在锁外构造，调用方 Set 之后仍可随意复用/改写 value。
 	m.store(key, append([]byte(nil), value...), ttl)
@@ -163,8 +203,8 @@ func (m *Memory) Set(key string, value []byte, ttl time.Duration) {
 // 等于把一次响应体的分配翻倍。
 //
 // 契约边界（与 Set 的差别仅此一条）：Set 之后调用方可以随意改自己的切片；
-// SetBytes 之后不可以。其余全部一致：Get 返回独立副本、TTL、分片淘汰、
-// 容量上限、nil/空值语义。
+// SetBytes 之后不可以。其余全部一致：Get/View 都不会原地改写值、TTL、分片
+// 淘汰、容量上限、nil/空值语义；区别只在 Get 返回副本、View 返回只读视图。
 func (m *Memory) SetBytes(key string, value []byte, ttl time.Duration) {
 	m.store(key, value, ttl)
 }

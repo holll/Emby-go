@@ -43,6 +43,23 @@ func BenchmarkGetHit600K(b *testing.B) {
 	}
 }
 
+// BenchmarkViewHit600K 是列表页实际走的读路径：只取视图，不克隆。
+// 与 BenchmarkGetHit600K 的差值就是每次命中省掉的 600KB 拷贝。
+func BenchmarkViewHit600K(b *testing.B) {
+	c := NewMemory(64)
+	c.SetBytes("items:bench", benchPayload(), time.Hour)
+	b.SetBytes(benchValueBytes)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v, ok := c.View("items:bench")
+		if !ok {
+			b.Fatal("bench key missing")
+		}
+		benchSink = len(v)
+	}
+}
+
 // BenchmarkSet600K 写入路径：入参私有副本在锁外构造，锁内只替换 Element。
 func BenchmarkSet600K(b *testing.B) {
 	c := NewMemory(64)
