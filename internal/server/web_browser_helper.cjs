@@ -20,8 +20,36 @@ function available(t) {
   return false;
 }
 
+function browserEnvironment(dir) {
+  const env = {
+    ...process.env,
+    HOME: path.join(dir, 'home'),
+    XDG_CACHE_HOME: path.join(dir, 'cache'),
+    XDG_CONFIG_HOME: path.join(dir, 'config'),
+    XDG_DATA_HOME: path.join(dir, 'data'),
+    XDG_RUNTIME_DIR: path.join(dir, 'runtime'),
+    // Explicit local, nonexistent Unix sockets fail immediately. Never inherit
+    // malformed addresses, network endpoints or D-Bus autolaunch from the host.
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=' + path.join(dir, 'no-session-bus'),
+    DBUS_SYSTEM_BUS_ADDRESS: 'unix:path=' + path.join(dir, 'no-system-bus'),
+  };
+  // Host overrides can bypass the writable XDG font cache entirely. Retain the
+  // system font configuration/fonts, but not unrelated shell overrides.
+  delete env.FONTCONFIG_FILE;
+  delete env.FONTCONFIG_PATH;
+  for (const key of ['HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR']) {
+    fs.mkdirSync(env[key], { recursive: true, mode: 0o700 });
+  }
+  fs.mkdirSync(path.join(env.XDG_CACHE_HOME, 'fontconfig'), { mode: 0o700 });
+  return env;
+}
+
 async function browser(t, executable = chrome) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-browser-'));
+  let env;
+  try { env = browserEnvironment(dir); }
+  catch (error) { fs.rmSync(dir, { recursive: true, force: true }); throw error; }
+  const started = performance.now();
   // Fresh profiles otherwise start first-run/background services. These services
   // are irrelevant to local fixtures and can block cold CI browser startup.
   const proc = spawn(executable, [
@@ -31,14 +59,17 @@ async function browser(t, executable = chrome) {
     '--disable-extensions', '--metrics-recording-only', '--password-store=basic',
     '--use-mock-keychain', '--remote-debugging-port=0',
     '--user-data-dir=' + path.join(dir, 'profile'), 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let stderr = '', ws, exitCode, exitSignal, spawnError;
+  ], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '', ws, exitCode, exitSignal, spawnError, firstStderrMs;
   const exited = new Promise(resolve => {
     proc.once('exit', (code, signal) => { exitCode = code; exitSignal = signal; resolve(); });
     proc.once('error', error => { spawnError = error; resolve(); });
   });
-  proc.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-65536); });
-  const diagnostic = message => Error(`${message}; executable=${executable}; pid=${proc.pid}; exit=${exitCode}; signal=${exitSignal}; spawn=${spawnError?.message || 'none'}\n${stderr}`);
+  proc.stderr.on('data', chunk => {
+    if (firstStderrMs === undefined) firstStderrMs = Math.round(performance.now() - started);
+    stderr = (stderr + chunk).slice(-65536);
+  });
+  const diagnostic = message => Error(`${message}; executable=${executable}; pid=${proc.pid}; exit=${exitCode}; signal=${exitSignal}; spawn=${spawnError?.message || 'none'}; elapsed_ms=${Math.round(performance.now() - started)}; first_stderr_ms=${firstStderrMs ?? 'none'}\n${stderr}`);
   t.after(async () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({ id: 0, method: 'Browser.close' })); } catch { /* bounded termination below */ }
@@ -57,12 +88,14 @@ async function browser(t, executable = chrome) {
       if (match) finish(null, match[1]);
     };
     const onError = () => finish(diagnostic('Chromium spawn failed'));
+    // 'exit' can precede draining stderr. Wait for 'close' to retain the actual
+    // startup failure, without sleeping, retrying or changing the startup budget.
     const onExit = () => finish(diagnostic('Chromium exited before CDP startup'));
     function finish(error, value) {
-      clearTimeout(timeout); proc.stderr.off('data', onData); proc.off('error', onError); proc.off('exit', onExit);
+      clearTimeout(timeout); proc.stderr.off('data', onData); proc.off('error', onError); proc.off('close', onExit);
       if (error) reject(error); else resolve(value);
     }
-    proc.stderr.on('data', onData); proc.once('error', onError); proc.once('exit', onExit);
+    proc.stderr.on('data', onData); proc.once('error', onError); proc.once('close', onExit);
   });
   ws = new WebSocket(url);
   await new Promise((resolve, reject) => {

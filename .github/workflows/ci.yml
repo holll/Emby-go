@@ -157,7 +157,8 @@ jobs:
       - name: Frontend VM tests
         run: |
           set -o pipefail
-          node --test --test-reporter=tap internal/server/web*_test.cjs 2>&1 | tee /tmp/web-test.log
+          # Avoid competing cold Chromium starts on small runners; all files and assertions still run.
+          node --test --test-concurrency=1 --test-reporter=tap internal/server/web*_test.cjs 2>&1 | tee /tmp/web-test.log
 
       # 将首个失败断言写进公开 annotations，不再只看到 exit code 1。
       - name: Frontend failure details
