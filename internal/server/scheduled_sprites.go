@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
@@ -41,24 +42,38 @@ func parseScheduledSpriteParams(raw map[string]any) (scheduledSpriteParams, erro
 	return p, nil
 }
 
+// failScheduledSprites 处理「还没进入任务列表」就失败的雪碧图执行：
+// 这类失败原先只返回一句固定文案，任务页没有条目、底层原因也无处可查。
+// 这里补一条任务记录（管理端任务页可见），把底层原因用 %w 留给 scheduler
+// 写进计划任务「上次结果」，并单独记一条带任务名的错误日志。
+func (a *App) failScheduledSprites(task scheduler.Task, stage string, cause error) error {
+	err := fmt.Errorf("雪碧图计划任务失败（%s）: %w", stage, cause)
+	id := a.startTask("video_sprites")
+	slog.Error("雪碧图计划任务失败", "name", task.Name, "type", task.Type, "task_id", id, "stage", stage, "error", cause)
+	a.finishTask(id, err)
+	return err
+}
+
 func (a *App) runScheduledSprites(parent context.Context, task scheduler.Task) error {
 	p, err := parseScheduledSpriteParams(task.Params)
 	if err != nil {
-		return err
+		return a.failScheduledSprites(task, "参数无效", err)
 	}
 	if err = parent.Err(); err != nil {
+		slog.Debug("雪碧图计划任务未执行：调度已取消", "name", task.Name, "task_id", task.ID, "error", err)
 		return err
 	}
 	if err = a.rootCtx.Err(); err != nil {
+		slog.Debug("雪碧图计划任务未执行：服务正在关停", "name", task.Name, "task_id", task.ID, "error", err)
 		return err
 	}
 	opts, err := a.spriteOptions()
 	if err != nil {
-		return errors.New("ffmpeg 或 ffprobe 不可用")
+		return a.failScheduledSprites(task, "ffmpeg 或 ffprobe 不可用", err)
 	}
 	total, maxID, err := a.db.ScheduledSpriteScope(parent, p.LibraryID)
 	if err != nil {
-		return errors.New("视频预览媒体库范围不可用")
+		return a.failScheduledSprites(task, "视频预览媒体库范围不可用", err)
 	}
 	if p.Limit > 0 && total > p.Limit {
 		total = p.Limit
@@ -66,11 +81,20 @@ func (a *App) runScheduledSprites(parent context.Context, task scheduler.Task) e
 	a.sprites.mu.Lock()
 	if a.rootCtx.Err() != nil || parent.Err() != nil {
 		a.sprites.mu.Unlock()
+		slog.Debug("雪碧图计划任务未执行：服务正在关停或调度已取消", "name", task.Name, "task_id", task.ID)
 		return context.Canceled
 	}
-	if a.sprites.status.Running || !a.claimNFO("sprites") {
+	// 跳过（scheduler.ErrBusy）也要能定位：区分「上一轮仍在跑」与「别的
+	// 媒体维护任务占着 NFO 锁」，两种情况运维处理方式完全不同。
+	if a.sprites.status.Running {
 		a.sprites.mu.Unlock()
-		return scheduler.ErrBusy
+		slog.Info("雪碧图计划任务跳过：上一轮生成仍在执行", "name", task.Name, "task_id", task.ID)
+		return fmt.Errorf("%w：上一轮雪碧图生成仍在执行", scheduler.ErrBusy)
+	}
+	if !a.claimNFO("sprites") {
+		a.sprites.mu.Unlock()
+		slog.Info("雪碧图计划任务跳过：刮削/翻译等媒体维护任务正在占用", "name", task.Name, "task_id", task.ID)
+		return fmt.Errorf("%w：刮削或翻译等媒体维护任务正在占用", scheduler.ErrBusy)
 	}
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	stopParent := context.AfterFunc(parent, cancel)
@@ -79,6 +103,10 @@ func (a *App) runScheduledSprites(parent context.Context, task scheduler.Task) e
 	a.sprites.status = spriteStatus{InstanceID: a.instanceID, TaskID: id, MovieIDs: []int64{}, Running: true, Total: total}
 	a.sprites.cancel = cancel
 	a.sprites.mu.Unlock()
+	// 开始日志带上解析后的作用域与目标数：任务参数是 JSON，
+	// 用户在日志里要能直接看到「这次到底要生成多少、覆盖哪个库」。
+	slog.Info("雪碧图计划任务开始", "name", task.Name, "task_id", id,
+		"library_id", p.LibraryID, "limit", p.Limit, "overwrite", p.Overwrite, "total", total)
 	// A scheduler run is synchronous: cron.Stop waits for it, and manual RunNow
 	// is already registered with workerWG by adminRunScheduledTask.
 	after := int64(0)

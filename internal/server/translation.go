@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"strconv"
@@ -274,6 +275,9 @@ func (a *App) translationSnapshot() translationStatus {
 }
 
 func (a *App) executeTranslation(ctx context.Context, taskID int64, cfg scraper.Config, req translationRequest) (err error) {
+	started := time.Now()
+	scope := fmt.Sprintf("library_id=%d limit=%d fields=%v movies=%d",
+		req.LibraryID, req.Limit, req.Fields, len(req.MovieIDs))
 	defer func() {
 		a.cache.Clear()
 		a.translation.mu.Lock()
@@ -295,8 +299,22 @@ func (a *App) executeTranslation(ctx context.Context, taskID int64, cfg scraper.
 		}
 		a.translation.cancel = nil
 		a.releaseNFO("translate")
+		// 计数器与失败样例在锁内取快照：翻译任务以前没有任何汇总日志，
+		// 结束后只剩任务行的一句 message，看不出成功/跳过/失败各多少、多久、首因是什么。
+		success, skipped, failed, total, done := status.Success, status.Skipped, status.Failed, status.Total, status.Done
+		first := scheduledFirstSample(status.Failures)
 		a.translation.mu.Unlock()
 		a.finishTask(taskID, err)
+		fields := []any{"task_id", taskID, "scope", scope, "success", success,
+			"skipped", skipped, "failed", failed, "done", done, "total", total,
+			"elapsed", time.Since(started).Round(time.Millisecond).String()}
+		if first != "" {
+			fields = append(fields, "first_failure", first)
+		}
+		if err != nil {
+			fields = append(fields, "error", err)
+		}
+		slog.Info("独立翻译任务结束", fields...)
 	}()
 	engine := scraper.New(cfg, a.db)
 	item := engine.TranslateExisting
@@ -460,6 +478,7 @@ func (a *App) adminTranslationCancel(c *gin.Context) {
 }
 
 func (a *App) runScheduledTranslation(task scheduler.Task) error {
+	scope := scheduledScope(task.Params)
 	data, err := json.Marshal(task.Params)
 	if err != nil {
 		return err
@@ -469,18 +488,25 @@ func (a *App) runScheduledTranslation(task scheduler.Task) error {
 	}
 	req, err := decodeTranslationRequest(data, true)
 	if err != nil {
+		slog.Warn("计划任务翻译参数非法，本次未执行", "task", task.Name, "scope", scope, "error", err)
 		return err
 	}
 	cfg, total, err := a.prepareTranslation(req)
 	if err != nil {
+		// 未配置翻译服务/目标不存在等准备期失败，日志要带作用域与原始 err，
+		// 否则用户只看到任务行里一句友好文案，不知道是配置问题还是范围写错。
+		slog.Warn("计划任务翻译未执行", "task", task.Name, "scope", scope, "error", err)
 		return err
 	}
 	ctx, taskID, err := a.beginTranslation(total)
 	if errors.Is(err, errTranslationBusy) {
-		return scheduler.ErrBusy
+		slog.Info("计划任务翻译跳过", "task", task.Name, "scope", scope,
+			"reason", "翻译或其它 NFO 写入任务正在进行")
+		return scheduledBusy("翻译或其它 NFO 写入任务正在进行")
 	}
 	if err != nil {
 		return err
 	}
+	slog.Info("计划任务翻译开始", "task", task.Name, "task_id", taskID, "scope", scope, "total", total)
 	return a.executeTranslation(ctx, taskID, cfg, req)
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -301,6 +302,7 @@ func (a *App) adminScrapeRun(c *gin.Context) {
 // executeScrape 同步跑完一批刮削并完成全部收尾（调用方负责起 goroutine）。
 // 同步形态是为了让计划任务能据此判定重叠与成败。
 func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
+	started := time.Now()
 	taskID := a.startTask("scrape")
 	opts.OnProgress = a.updateScrapeProgress
 	opts.OnItem = func(item scraper.ItemResult) {
@@ -338,9 +340,34 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 	a.cache.Clear()
 	a.finishTask(taskID, err)
 	a.endScrape(err)
-	slog.Info("刮削任务结束", "success", progress.Success, "skipped", progress.Skipped,
-		"failed", progress.Failed, "total", progress.Total, "error", err)
+	// 结束日志必须自解释：作用域 + 成败计数 + 耗时 + 失败首因。
+	// 用户反馈「只有已开始/已结束」，根因就是这条只有计数、没有范围与样例首因。
+	fields := []any{"task_id", taskID, "scope", scrapeScope(opts),
+		"success", progress.Success, "skipped", progress.Skipped,
+		"failed", progress.Failed, "total", progress.Total,
+		"elapsed", time.Since(started).Round(time.Millisecond).String()}
+	if first := scheduledFirstSample(a.scrapeFailureSamples()); first != "" {
+		fields = append(fields, "first_failure", first)
+	}
+	if err != nil {
+		fields = append(fields, "error", err)
+	}
+	slog.Info("刮削任务结束", fields...)
 	return err
+}
+
+// scrapeScope 渲染一批刮削的有效作用域。计划任务与手动任务共用 execute* 路径，
+// 结束日志自己说清范围，才不用回头找「启动」那条日志去配对。
+func scrapeScope(opts scraper.RunOptions) string {
+	return fmt.Sprintf("library_id=%d limit=%d only_missing=%t overwrite=%t",
+		opts.LibraryID, opts.Limit, opts.OnlyMissing, opts.Overwrite)
+}
+
+// scrapeFailureSamples 返回限量失败样例的副本（日志汇总用；与 /scrape/progress 同源）。
+func (a *App) scrapeFailureSamples() []string {
+	a.scrapeTaskMu.RLock()
+	defer a.scrapeTaskMu.RUnlock()
+	return append([]string(nil), a.scrapeStatus.Failures...)
 }
 
 // adminScrapeAvatars 启动演员头像任务（异步）。
@@ -405,6 +432,8 @@ func (a *App) adminScrapeAvatars(c *gin.Context) {
 
 // executeScrapeAvatars 同步跑完头像任务并收尾（与影片刮削同样的同步形态）。
 func (a *App) executeScrapeAvatars(cfg scraper.Config, libraryID int64, limit int) error {
+	started := time.Now()
+	scope := fmt.Sprintf("library_id=%d limit=%d", libraryID, limit)
 	taskID := a.startTask("scrape_avatars")
 	// claim/release 成对放在本函数内（与 executeScrape 同一理由）：goroutine
 	// 起不来时不会把 nfoOwner 永久留在 "scrape_avatars"。
@@ -420,18 +449,27 @@ func (a *App) executeScrapeAvatars(cfg scraper.Config, libraryID int64, limit in
 				}
 			})
 	}()
+	elapsed := time.Since(started).Round(time.Millisecond).String()
+	fields := []any{"task_id", taskID, "scope", scope, "success", progress.Success,
+		"skipped", progress.Skipped, "failed", progress.Failed, "total", progress.Total,
+		"elapsed", elapsed}
+	if first := scheduledFirstSample(a.scrapeFailureSamples()); first != "" {
+		fields = append(fields, "first_failure", first)
+	}
 	if err != nil {
 		a.finishTask(taskID, err)
 		a.endScrape(err)
 		a.cache.Clear()
-		slog.Warn("演员头像任务提前结束", "error", err)
+		// 提前结束也要带计数与首因：只写 error 的日志看不出已经处理了多少、
+		// 失败的是哪一条，等于把「为什么失败」又丢回给了任务行。
+		fields = append(fields, "error", err)
+		slog.Warn("演员头像任务提前结束", fields...)
 		return err
 	}
 	a.finishTask(taskID, err)
 	a.endScrape(err)
 	a.cache.Clear()
-	slog.Info("演员头像任务结束", "success", progress.Success, "skipped", progress.Skipped,
-		"failed", progress.Failed, "total", progress.Total, "error", err)
+	slog.Info("演员头像任务结束", fields...)
 	return err
 }
 

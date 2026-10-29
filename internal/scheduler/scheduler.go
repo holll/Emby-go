@@ -155,6 +155,21 @@ func (s *Scheduler) release(id int64) {
 	s.runMu.Unlock()
 }
 
+// taskParams 把任务参数渲染成稳定的键值串（json.Marshal 对 map 键排序），
+// 供开始/结束/跳过三类日志定位「这一次到底跑的还是哪个范围」：
+// 以前日志只有 task_id/type，运维看不出同一条任务改过作用域后是否真的生效。
+func taskParams(params map[string]any) string {
+	if len(params) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		// 参数来自库里已规范化的 JSON，取舍上宁可留个可读兜底也不要丢日志。
+		return fmt.Sprintf("%v", params)
+	}
+	return string(data)
+}
+
 // fire 到点执行：调 Runner 并把结果写回任务行。
 func (s *Scheduler) fire(task Task) {
 	if !s.acquire(task.ID) {
@@ -162,7 +177,8 @@ func (s *Scheduler) fire(task Task) {
 		if rerr := s.store.RecordScheduledResult(task.ID, StatusSkipped, message); rerr != nil {
 			slog.Warn("写入计划任务结果失败", "task_id", task.ID, "error", rerr)
 		}
-		slog.Info("计划任务跳过", "task_id", task.ID, "name", task.Name, "type", task.Type, "reason", message)
+		slog.Info("计划任务跳过", "task_id", task.ID, "name", task.Name, "type", task.Type,
+			"params", taskParams(task.Params), "reason", message)
 		return
 	}
 	defer s.release(task.ID)
@@ -172,6 +188,10 @@ func (s *Scheduler) fire(task Task) {
 // fireLocked 执行任务并落库；调用方已 acquire(task.ID)。
 func (s *Scheduler) fireLocked(task Task) {
 	start := time.Now()
+	// 调度层的「开始」：以前这条只由 server 的内存任务列表（startTask）输出，
+	// 于是准备阶段就失败的执行（参数非法/未配置/忙）只有一条无上下文的「结束」。
+	slog.Info("计划任务开始", "task_id", task.ID, "name", task.Name, "type", task.Type,
+		"cron", task.Cron, "params", taskParams(task.Params))
 	err := s.runner(s.ctx, task)
 	status, message := StatusSuccess, ""
 	switch {
@@ -185,7 +205,8 @@ func (s *Scheduler) fireLocked(task Task) {
 		slog.Warn("写入计划任务结果失败", "task_id", task.ID, "error", rerr)
 	}
 	slog.Info("计划任务执行结束", "task_id", task.ID, "name", task.Name, "type", task.Type,
-		"status", status, "elapsed", time.Since(start).Round(time.Millisecond).String(), "message", message)
+		"status", status, "elapsed", time.Since(start).Round(time.Millisecond).String(),
+		"params", taskParams(task.Params), "message", message)
 }
 
 // RunNow 立即执行一次指定任务（同步；调用方需要异步请自行起 goroutine）。

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,44 +67,102 @@ func (a *App) runScheduledTask(ctx context.Context, task scheduler.Task) error {
 	}
 }
 
+// —— 日志辅助：开始/结束/跳过都要说清「跑了哪个范围、为什么没跑」——
+
+// scheduledScope 把计划任务参数压成一条稳定的作用域描述（键排序、跳过空值）。
+// 计划任务的日志以前只有任务名，看不出 library_id/limit 等实际作用域，
+// 用户只看到「已开始/已结束」，无法判断执行是否真的覆盖了他配置的范围。
+func scheduledScope(params map[string]any) string {
+	keys := slices.Sorted(maps.Keys(params))
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := params[key]
+		if value == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%v", key, value))
+	}
+	if len(parts) == 0 {
+		return "全部范围"
+	}
+	return strings.Join(parts, " ")
+}
+
+// scheduledBusy 保留 ErrBusy 语义（调度器据此把本次记为「跳过」而不是失败），
+// 同时把「被谁占着」写进文案：只返回「任务正在进行中」时，
+// 运维无法区分是同类任务没结束、还是扫库/探测占着 NFO 通道。
+func scheduledBusy(reason string) error {
+	return fmt.Errorf("%w：%s", scheduler.ErrBusy, reason)
+}
+
+// scheduledFirstSample 取失败样例的第一条当「失败首因」；样例列表是限量的，
+// 首因进汇总日志，全量样例仍由各任务的进展接口/失败汇总日志提供。
+func scheduledFirstSample(samples []string) string {
+	if len(samples) == 0 {
+		return ""
+	}
+	return samples[0]
+}
+
 // runScheduledScan 执行扫描/重建索引（同步阻塞直到结束，调度器据此判定重叠）。
 func (a *App) runScheduledScan(task scheduler.Task) error {
+	scope := scheduledScope(task.Params)
 	libraryID := int64(0)
 	mode := scanner.ScanModeFull
 	if task.Type == "scan" {
 		var err error
 		libraryID, mode, err = scheduledScanParams(task.Params)
 		if err != nil {
+			// 参数非法时也要落一条日志：此前只把 err 写回任务行，
+			// 日志里没有这次执行的任何痕迹，等于「到点了但什么都没发生」。
+			slog.Warn("计划任务扫描参数非法，本次未执行", "task", task.Name, "type", task.Type,
+				"scope", scope, "error", err)
 			return err
 		}
 	}
 	marker, err := scheduledScanMarker(task.Params)
 	if err != nil {
+		slog.Warn("计划任务扫描参数非法，本次未执行", "task", task.Name, "type", task.Type,
+			"scope", scope, "error", err)
 		return err
 	}
 	if a.scanning() {
-		return scheduler.ErrBusy
+		slog.Info("计划任务扫描跳过", "task", task.Name, "type", task.Type, "scope", scope,
+			"reason", "扫库/重建索引任务正在进行")
+		return scheduledBusy("扫库/重建索引任务正在进行")
 	}
+	start := time.Now()
+	// 跳过日志只说「没跑」，这里补「即将跑什么」：模式与作用域是用户配置后最想确认的两项。
+	slog.Info("计划任务扫描开始", "task", task.Name, "type", task.Type, "scope", scope,
+		"mode", string(mode), "incremental_marker", marker.Path != "")
 	taskID := a.startTask(task.Type)
 	result, err := a.scanLibraries(libraryID, taskID, mode, false, marker)
 	if errors.Is(err, errScanBusy) {
 		a.finishTaskBusy(taskID, err.Error())
-		return scheduler.ErrBusy
+		slog.Info("计划任务扫描跳过", "task", task.Name, "type", task.Type, "scope", scope,
+			"reason", err.Error(), "elapsed", time.Since(start).Round(time.Millisecond).String())
+		return scheduledBusy(err.Error())
 	}
 	a.finishTask(taskID, err)
+	elapsed := time.Since(start).Round(time.Millisecond).String()
 	if err != nil {
+		slog.Error("计划任务扫描失败", "task", task.Name, "type", task.Type, "scope", scope,
+			"mode", string(mode), "elapsed", elapsed, "error", err)
 		return err
 	}
-	slog.Info("计划任务扫描完成", "task", task.Name, "library_id", libraryID,
+	slog.Info("计划任务扫描完成", "task", task.Name, "type", task.Type,
+		"library_id", libraryID, "mode", string(mode),
 		"success", result.Success, "pending", result.Pending,
-		"skipped", result.Skipped, "failed", result.Failed)
+		"skipped", result.Skipped, "failed", result.Failed, "elapsed", elapsed)
 	return nil
 }
 
 // runScheduledProbe 执行媒体信息探测（同步阻塞直到结束）。
 func (a *App) runScheduledProbe(task scheduler.Task) error {
+	scope := scheduledScope(task.Params)
 	status, err := scheduledProbeStatus(task.Params)
 	if err != nil {
+		slog.Warn("计划任务探测参数非法，本次未执行", "task", task.Name, "scope", scope, "error", err)
 		return err
 	}
 	req := probeRequest{
@@ -117,23 +176,43 @@ func (a *App) runScheduledProbe(task scheduler.Task) error {
 	}
 	plan, err := a.prepareProbe(req)
 	if errors.Is(err, errProbeBusy) {
-		return scheduler.ErrBusy
+		slog.Info("计划任务探测跳过", "task", task.Name, "scope", scope,
+			"reason", "同类探测任务或 NFO 通道已被占用")
+		return scheduledBusy("媒体信息探测或 NFO 通道已被占用")
 	}
 	if err != nil {
+		// 准备阶段失败（ffprobe 自检、读库）以前只有任务行里的一句 message，
+		// 日志补上作用域与原始 err，便于区分「环境坏了」还是「范围选错了」。
+		slog.Error("计划任务探测准备失败", "task", task.Name, "scope", scope, "error", err)
 		return err
 	}
 	if len(plan.targets) == 0 {
-		slog.Info("计划任务探测跳过：没有可探测的影片", "task", task.Name)
+		slog.Info("计划任务探测跳过：没有可探测的影片", "task", task.Name, "scope", scope,
+			"status", statusOrAll(status), "movies", plan.movies)
 		return nil
 	}
 	if err := a.beginProbe(len(plan.targets)); err != nil {
 		if errors.Is(err, errServerShuttingDown) {
 			return context.Canceled
 		}
-		return scheduler.ErrBusy
+		slog.Info("计划任务探测跳过", "task", task.Name, "scope", scope,
+			"reason", "启动探测被拒绝（服务正在关停或探测通道被占用）")
+		return scheduledBusy("媒体信息探测通道已被占用")
 	}
 	taskID := a.startTask("probe")
+	slog.Info("计划任务探测开始", "task", task.Name, "task_id", taskID, "scope", scope,
+		"status", statusOrAll(status), "only_missing", plan.onlyMissing,
+		"movies", plan.movies, "files", len(plan.targets))
 	return a.runProbe(taskID, plan.ffprobe, plan.targets, plan.onlyMissing)
+}
+
+// statusOrAll 把空状态（历史任务，语义为 success）显示成具体值，
+// 否则日志里 status= 是空的，读者会以为筛选条件没生效。
+func statusOrAll(status string) string {
+	if status == "" {
+		return "success"
+	}
+	return status
 }
 
 // —— 参数取值：Params 来自 JSON 解码，数字一律是 float64 ——
@@ -592,8 +671,11 @@ func (a *App) reloadScheduled() {
 // runScheduledScrape 定时批量刮削：同步执行，调度器据此判定重叠。
 // 与手动批量走同一条路径，因此同样「全部结束后整库扫一次」。
 func (a *App) runScheduledScrape(task scheduler.Task) error {
+	scope := scheduledScope(task.Params)
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
+		// 以前这里直接 return errors.New，日志里连「为什么没跑」都没有，只有任务行一句话。
+		slog.Warn("计划任务刮削未执行：未配置 MetaTube 地址或 token", "task", task.Name, "scope", scope)
 		return errors.New("未配置 MetaTube 地址或 token")
 	}
 	onlyMissing := true
@@ -609,24 +691,31 @@ func (a *App) runScheduledScrape(task scheduler.Task) error {
 	limit := int(paramInt64(task.Params, "limit"))
 
 	if owner := a.nfoBusyOwner(); owner != "" {
-		return scheduler.ErrBusy
+		slog.Info("计划任务刮削跳过", "task", task.Name, "scope", scope,
+			"reason", owner+" 正在占用 NFO 写入通道")
+		return scheduledBusy(owner + " 正在占用 NFO 写入通道")
 	}
 	total, err := a.db.CountMoviesForScrape(libraryID, onlyMissing)
 	if err != nil {
+		slog.Error("计划任务刮削统计待刮削影片失败，本次未执行", "task", task.Name, "scope", scope,
+			"library_id", libraryID, "only_missing", onlyMissing, "error", err)
 		return err
 	}
 	if total == 0 {
-		slog.Info("计划任务刮削跳过：没有符合条件的影片", "task", task.Name)
+		slog.Info("计划任务刮削跳过：没有符合条件的影片", "task", task.Name, "scope", scope,
+			"library_id", libraryID, "only_missing", onlyMissing)
 		return nil
 	}
 	if err := a.beginScrape("scrape", total); err != nil {
 		if errors.Is(err, errServerShuttingDown) {
 			return context.Canceled
 		}
-		return scheduler.ErrBusy
+		slog.Info("计划任务刮削跳过", "task", task.Name, "scope", scope,
+			"reason", "同类刮削任务正在进行")
+		return scheduledBusy("同类刮削任务正在进行")
 	}
-	slog.Info("计划任务刮削启动", "task", task.Name, "total", total,
-		"library_id", libraryID, "only_missing", onlyMissing, "overwrite", overwrite)
+	slog.Info("计划任务刮削启动", "task", task.Name, "scope", scope, "total", total,
+		"library_id", libraryID, "limit", limit, "only_missing", onlyMissing, "overwrite", overwrite)
 	// NFO 通道由 executeScrape 在自己的栈里 claim + defer release。
 	return a.executeScrape(cfg, scraper.RunOptions{
 		LibraryID: libraryID, OnlyMissing: onlyMissing, Limit: limit, Overwrite: overwrite,
@@ -635,31 +724,41 @@ func (a *App) runScheduledScrape(task scheduler.Task) error {
 
 // runScheduledScrapeAvatars 定时补演员头像。
 func (a *App) runScheduledScrapeAvatars(task scheduler.Task) error {
+	scope := scheduledScope(task.Params)
 	cfg := a.scrapeConfig()
 	if !cfg.Configured() {
+		slog.Warn("计划任务头像补全未执行：未配置 MetaTube 地址或 token", "task", task.Name, "scope", scope)
 		return errors.New("未配置 MetaTube 地址或 token")
 	}
 	libraryID := paramInt64(task.Params, "library_id")
 	limit := int(paramInt64(task.Params, "limit"))
 
 	if owner := a.nfoBusyOwner(); owner != "" {
-		return scheduler.ErrBusy
+		slog.Info("计划任务头像补全跳过", "task", task.Name, "scope", scope,
+			"reason", owner+" 正在占用 NFO 写入通道")
+		return scheduledBusy(owner + " 正在占用 NFO 写入通道")
 	}
 	names, err := a.db.ActorsMissingAvatar(libraryID, limit)
 	if err != nil {
+		slog.Error("计划任务头像补全统计缺头像演员失败，本次未执行", "task", task.Name, "scope", scope,
+			"library_id", libraryID, "limit", limit, "error", err)
 		return err
 	}
 	if len(names) == 0 {
-		slog.Info("计划任务头像补全跳过：没有缺头像的演员", "task", task.Name)
+		slog.Info("计划任务头像补全跳过：没有缺头像的演员", "task", task.Name, "scope", scope,
+			"library_id", libraryID, "limit", limit)
 		return nil
 	}
 	if err := a.beginScrape("scrape_avatars", len(names)); err != nil {
 		if errors.Is(err, errServerShuttingDown) {
 			return context.Canceled
 		}
-		return scheduler.ErrBusy
+		slog.Info("计划任务头像补全跳过", "task", task.Name, "scope", scope,
+			"reason", "同类刮削任务正在进行")
+		return scheduledBusy("同类刮削任务正在进行")
 	}
-	slog.Info("计划任务头像补全启动", "task", task.Name, "actors", len(names), "library_id", libraryID)
+	slog.Info("计划任务头像补全启动", "task", task.Name, "scope", scope, "actors", len(names),
+		"library_id", libraryID, "limit", limit)
 	// NFO 通道由 executeScrapeAvatars 在自己的栈里 claim + defer release。
 	return a.executeScrapeAvatars(cfg, libraryID, limit)
 }

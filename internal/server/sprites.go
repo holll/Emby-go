@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/jpeg"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -181,7 +183,21 @@ func (a *App) adminSpriteRun(c *gin.Context) {
 	go func() { defer release(); a.executeSprites(ctx, id, req, opts) }()
 	c.JSON(202, accepted)
 }
+
+// spriteFailLogLimit 逐影片失败日志只记录前若干条：大规模失败时不刷屏，
+// 也不为每条失败额外分配 Attr；剩余数量与首因由结尾的汇总行给出。
+const spriteFailLogLimit = 10
+
+// errSpriteNoOutput 生成器既未报错、也未返回跳过或变更：结果自相矛盾。
+// 计为失败并留下原因，避免只看到失败计数、看不到为什么。
+var errSpriteNoOutput = errors.New("生成器既未报错也未产生新版本")
+
 func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, opts artwork.SpriteOptions) (runErr error) {
+	started := time.Now()
+	// 诊断信息只在本次执行的内存里累计，逐影片路径是常数开销。
+	var firstErr error // 首个失败原因（含影片 id），只赋值一次
+	var listErr error  // 目标分页读取失败：底层原因要留在任务行上
+	done, failed, logged, success, skipped := 0, 0, 0, 0, 0
 	defer func() {
 		a.sprites.mu.Lock()
 		s := &a.sprites.status
@@ -190,12 +206,19 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 		s.Cancelled = ctx.Err() != nil
 		s.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		var taskErr error
-		if s.Cancelled {
+		switch {
+		case s.Cancelled:
 			s.Error = "任务已取消"
-		} else if s.Failed > 0 {
+			taskErr = errors.New(s.Error)
+		case listErr != nil:
+			// 目标读取失败曾经只写固定文案，底层 err 被丢掉；任务行是管理端
+			// 唯一可见的失败说明，这里必须把原因带上。
+			s.Error = "视频预览任务目标读取失败: " + listErr.Error()
+			taskErr = fmt.Errorf("视频预览任务目标读取失败: %w", listErr)
+		case s.Failed > 0:
+			// 逐影片原因只进服务日志：错误文本里可能含带凭据的 STRM URL，
+			// 不能落到管理端可见的任务行与计划任务「上次结果」。
 			s.Error = "部分视频预览生成失败，请检查可信源及服务配置"
-		}
-		if s.Error != "" {
 			taskErr = errors.New(s.Error)
 		}
 		if s.Cancelled {
@@ -203,6 +226,7 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 		} else {
 			runErr = taskErr
 		}
+		cancelled, taskID := s.Cancelled, s.TaskID
 		if a.sprites.cancel != nil {
 			a.sprites.cancel()
 		}
@@ -210,6 +234,25 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 		a.finishTask(id, taskErr)
 		a.releaseNFO("sprites")
 		a.sprites.mu.Unlock()
+		// 汇总日志放在解锁之后：写日志不该占着状态锁，也不影响已经落定的状态。
+		elapsed := time.Since(started).Round(time.Millisecond).String()
+		switch {
+		case listErr != nil:
+			slog.Error("视频预览任务中止：目标读取失败", "task_id", taskID, "instance_id", a.instanceID,
+				"done", done, "failed", failed, "elapsed", elapsed, "error", listErr)
+		case cancelled:
+			slog.Info("视频预览任务已取消", "task_id", taskID, "done", done,
+				"success", success, "skipped", skipped, "failed", failed, "elapsed", elapsed)
+		case failed > 0:
+			slog.Warn("视频预览任务结束：部分影片生成失败", "task_id", taskID, "instance_id", a.instanceID,
+				"done", done, "success", success, "skipped", skipped, "failed", failed,
+				"logged", logged, "suppressed", failed-logged, "elapsed", elapsed, "first_error", firstErr)
+		default:
+			// 成功路径也必须有一条汇总：否则「已开始」之后仍然什么都没有，
+			// 用户只能靠任务行的时间戳猜它到底生成了多少张。
+			slog.Info("视频预览任务结束", "task_id", taskID, "instance_id", a.instanceID,
+				"done", done, "success", success, "skipped", skipped, "failed", failed, "elapsed", elapsed)
+		}
 	}()
 	run := a.sprites.run
 	if run == nil {
@@ -230,9 +273,8 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 	for ctx.Err() == nil {
 		movieID, interval, ok, err := next(ctx)
 		if err != nil {
-			a.sprites.mu.Lock()
-			a.sprites.status.Error = "视频预览任务目标读取失败"
-			a.sprites.mu.Unlock()
+			// 底层 err 必须一路留到任务行与汇总日志，而不是只留一句固定文案。
+			listErr = err
 			break
 		}
 		if !ok {
@@ -252,20 +294,45 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 			a.sprites.mu.Unlock()
 		}
 		result, err := run(ctx, a.db, artwork.SpriteRequest{MovieID: movieID, IntervalMs: int64(interval) * 1000, Overwrite: req.Overwrite}, opts)
+		var cause error
+		shouldLog := false
 		a.sprites.mu.Lock()
 		s := &a.sprites.status
 		s.Done++
+		done++
 		switch {
 		case err != nil:
 			s.Failed++
+			cause = err
 		case result.Skipped:
 			s.Skipped++
+			skipped++
 		case result.Changed:
 			s.Success++
+			success++
 		default:
 			s.Failed++
+			cause = errSpriteNoOutput
+		}
+		if cause != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("影片 %d: %w", movieID, cause)
+			}
+			// 逐影片日志限量：前 spriteFailLogLimit 条带原始原因，其余计入汇总的 suppressed。
+			if logged < spriteFailLogLimit {
+				logged++
+				shouldLog = true
+			}
 		}
 		a.sprites.mu.Unlock()
+		if shouldLog {
+			msg := "视频预览生成失败"
+			if err == nil {
+				msg = "视频预览生成未产生新版本"
+			}
+			slog.Warn(msg, "task_id", id, "movie_id", movieID, "interval_seconds", interval, "error", cause)
+		}
 	}
 	return nil
 }

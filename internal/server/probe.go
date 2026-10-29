@@ -422,6 +422,8 @@ func (a *App) probing() bool {
 // 不能用发起请求的 context，否则 handler 一返回任务就被取消。
 // 返回非 nil 表示因连续失败过多主动中止（人工取消不算错误）。
 func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, onlyMissing bool) error {
+	// 汇总日志要带耗时：只报「结束」而不报跑了多久，无法判断是秒级空转还是真的在探测。
+	started := time.Now()
 	// 与本任务 claim 配对，且必须用 defer：这条 goroutine 没有 recover，
 	// 中途 panic 或将来新增的提前 return 都会让 nfoOwner 永久停在 "probe"，
 	// 此后扫库/刮削/探测全部被拒，只能重启进程。
@@ -436,7 +438,7 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 
 	// R6：启动日志固定 0/N；总数是文件级 len(targets)，不是影片数。
 	slog.Info(fmt.Sprintf("媒体信息探测[0/%d]，任务开始", len(targets)),
-		"task_id", taskID, "total", len(targets), "state", "started")
+		"task_id", taskID, "total", len(targets), "state", "started", "only_missing", onlyMissing)
 
 	jobs := make(chan probeTarget)
 	touched := make(chan int64, len(targets))
@@ -516,12 +518,24 @@ func (a *App) runProbe(taskID int64, ffprobe string, targets []probeTarget, only
 	}
 	result = errors.Join(result, refreshErr)
 	a.finishTask(taskID, result)
-	slog.Info("媒体信息探测结束", "task_id", taskID, "success", success, "skipped", skipped,
-		"failed", failed, "handled", done, "total", len(targets), "aborted", aborted, "cancelled", cancelled)
+	// 失败首因与耗时进同一条汇总日志：用户反馈「只有已开始/已结束」，
+	// 而原因原本散在另一条 warn 里，日志只看结束行时完全不知道失败长什么样。
+	samples := a.probeFailureSamples()
+	fields := []any{"task_id", taskID, "success", success, "skipped", skipped,
+		"failed", failed, "handled", done, "total", len(targets),
+		"aborted", aborted, "cancelled", cancelled,
+		"elapsed", time.Since(started).Round(time.Millisecond).String()}
+	if first := scheduledFirstSample(samples); first != "" {
+		fields = append(fields, "first_failure", first)
+	}
+	if result != nil {
+		fields = append(fields, "error", result)
+	}
+	slog.Info("媒体信息探测结束", fields...)
 	if failed > 0 {
 		// 汇总可能的原因分布，便于一眼定位是环境问题还是个别失效源。
 		slog.Warn("媒体信息探测失败汇总", "failed", failed, "total", len(targets),
-			"samples", a.probeFailureSamples())
+			"samples", samples)
 	}
 	return result
 }
