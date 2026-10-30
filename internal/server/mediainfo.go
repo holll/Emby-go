@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -85,21 +84,16 @@ func loadMediaInfo(strmPath, source string) (mediaInfoFile, bool) {
 }
 
 // saveMediaInfo 原子写入缓存（先写临时文件再改名，避免中途失败留半截 JSON）。
-// 原始输出做缩进处理，便于人工查看与 diff。
+// 使用紧凑 JSON，减少缓存文件的空白字符与体积。
 func saveMediaInfo(strmPath, source string, raw []byte) error {
-	pretty := raw
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, raw, "", "  "); err == nil {
-		pretty = buf.Bytes()
-	}
 	file := mediaInfoFile{
 		ProbeVersion: probeVersion,
 		ProbedAt:     time.Now().UTC().Format(time.RFC3339),
 		Source:       source,
 		MediaFile:    mediaBaseName(source),
-		FFProbe:      json.RawMessage(pretty),
+		FFProbe:      json.RawMessage(raw),
 	}
-	encoded, err := json.MarshalIndent(file, "", "  ")
+	encoded, err := json.Marshal(file)
 	if err != nil {
 		return err
 	}
