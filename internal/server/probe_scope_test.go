@@ -130,3 +130,31 @@ func TestProbeAllPreservesNFOLibraryAndLegacyEligibility(t *testing.T) {
 		}
 	}
 }
+
+// TestPrepareProbeNeedsFFProbeOnlyWhenThereIsWork 钉住 prepareProbe 内部的判断顺序。
+//
+// 背景（CI 抓到的问题）：旧实现先自检 ffprobe 再查库，于是在没装 ffmpeg 的机器上，
+// 一个空库的计划探测会被报成任务失败「未找到 ffprobe」，而不是走
+// 「计划任务探测跳过：没有可探测的影片」分支——这个失败与作用域无关，每天报一次，
+// 只会把人骗去查错方向。这里用「显式指向不存在的 ffprobe」在任意机器上复现该环境，
+// 断言：空库必须跳过成功，有影片必须失败且原因指向 ffprobe。
+func TestPrepareProbeNeedsFFProbeOnlyWhenThereIsWork(t *testing.T) {
+	app, media := detailTestApp(t, t.TempDir(), `<movie><title>Ready</title></movie>`)
+	app.startupWG.Wait()
+	app.cfg.FFProbePath = filepath.Join(t.TempDir(), "missing-ffprobe")
+	lib, err := app.db.AddLibrary("L", media)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := app.prepareProbe(probeRequest{LibraryID: lib.ID, Status: "all"})
+	if err != nil || len(plan.targets) != 0 {
+		t.Fatalf("空库应先走跳过分支: targets=%d err=%v", len(plan.targets), err)
+	}
+
+	ts, token := detailServer(t, app)
+	scanOnce(t, ts, token)
+	if _, err := app.prepareProbe(probeRequest{LibraryID: lib.ID, Status: "all"}); err == nil {
+		t.Fatal("有影片时缺 ffprobe 必须报错，不能静默跳过")
+	}
+}

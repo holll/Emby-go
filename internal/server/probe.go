@@ -140,16 +140,6 @@ func (a *App) prepareProbe(req probeRequest) (probePlan, error) {
 	if a.probing() {
 		return probePlan{}, errProbeBusy
 	}
-	// ffprobe 在任务启动前就解析并自检：缺 ffprobe 或它无法执行时直接给明确错误，
-	// 而不是让成千上万条目逐个失败一遍（那既浪费时间又难归因）。
-	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
-	if err != nil {
-		return probePlan{}, err
-	}
-	if err := probe.Verify(a.rootCtx, ffprobe); err != nil {
-		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
-		return probePlan{}, err
-	}
 	// Empty remains legacy success; only an explicit all removes the status filter.
 	statusFilter := req.Status
 	if statusFilter == "all" {
@@ -161,6 +151,22 @@ func (a *App) prepareProbe(req probeRequest) (probePlan, error) {
 	}
 	// 展开成文件级任务：分集影片的每个分段 .strm 都要各自探测。
 	targets := probeTargets(movies)
+	// 先判断这一趟有没有活，再自检 ffprobe。空库/空筛选配上一台没装 ffmpeg 的
+	// 机器时，把「环境缺失」报成任务失败没有信息量：真正该走的是「没有可探测的
+	// 影片」跳过分支（计划任务每天报一次与范围无关的错，只会把人骗去查错方向）。
+	if len(targets) == 0 {
+		return probePlan{movies: len(movies), onlyMissing: onlyMissing}, nil
+	}
+	// ffprobe 在任务启动前就解析并自检：缺 ffprobe 或它无法执行时直接给明确错误，
+	// 而不是让成千上万条目逐个失败一遍（那既浪费时间又难归因）。
+	ffprobe, err := probe.LookPath(a.cfg.FFProbePath)
+	if err != nil {
+		return probePlan{}, err
+	}
+	if err := probe.Verify(a.rootCtx, ffprobe); err != nil {
+		slog.Error("探测任务未启动：ffprobe 自检失败", "ffprobe", ffprobe, "error", err)
+		return probePlan{}, err
+	}
 	return probePlan{ffprobe: ffprobe, targets: targets, movies: len(movies), onlyMissing: onlyMissing}, nil
 }
 
