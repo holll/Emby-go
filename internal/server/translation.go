@@ -333,7 +333,7 @@ func (a *App) executeTranslation(ctx context.Context, taskID int64, cfg scraper.
 	itemFailed := false
 	walkErr := a.walkTranslation(ctx, req, func(m store.Movie) error {
 		a.translation.mu.Lock()
-		a.translation.status.Current = m.Title
+		a.translation.status.Current = m.DisplayTitle()
 		a.translation.mu.Unlock()
 		result, itemErr := item(ctx, m, opts)
 		if ctx.Err() != nil && errors.Is(itemErr, ctx.Err()) {

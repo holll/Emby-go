@@ -1011,12 +1011,8 @@ func (a *App) embyItem(m store.Movie, d store.UserData) gin.H {
 // loaded=true 表示 actors 已由调用方批量取回（可为空，不再单条回查）。
 func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.ActorRef, loaded bool) gin.H {
 	id := strconv.FormatInt(m.ID, 10)
-	sortName := m.SortName
-	if sortName == "" {
-		sortName = m.Title
-	}
 	v := gin.H{
-		"Id": id, "Name": m.Title, "SortName": sortName,
+		"Id": id, "Name": m.DisplayTitle(), "SortName": m.DisplaySortName(),
 		"Type": "Movie", "MediaType": "Video", "IsFolder": false,
 		"ParentId":  externalLibraryID(m.LibraryID),
 		"ServerId":  a.serverID,

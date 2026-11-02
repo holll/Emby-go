@@ -49,6 +49,22 @@ func TestNormalizeAndSameNumber(t *testing.T) {
 	}
 }
 
+func TestSameNumberFC2Aliases(t *testing.T) {
+	aliases := []string{"FC2-1035070", "FC2-PPV-1035070", "FC2PPV-1035070", "fc2_ppv_1035070", "FC2PPV1035070", "FC21035070", "FC2 PPV 1035070", "FC2-PPV-1035070-mosaic"}
+	for _, a := range aliases {
+		for _, b := range aliases {
+			if !SameNumber(a, b) {
+				t.Errorf("SameNumber(%q, %q) = false，期望同号", a, b)
+			}
+		}
+	}
+	for _, other := range []string{"FC2-PPV-1035071", "FC2-PPV-10350700", "FC2-PPV-01035070", "FC2-PPV-1035070X", "FC2-PPV-1035070-CD1", "ABC-PPV-1035070", "1035070", "FC2-PPV", ""} {
+		if SameNumber("FC2-1035070", other) || SameNumber(other, "FC2-1035070") {
+			t.Errorf("不同番号 %q 不应命中 FC2-1035070", other)
+		}
+	}
+}
+
 // 归一化 + 比较连起来用：文件名里的番号要能和接口返回的番号对上。
 func TestTrimThenSameNumber(t *testing.T) {
 	if !SameNumber(Trim("[FHD] ABF-018 uncensored.mp4"), "ABF-018") {

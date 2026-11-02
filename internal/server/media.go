@@ -708,10 +708,10 @@ func mediaSourceName(m store.Movie, sourcePath string) string {
 	if sourcePath == "" {
 		sourcePath = m.SourcePath
 	}
-	if base := mediaFileName(sourcePath); base != "" {
+	if base := store.CleanDisplayName(mediaFileName(sourcePath)); base != "" {
 		return base
 	}
-	return m.Title
+	return m.DisplayTitle()
 }
 
 // itemFileName 返回条目对应的文件名（含扩展名），即 .strm 文件名。
@@ -1449,8 +1449,8 @@ func (a *App) partItem(m store.Movie, index int) gin.H {
 	}
 	item := gin.H{
 		"Id":                virtualPartID(m.ID, part),
-		"Name":              m.Title + " - CD" + strconv.Itoa(part),
-		"SortName":          m.Title,
+		"Name":              m.DisplayTitle() + " - 第 " + strconv.Itoa(part) + " 段",
+		"SortName":          m.DisplaySortName(),
 		"Type":              "Movie",
 		"MediaType":         "Video",
 		"ParentId":          strconv.FormatInt(m.ID, 10),

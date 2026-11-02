@@ -446,7 +446,7 @@ func TestMultiPartProbe(t *testing.T) {
 func TestProbeTargets(t *testing.T) {
 	movies := []store.Movie{
 		{ID: 1, Title: "单片", SourcePath: "/lib/single.strm"},
-		{ID: 2, Title: "分集", SourcePath: "/lib/mp-CD1.strm", AdditionalParts: []string{"/lib/mp-CD2.strm", "/lib/mp-CD3.strm"}},
+		{ID: 2, Title: "分集-CD1", SourcePath: "/lib/mp-CD1.strm", AdditionalParts: []string{"/lib/mp-CD2.strm", "/lib/mp-CD3.strm"}},
 	}
 	targets := probeTargets(movies)
 	if len(targets) != 4 {
@@ -470,7 +470,7 @@ func TestProbeTargets(t *testing.T) {
 	if got := targets[1].label(); got != "分集" {
 		t.Errorf("主文件 label = %q", got)
 	}
-	if got := targets[2].label(); got != "分集 - CD2" {
+	if got := targets[2].label(); got != "分集 - 第 2 段" {
 		t.Errorf("分段 label = %q", got)
 	}
 }

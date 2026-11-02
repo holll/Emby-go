@@ -2111,7 +2111,7 @@ test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位
   const { available, probe } = require('./web_browser_helper.cjs');
   if (!available(t)) return;
   const box = sandbox({ me: { is_admin: true }, esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
-  vm.runInContext(section('function wallCard(', 'const WALL_PAGE_SIZE'), box);
+  vm.runInContext(section('function cleanDisplayName(', 'const WALL_PAGE_SIZE'), box);
   const card = box.wallCard({ id: 1, status: 'success', Title: 'test' }, null);
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
   const doc = `<!doctype html><meta charset="utf-8"><style>${css}</style><div class="wall is-selecting" style="margin:20px;width:260px">${card}<div class="field" hidden id="f">probe<input></div></div><script>

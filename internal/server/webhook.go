@@ -48,7 +48,7 @@ func webhookResultCounts(result webhook.Result) (sent, failed, skipped int) {
 
 func (a *App) movieWebhook(c *gin.Context, name string, movie store.Movie) webhook.Event {
 	event := webhook.Event{Event: name, Item: webhook.Item{
-		Id: strconv.FormatInt(movie.ID, 10), Name: movie.Title,
+		Id: strconv.FormatInt(movie.ID, 10), Name: store.CleanDisplayName(movie.Title),
 		Path: movie.SourcePath, Type: "Movie", LibraryId: strconv.FormatInt(movie.LibraryID, 10),
 	}}
 	if movie.RuntimeSeconds > 0 && movie.RuntimeSeconds <= (1<<63-1)/10000000 {
@@ -128,7 +128,7 @@ func (a *App) notifyMovieDeleted(c *gin.Context, movie store.Movie) {
 	event := webhook.Event{
 		Event: webhook.ItemDeleted,
 		Item: webhook.Item{
-			Id: strconv.FormatInt(movie.ID, 10), Name: movie.Title,
+			Id: strconv.FormatInt(movie.ID, 10), Name: store.CleanDisplayName(movie.Title),
 			Path: movie.SourcePath, Type: "Movie",
 		},
 		Server:    webhook.Server{Id: a.serverID, Name: a.serverName},

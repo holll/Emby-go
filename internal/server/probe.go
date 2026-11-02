@@ -94,9 +94,9 @@ type probeTarget struct {
 // label 返回用于进度与失败信息展示的名称。
 func (t probeTarget) label() string {
 	if t.Primary {
-		return t.Movie.Title
+		return t.Movie.DisplayTitle()
 	}
-	return t.Movie.Title + " - CD" + strconv.Itoa(t.Index)
+	return t.Movie.DisplayTitle() + " - 第 " + strconv.Itoa(t.Index) + " 段"
 }
 
 // probeTargets 把影片列表展开成待探测文件列表：主文件 + 全部分段。

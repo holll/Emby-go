@@ -44,6 +44,20 @@ func TestSearchQueryPriority(t *testing.T) {
 	}
 }
 
+func TestDisplayTitleHidesCDPart(t *testing.T) {
+	movie := store.Movie{SourcePath: "/media/FC2-PPV-1050737/FC2-PPV-1050737-CD1.strm"}
+	if got := displayTitle(movie); got != "FC2-PPV-1050737" {
+		t.Fatalf("displayTitle = %q", got)
+	}
+	if !strings.HasSuffix(movie.SourcePath, "-CD1.strm") {
+		t.Fatal("source path changed")
+	}
+	movie.Title = "Title-CD10"
+	if got := displayTitle(movie); got != "Title" {
+		t.Fatalf("displayTitle = %q", got)
+	}
+}
+
 func TestSelectExactOnlyAcceptsNumberMatch(t *testing.T) {
 	results := []metatube.MovieSearchResult{
 		{Provider: "a", ID: "1", Number: "ABF-019"},
@@ -86,6 +100,30 @@ func TestSelectAllExactKeepsOrder(t *testing.T) {
 	}
 	if got := selectAllExact(results, ""); len(got) != 0 {
 		t.Errorf("预期番号为空应返回空: %+v", got)
+	}
+}
+
+func TestSelectAllExactFC2Aliases(t *testing.T) {
+	cases := []struct{ filename, provider, number string }{
+		{"FC2-PPV-1035070.strm", "GGJAV", "FC2PPV-1035070"},
+		{"FC2-PPV-1040071.strm", "NJAVTV", "FC2-PPV-1040071"},
+		{"FC2-PPV-1043729.strm", "NJAVTV", "FC2-PPV-1043729"},
+		{"FC2-PPV-1050737-CD1.strm", "GGJAV", "FC2PPV-1050737"},
+		{"FC2-PPV-1084018.strm", "GGJAV", "FC2PPV-1084018"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.filename, func(t *testing.T) {
+			movie := store.Movie{SourcePath: "/media/" + tc.filename}
+			candidate := metatube.MovieSearchResult{Provider: tc.provider, ID: "match", Number: tc.number}
+			results := []metatube.MovieSearchResult{
+				{Provider: tc.provider, ID: "wrong", Number: tc.number + "0"},
+				candidate,
+			}
+			matches := selectAllExact(results, expectedNumber(movie))
+			if len(matches) != 1 || matches[0].ID != candidate.ID {
+				t.Fatalf("query=%q expected=%q: 应只命中同号来源，得到 %+v", searchQuery(movie), expectedNumber(movie), matches)
+			}
+		})
 	}
 }
 

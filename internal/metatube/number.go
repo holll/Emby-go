@@ -97,9 +97,19 @@ func SameNumber(a, b string) bool {
 	if compact(left) == compact(right) {
 		return true
 	}
-	// 再剥掉 provider 语义后缀比一次：NHDTB-944-mosaic 与 NHDTB-944。
-	return compact(stripProviderSuffix(left)) == compact(stripProviderSuffix(right))
+	// 再剥掉 provider 语义后缀，并统一 FC2 的 PPV 别名。
+	return comparisonNumber(left) == comparisonNumber(right)
 }
+
+// comparisonNumber 仅用于比较，不改变搜索词或写入 NFO 的番号。
+// 文件名提取会去掉 PPV，但来源常返回 FC2-PPV / FC2PPV；只有纯数字编号
+// 才统一前缀，不能靠 Trim 宽松截取而把不同番号或未知后缀误判为同号。
+func comparisonNumber(number string) string {
+	number = compact(stripProviderSuffix(number))
+	return reFC2PPVNumber.ReplaceAllString(number, "FC2${1}")
+}
+
+var reFC2PPVNumber = regexp.MustCompile(`^FC2PPV([0-9]+)$`)
 
 func compact(s string) string {
 	var builder strings.Builder

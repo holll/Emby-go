@@ -344,10 +344,24 @@ async function pageLibraries() {
   }));
 }
 
+// 展示层与 store.CleanDisplayName 保持一致；不要用于编辑值、路径或播放身份。
+function cleanDisplayName(value) {
+  return String(value || '').trim().replace(/[ ._-]+CD[1-9][0-9]*$/i, '').trim();
+}
+
+function movieDisplayTitle(item) {
+  for (const value of [item.Title, item.Number]) {
+    const name = cleanDisplayName(value);
+    if (name) return name;
+  }
+  const base = String(item.source_path || '').replace(/\\/g, '/').split('/').pop() || '';
+  return cleanDisplayName(base.replace(/\.[^.]*$/, ''));
+}
+
 /* ---------------------------------------------------------------- 媒体墙 */
 function wallCard(item, ud) {
   const st = item.Status || item.status || '';
-  const title = item.Title || '';
+  const title = movieDisplayTitle(item);
   const playable = st === 'success' || st === 'manual';
   // 海报格子最宽约 185px（.wall 的 minmax(148px,1fr)）；按 1x/2x 取 200/400，
   // 避免 1x 屏也拉 360 的缩略图。不带 maxWidth 会拉原图（约 56KB/张 × 每页 100 张），
@@ -356,7 +370,7 @@ function wallCard(item, ud) {
     : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb` : '');
   const poster = posterBase ? `${posterBase}?maxWidth=360` : '';
   const posterSrcset = posterBase ? `${posterBase}?maxWidth=200 1x, ${posterBase}?maxWidth=400 2x` : '';
-  const sub = [numberUnlessInTitle(title, item.Number), item.Year, item.OriginalTitle].filter(Boolean).join(' · ')
+  const sub = [numberUnlessInTitle(title, cleanDisplayName(item.Number)), item.Year, cleanDisplayName(item.OriginalTitle)].filter(Boolean).join(' · ')
     || (item.source_protocol || item.SourceProtocol || '');
   const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
     ? Math.min(100, Math.round(ud.position_ticks / (item.RuntimeSeconds * 10000000) * 100)) : 0;
@@ -369,12 +383,12 @@ function wallCard(item, ud) {
     stateBadge,
     ud && ud.played ? '<span class="wall-badge played">已看</span>' : '',
     ud && ud.favorite ? '<span class="wall-badge fav">♥</span>' : '',
-    (item.AdditionalParts || []).length ? `<span class="wall-badge multi">CD×${(item.AdditionalParts || []).length + 1}</span>` : ''
+    (item.AdditionalParts || []).length ? `<span class="wall-badge multi">${(item.AdditionalParts || []).length + 1} 段</span>` : ''
   ].join('');
   const body = poster
     ? `<img loading="lazy" src="${esc(poster)}"${posterSrcset ? ` srcset="${esc(posterSrcset)}"` : ''} alt="">`
-    : `<span class="wall-path" title="${esc(item.source_path)}">${esc(item.source_path || title || '—')}</span>`;
-  const label = title || String(item.source_path || '').split(/[\\/]/).pop() || '—';
+    : `<span class="wall-path" title="${esc(item.source_path)}">${esc(title || '—')}</span>`;
+  const label = title || '—';
   return `
     <article class="wall-card" data-play="${item.id}">
       <div class="wall-poster">
@@ -390,7 +404,7 @@ function wallCard(item, ud) {
         ${playable ? `<button class="wall-play" data-quickplay="${item.id}" title="直接播放">${icon('play')}</button>` : ''}
       </div>
       <div class="wall-meta">
-        <button type="button" class="wall-title" data-open="${item.id}" title="${esc(title || item.source_path)}">${esc(label)}</button>
+        <button type="button" class="wall-title" data-open="${item.id}" title="${esc(title || '—')}">${esc(label)}</button>
         <small>${esc(sub)}</small>
       </div>
     </article>`;
@@ -988,7 +1002,7 @@ async function openDetail(item) {
   // （id / collection / official_rating / source_path / source_protocol / created_at …），
   // 其余保持 Go 字段名。取值时按接口实际返回的键来写。
   const m = data.movie || {};
-  const title = m.Title || String(item.id);
+  const title = movieDisplayTitle(m) || String(item.id);
   const st = m.Status || '';
   const playable = st === 'success' || st === 'manual';
   // 详情海报渲染 104px 宽，背景铺满抽屉；按 1x/2x 取 120/240 与 540/1080，避免拉原图。
@@ -999,7 +1013,7 @@ async function openDetail(item) {
     : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : posterBase);
   const backdrop = backdropBase ? `${backdropBase}?maxWidth=1080` : '';
   const backdropSrcset = backdropBase ? `${backdropBase}?maxWidth=540 1x, ${backdropBase}?maxWidth=1080 2x` : '';
-  const head = [numberUnlessInTitle(title, m.Number), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
+  const head = [numberUnlessInTitle(title, cleanDisplayName(m.Number)), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
   const actors = data.actors || [];
   const lockedFields = data.locked_fields || [];
   const lockedNames = new Set(lockedFields.map(name => name.toLowerCase()));
@@ -1068,8 +1082,8 @@ async function openDetail(item) {
 
       <section class="detail-section"><h3>元数据</h3>
         <dl class="detail-meta">
-          ${detailMetaRow('番号', m.Number)}
-          ${detailMetaRow('原名', m.OriginalTitle)}
+          ${detailMetaRow('番号', cleanDisplayName(m.Number))}
+          ${detailMetaRow('原名', cleanDisplayName(m.OriginalTitle))}
           ${detailMetaRow('年份', m.Year ? String(m.Year) : '')}
           ${detailMetaRow('分级', m.official_rating)}
           ${detailMetaRow('类型', m.Genres, 'genre')}
@@ -1282,7 +1296,7 @@ function streamURL(id, kind) {
 function openPlayer(item) {
   if (artInstance) closePlayer();
   const overlay = document.querySelector('#player-overlay');
-  const title = item.Title || String(item.source_path || '').split(/[\\/]/).pop() || '播放';
+  const title = movieDisplayTitle(item) || '播放';
   document.querySelector('#player-title').textContent = title;
   overlay.hidden = false;
   overlayPush('#player-overlay');

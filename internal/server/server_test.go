@@ -676,9 +676,9 @@ func TestEntityIDURLSafeRoundTrip(t *testing.T) {
 
 func TestMultiPartScan(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "Movie-CD1.strm"), []byte("http://media.test/movie-part1.mp4\n"), 0644)
-	os.WriteFile(filepath.Join(root, "Movie-CD2.strm"), []byte("http://media.test/movie-part2.mp4\n"), 0644)
-	os.WriteFile(filepath.Join(root, "Movie-CD1.nfo"), []byte(`<movie><title>Split Movie</title><year>2024</year><genre>Action</genre></movie>`), 0644)
+	os.WriteFile(filepath.Join(root, "Movie-CD1.strm"), []byte("http://media.test/movie-CD1.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "Movie-CD2.strm"), []byte("http://media.test/movie-CD2.mp4\n"), 0644)
+	os.WriteFile(filepath.Join(root, "Movie-CD1.nfo"), []byte(`<movie><title>Split Movie-CD1</title><sorttitle>Sorted Movie_CD1</sorttitle><year>2024</year><genre>Action</genre></movie>`), 0644)
 
 	db := filepath.Join(root, "test.db")
 	a, err := newApp(config.Config{DBPath: db}, cache.NewMemory(512))
@@ -744,6 +744,20 @@ func TestMultiPartScan(t *testing.T) {
 		t.Fatalf("main movie should advertise PartCount=2: %v", item)
 	}
 	movieID := item["Id"].(string)
+	if item["Name"] != "Split Movie" || item["SortName"] != "Sorted Movie" {
+		t.Fatalf("list must hide CD suffixes: %v", item)
+	}
+	for _, route := range []string{"/Items/", "/Users/1/Items/"} {
+		for range 2 { // Also cover the warm detail response cache.
+			resp, detail := authReq("GET", route+movieID, "")
+			if resp.StatusCode != http.StatusOK || detail["Name"] != "Split Movie" || detail["SortName"] != "Sorted Movie" || detail["Path"] != filepath.Join(root, "Movie-CD1.strm") {
+				t.Fatalf("main display title or raw path changed: %v", detail)
+			}
+		}
+	}
+	if resp, detail := authReq("GET", "/api/admin/items/"+movieID+"/detail", ""); resp.StatusCode != http.StatusOK || detail["movie"].(map[string]any)["Title"] != "Split Movie-CD1" || detail["movie"].(map[string]any)["sortname"] != "Sorted Movie_CD1" {
+		t.Fatalf("admin editable fields must remain raw: %v", detail)
+	}
 
 	// AdditionalParts 返回 CD2 及虚拟 id。
 	partsResp, parts := authReq("GET", "/Videos/"+movieID+"/AdditionalParts", "")
@@ -752,12 +766,12 @@ func TestMultiPartScan(t *testing.T) {
 	}
 	partItem := parts["Items"].([]any)[0].(map[string]any)
 	partID, _ := partItem["Id"].(string)
-	if partItem["PartCount"].(float64) != 2 || partID == movieID {
+	if partItem["PartCount"].(float64) != 2 || partID != "part-"+movieID+"-2" || partItem["Name"] != "Split Movie - 第 2 段" || partItem["SortName"] != "Sorted Movie" {
 		t.Fatalf("additional part shape: %v", partItem)
 	}
 
 	// 分段详情（虚拟 part id）可取，避免客户端点开 CD2 时 404。
-	if detailResp, detail := authReq("GET", "/Users/1/Items/"+partID, ""); detailResp.StatusCode != http.StatusOK || detail["ImageTags"] == nil || detail["PartCount"].(float64) != 2 {
+	if detailResp, detail := authReq("GET", "/Users/1/Items/"+partID, ""); detailResp.StatusCode != http.StatusOK || detail["ImageTags"] == nil || detail["PartCount"].(float64) != 2 || detail["Name"] != "Split Movie - 第 2 段" || detail["SortName"] != "Sorted Movie" {
 		t.Fatalf("part detail shape: %v", detail)
 	}
 	// 虚拟 part id 可直接播放（302 到 CD2 真实地址）。
@@ -766,12 +780,22 @@ func TestMultiPartScan(t *testing.T) {
 	streamReq.Header.Set("X-Emby-Token", token)
 	streamResp, _ := noRedirect.Do(streamReq)
 	streamResp.Body.Close()
-	if streamResp.StatusCode != http.StatusFound || streamResp.Header.Get("Location") != "http://media.test/movie-part2.mp4" {
+	if streamResp.StatusCode != http.StatusFound || streamResp.Header.Get("Location") != "http://media.test/movie-CD2.mp4" {
 		t.Fatalf("part stream redirect: status=%d location=%s", streamResp.StatusCode, streamResp.Header.Get("Location"))
 	}
-	// PlaybackInfo 对虚拟 part id 同样返回可播 MediaSource。
-	if pbResp, pb := authReq("GET", "/Items/"+partID+"/PlaybackInfo?UserId=1", ""); pbResp.StatusCode != http.StatusOK || pb["MediaSources"] == nil {
-		t.Fatalf("part playback info: %v", pb)
+	// PlaybackInfo 清理媒体源展示名，但保留主文件/分段的路径及标识。
+	for _, target := range []struct{ id, sourcePath string }{
+		{movieID, filepath.Join(root, "Movie-CD1.strm")},
+		{partID, filepath.Join(root, "Movie-CD2.strm")},
+	} {
+		pbResp, pb := authReq("GET", "/Items/"+target.id+"/PlaybackInfo?UserId=1", "")
+		if pbResp.StatusCode != http.StatusOK || pb["MediaSources"] == nil {
+			t.Fatalf("playback info: %v", pb)
+		}
+		source := pb["MediaSources"].([]any)[0].(map[string]any)
+		if source["Name"] != "movie" || source["Path"] != target.sourcePath || source["Id"] != "mediasource_"+target.id || source["ItemId"] != target.id {
+			t.Fatalf("source display or playback identity changed: %v", source)
+		}
 	}
 	// CD2 不能作为独立影片在列表中重复出现。
 	if _, ok := items["Items"].([]any); !ok || len(items["Items"].([]any)) != 1 {

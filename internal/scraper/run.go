@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -353,13 +352,7 @@ func (s *Scraper) ScrapeOneMovie(ctx context.Context, movie store.Movie, provide
 
 // displayTitle 取用于日志/进度的展示名。
 func displayTitle(movie store.Movie) string {
-	if title := strings.TrimSpace(movie.Title); title != "" {
-		return title
-	}
-	if number := strings.TrimSpace(movie.Number); number != "" {
-		return number
-	}
-	return movie.SourcePath
+	return movie.DisplayTitle()
 }
 
 // IsNotFound 供上层区分「上游没有这部片」与真正的故障。
