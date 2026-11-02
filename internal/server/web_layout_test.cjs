@@ -66,6 +66,58 @@ async function browser(t) {
   return { call, evaluate, dir };
 }
 
+test('通知设置：删除风险确认是可点击和键盘切换的复选框，保存受确认保护', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();})()`);
+  assert.equal(await evaluate(`document.querySelector('#wh-confirm-delete').type`), 'checkbox');
+  await evaluate(`(()=>{document.querySelector('[data-target-index]').open=true;document.querySelector('[data-event="item.deleted"]').click();document.querySelector('#wh-save').click();})()`);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method==='PUT').length`), 0);
+  assert.match(await evaluate(`document.querySelector('#wh-status').textContent`), /请勾选删除风险确认/);
+  await evaluate(`document.querySelector('#wh-confirm-delete').closest('label').click()`);
+  assert.equal(await evaluate(`document.querySelector('#wh-confirm-delete').checked`), true);
+  await evaluate(`document.querySelector('#wh-confirm-delete').focus()`);
+  await call('Input.dispatchKeyEvent', { type:'keyDown', key:' ', code:'Space', windowsVirtualKeyCode:32 });
+  await call('Input.dispatchKeyEvent', { type:'keyUp', key:' ', code:'Space', windowsVirtualKeyCode:32 });
+  assert.equal(await evaluate(`document.querySelector('#wh-confirm-delete').checked`), false);
+  const saved = await evaluate(`(async()=>{document.querySelector('#wh-confirm-delete').click();document.querySelector('#wh-save').click();for(let i=0;i<100&&!document.querySelector('#wh-status').textContent.includes('已保存');i++)await new Promise(r=>setTimeout(r,10));return {calls:__calls.filter(c=>c.method==='PUT'),checked:document.querySelector('#wh-confirm-delete').checked};})()`);
+  assert.equal(saved.calls.length, 1);
+  const draft = JSON.parse(saved.calls[0].body);
+  assert.equal(draft.confirm_delete, true);
+  assert.ok(draft.targets[0].events.includes('item.deleted'));
+  assert.equal(saved.checked, false, '保存后复位确认');
+});
+
+test('通知设置：hidden确认行不占空间，删除与清空后才显示', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  for (const width of [1440, 390]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height:844, deviceScaleFactor:1, mobile:width<860 });
+    await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();})()`);
+    const initial = await evaluate(`['wh-confirm-remove-row','wh-confirm-empty-row'].map(id=>{const e=document.getElementById(id);return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};})`);
+    for (const row of initial) assert.deepEqual(row, { hidden:true, display:'none', rects:0 }, '初始确认行隐藏 '+width);
+    const removed = await evaluate(`(()=>{document.querySelector('[data-target-index]').open=true;document.querySelector('[data-remove]').click();return ['wh-confirm-remove-row','wh-confirm-empty-row'].map(id=>{const e=document.getElementById(id);return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};});})()`);
+    for (const row of removed) { assert.equal(row.hidden,false); assert.equal(row.display,'flex'); assert.ok(row.rects>0); }
+    const added = await evaluate(`(()=>{document.querySelector('#wh-add').click();const e=document.querySelector('#wh-confirm-empty-row');return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};})()`);
+    assert.deepEqual(added, { hidden:true, display:'none', rects:0 }, '添加后清空确认重新隐藏');
+    assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '仅修改草稿');
+  }
+});
+
+test('通知设置：动态编码和超时标签关联唯一控件，增删重绘后仍正确', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();for(let i=0;i<100&&document.querySelector('#wh-save').disabled;i++)await new Promise(r=>setTimeout(r,10));document.querySelector('#wh-add').click();})()`);
+  async function checkLabels(expected) {
+    const result = await evaluate(`(()=>{const controls=[...document.querySelectorAll('#wh-targets [data-field="format"],#wh-targets [data-field="timeout"]')];return controls.map(e=>({id:e.id,unique:!!e.id&&document.querySelectorAll('[id="'+e.id+'"]').length===1,label:!!e.labels?.length&&[...e.labels].some(l=>l.htmlFor===e.id&&l.control===e)}));})()`);
+    assert.equal(result.length, expected);
+    assert.ok(result.every(e=>e.id&&e.unique&&e.label), JSON.stringify(result));
+  }
+  await checkLabels(4);
+  await evaluate(`(()=>{document.querySelector('[data-target-index="0"]').open=true;document.querySelector('[data-target-index="0"] [data-remove]').click();document.querySelector('#wh-add').click();})()`);
+  await checkLabels(4);
+});
+
 test('完整前端：桌面与移动端页面布局、渐进表单和触控导航', { timeout: 120000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);

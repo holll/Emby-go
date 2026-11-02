@@ -484,7 +484,9 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
 .form-foot { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
 .hint { color: var(--dim); font-size: 12.5px; margin: 10px 0 0; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
-.check input { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); }
+.check input[type="checkbox"] { flex: 0 0 16px; width: 16px; height: 16px; padding: 0; accent-color: var(--accent); }
+/* Author display rules must not reveal conditionally hidden confirmation rows. */
+.check[hidden], .warning-block[hidden] { display: none !important; }
 .preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* 计划任务：启用开关（复选框外观化为滑块） */
@@ -889,6 +891,30 @@ body.player-open { overflow: hidden; }
 .disclosure-summary { line-height: 1.6; }
 .disclosure-summary small { color: var(--muted); font-weight: 400; }
 .disclosure-body { min-width: 0; }
+/* Compact notification cards: 44px summary hit area without two layers of panel padding. */
+.webhook-target.panel { padding: 0 16px; margin: 12px 0; box-shadow: none; }
+.webhook-target > summary { min-height: 44px; padding-block: 10px; }
+.webhook-target[open] > summary { margin-bottom: 12px; padding-bottom: 10px; }
+.webhook-target .disclosure-body { padding-bottom: 16px; }
+.wh-target-actions { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+#webhook-settings .btn, #webhook-settings .check { min-height: 44px; }
+#webhook-settings .check { cursor: pointer; }
+#webhook-settings .field > .check { font: inherit; letter-spacing: normal; text-transform: none; color: var(--muted); }
+.wh-intro { margin-top: 0; }
+.wh-delivery { margin-bottom: 16px; }
+.wh-events { margin: 16px 0 0; padding: 12px; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.wh-progress-hint { margin: 0 0 12px; }
+.wh-delete-risk { margin-top: 16px; }
+.wh-delete-risk .warning-block { display: block; }
+#wh-save-impact { margin-top: 16px; }
+#webhook-settings .form-foot { margin-top: 12px; }
+@media (max-width: 860px) {
+  .webhook-target.panel { padding-inline: 12px; }
+  .webhook-target .field-grid { gap: 12px; }
+  .wh-events .field-grid { gap: 8px; }
+  .wh-events .check { padding-block: 4px; }
+  #webhook-settings .form-foot > .btn { flex: 1 1 auto; justify-content: center; }
+}
 .wall-maintenance { margin: 16px 0; padding: 8px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); }
 .wall-maintenance[open] > summary, .detail-maintenance[open] > summary { margin-bottom: 16px; }
 .detail-maintenance { border-top: 1px solid var(--line); padding-top: 8px; }

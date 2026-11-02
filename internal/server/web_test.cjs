@@ -1726,6 +1726,40 @@ function webhookPanel(api) {
   };
 }
 
+test('Webhook确认框使用真实checkbox，隐藏状态不被flex覆盖，动态字段标签有唯一关联', async () => {
+  const p = webhookPanel(async () => whView([whTarget(), whTarget({ id: 'wh_2', name: '目标B' })]));
+  await p.mounted;
+  assert.match(p.host.innerHTML, /id="wh-confirm-delete" type="checkbox"/);
+  const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
+  assert.match(css, /\.check input\[type="checkbox"\]/);
+  assert.doesNotMatch(css, /\.check input\s*\{/);
+  assert.match(css, /\.check\[hidden\], \.warning-block\[hidden\] \{ display: none !important; \}/);
+  const ids = [];
+  for (const [index, card] of p.cards().entries()) {
+    for (const name of ['name', 'enabled', 'allow-private', 'format', 'timeout', 'url', 'clear-url']) {
+      const id = `wh-${index}-${name}`;
+      assert.ok(card.innerHTML.includes(`for="${id}"`));
+      assert.ok(card.innerHTML.includes(`id="${id}"`));
+    }
+    ids.push(...[...card.innerHTML.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]));
+  }
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(p.nodes['wh-remove-preview'].hidden, true);
+  assert.equal(p.nodes['wh-confirm-remove-row'].hidden, true);
+  assert.equal(p.nodes['wh-confirm-empty-row'].hidden, true);
+  p.remove(0);
+  assert.equal(p.nodes['wh-remove-preview'].hidden, false);
+  assert.equal(p.nodes['wh-confirm-remove-row'].hidden, false);
+  assert.equal(p.nodes['wh-confirm-empty-row'].hidden, true);
+  p.remove(0);
+  assert.equal(p.nodes['wh-confirm-empty-row'].hidden, false);
+  p.add();
+  assert.equal(p.nodes['wh-confirm-empty-row'].hidden, true);
+  await p.reload();
+  assert.equal(p.nodes['wh-remove-preview'].hidden, true);
+  assert.equal(p.nodes['wh-confirm-remove-row'].hidden, true);
+});
+
 test('Webhook多目标加载不回显地址，保存完整订阅及If-Match', async () => {
   const p = webhookPanel(async (path, options) => {
     assert.equal(path, '/webhook/targets');

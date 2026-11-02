@@ -14,14 +14,18 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
 
   host.innerHTML = `
     <div class="panel-head"><h2 id="webhook-title">Webhook 多目标</h2><button type="button" id="wh-reload" class="btn btn-sm">重新加载</button></div>
-    <p class="hint">每个目标可单独开关并订阅事件。地址只写不回显：留空保留已保存地址，填写新地址即替换。保存为整集合原子替换，重启保留；不会试发通知。</p>
+    <p class="hint wh-intro">每个目标可单独开关并订阅事件。接收地址只写不回显，留空保留，填写新地址即替换。</p>
+    <p class="hint wh-delivery" role="note"><strong>投递机制：</strong>同步投递，无自动重试或持久队列；部分目标失败不影响业务结果。</p>
     <div id="wh-targets"></div>
     <p id="wh-empty" class="hint" hidden>当前没有通知目标；保存空集合会停止所有 Webhook 投递。</p>
     <div id="wh-remove-preview" class="warning-block" role="alert" hidden></div>
     <label class="check" id="wh-confirm-remove-row" hidden><input id="wh-confirm-remove" type="checkbox">我确认上述目标将被删除（已有地址一并移除）。</label>
     <label class="check" id="wh-confirm-empty-row" hidden><input id="wh-confirm-empty" type="checkbox">我确认清空全部 Webhook 目标，停止所有通知。</label>
-    <label class="check"><input id="wh-confirm-delete">对新增的删除订阅，我确认 SmartStrm 可能删除远端整个目录且不可撤销。</label>
-    <p class="warning-block" role="note">item.deleted 可能让 SmartStrm 删除远端整个目录，包括同目录其它影片。playback.progress 高频同步投递，会增加播放上报延迟。通知无自动重试或持久队列；部分目标失败不影响业务结果。</p>
+    <div class="wh-delete-risk">
+      <p id="wh-delete-risk" class="warning-block" role="note"><strong>删除风险：</strong>item.deleted 可能让 SmartStrm 删除远端整个目录，包括同目录其它影片，且不可撤销。</p>
+      <label class="check"><input id="wh-confirm-delete" type="checkbox" aria-describedby="wh-delete-risk">对新增的删除订阅，我已理解并确认上述风险。</label>
+    </div>
+    <p id="wh-save-impact" class="hint">保存影响：整集合原子替换，即时生效、重启保留；只保存配置，不会发送测试通知。</p>
     <p id="wh-status" class="hint" role="status" aria-live="polite">正在加载通知目标…</p>
     <div class="form-foot"><button id="wh-add" class="btn btn-sm" type="button">+ 添加目标</button><button id="wh-save" class="btn btn-accent" type="button" disabled>保存全部目标</button></div>`;
 
@@ -70,21 +74,22 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
     section.innerHTML = `
       <summary class="disclosure-summary"><span data-target-summary></span></summary>
       <div class="disclosure-body">
-      <div class="panel-head"><h3>目标 ${index + 1}${target.isNew ? '（新建）' : ''}</h3><button class="btn btn-sm" type="button" data-remove>删除目标</button></div>
+      <div class="wh-target-actions"><button class="btn btn-sm" type="button" data-remove>删除目标 ${index + 1}</button></div>
       <div class="field-grid">
-        <div class="field full"><label>名称</label><input data-field="name" maxlength="80" autocomplete="off" placeholder="例如：家庭通知机器人"></div>
-        <label class="check"><input data-field="enabled" type="checkbox">启用该目标</label>
-        <label class="check"><input data-field="allow-private" type="checkbox">允许受信任的内网 / 本机接收端</label>
-        <div class="field"><label>编码格式</label><select data-field="format"><option value="json">JSON · SmartStrm</option><option value="form">Emby 表单 · data=&lt;JSON&gt;</option></select></div>
-        <div class="field"><label>超时（秒，1–30）</label><input data-field="timeout" type="number" min="1" max="30" step="1" required></div>
-        <div class="field full"><label>接收地址（含 token，请妥善保密）</label>
-          <input data-field="url" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" placeholder="输入新的完整 HTTP(S) 地址；留空保留">
-          <span class="hint">${target.urlConfigured ? '已保存地址（不回显）；留空保留，输入新地址替换。' : '尚未配置接收地址。'}</span>
-          <label class="check"><input data-field="clear-url" type="checkbox" ${target.urlConfigured ? '' : 'disabled'}>清除已保存地址</label>
+        <div class="field full"><label for="wh-${index}-name">名称</label><input id="wh-${index}-name" data-field="name" maxlength="80" autocomplete="off" placeholder="例如：家庭通知机器人"></div>
+        <label class="check" for="wh-${index}-enabled"><input id="wh-${index}-enabled" data-field="enabled" type="checkbox">启用该目标</label>
+        <label class="check" for="wh-${index}-allow-private"><input id="wh-${index}-allow-private" data-field="allow-private" type="checkbox">允许受信任的内网 / 本机接收端</label>
+        <div class="field"><label for="wh-${index}-format">编码格式</label><select id="wh-${index}-format" data-field="format"><option value="json">JSON · SmartStrm</option><option value="form">Emby 表单 · data=&lt;JSON&gt;</option></select></div>
+        <div class="field"><label for="wh-${index}-timeout">超时（秒，1–30）</label><input id="wh-${index}-timeout" data-field="timeout" type="number" min="1" max="30" step="1" required></div>
+        <div class="field full"><label for="wh-${index}-url">接收地址（含 token，请妥善保密）</label>
+          <input id="wh-${index}-url" data-field="url" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" aria-describedby="wh-${index}-url-hint" placeholder="输入新的完整 HTTP(S) 地址；留空保留">
+          <span id="wh-${index}-url-hint" class="hint">${target.urlConfigured ? '已保存地址（不回显）；留空保留，输入新地址替换。' : '尚未配置接收地址。'}</span>
+          <label class="check" for="wh-${index}-clear-url"><input id="wh-${index}-clear-url" data-field="clear-url" type="checkbox" ${target.urlConfigured ? '' : 'disabled'}>清除已保存地址</label>
         </div>
       </div>
-      <fieldset style="margin:14px 0 0;padding:12px;min-width:0;border:1px solid var(--line)"><legend>事件订阅（至少一项）</legend>
-        <div class="field-grid">${events.map(([name, label]) => `<label class="check"><input type="checkbox" data-event="${name}"><span>${label}<br><small class="mono">${name}</small></span></label>`).join('')}</div>
+      <fieldset class="wh-events"><legend>事件订阅（至少一项）</legend>
+        <p id="wh-${index}-progress-hint" class="hint wh-progress-hint">性能提示：playback.progress 高频同步投递，会增加播放上报延迟；仅在需要时订阅。</p>
+        <div class="field-grid">${events.map(([name, label]) => `<label class="check" for="wh-${index}-${name}"><input id="wh-${index}-${name}" type="checkbox" data-event="${name}"${name === 'playback.progress' ? ` aria-describedby="wh-${index}-progress-hint"` : name === 'item.deleted' ? ' aria-describedby="wh-delete-risk"' : ''}><span>${label}<br><small class="mono">${name}</small></span></label>`).join('')}</div>
       </fieldset></div>`;
     const set = (selector, value) => { section.querySelector(selector).value = value; };
     const check = (selector, value) => { section.querySelector(selector).checked = value; };
