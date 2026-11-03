@@ -4,7 +4,7 @@
 > **阅读顺序**：§0–§8 是早期批次快照，§9 起是后续实施及计划；最新 MetaTube 范围裁剪见 §20。旧条目的“未做”、Redis 必选、单用户、兼容回退等描述不代表当前实现；后续批次会覆盖早期状态。历史数据不重新包装成当前测试结果。
 > **重要更新**：批次 84–90 已引入多用户与用户隔离；95 移除旧管理员认证回退；96 将 Redis 降为可选；97 摘要化会话。§10 的旧回退/待定项以这些后续结果为准。
 > **完成 = 当批本地实现 + 本地回归通过**，不代表生产放行。部署仍须按 §3 回填 A01–A15 和相关开放条目；不删安全验收定义或故障证据。
-> 详细历史记录位于本地 `docs/implementation-progress-2026-10-16.md`；部分研究资料不随仓库发布，不能假设外部读者拥有临时脚本或截图。
+> 详细历史记录与部分研究资料不随仓库发布，不能假设外部读者拥有临时脚本或截图。
 
 文档整理：2026-10-23（Asia/Shanghai）；下列基线日期与提交号保持为历史。
 基线提交：`1b93a06`（40 批 checkpoint）；批次 41 `3499029`；批次 42 起见 git log
@@ -103,7 +103,7 @@ D01–D12 已于 2026-10-17/18 全部批准并落地，原提案正文与上表�
 
 ## 3. 验收 A01–A15
 
-**生产部署验收未执行**；自动子集与真实二进制冒烟已用假 Redis+合成媒体本地跑通（见 §3.1），不等于部署验收。验收定义与断言见 `docs/architecture-database-frontend-review-2026-10-16.md` §9；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
+**生产部署验收未执行**；自动子集与真实二进制冒烟已用假 Redis+合成媒体本地跑通（见 §3.1），不等于部署验收。验收定义与断言见下方表格；执行时在此逐项回填：命令、环境、原始输出路径、执行人、日期。未回填即视为未通过。
 
 批次 83 后在当前构建（`0056730`）复跑真实二进制：`TestAcceptanceLive`、`TestAcceptanceConcurrentPlayback`、`TestAcceptanceScanTaskAPI`、`TestAcceptanceManualEdit`、`TestAcceptanceSessionRevoke` 全部 PASS（假 Redis + 合成媒体）。
 
@@ -130,9 +130,9 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | A10 任务 | 自动（`scan_tasks_test.go` 6 组）+ 人工 kill -9 未做 | 真实进程 kill -9 | 单测/实跑：202/幂等/409/容量/1h 过期；崩溃不恢复语义未演练 |
 | A11 退出 | 单测 + 自动（health）；**本地 SIGTERM 实跑通过**；503 窗口/长流/超时路径待演练 | 部署侧 30s 宽限 | 测试名 + 演练记录 |
 | A12 跨层兼容 | 自动（契约测试 + Playwright 页面/axe）+ 人工旧客户端未做 | 旧版 Emby 客户端 | `contract_test.go`；批次 59 axe 0 violations；真实旧客户端抓包待做 |
-| A13 浏览器/a11y | 自动（Playwright 三引擎巡检，批次 60） | D12 矩阵（Chromium/Firefox/WebKit） | 7 页面 ×3 引擎 0 console error/0 axe/0 移动溢出；键盘流程 `keyboard.cjs`；截图 `docs/screenshots/` |
+| A13 浏览器/a11y | 自动（Playwright 三引擎巡检，批次 60） | D12 矩阵（Chromium/Firefox/WebKit） | 7 页面 ×3 引擎 0 console error/0 axe/0 移动溢出；键盘流程 `keyboard.cjs` |
 | A14 入口/资源 | 自动（413/401/健康 + 登录限流 429）本地通过；慢头/大 header 压测未做 | 压测工具、代理拓扑 | `limits_test.go`、acceptance 输出；慢头依赖部署侧代理 |
-| A15 性能/语义 | 自动（批次 57 固定参数） | D12 阈值、同参数前后采样 | 5000 项扫描 11.0s；列表 Limit=50 p95 17.2ms、Limit=200 p95 49.7ms；详情 p95 7.1ms；RSS 47.5MB；`docs/acceptance/bench.cjs` |
+| A15 性能/语义 | 自动（批次 57 固定参数） | D12 阈值、同参数前后采样 | 5000 项扫描 11.0s；列表 Limit=50 p95 17.2ms、Limit=200 p95 49.7ms；详情 p95 7.1ms；RSS 47.5MB；基准脚本未随仓库保留 |
 
 > 自动化只证明协议/计数层；D12 已批并落地，A13/A15 的自动部分已有证据，真机与部署验收仍需执行。
 
@@ -150,9 +150,9 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A10 子集（批次 55）：`POST /api/admin/tasks/scan?library_id=1` + `Idempotency-Key` → 202+`task_id=3`；轮询状态到 `succeeded`；同 key 重放 → 202、`replayed=true`、同一 `task_id`。
 - A07 子集（批次 56）：`PATCH /api/admin/items/1` `{"title":"Acceptance Edit …"}` → 200 `saved:true`；`a.nfo` 实际写入新标题；再触发扫描并等待终态后详情标题仍为人工值（未被旧 NFO 回写）。
 - A09 恢复演练（批次 56，本机）：SIGTERM 52ms 退出 → 备份 172K（DB+NFO+config）→ 删除 DB 重启得 `{"initialized":false}`（确认丢失）→ 还原后重启 1.2s：`initialized:true`、登录成功、标题/`PlayCount=12`/`PositionTicks=300000000` 全部保留、NFO 一致。
-- A12 UI 冒烟（批次 59，Playwright/Chromium 156 headless，1280×800 + 390×844）：登录 → 媒体墙（100 卡）→ 搜索「Perf Movie 42」命中 → 详情抽屉打开且首焦点在抽屉内 → 连按 8 次 Tab 焦点仍在抽屉（焦点圈）→ Esc 关闭后焦点回到卡片标题按钮；控制台 0 error；截图 `docs/screenshots/01-login..05-mobile.png`，脚本 `docs/acceptance/ui.cjs`。
-- A12 跨浏览器页面巡检（批次 60，Chromium/Firefox/WebKit × 7 页：总览/媒体库/媒体墙/计划任务/接口探针/刮削/设置）：三浏览器全部 0 控制台错误、移动视口横向溢出 0px；Chromium 逐页截图 `docs/screenshots/chromium-*.png`。纯键盘流程（批次 60）：autofocus 账号 → Tab 密码 → Enter 提交 → Tab 到「媒体墙」Enter → Tab 到标题按钮 Enter → 详情抽屉显示对应影片，全程无鼠标、0 error。
-- A12 功能级断言（批次 61，`docs/acceptance/func.cjs`）：设置页创建 API key→用该 key 调 `/api/admin/settings` 200→UI 删除→同 key 立即 401；计划任务新建→列表出现→删除；详情「编辑元数据」改标题→保存后抽屉关闭、墙面卡片标题更新、重开详情仍为新标题（NFO 已写）；快捷播放按钮打开播放器浮层（标题=影片名）并可关闭；全程 0 error。截图 `docs/screenshots/func-detail-edited.png`。
+- A12 UI 冒烟（批次 59，Playwright/Chromium 156 headless，1280×800 + 390×844）：登录 → 媒体墙（100 卡）→ 搜索「Perf Movie 42」命中 → 详情抽屉打开且首焦点在抽屉内 → 连按 8 次 Tab 焦点仍在抽屉（焦点圈）→ Esc 关闭后焦点回到卡片标题按钮；控制台 0 error；脚本 `docs/acceptance/ui.cjs`。
+- A12 跨浏览器页面巡检（批次 60，Chromium/Firefox/WebKit × 7 页：总览/媒体库/媒体墙/计划任务/接口探针/刮削/设置）：三浏览器全部 0 控制台错误、移动视口横向溢出 0px；纯键盘流程（批次 60）：autofocus 账号 → Tab 密码 → Enter 提交 → Tab 到「媒体墙」Enter → Tab 到标题按钮 Enter → 详情抽屉显示对应影片，全程无鼠标、0 error。
+- A12 功能级断言（批次 61，`docs/acceptance/func.cjs`）：设置页创建 API key→用该 key 调 `/api/admin/settings` 200→UI 删除→同 key 立即 401；计划任务新建→列表出现→删除；详情「编辑元数据」改标题→保存后抽屉关闭、墙面卡片标题更新、重开详情仍为新标题（NFO 已写）；快捷播放按钮打开播放器浮层（标题=影片名）并可关闭；全程 0 error。
 - 依赖漏洞扫描（批次 63）：`govulncheck ./...` 升级前命中 9 个调用链（x/net v0.25.0 ×8、x/text v0.15.0 ×1）；升级 x/net 0.60.0 + x/text 0.42.0（连带 x/crypto 0.57.0、x/sys 0.48.0）后 **调用链 0 命中**；CI 新增 `vuln` job 作为门禁。首次 CI 实跑显示 Go 1.26.0 标准库本身有漏洞（annotations 12 条指向 `http.Header.Set/Get/Del`、`http.Client.Do`），据此 go.mod 上调 `go 1.27.0`。
 - A15 混合负载（批次 62，`docs/acceptance/mixed.cjs`）：5000 项全库扫描进行中，12 个并发 worker（列表×5/详情/并发播放停止×2）持续 12s：共 5930 请求、**0 错误**、494 rps、p95 55ms、p99 94ms、max 594ms；扫描最终 success=5000。
 - A13 可访问性（批次 59/60，axe-core WCAG 2.1 A/AA）：修复 2 个 serious（100 节点 `nested-interactive`、100 节点 `label-content-name-mismatch`）与 1 个 critical（刮削页 `<select id="sc-lib">` 缺可访问名，补 `aria-label="媒体库"`）；复跑 **Chromium/Firefox/WebKit × 7 页全部 0 violations**；卡片改为「非交互容器 + 独立标题按钮」，内部按钮保持原生语义；脚本 `docs/acceptance/axe.cjs`、`pages.cjs`。
@@ -240,6 +240,13 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | README:78 | “手动补录” | 改为编辑/刮削链（端点 2026-10-12 已移除） |
 | README:155 | “不做刮削器” | 改为不做通用插件，内置适配器除外 |
 | dev-plan §1–§3、§6、Roadmap | 手动补录/零刮削/可选 Redis/无 provider 字段 | 按实现校准，并新增 §9 施工治理 |
+
+2026-11-03 清理（本批次）：
+
+- 删除已完成的一次性方案产物：`docs/2026-10-29-go-review.md`（评审报告，施工状态已完成）、`docs/2026-10-29-modernize.patch`（已被落地改写，无法原样回滚）。
+- 删除 `docs/screenshots/`（16 张，2026-10-23~25 批次 UI 快照）：界面此后已变（紧凑布局、webhook 多目标、任务面板抽共用状态机），图片不再代表当前界面；A12/A13 的断言结论仍以正文记录为准。
+- 验收脚本 `docs/acceptance/*.cjs` 去掉 `/tmp/pw` 硬编码：playwright 走正常解析（`PW_DIR` 可覆盖）、axe-core 走 `require.resolve`（`AXE_PATH` 可覆盖）、截图目录默认 `os.tmpdir()/emby-acceptance-*`（`SHOT_DIR` 可覆盖）、实例地址统一 `UI_BASE`（默认 `http://127.0.0.1:18100`）、账号 `UI_USER`/`UI_PASS`；`pages.cjs` 页面清单补齐为当前 11 页导航。
+- `docs/` 整个目录在 `.gitignore` 里（`/docs/`），所以上文引用的 `docs/acceptance/*.cjs`、`docs/emby-study/jellyfin-reading-notes.md` 与出处 JSON 只存在于本地验收环境，仓库读者看不到；这些路径继续用于本机复跑，正文断言与结论不依赖它们是否入库。
 
 ## 8. v2 施工台账（v1.5.0 之后）
 
@@ -353,7 +360,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 
 ## 14. 安全运维六项（R1–R6）
 
-按 [安全运维六项方案](<docs/security-operations-six-features-plan-2026-10-23.md>) 施工。六项共享一条前提：默认配置收紧、失败关闭、敏感信息不落调试/审计/容器日志，单进程内存态重启后清零。
+按安全运维六项方案施工。六项共享一条前提：默认配置收紧、失败关闭、敏感信息不落调试/审计/容器日志，单进程内存态重启后清零。
 
 - **R1 防爆破**：新增 [auth_guard.go](<internal/server/auth_guard.go>)，登录/初始化/改密/`/Users/AuthenticateByName` 统一走 `AdmitRequest → AttachAccount → Finish` 三步预留；IP 令牌桶 10/1rps、全局 40/20rps、bcrypt 并发槽默认 4（有界等 100ms）、凭据 body 8 KiB（含 chunked 超限 413）、账号与组合失败窗口、账号冷却上限 5 分钟、键表满转 overflow 桶；成功只在凭据提交后清账号/组合额度，不清 IP 攻击历史。429 保持 `AUTH_RATE_LIMITED` 且 `Retry-After` 为正整数。[配置](<internal/config/config.go>) 增加 `security.auth`；管理员可查 [auth-limits](<internal/server/auth_guard_handlers.go>) 并以交互会话 + 密码再认证 [unlock](<internal/server/auth_guard_handlers.go>)。[debug raw 日志](<internal/server/requestlog_debug.go>) 与 [审计路径](<internal/server/admin_audit.go>) 对认证/改密/密钥/解锁路由整段脱敏。
 - **R2 扫描身份**：扫描进度写入 `instance_id/run_id/task_id`（[server.go](<internal/server/server.go>)、[admin.go](<internal/server/admin.go>)）；前端只按运行身份或提交的 task 归并，首读历史终态不弹、观察到终态只提示一次、失败可关闭、换页/换账号/服务重启 ID 重用都不误刷新。
@@ -379,7 +386,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 
 ## 15. 增量扫描收敛（2026-10-23，本地）
 
-本轮依据 [增量扫描计划](<docs/incremental-scan-plan-2026-10-23.md>)，在工作树已有部分实现上补齐正确性、接入与验收；不引入文件监视器，不覆盖既有六项运维、独立翻译及取证资料。
+本轮依据增量扫描计划，在工作树已有部分实现上补齐正确性、接入与验收；不引入文件监视器，不覆盖既有六项运维、独立翻译及取证资料。
 
 - 两种模式都完整枚举。旧 API、旧计划默认 `full`；界面提供 `incremental`。原始 STRM/NFO 内容摘要、图片 stat、CD 成员与索引证据决定跳过；未变化组不解析 NFO、不改业务行或基线、不推进版本。
 - 迁移基线为 **schema 16**，不重写既有迁移 checksum。组索引、演员/特征、扫描基线与版本同事务提交；writer 预留后检查库配置和取消，失败丢弃暂存结果。其他索引写入口在自身事务内失效重叠基线。

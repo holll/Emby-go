@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// benchValueBytes 取 600KB，对应 review 里实测的 600,000 B 量级列表 DTO
-// （614,400 B = 600 KiB，与 docs/2026-10-29-go-review.md §2.2 P0-2 口径一致）。
+// benchValueBytes 取 600 KiB，对应实测中 600,000 B 量级的列表 DTO
+// （614,400 B = 600 KiB）。
 const benchValueBytes = 600 * 1024
 
 var benchSink int

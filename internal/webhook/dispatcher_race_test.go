@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestReproCloseRacesWithSend 等价 docs/2026-10-29-go-review.md §5.2 的最小复现：
+// TestReproCloseRacesWithSend 是 Close 与在途 Send/Subscribed 竞争的最小复现：
 // 多个 goroutine 循环 Subscribed+Send，同时 Close。修复前 Close 无锁把
 // Dispatcher.targets 置 nil，与读侧的 slice header 遍历竞争，-race 必报，
 // 且读侧可能读到撕裂的 ptr/len → 越界 panic。
