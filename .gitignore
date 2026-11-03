@@ -11,6 +11,10 @@
 # 内部文档（含真实服务校准记录，不入库）
 /docs/
 
+# 本地验收产物与一次性脚本（抓包、截图、NFO 重建脚本，不入库）
+/reports/
+/tools/
+
 # Runtime data (SQLite WAL/shm 一并忽略)
 *.db
 *.db-shm
