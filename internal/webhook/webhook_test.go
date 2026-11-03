@@ -65,6 +65,48 @@ func TestSendSuccess(t *testing.T) {
 	s.Close()
 }
 
+// Both encodings carry exactly the same event; form is only an HTTP envelope.
+func TestJSONAndFormCarrySameNotification(t *testing.T) {
+	for _, format := range []string{"json", "form"} {
+		t.Run(format, func(t *testing.T) {
+			want := deletionEvent()
+			want.Date = want.Timestamp
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload io.Reader = r.Body
+				if format == "form" {
+					if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+						t.Error("expected form encoding")
+					}
+					if err := r.ParseForm(); err != nil {
+						t.Error(err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					payload = strings.NewReader(r.PostForm.Get("data"))
+				} else if r.Header.Get("Content-Type") != "application/json" {
+					t.Error("expected JSON encoding")
+				}
+				var got Event
+				if err := json.NewDecoder(payload).Decode(&got); err != nil {
+					t.Error(err)
+				} else if !reflect.DeepEqual(got, want) {
+					t.Errorf("%s encoding changed notification: %+v", format, got)
+				}
+				io.WriteString(w, "ok")
+			}))
+			defer srv.Close()
+			s, err := New(config.WebhookConfig{Enabled: true, URL: srv.URL, Format: format, AllowPrivate: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if err := s.Send(context.Background(), deletionEvent()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestDisabled(t *testing.T) {
 	var count atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count.Add(1) }))
@@ -182,8 +224,8 @@ func TestTimeoutAndCancellation(t *testing.T) {
 			s.client.Timeout = 50 * time.Millisecond
 			start := time.Now()
 			err := s.Send(context.Background(), deletionEvent())
-			if err == nil {
-				t.Fatal("expected client total timeout")
+			if !errors.Is(err, context.DeadlineExceeded) || classifyTargetError(err) != "timeout" {
+				t.Fatalf("expected safe client timeout classification: %v", err)
 			}
 			if time.Since(start) > time.Second {
 				t.Fatal("timeout did not bound response read")
@@ -208,7 +250,7 @@ func TestTimeoutAndCancellation(t *testing.T) {
 		defer cancel()
 		start := time.Now()
 		err := senderFor(t, srv.URL).Send(ctx, deletionEvent())
-		if !errors.Is(err, ErrReadResponse) || time.Since(start) > time.Second {
+		if !errors.Is(err, ErrReadResponse) || !errors.Is(err, context.DeadlineExceeded) || classifyTargetError(err) != "timeout" || time.Since(start) > time.Second {
 			t.Fatalf("context did not stop body read: %v", err)
 		}
 	})
@@ -218,7 +260,7 @@ func TestTimeoutAndCancellation(t *testing.T) {
 		defer srv.Close()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := senderFor(t, srv.URL).Send(ctx, deletionEvent()); !errors.Is(err, ErrSend) {
+		if err := senderFor(t, srv.URL).Send(ctx, deletionEvent()); !errors.Is(err, ErrSend) || !errors.Is(err, context.Canceled) || classifyTargetError(err) != "canceled" {
 			t.Fatalf("got %v", err)
 		}
 		if count.Load() != 0 {

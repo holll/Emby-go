@@ -1,9 +1,12 @@
 # PLAN-STATUS — 施工状态与放行台账
 
-> 唯一进度台账。方案见 [dev-plan.md](dev-plan.md)，逐批细节见 `docs/implementation-progress-2026-10-16.md`（内部记录，不入库）。
-> 状态口径：**完成 = 本地实现 + 本地回归通过**；不代表生产放行。生产放行必须同时满足 A01–A15 全过（部署环境回填）、D01–D12 已批并落地、相关条目关闭。
+> 本文件保留历史决策、施工证据与部署验收，不再重复维护完整设计；当前边界见 [设计与后续计划](<dev-plan.md>)，使用说明见 [README](<README.md>)。
+> **阅读顺序**：§0–§8 是早期批次快照，§9 起是后续实施及计划；最新 MetaTube 范围裁剪见 §20。旧条目的“未做”、Redis 必选、单用户、兼容回退等描述不代表当前实现；后续批次会覆盖早期状态。历史数据不重新包装成当前测试结果。
+> **重要更新**：批次 84–90 已引入多用户与用户隔离；95 移除旧管理员认证回退；96 将 Redis 降为可选；97 摘要化会话。§10 的旧回退/待定项以这些后续结果为准。
+> **完成 = 当批本地实现 + 本地回归通过**，不代表生产放行。部署仍须按 §3 回填 A01–A15 和相关开放条目；不删安全验收定义或故障证据。
+> 详细历史记录位于本地 `docs/implementation-progress-2026-10-16.md`；部分研究资料不随仓库发布，不能假设外部读者拥有临时脚本或截图。
 
-最后更新：2026-10-18（Asia/Shanghai）
+文档整理：2026-10-23（Asia/Shanghai）；下列基线日期与提交号保持为历史。
 基线提交：`1b93a06`（40 批 checkpoint）；批次 41 `3499029`；批次 42 起见 git log
 
 ## 0. 本地基线（2026-10-17 实测）
@@ -172,12 +175,9 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 ## 5. 下一步队列（按依赖）
 
-批次 41–72 已全部完成，逐批主题见 §6。剩余工作都依赖部署环境或属于 R4：
+早期“下一步”中 FE-07/FE-15、图片预算、索引及候选分批已在后续批次落实，不再作为待施工队列重复列出。当前候选方向见 [后续计划](<dev-plan.md#4-后续工作>)。
 
-1. **部署验收**：A01 HTTP 级可控时钟、A04 提交后杀进程、A06/A08 只读卷、A10 kill -9、A11 长流与 503 窗口、A12 旧客户端抓包、A13 iOS/Android 真机、A14 慢头/大 header 压测——需可登录部署。
-2. **前端独立项**：FE-07（触屏/elementFromPoint 复核）、FE-15（cron 校验与 latest-wins），并补 FE-04/FE-09/FE-10 的真实读屏验证。
-3. **R4 性能项**：DB-04/05/06/10、FE-11（分页 DOM/图片 srcset）。
-4. **生产放行**：按 D04 配置 `setup_code`/来源白名单/可信代理与 TLS；完成后按 §3 回填，未回填不得宣称生产可用。
+仍需保留的部署门禁：按 §3 补充 HTTP 级时钟、提交后杀进程、只读卷、任务崩溃、长流与 503 窗口、真实客户端、真机/读屏、慢头/大 header、生产库和备份恢复演练。按实际网络配置初始化保护、可信代理与 TLS；未回填不得宣称生产可用。
 
 ## 6. 批次映射（1–72）
 
@@ -243,7 +243,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 ## 8. v2 施工台账（v1.5.0 之后）
 
-v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.md](dev-plan.md) §10，契约正文见 [API-CONTRACT.md](API-CONTRACT.md)。
+v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契约](<API-CONTRACT.md#5-变更规则v2>)，当前设计见 [开发计划](<dev-plan.md>)。
 
 | 批次 | 主题 | 状态 | 边界 |
 |---|---|---|---|
@@ -313,3 +313,234 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。v2 目标与规则见 [dev-plan.
 | 95 | 删除硬编码 user 1 的用户数据 API（`Data/DataFor/SavePlayback/SetPlayed/SetFavorite/SetLikes/SetHideFromResume`），改 `DataUser/DataForUser/SavePlaybackForUser` 与 `SetIndexed*ForUser`；`authOK` 账户缺失按 401 fail-closed，移除 `administrators` 旧行回退；新增删除用户 token 失效与旧口令拒绝测试 | ✅ 本地完成 | 旧 `SaveAccessToken`/`CreateAPIKey` 仍是 user 1 包装（服务端已走 ForUser）；回退旧二进制仍读 administrators |
 | 94 | 全量 schema 校验：参考库跑完迁移 1–11 后逐表比对列/类型/默认值/主键/外键/唯一/CHECK，索引按语义签名（列序/排序/唯一/部分谓词）；备份 CLI 加固：只读 DSN + busy_timeout、暂存目录成功后才发布、`PRAGMA integrity_check` 失败即删、NFO 落盘 fsync | ✅ 本地完成 | 崩溃残留 `.tmp` 目录不自动清理；备份保留期外的异地副本仍靠部署侧 |
 | 93 | `userdata(movie_id)`、`login_events(user_id,created_at)` 索引（迁移 11，末尾 ANALYZE）；周期性 ANALYZE（启动一次 + 每 7 天，随进程退出 join）；图片缓存 TTL 5 分钟→24 小时（配合 Cloudflare） | ✅ 本地完成 | 真实 20k 删库基准与索引写放大未测；ANALYZE 周期是固定 7 天，不感知写入量 |
+
+## 12. 全栈复审修复（2026-10-23，本地）
+
+范围为本轮确认的 17 项问题及 Similar 源对象授权遗漏，不覆盖旧报告全部开放项；保留前两轮重构和既有 NFO 路径改动，未提交、未部署。
+
+| 范围 | 实施 | 回归证据 |
+|---|---|---|
+| 身份与并发（3 项） | migration 14：账户 ID 不复用、会话签发校验凭据代际；改密/撤销原子推进代际；最后管理员在 SQLite 写锁内检查。成功登录审计在签发提交后记录，自助改密同时校验不可变账户 ID。 | [Store 身份测试](<internal/store/identity_test.go>)、[HTTP 身份测试](<internal/server/auth_identity_test.go>)、[改密身份交错回归](<internal/server/users_password_identity_test.go>) |
+| 库授权（5 项 + Similar） | Suggestions、实体聚合/详情、Images JSON、AdditionalParts、个人状态写入和 Similar 源对象限定可见库；聚合在分页前过滤，缓存绑定账户与授权快照；缺身份/删除/旧管理员角色/读库故障失败关闭。匿名图片字节边界不变。 | [对象授权与缓存回归](<internal/server/object_scope_test.go>)、[实体查询回归](<internal/store/entity_scope_test.go>) |
+| 备份边界（1 项） | 写入及清理前拒绝源数据库/媒体库与输出互相包含；关闭 NFO 复制同样保护媒体库；统一实际规范路径处理符号链接与 `..`。 | [输出边界回归](<internal/backup/output_boundary_test.go>)、[清理边界回归](<internal/backup/output_cleanup_boundary_test.go>) |
+| 前端（8 项） | 管理按钮遮挡、旧身份响应、当前会话退出、密钥明文生命周期、扫描终态刷新、隐藏字段占位、日志刷新快照及刮削 inspect 失败恢复。 | [前端 VM 与静态 Chromium 回归](<internal/server/web_test.cjs>) |
+
+统一验证：`go test -count=1 -timeout=15m -coverprofile=… ./...` 全部通过（server 128.689s、store 55.838s），总语句覆盖率 **75.9%**，通过 70% 门禁；`go vet ./...`、`go build ./...`、本轮 Go 文件格式与 `git diff --check` 通过。`node --test internal/server/web*_test.cjs` **144/144** 通过，app/login 语法检查通过。全量 `go test -race -count=1 -timeout=30m ./...` **全部通过**（server 928.409s、store 518.849s），本轮本地统一回归完成。
+
+真实浏览器覆盖限缓存 Chromium 的宽/窄静态 DOM/CSS；不代表真实服务、客户端播放、Firefox/Safari、读屏或生产迁移验收。
+
+升级前备份，schema 15（含 API 密钥 stable_id）不支持直接降级旧二进制；回退须停服恢复升级前数据库，详见 [备份与恢复](<README.md#备份与恢复d11>)。历史已删除且无留存引用的用户 ID 无法追溯。备份目录检查不固定 inode，仍要求备份期间不由外部替换目录/符号链接或变更库路径；SQLite 与 NFO 仍非联合快照。
+
+## 13. 独立翻译与手动计划任务
+
+已实现从现有 NFO 独立翻译，不重新刮削或获取图片，原刮削内自动翻译保持不变。复用现有翻译服务配置及服务端缓存，不新增应用内翻译缓存或持久失败队列。
+
+- **入口**：详情页“仅翻译”、管理员媒体墙多选、独立翻译页的按库/全库运行，以及 `translate` 类型计划任务。新建翻译计划默认禁用自动调度，仍可手动立即执行；未替用户创建或启用任何定时计划。
+- **字段**：默认仅标题，以 NFO `originaltitle` 为源并保留它；简介需显式选择，以当前 `plot` 为源，界面提示重复翻译风险。尊重字段锁、保留未知 XML；缺原文或缺 NFO 跳过，不创建 NFO。
+- **并发与落盘**：网络请求不持文件锁；提交时检查相关源字段、目标字段与锁，冲突不覆盖。与扫描、探测、刮削及编辑共用应用内 NFO 互斥门。写前取消不落盘；写后局部重建索引不因取消而省略，索引失败独立报告。重试即使文本未改变也刷新索引，修复前次刷新失败。
+- **API 与观察**：管理员专用 `/api/admin/translate/run`、`/status`、`/cancel`；显式空选片不退化全库，IDs 与显式库参数互斥。精确任务 ID、页面代际及身份校验防止旧响应刷新或取消新任务；计划未知参数与 ETag 往返保留。
+
+回归入口：
+
+- [NFO 快照与提交](<internal/nfo/translation_test.go>)：字段/锁 CAS、未知节点、取消与冲突。
+- [独立翻译核心](<internal/scraper/translation_test.go>)：服务失败保留、原文与字段锁、真实索引刷新失败后的 nochange 修复，以及旧 CD1 与共享 NFO 并存路径。
+- [翻译 API](<internal/server/translation_test.go>)、[计划任务](<internal/server/scheduled_translation_test.go>)：权限、范围、参数、互斥、取消、索引错误和计划往返。
+- [Web 回归](<internal/server/web_test.cjs>)：确认范围、选片与上限、精确任务取消、退避及跨身份/页面隔离、nochange 完成刷新和禁调度计划的手动执行。
+
+冻结后验收：全量 `go test -count=1 -timeout=15m -coverprofile=/tmp/emby-translation-coverage.out ./...` 通过，总语句覆盖率 **76.5%**；`go vet ./...`、`go build ./...`、Go 格式和 `git diff --check` 通过。NFO/scraper 全包 race、补充交叉测试 race，以及 server 的 `Test(Translation|ScheduledTranslation)` 定向 race 均通过。本轮没有重新运行全项目 race；§12 的完整 race 是上一轮快照证据。
+
+最终 Web **154/154** 通过、0 跳过，app/login 语法检查及冻结后 Go 内嵌构建通过。缓存 Chromium 在 1280/500px 下验证选片框与管理按钮命中、隐藏字段和键盘聚焦；仅为静态 DOM/CSS 与 VM 回归，不代表真实翻译网关/业务服务端到端验收。未访问生产翻译服务，未提交、推送或部署。
+
+## 14. 安全运维六项（R1–R6）
+
+按 [安全运维六项方案](<docs/security-operations-six-features-plan-2026-10-23.md>) 施工。六项共享一条前提：默认配置收紧、失败关闭、敏感信息不落调试/审计/容器日志，单进程内存态重启后清零。
+
+- **R1 防爆破**：新增 [auth_guard.go](<internal/server/auth_guard.go>)，登录/初始化/改密/`/Users/AuthenticateByName` 统一走 `AdmitRequest → AttachAccount → Finish` 三步预留；IP 令牌桶 10/1rps、全局 40/20rps、bcrypt 并发槽默认 4（有界等 100ms）、凭据 body 8 KiB（含 chunked 超限 413）、账号与组合失败窗口、账号冷却上限 5 分钟、键表满转 overflow 桶；成功只在凭据提交后清账号/组合额度，不清 IP 攻击历史。429 保持 `AUTH_RATE_LIMITED` 且 `Retry-After` 为正整数。[配置](<internal/config/config.go>) 增加 `security.auth`；管理员可查 [auth-limits](<internal/server/auth_guard_handlers.go>) 并以交互会话 + 密码再认证 [unlock](<internal/server/auth_guard_handlers.go>)。[debug raw 日志](<internal/server/requestlog_debug.go>) 与 [审计路径](<internal/server/admin_audit.go>) 对认证/改密/密钥/解锁路由整段脱敏。
+- **R2 扫描身份**：扫描进度写入 `instance_id/run_id/task_id`（[server.go](<internal/server/server.go>)、[admin.go](<internal/server/admin.go>)）；前端只按运行身份或提交的 task 归并，首读历史终态不弹、观察到终态只提示一次、失败可关闭、换页/换账号/服务重启 ID 重用都不误刷新。
+- **R3 多 Webhook**：`webhook.config.v2` 多目标（≤10、整集合 ETag、按目标 ID 合并 URL 秘密、缺/过期 If-Match 428/412、旧单目标 PUT 409）；[dispatcher](<internal/webhook/dispatcher.go>) 单事件 4 并发/5 秒预算、`skipped_budget` 不算成功、聚合 `partial`；`X-Webhook-Status: partial` 在通用 API 层统一提示，业务成功不回滚。[设置组件](<internal/server/web/webhook-settings.js>) 重写为多目标编辑器，前置删除订阅与清空确认。
+- **R4 磁盘日志**：写入层 [sanitizer](<internal/logging/sanitize.go>) 覆盖消息/属性/嵌套分组，出站 `?[REDACTED]`、Bearer/密码/token 统一替换；[disklogs](<internal/logging/disklogs.go>) 用受限根、严格日期文件名、HMAC 游标、1 MiB 扫描/64 KiB 行/512 KiB 响应上限，半行与 gap/reset 显式返回，旧非结构化行只显示隐藏占位符；管理员 `/api/admin/logs/disk` 与独立[运行日志页](<internal/server/web/app.js>)，增量轮询、去重、1000 行上限、暂停/加载更早/滚动锚点、内容全转义。
+- **R5 密钥轮转**：[migration 15](<internal/store/api_key_rotation.go>) 增加 stable_id/version/rotated_at 并回填唯一 ID；对外 `ak_` 稳定 ID，`POST /api/admin/apikeys/{id}/rotate` 需 If-Match、密码再认证与 actor 代际校验，key/key_hash 同事务替换，旧 key 立即失效；UI 显示版本/最近轮转并提供轮转表单。
+- **R6 探测进度**：[probe.go](<internal/server/probe.go>) 批量启动输出 0/N，每个处理完成文件输出一条 `媒体信息探测[n/N]`（task_id/item_id/编号/CD/状态/safe_error），计数与进度行在 `probeProgressEmit` 内串行，单条同步探测复用同一完成函数输出 1/1。
+
+施工期统一验证记录：
+
+- `go build ./...`、`go vet ./...`、`gofmt`、`git diff --check` 通过。
+- `node --test internal/server/web*_test.cjs` **156/156** 通过；`node --check` app/login/webhook-settings 通过。
+- 全量 Go 测试与覆盖率见下方“六项冻结验证”。
+
+### 六项冻结验证（2026-10-23 本地）
+
+- `go test -count=1 -timeout=15m -coverprofile=/tmp/emby-ops-coverage-final.out ./...` 全部通过，`go tool cover -func` 总语句覆盖率 **75.8%**（高于项目 70% 门禁）；`go build ./...`、`go vet ./...`、`gofmt -l`、`git diff --check` 通过。
+- `node --test internal/server/web*_test.cjs` **156/156** 通过（web_test 137 + web_progress 19）；`node --check` app.js/login.js/webhook-settings.js 通过。
+- 新增/更新的定向测试覆盖：防爆破并发预留/键表饱和/冷却/429 形状/chunked 超限、扫描运行身份与前端状态机、Webhook 多目标 ETag/秘密合并/预算与 partial、磁盘日志游标/半行/截断/脱敏、密钥轮转与 migration 15、探测严格进度顺序与单次计数。
+- 本轮未重跑全项目 `-race`，§12 的 race 结果仍是上一轮快照；未连接真实 Webhook 接收端、未用真实生产库执行 migration 15、未做真实浏览器/真实磁盘日志链路的人工验收。这些边界不影响本地单元/集成结论，但不能替代上线前演练。
+
+**施工边界**：未提交、未推送、未部署；工作树中早于本轮的身份/授权修复、独立翻译与文档调整保持原样，未回滚或改写。
+
+## 15. 增量扫描收敛（2026-10-23，本地）
+
+本轮依据 [增量扫描计划](<docs/incremental-scan-plan-2026-10-23.md>)，在工作树已有部分实现上补齐正确性、接入与验收；不引入文件监视器，不覆盖既有六项运维、独立翻译及取证资料。
+
+- 两种模式都完整枚举。旧 API、旧计划默认 `full`；界面提供 `incremental`。原始 STRM/NFO 内容摘要、图片 stat、CD 成员与索引证据决定跳过；未变化组不解析 NFO、不改业务行或基线、不推进版本。
+- 迁移基线为 **schema 16**，不重写既有迁移 checksum。组索引、演员/特征、扫描基线与版本同事务提交；writer 预留后检查库配置和取消，失败丢弃暂存结果。其他索引写入口在自身事务内失效重叠基线。
+- 完整健康清单才允许末尾缺失清理；失败、取消、不稳定、库配置变化及根标识异常均抑制清理。已有记录的空库默认受保护；只有手动 HTTP 显式确认可放行，计划不自动执行该确认。可选相对根标识与 SHA256 必须成对，根内只读，不创建标识文件。
+- 保留仍在盘的 manual 主片和人工 part。缺失/无效 NFO 不清人工元数据、演员及特征，但不能冻结来源和分段结构；非 manual 继续原有 pending 规则。只有健康完整清单证明真正消失后才清理，拆组过程不提前删除另一组的 ID/创建时间/观看数据。
+- HTTP 在幂等重放前严格解析参数；同 key 异规范摘要返回 409，同 key 同参数并发得到同一任务。计划保留未知参数和 ETag；失败结果保留已提交部分成果，缓存按真实索引变化失效。前端以本次 task result 为准，保持身份与页面隔离，安全未完成不自动隐藏。
+
+### 回归与性能入口
+
+- [事务与失效回归](<internal/store/scan_state_test.go>)：失败注入/真实 COMMIT 失败、ID 与版本回滚、跨入口失效、大批次、零变化业务与状态触发器计数。
+- [扫描正确性](<internal/scanner/incremental_acceptance_test.go>)、[保留策略](<internal/scanner/incremental_retention_test.go>)、[manual 缺 NFO 的 CD 结构与零写回归](<internal/scanner/incremental_manual_parts_test.go>)、[完整清单](<internal/scanner/incremental_inventory_test.go>)、[根标识](<internal/scanner/root_marker_test.go>)。
+- [HTTP 与幂等回归](<internal/server/incremental_scan_test.go>)；前端 `node --test internal/server/web*_test.cjs`。
+- [可重复性能基准](<internal/scanner/incremental_benchmark_test.go>)：200 组，本地临时目录，`-benchtime=1x`，仅单次对照而非稳定倍数承诺。
+
+| 200 组场景 | full → incremental，毫秒 | 业务行 DML，full → incremental | 增量组重建 / 版本推进 |
+|---|---:|---:|---:|
+| 普通组，0% 变化 | 907.46 → 57.68 | 800 → 0 | 0 / 0 |
+| 普通组，1% 变化 | 881.01 → 60.60 | 800 → 8 | 2 / 2 |
+| 普通组，10% 变化 | 910.16 → 187.11 | 800 → 80 | 20 / 20 |
+| 每组双 CD，0% 变化 | 2306.14 → 347.98 | 800 → 0 | 0 / 0 |
+| 每组双 CD，1% 变化 | 2171.56 → 251.16 | 800 → 8 | 2 / 2 |
+| 每组双 CD，10% 变化 | 1364.34 → 347.68 | 800 → 80 | 20 / 20 |
+
+无变化场景扫描状态行 DML 也为 0。`benchmem` 的 B/op、allocs/op 是总分配指标，不是峰值内存；枚举/摘要/解析/提交分段耗时及真实解析次数尚未单独仪表化。严格 CD 成员复核仍逐组 ReadDir，大目录存在复杂度开销，不用可漏变化的目录时间戳缓存换取速度。
+
+### 统一冻结验证
+
+- 冻结后 `go test -count=1 -timeout=20m -coverprofile=/tmp/emby-incremental-coverage-final.out ./...` 全部通过；总语句覆盖率 **76.7%**，高于项目 70% 门禁。server 146.288s、store 72.313s、scanner 10.213s。
+- `go vet ./...`、`go build ./...`、`gofmt -l internal/store internal/scanner internal/server` 与 `git diff --check` 通过。
+- `node --test internal/server/web*_test.cjs` **163/163** 通过，无失败/跳过；app/login 语法检查通过。真实 Chromium 的局部静态 CSS/命中测试通过，不等于真实服务 E2E。
+- 冻结后 `go test -race -count=1 -timeout=40m ./...` **全包通过**：server 1085.388s、store 665.555s、scanner 167.566s；退出码 0。此前目录 stat 缓存的失败促成撤回优化，不冒充通过；这里记录的是撤回及 manual CD 修复后的独立完整重跑。
+
+**边界**：没有真实 SMB/NFS 故障演练、生产库迁移或真实服务浏览器 E2E；图片同大小/mtime 覆写仍是 stat 指纹残余。根标识与复验不是文件系统和 SQLite 的联合快照，无法排除所有外部并发改盘/挂载异常。未提交、推送或部署。
+
+---
+
+## 16. 前端功能布局与移动操作（2026-10-23，本地实施完成）
+
+### 实现范围
+
+- 保留暗色管理台和原生 JS/CSS，不改后端业务权限、任务身份隔离、计划参数/ETag 或危险确认。导航按职责分组；手机改为按钮开启的抽屉菜单，而不是十个入口横向滚动。
+- 设置分成账户安全、用户与授权、服务连接等六类，每次只显示一类；切类不销毁输入，身份切换重置。Webhook 使用不含 URL/凭据的折叠摘要，已有目标默认收起、新目标展开；原保存、冲突和删除确认保留。
+- 计划任务先显示现有列表，新建表单按需展开；刮削先显示执行与进度，连接配置收起。媒体墙主筛选与维护分层，详情的简介/演员与维护工具分开；独立翻译仍是独立功能。
+- `navigation.js` 单独处理移动菜单、Esc/Tab 焦点循环、主内容 inert、关闭后焦点还原、跨断点复位及遮罩互斥；已接入显式静态路由、go:embed、ETag/no-cache。手机操作目标按至少 44 CSS px 和 8px 间距设计，兼顾 safe-area、窄屏表单/表格和详情抽屉。
+
+### 验证证据
+
+- 冻结后 `node --test internal/server/web*_test.cjs` **171/171 通过**，无失败/跳过；app/navigation/webhook-settings/login 语法检查和 `git diff --check` 通过。
+- 新增 `internal/server/web_navigation_test.cjs` 四组独立导航状态测试；`internal/server/web_layout_test.cjs` 使用现有 Chromium、内置 CDP 与模拟 API，在 **1280、768、390、360 CSS px** 下运行完整页面脚本，覆盖七页面、六设置分类、展开表单/详情、选片与管理按钮实际命中及触控尺寸、菜单/焦点和文档横向溢出。测试启用减少动画偏好以稳定几何测量，不以隐藏 checkbox 代替可见标签命中。
+- `TestNavigationEmbeddedAsset` 验证导航资源 200、JS 类型、no-cache/ETag、304 及加载顺序。全量 `go test -count=1 -timeout=20m ./...` 通过（server 106.511s、store 57.611s、scanner 9.858s）；`go vet ./...`、`go build ./...` 通过。
+- 本轮不重跑完整 race；上一节完整 race 结果属于增量扫描批次，不能冒认为本轮结果。
+
+**验证边界**：Chromium 使用临时文件和模拟数据，不启动业务服务、不访问生产；不等于真实 API/网关 E2E、手机真机、Safari/Firefox 或读屏验收。截图已生成，但当前模型不支持图像输入，未作人工视觉审图。部署需重新构建包含嵌入资源的二进制并刷新浏览器；本轮未提交、推送或部署，既有工作区改动与取证资料保留。
+
+---
+
+## 17. NFO 不可读保护与契约补登记（2026-10-24，本地实施完成）
+
+### 实现范围
+
+- 扫描不再把「NFO 存在但解析失败」当成清空元数据的指令。增量路径在 `buildRecords` 记录候选文件与解析错误并通过 `ScanGroupMovie.KeepIndexedMetadata` 透传；`commitScanGroup` 在人工保护分支之前走保留分支：只更新 `file_size/file_mtime/source_protocol/source_container/additional_parts/updated_at`（复用 `updateManualScanStructureTx` 的差异谓词），元数据、演员、特征与 `status` 原样保留，`last_scrape_error` 写入 `[NFO 不可读] <path>: <err>`（截断 300 字符）。全量/单文件路径同样区分 `os.ErrNotExist`（无 NFO，仍按 pending）与其他读取错误（保留，`IndexMovieUnreadableNFO`）；从未索引过的源仍是 pending 入库并带同前缀原因，用户能看到并修。
+- 恢复是自动的：NFO 可解析后正常索引并清除 `[NFO 不可读]` 前缀的备注（增量在提交事务内，全量在读后确认再写，且只清本前缀，不动刮削失败/待确认）。
+- 扫描结果新增 `unreadable_nfo`，前端在扫描摘要里显示「NFO 不可读 N（已保留原元数据）」；「重读源」单文件入口在同一情形下返回 `nfo_unreadable: true` 与 `warning`，避免操作者以为文件被读到了；`API-CONTRACT.md` §4.4 登记字段与语义。
+- `API-CONTRACT.md` §3 补登 `500 ITEM_DATA_UNAVAILABLE`（`internal/server/item_associations.go`），消除 code 表漂移。
+- `dev-plan.md` §3.1 增加对应硬约束；`docs/emby-study/jellyfin-reading-notes.md` §8 标注第 1/3 项已落地、第 2 项（目录级 `movie.nfo` 兼容）经确认不做。
+
+### 验证证据
+
+- 新增 `internal/scanner/unreadable_nfo_test.go`：好 NFO → 破坏 → 增量与全量各扫一遍 → 断言标题/简介/`status=success`/可见性保持、`unreadable_nfo=1`、备注带前缀；修好 NFO 再扫 → 标题刷新、备注清空；另测「新源 + 坏 NFO」入库为 pending。新增 `internal/server/image_conditional_test.go`：原图与缩略图的 `Cache-Control` 不得含 `immutable`（保留 `max-age` + `must-revalidate`），`If-None-Match` 单值/多值/`W/`/`*` 必须 304，不匹配必须 200。
+- `go build ./...`、`go vet ./...`、`gofmt -l internal/`（无输出）、`git diff --check` 通过；`go test -count=1 ./...` 全包通过（server 115.084s、store 64.666s，最后一次完整运行）；`node --test internal/server/web*_test.cjs` **171/171** 通过。扫描进度快照（`scanStatus`）同步暴露 `unreadable_nfo`，前端摘要据此显示。
+- 本轮未重跑 race 与覆盖率，不冒认既有结果。
+
+**验证边界**：未做真实挂载/NFS 故障、真实 Emby 客户端或生产库验证；「保留」只覆盖元数据与可见性，不保证 NFO 目录级候选兼容（明确不做）。本轮未提交、推送或部署；工作区既有改动（API-CONTRACT/PLAN-STATUS/README/dev-plan 的历史改动、docs/* 删除、reports/）保持原样。
+
+---
+
+## 18. 缩略图磁盘变体缓存与尺寸档位（2026-10-24，本地实施完成）
+
+### 实现范围
+
+- 先量化再动手：`internal/imageutil.Thumbnail` 全链路（webp 解码 + 盒式缩放 + 编码）在本机 2 核实测 —— 1000×1500 源缩到宽 200 为 **70ms**（解码 44–60、缩放 15、编码 ~15），缩到宽 400 为 **122–152ms**；纯 Go 的 `deepteams/webp` 解码是主要成本。一页 100 部海报墙（前端同时要 200 与 400 宽）约 **19s CPU**，2 核加 `thumbSem` 4 并发约 8–10s 出齐；命中内存、命中 304、无尺寸参数直出原图时基本零成本，所以问题集中在「首次/重启后重算」与「并发重复算」。
+- 原实现只有进程内 LRU（512 条、TTL 30 分钟）：一页就能把缓存顶掉，重启即全部重算。新增 `internal/imagecache`：`Disk` 以 sha256 前 16 字节做两级分片（`<2hex>/<32hex>.webp`），`Put` 走同目录临时文件 + `rename` 原子写，`Get` 命中时按 1 小时节流刷新 mtime 作为「最近使用」的近似，`Trim` 先删 TTL 过期、再按 mtime 由旧到新淘汰到 80% 水位，`MaybeTrim` 后台执行且十分钟节流 + 单飞。缓存不可用（目录建不出来）时降级为纯内存缓存并告警，图片接口行为不变。
+- `internal/server/media.go` 的命中顺序改为 进程内 LRU → 磁盘变体 → 同 key 合并生成 → 信号量 → 复查（内存、磁盘）→ 生成 → 内存 + 落盘；`beginThumbFlight/finishThumbFlight` 实现 singleflight（follower 等 `done` 或请求 ctx 取消），避免 `<img>` 与 `srcset` 同时开时把同一份 CPU 工作排两遍。生成函数抽成 `App.thumbGenerate`，测试据此统计真实编码次数。
+- 尺寸按档位**向下**取整（`imageEdgeBuckets`，195 → 180）：变体集合可枚举、彼此更易复用，且响应永远不超过请求的 `maxWidth/maxHeight`（不破坏客户端的布局语义）；`<32` 保留原值。
+- 配置 `image_cache{enabled, dir, max_bytes, ttl_hours}`，默认启用、目录取 `db_path` 同级 `image-cache/`、上限 2GiB、保留 168 小时；`-1` 表示不限/不过期；`config.Load` 与 `server.New` 两处都套默认值（测试直接构造 `config.Config` 会绕过 `Load`）。启动时清理一次，之后由写入侧触发。
+- 文档：`config.example.yaml` 增 `image_cache` 段（含成本说明）、`API-CONTRACT.md` §4 图片行补「按档位向下对齐、同一输入只编码一次」、`.gitignore` 增 `/image-cache/`。
+
+### 验证证据
+
+- 新增 `internal/imagecache/disk_test.go`：读写回环且不留临时文件、key 稳定且不同输入不撞文件、按容量淘汰最旧（1500 字节上限删到剩最新一份）、TTL 过期在 `Trim` 时删除、禁用/降级实例为纯空操作。
+- 新增 `internal/server/image_disk_cache_test.go`：首次请求生成并落盘（1 份变体）；`imgThumb.Clear()` 后同 URL 仍 200 且**零新增生成**（走磁盘）；`maxWidth=195` 与 `190` 都落在 180 档、响应 180×90 且字节完全相同、不新增变体；8 个并发同 URL 只生成 1 次（计数 hook，生成窗口内人为 sleep 30ms）；改写源图 mtime 后新增 1 份变体；`Cache-Control` 仍含 `max-age` 且不含 `immutable`。新增 `internal/config/config_test.go` 两例：默认值/显式关闭/`-1` 语义、YAML 覆盖生效。
+- `go build ./...`、`go vet ./...`、`gofmt -l internal/`（无输出）、`git diff --check` 通过；`go test -count=1 ./...` 全包通过（server 120.556s、store 67.818s、scanner 8.310s、imagecache 0.010s，最后一次完整运行）；`node --test internal/server/web*_test.cjs` **171/171** 通过。
+- `go test -race -count=1 ./internal/imagecache/` 与 `go test -race -count=1 ./internal/server/ -run TestImage` 均通过（后者 29.655s），覆盖 singleflight 与磁盘读写的并发路径。
+
+**验证边界**：未在真实大目录（十万级变体）上测 `Trim` 耗时与 IO 抖动；未做多实例共享同一缓存目录的压测（singleflight 只在进程内生效，多实例会各生成一次，靠 rename 原子性保证不读到半文件）；未用真实 Emby 客户端验证 180 档缩略图的观感；容量/TTL 的淘汰策略以 mtime 近似 LRU，长时间只读不写的变体可能被淘汰后重新生成。本轮未提交、推送或部署；工作区既有改动（API-CONTRACT/PLAN-STATUS/README/dev-plan 的历史改动、docs/* 删除、reports/）保持原样。
+
+---
+
+## 19. 图片缓存进入设置页：在线容量上限与清理（2026-10-25，本地实施完成）
+
+### 实现范围
+
+- 设置页新增「图片缓存」分类（`internal/server/web/image-cache-settings.js`）：展示缓存目录、启用状态、当前占用（字节 + 变体数）、容量上限，提供「保存上限」与「立即清理」。上限输入以 GiB 为单位（0 = 不限制），前端换算成字节提交，不引入第二套单位语义。
+- 后端 `internal/server/image_cache_settings.go`：`GET /api/admin/image-cache/settings` 返回 `{dir,enabled,max_bytes,used_bytes,files,max_allowed_bytes,config_etag}`；`PUT` 接受 `{max_bytes}`（0–64 GiB）并沿用日志期限设置的并发约定——缺 `If-Match` 428、不匹配 412 `IMAGE_CACHE_SETTINGS_CHANGED`、配置禁用时 409 `IMAGE_CACHE_DISABLED`；`POST /api/admin/image-cache/trim` 立即清理。
+- 持久化走既有的 `settings` KV（键 `image_cache.max_bytes`）：配置文件仍是部署默认值，设置页保存的值优先，重启后仍然生效；坏值在启动时降级为「沿用配置文件」并告警，不让服务起不来。
+- `internal/imagecache` 增 `Stats()`（只统计 `.webp`，排除临时文件）与 `SetMaxBytes()`/`MaxBytes()`；`maxBytes`/`ttl` 的读取改到 `trimMu` 下，避免设置页写入与后台清理并发读写同一字段。
+- 保存后立刻按新上限清理（最多等 2 秒，超出部分交给后台，响应不装成「已清完」）；`Trim` 的 80% 水位计算改为 `maxBytes*80/100`，修掉小上限（<100 字节）时整数除法把水位算成 0、误删整目录的问题。
+- 文档：`API-CONTRACT.md` §4.3 增端点行；`config.example.yaml` 注明 `max_bytes` 可被管理页在线覆盖。
+
+### 验证证据
+
+- 新增 `internal/server/image_cache_settings_test.go`：未认证 401、非管理员 403；GET 快照字段与 `no-store`；11 组非法 body 全部 400；缺 `If-Match` 428、过期 `If-Match` 412；保存后 DB 持久化、重启保留、`0` 立即落到 `Disk`；写入 3 份变体后 GET 统计 3/3000 字节，上限调到 2048 后同步清理到 ≤1 份；禁用配置下 GET `enabled:false` 且 PUT 409；坏值设置不阻断启动并回落 2 GiB；静态资源可服务、ETag 命中 304、`/admin` 引用该脚本。
+- `internal/imagecache/disk_test.go` 增 `TestDiskStatsAndSetMaxBytes`：临时文件不计入占用、上限 6 字节时按水位删到 1 份、`0`/负数归一成不限制、禁用实例与 nil 接收者均为空操作。
+- 新增 `internal/server/web_image_cache_test.cjs`（3 个用例）：体积格式化与 GiB 往返、渲染占用/保存换算成字节并带 `If-Match`、412 时保留草稿且禁止重提、禁用配置锁死表单、清理按钮走 POST 并回显释放量。
+- `go build ./...`、`go vet ./...`、`gofmt -l internal/`（无输出）、`git diff --check` 通过；`go test -count=1 ./...` 与 `node --test internal/server/web*_test.cjs` 全绿（详见提交前的最终运行）。
+
+**验证边界**：`used_bytes`/`files` 是即时 walk 目录的结果，十万级变体时单次读取会慢一个量级（前端只在打开/保存/清理后各读一次）；上限只约束本进程的清理策略，多实例共享同一目录时各自看到同一个上限但清理时机不协调；设置页不能开启配置里已经关闭的缓存（`enabled` 只能改配置文件）。
+
+---
+
+## 20. MetaTube 能力对齐施工计划（2026-11-03）
+
+### 范围决策
+
+用户在插件能力对照后明确裁剪本阶段范围；本节覆盖先前“优先补来源过滤”等建议。设计边界、依赖及逐项验收见 [方案 §4.1](<dev-plan.md#41-metatube-能力对齐方案2026-11-03-范围更新>)，本节只维护施工状态。
+
+| 项目 | 当前决策 | 施工边界 |
+|---|---|---|
+| 预告片刮削与生成 | 暂缓 | 不接入预告片详情、不生成预告片 STRM、不增加任务；已有 NFO 预告片读取不移除 |
+| 自定义替换表 | 暂缓 | 不开发标题、演员、类型替换表及配置界面 |
+| 标题与 Tagline 模板 | 暂缓 | 保留现有固定标题规则，不引入模板引擎 |
+| 全局来源筛选与排序 | 暂缓 | 不增加来源白名单及优先级；已有手动指定单一来源继续保留 |
+| 翻译扩展 | 当前够用，维持现状 | 现有服务和开关继续维护，不新增翻译引擎、不改现有翻译状态/缓存策略 |
+
+“暂缓”不是已完成，也不是永久取消；重新启动需另行排期。本轮仅更新计划，不启动实现、不改变运行中的服务。
+
+### 已有基线（不是本轮新增）
+
+- 四种影片手动识别已在前序实现，搜索与预览只读，确认后才进入写入流程。
+- 官方 `Provider:movie-id` 标记已支持写入、导入、精准复用及历史 `metatube:` 前缀兼容；只补缺失、锁字段及旧 API 键兼容保留。
+- Position/Update 目前仅解析兼容，完整裁切/强制刷新语义仍属于下表待施工项，不能算已验收。
+- 演员头像、文件名版本标记/角标和现有翻译继续作为回归基线，不重复立项。
+- 前序本地验证记录：身份适配后 `go test ./...` 与前端 260 项测试通过，并执行了相关身份路径 race；这是前序运行记录，不是本次文档更新重新跑出的结果，也不代表生产验收。
+
+### 保留施工队列
+
+状态图例：○ 待施工 · ◐ 施工中 · ✅ 本地实施与回归完成。当前没有条目进入施工中。
+
+| ID | 施工项 | 状态 | 前置与交付门槛 |
+|---|---|---|---|
+| MT-01 | Position/Update 完整语义 | ○ | 结构化后缀兼容旧解析调用方；验证 Update→lazy 参数及精准失败不转搜；不改变只读预览和写入锁 |
+| MT-02 | 图片 ratio/pos/auto 与缓存隔离 | ○ | 依赖 MT-01；核对上游参数范围、保留旧默认请求、真实图片验证裁切效果 |
+| MT-03 | 剧照与多图片候选 | ○ | 依赖 MT-02；先定图片角色与持久化命名；选择确认后写入，不默认全量下载 |
+| MT-04 | 中文字幕整理增强 | ○ | 复用现有标记和写入保护；明确人工与程序标签归属、外置字幕识别和任务入口，不默认整库改写 |
+| MT-05 | 演员独立资料与精准身份 | ○ | 先定持久真源及重建协议；人工选择、同名防误配、头像兼容和关系回归 |
+| MT-06 | AVBASE 姓名转换建议 | ○ | MT-05 身份边界明确后实施；默认关闭、人工确认，不把相似度 0.8 当作安全自动覆盖保证 |
+
+按 MT-01 → MT-02 → MT-03 → MT-04 → MT-05 → MT-06 建议顺序推进；不把暂缓的来源筛选、替换表、模板或预告片当成前置。系列自动合集与外链另行评估，插件自身自动更新不迁移为本项目功能。
+
+### 后续验收与本轮验证边界
+
+- 各施工项须交付实现、针对性测试、契约/使用说明更新；涉及 NFO、图片落盘和索引更新时继续报告部分成功并支持恢复，不用文件回滚伪装联合事务。
+- 功能批次按方案 §5 执行 build/vet/Go/前端回归，并发路径按需 race；图片和选择 UI 补真实图片与浏览器验证。真实 MetaTube/客户端或生产环境未验证时单列边界。
+- 本轮仅修改本台账与方案，检查文档差异及 `git diff --check`；未重跑功能测试、未提交、未推送、未重建或部署。既有未提交代码和历史文档改动保留。

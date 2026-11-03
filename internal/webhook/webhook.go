@@ -177,6 +177,12 @@ func (s *Sender) Send(ctx context.Context, event Event) error {
 	if err != nil {
 		return ErrInvalidEvent
 	}
+	return s.sendPayload(ctx, body)
+}
+
+// sendPayload shares the single-attempt transport and bounded acknowledgment
+// handling between subscribed events and explicit, harmless test messages.
+func (s *Sender) sendPayload(ctx context.Context, body []byte) error {
 	var payload io.Reader = bytes.NewReader(body)
 	contentType := "application/json"
 	if s.format == "form" {
@@ -193,7 +199,7 @@ func (s *Sender) Send(ctx context.Context, event Event) error {
 	req.Close = true
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return ErrSend
+		return safeDeliveryError(err, ErrSend)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -202,7 +208,7 @@ func (s *Sender) Send(ctx context.Context, event Event) error {
 	// The client total timeout and caller context cover this read as well as Do.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return ErrReadResponse
+		return safeDeliveryError(err, ErrReadResponse)
 	}
 	// Treat a full buffer conservatively: do not accept an unknown/truncated ack.
 	if len(data) == maxResponseBytes {
@@ -213,6 +219,18 @@ func (s *Sender) Send(ctx context.Context, event Event) error {
 		return ErrIgnored
 	}
 	return nil
+}
+
+// Preserve only safe context sentinels, never the raw HTTP error (which can
+// contain the full URL and credentials). Keep the stage sentinel for callers.
+func safeDeliveryError(err, stage error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(stage, context.DeadlineExceeded)
+	}
+	if errors.Is(err, context.Canceled) {
+		return errors.Join(stage, context.Canceled)
+	}
+	return stage
 }
 
 // Close releases idle connections. Requests use Connection: close because the

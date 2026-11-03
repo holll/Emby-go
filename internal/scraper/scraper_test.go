@@ -173,7 +173,7 @@ func TestBuildFieldsMapsMetaTubeToNFO(t *testing.T) {
 	if fields.Mpaa != officialRating {
 		t.Errorf("分级应为常量 %s，得到 %s", officialRating, fields.Mpaa)
 	}
-	if fields.ProviderID != "metatube:fanza:abc" {
+	if fields.ProviderID != "fanza:abc" {
 		t.Errorf("ProviderID = %q", fields.ProviderID)
 	}
 	if !contains(fields.Tags, "厂牌") {
@@ -285,7 +285,7 @@ func TestSplitProviderID(t *testing.T) {
 	if !ok || provider != "fanza" || id != "abc-1" {
 		t.Errorf("SplitProviderID = (%q, %q, %v)", provider, id, ok)
 	}
-	for _, bad := range []string{"", "fanza:abc", "metatube:", "metatube:fanza", "metatube::abc"} {
+	for _, bad := range []string{"", "fanza:", "metatube:", "metatube:fanza", "metatube::abc"} {
 		if _, _, ok := SplitProviderID(bad); ok {
 			t.Errorf("%q 不应解析成功", bad)
 		}
@@ -403,7 +403,7 @@ func TestApplyWritesNFOAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if result.ProviderID != "metatube:fanza:abc" || result.ImageCount != 3 {
+	if result.ProviderID != "fanza:abc" || result.ImageCount != 3 {
 		t.Errorf("结果不对: %+v", result)
 	}
 
@@ -418,7 +418,7 @@ func TestApplyWritesNFOAndImages(t *testing.T) {
 		"<originaltitle>原文标题</originaltitle>",
 		"<plot>原文简介</plot>",
 		"<mpaa>JP-18+</mpaa>",
-		"<uniqueid type=\"metatube\">metatube:fanza:abc</uniqueid>",
+		"<uniqueid type=\"metatube\">fanza:abc</uniqueid>",
 		"<name>甲</name>",
 		"<unknownvendor>keep</unknownvendor>", // 未知标签保留
 		"<fileinfo>",                          // 探测结果保留
@@ -440,7 +440,7 @@ func TestApplyWritesNFOAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("刮削后的 NFO 无法解析: %v", err)
 	}
-	if meta.ProviderID() != "metatube:fanza:abc" || meta.Mpaa != officialRating {
+	if meta.ProviderID() != "fanza:abc" || meta.Mpaa != officialRating {
 		t.Errorf("解析结果不对: %+v", meta)
 	}
 }

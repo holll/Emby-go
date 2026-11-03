@@ -254,7 +254,7 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	}
 	// 不传 url 参数：后端按 provider:id 自己取源图并按类型裁到约定比例。
 	// 某些来源没有某类图时后端会返回错误，我们记 warn 跳过（图片尽力而为）。
-	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQualityValue(), "", badge)
+	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQuality, "", badge)
 	data, err := s.client.Download(ctx, url, maxImageBytes)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", ctxErr
@@ -309,15 +309,16 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	return dest, nil
 }
 
-// providerID 三段式 ProviderID，用于去重与回查（需求映射表）。
+// providerID writes the MetaTube plugin identity used by NFOs and lookups.
 func providerID(provider, id string) string {
-	return "metatube:" + provider + ":" + id
+	return metatube.FormatProviderID(provider, id)
 }
 
-// SplitProviderID 解析 metatube:<provider>:<id>。
+// SplitProviderID accepts plugin identities and the old metatube:provider:id
+// marker. Legacy IDs are opaque raw values: never percent-decode them.
 func SplitProviderID(raw string) (provider, id string, ok bool) {
 	if !strings.HasPrefix(raw, "metatube:") {
-		return "", "", false
+		return metatube.ParseProviderID(raw)
 	}
 	parts := strings.SplitN(strings.TrimPrefix(raw, "metatube:"), ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

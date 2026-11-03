@@ -1666,16 +1666,18 @@ test('移动端表格：用户卡片化与日志堆叠', async () => {
 
 const webhookUI = fs.readFileSync(path.join(__dirname, 'web/webhook-settings.js'), 'utf8');
 const webhookEventNames = [...webhookUI.matchAll(/\['((?:item|playback|user)\.[a-z]+)',/g)].map(m => m[1]);
-const whTarget = (over = {}) => ({ id: 'wh_1', name: '目标A', enabled: false, url_configured: true,
+const whTarget = (over = {}) => ({ id: 'wh_1', name: '目标A', enabled: false, url: 'https://receiver.example/saved-token', url_configured: true,
   events: ['item.rate'], format: 'json', timeout_seconds: 5, allow_private: false, ...over });
 const whView = (targets = [whTarget()], tag = '"cfg-1"', multi = true) => ({ version: 2, config_etag: tag, multi_target: multi, targets });
 
 function webhookPanel(api) {
   const makeNode = () => ({ value: '', checked: false, disabled: false, textContent: '', hidden: false, role: '',
     listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; },
-    setAttribute(k, v) { this[k] = v; }, focus() { this.focused = true; } });
+    setAttribute(k, v) { this[k] = v; }, focus() { this.focused = true; },
+    showModal() { this.open = true; }, close() { this.open = false; this.listeners.close?.(); } });
   const ids = ['webhook-title', 'wh-reload', 'wh-targets', 'wh-empty', 'wh-remove-preview', 'wh-confirm-remove-row',
-    'wh-confirm-remove', 'wh-confirm-empty-row', 'wh-confirm-empty', 'wh-confirm-delete', 'wh-status', 'wh-add', 'wh-save'];
+    'wh-confirm-remove', 'wh-confirm-empty-row', 'wh-confirm-empty', 'wh-confirm-delete', 'wh-status', 'wh-add', 'wh-save',
+    'wh-dialog', 'wh-dialog-form', 'wh-dialog-body', 'wh-dialog-status', 'wh-dialog-close', 'wh-dialog-cancel', 'wh-dialog-submit'];
   const nodes = Object.fromEntries(ids.map(id => [id, makeNode()]));
   const targetsHost = nodes['wh-targets'];
   let cards = [];
@@ -1699,14 +1701,17 @@ function webhookPanel(api) {
       fields: () => [...map.values(), ...eventNodes],
       events: eventNodes,
       querySelector: field,
-      querySelectorAll: selector => selector === '[data-event]' ? eventNodes : [],
+      querySelectorAll: selector => selector === '[data-event]' ? eventNodes : selector === 'input, select, button' ? [...map.values(), ...eventNodes] : [],
       innerHTML: ''
     };
   };
   const host = { isConnected: true, innerHTML: '', querySelector: selector => nodes[selector.replace(/^#/, '')] };
   const calls = [], prompts = [];
   let active = true, confirms = true;
-  const box = sandbox({ document: { createElement: () => cardStub() },
+  let draftCard;
+  nodes['wh-dialog-body'].appendChild = card => { draftCard = card; };
+  Object.defineProperty(nodes['wh-dialog-body'], 'innerHTML', { get: () => '', set: () => { draftCard = null; } });
+  const box = sandbox({ URL, document: { createElement: () => cardStub() },
     confirm: text => { prompts.push(text); return confirms; } });
   vm.runInContext(webhookUI, box);
   const mounted = box.mountWebhookSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
@@ -1717,7 +1722,18 @@ function webhookPanel(api) {
     card,
     field: (index, name) => cards[index].querySelector(`[data-field="${name}"]`),
     events: index => cards[index].events,
-    add: () => nodes['wh-add'].listeners.click(),
+    openAdd: () => nodes['wh-add'].listeners.click(),
+    draftField: name => draftCard.querySelector(`[data-field="${name}"]`),
+    draftEvents: () => draftCard.events,
+    submitDraft: () => nodes['wh-dialog-form'].listeners.submit({ preventDefault() {} }),
+    cancelAdd: () => nodes['wh-dialog-cancel'].listeners.click(),
+    add: () => {
+      nodes['wh-add'].listeners.click();
+      draftCard.querySelector('[data-field="name"]').value = '新目标';
+      draftCard.querySelector('[data-field="url"]').value = 'https://receiver.example/new';
+      draftCard.events.find(e => e.dataset.event === 'item.updated').checked = true;
+      nodes['wh-dialog-form'].listeners.submit({ preventDefault() {} });
+    },
     remove: index => cards[index].querySelector('[data-remove]').listeners.click(),
     save: () => nodes['wh-save'].listeners.click(),
     reload: () => nodes['wh-reload'].listeners.click(),
@@ -1760,16 +1776,17 @@ test('Webhook确认框使用真实checkbox，隐藏状态不被flex覆盖，动�
   assert.equal(p.nodes['wh-confirm-remove-row'].hidden, true);
 });
 
-test('Webhook多目标加载不回显地址，保存完整订阅及If-Match', async () => {
+test('Webhook多目标明文回显已保存地址，保存完整订阅及If-Match', async () => {
   const p = webhookPanel(async (path, options) => {
     assert.equal(path, '/webhook/targets');
     if (!options) return whView();
-    return whView([whTarget({ name: '目标A', enabled: true, events: ['playback.stop'], format: 'form', timeout_seconds: 12, allow_private: true })], '"cfg-2"');
+    return whView([whTarget({ name: '目标A', url: 'https://receiver.example/private-token-canary', enabled: true, events: ['playback.stop'], format: 'form', timeout_seconds: 12, allow_private: true })], '"cfg-2"');
   });
   await p.mounted;
   assert.equal(p.cards().length, 1);
   assert.equal(p.events(0).length, 13);
-  assert.equal(p.field(0, 'url').value, '');
+  assert.equal(p.field(0, 'url').value, 'https://receiver.example/saved-token');
+  assert.match(p.card(0).innerHTML, /data-field="url" type="text" inputmode="url"/);
   assert.equal(p.nodes['wh-save'].disabled, false);
   p.field(0, 'enabled').checked = true; p.field(0, 'allow-private').checked = true;
   p.field(0, 'url').value = 'https://receiver.example/private-token-canary'; p.field(0, 'format').value = 'form'; p.field(0, 'timeout').value = '12';
@@ -1782,10 +1799,13 @@ test('Webhook多目标加载不回显地址，保存完整订阅及If-Match', as
   assert.equal(body.targets[0].id, 'wh_1'); assert.equal(body.targets[0].format, 'form');
   assert.equal(body.targets[0].timeout_seconds, 12); assert.equal(body.targets[0].allow_private, true);
   assert.equal(body.confirm_delete, false); assert.equal(body.confirm_empty_targets, false);
-  assert.equal(p.field(0, 'url').value, ''); assert.equal(p.nodes['wh-confirm-delete'].checked, false);
+  assert.equal(p.field(0, 'url').value, 'https://receiver.example/private-token-canary'); assert.equal(p.nodes['wh-confirm-delete'].checked, false);
   assert.match(p.nodes['wh-status'].textContent, /即时生效.*重启保留.*未发送测试通知/);
   await p.save(); assert.equal(p.calls[2][1].headers['If-Match'], '"cfg-2"');
-  assert.equal(JSON.parse(p.calls[2][1].body).targets[0].url, undefined, '下一次留空保留，不填充旧URL');
+  assert.equal(JSON.parse(p.calls[2][1].body).targets[0].url, 'https://receiver.example/private-token-canary', '回显地址可再次原样保存');
+  p.field(0, 'url').value = '';
+  await p.save();
+  assert.equal(JSON.parse(p.calls[3][1].body).targets[0].url, undefined, '手动留空仍保留已保存的地址');
 });
 
 test('Webhook多目标新增目标由服务端分配ID，删除需清单确认，清空需显式确认', async () => {
@@ -1823,6 +1843,76 @@ test('Webhook多目标新增目标由服务端分配ID，删除需清单确认�
   assert.deepEqual(emptyBody.targets, []); assert.equal(emptyBody.confirm_empty_targets, true);
 });
 
+test('Webhook新增弹窗隔离草稿、取消不改目标且还原焦点，不自动请求', async () => {
+  const p = webhookPanel(async () => whView()); await p.mounted;
+  p.field(0, 'name').value = '现有目标未保存修改';
+  p.openAdd();
+  assert.equal(p.nodes['wh-dialog'].open, true);
+  assert.equal(p.cards().length, 1, '打开弹窗不插入空白目标');
+  assert.equal(p.draftField('name').focused, true);
+  p.draftField('name').value = '取消的目标';
+  p.draftField('url').value = 'https://receiver.example/cancel-token';
+  p.cancelAdd();
+  assert.equal(p.nodes['wh-dialog'].open, false);
+  assert.equal(p.nodes['wh-add'].focused, true);
+  assert.equal(p.cards().length, 1);
+  assert.equal(p.field(0, 'name').value, '现有目标未保存修改');
+  p.openAdd();
+  assert.equal(p.draftField('name').value, '');
+  assert.equal(p.draftField('url').value, '');
+  p.cancelAdd();
+  assert.equal(p.calls.length, 1, '取消不保存也不试发');
+});
+
+test('Webhook新增弹窗验证名称、事件和HTTP地址，确认只加入草稿', async () => {
+  const p = webhookPanel(async () => whView()); await p.mounted;
+  p.openAdd(); p.submitDraft();
+  assert.match(p.nodes['wh-dialog-status'].textContent, /名称/);
+  p.draftField('name').value = '新地址'; p.submitDraft();
+  assert.match(p.nodes['wh-dialog-status'].textContent, /至少.*事件/);
+  p.draftEvents().find(e => e.dataset.event === 'playback.stop').checked = true;
+  p.submitDraft(); assert.match(p.nodes['wh-dialog-status'].textContent, /接收地址/);
+  for (const url of ['javascript:alert(1)', 'ftp://receiver.example/path', '/relative', 'https://']) {
+    p.draftField('url').value = url; p.submitDraft();
+    assert.equal(p.nodes['wh-dialog'].open, true);
+    assert.equal(p.cards().length, 1);
+    assert.match(p.nodes['wh-dialog-status'].textContent, /HTTP\(S\)/);
+  }
+  p.draftField('url').value = 'https://receiver.example/new?token=visible';
+  p.submitDraft();
+  assert.equal(p.nodes['wh-dialog'].open, false);
+  assert.equal(p.cards().length, 2);
+  assert.equal(p.field(1, 'url').value, 'https://receiver.example/new?token=visible');
+  assert.equal(p.card(1).open, true);
+  assert.match(p.nodes['wh-status'].textContent, /草稿.*保存全部目标/);
+  assert.equal(p.calls.length, 1);
+});
+
+test('Webhook明文地址清除以clear_url为准，不把回显地址同时作为替换提交', async () => {
+  const p = webhookPanel(async (_, options) => options ? whView([whTarget({ url: '', url_configured: false })], '"cfg-clear"') : whView());
+  await p.mounted;
+  p.field(0, 'clear-url').checked = true;
+  p.field(0, 'clear-url').listeners.change();
+  assert.equal(p.field(0, 'url').disabled, true);
+  await p.save();
+  const draft = JSON.parse(p.calls[1][1].body);
+  assert.equal(draft.targets[0].clear_url, true);
+  assert.equal(draft.targets[0].url, undefined);
+  assert.equal(p.field(0, 'url').value, '');
+  assert.equal(p.field(0, 'clear-url').disabled, true);
+});
+
+test('Webhook新增弹窗在离页后不会加入或保存旧草稿', async () => {
+  const p = webhookPanel(async () => whView()); await p.mounted;
+  p.openAdd();
+  p.draftField('name').value = '旧页面目标';
+  p.draftField('url').value = 'https://receiver.example/old';
+  p.draftEvents()[0].checked = true;
+  p.leave(); p.submitDraft();
+  assert.equal(p.cards().length, 1);
+  assert.equal(p.calls.length, 1);
+});
+
 test('Webhook多目标读取失败只能显式重载；保存503保留草稿而不自动重试', async () => {
   let step = 0;
   const p = webhookPanel(async () => { if (++step !== 2) throw Object.assign(Error('network'), { status: 503 }); return whView(); });
@@ -1844,7 +1934,7 @@ test('Webhook多目标412保留草稿并禁旧重提，显式确认重新加载�
   assert.match(p.nodes['wh-status'].textContent, /草稿已保留.*不会自动覆盖/);
   await p.save(); assert.equal(p.calls.length, 2);
   p.confirm(false); p.reload(); assert.equal(p.calls.length, 2); assert.equal(p.field(0, 'url').value, 'https://receiver.example/unsaved');
-  p.confirm(true); await p.reload(); assert.equal(p.field(0, 'url').value, ''); assert.equal(p.nodes['wh-save'].disabled, false);
+  p.confirm(true); await p.reload(); assert.equal(p.field(0, 'url').value, 'https://receiver.example/saved-token'); assert.equal(p.nodes['wh-save'].disabled, false);
   await p.save(); assert.equal(p.calls[3][1].headers['If-Match'], '"new"');
 });
 
@@ -1882,12 +1972,24 @@ test('Webhook多目标独立资源在app之前加载，管理员设置挂载且�
   assert.match(settings, /if \(!me \|\| !me\.is_admin\)/);
   assert.match(settings, /id="webhook-settings"/);
   assert.match(settings, /mountWebhookSettings\(webhookHost, api, \(\) => gen === pageGen && webhookHost.isConnected\)/);
-  assert.match(webhookUI, /type="password".*autocomplete="new-password"/);
+  assert.match(webhookUI, /data-field="url" type="text" inputmode="url".*autocomplete="off"/);
+  assert.doesNotMatch(webhookUI, /type="password"/);
   assert.ok(!webhookUI.includes('localStorage'));
-  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 2, '只提供读取目标与保存目标');
+  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 3, '读取、保存与用户主动发送测试使用独立接口');
+  assert.match(webhookUI, /apiRequest\('\/webhook\/test', \{ method: 'POST'/);
   assert.match(webhookUI, /If-Match/);
   assert.match(webhookUI, /confirm_empty_targets/);
   assert.match(webhookUI, /confirm_delete/);
+});
+
+test('Webhook编码文案区分HTTP包装而非产品或JSON结构，保持配置值兼容', () => {
+  assert.match(webhookUI, /<option value="json">JSON 请求体<\/option>/);
+  assert.match(webhookUI, /<option value="form">表单 data（兼容模式）<\/option>/);
+  assert.doesNotMatch(webhookUI, /JSON · SmartStrm|Emby 表单/);
+  assert.match(webhookUI, /两种方式发送相同的事件 JSON，仅 HTTP 包装方式不同/);
+  assert.match(webhookUI, /JSON 直接作为请求体；表单将 JSON 放入 data 字段/);
+  assert.ok(webhookUI.includes('aria-describedby="wh-${index}-format-hint"'));
+  assert.ok(webhookUI.includes('id="wh-${index}-format-hint" class="hint"'));
 });
 
 const logSettingsUI = fs.readFileSync(path.join(__dirname, 'web/log-settings.js'), 'utf8');

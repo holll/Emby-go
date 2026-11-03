@@ -130,9 +130,6 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 	if mode != ScanModeFull && mode != ScanModeIncremental {
 		return Result{}, ErrInvalidScanMode
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	result := Result{Mode: string(mode)}
 	fail := func(err error) (Result, error) { result.Incomplete = true; return result, err }
 	if err := ctx.Err(); err != nil {

@@ -1,449 +1,110 @@
-# MetaTube Media Server — 开发计划
+# Emby-go — 设计边界与后续计划
 
-> 定位：**兼容 Emby API 协议的第三方媒体库软件**。元数据真源为 NFO；2026-10 起内置
-> MetaTube 刮削与标题/简介翻译（需配置上游后启用；标准刮削器插件规范仍列 roadmap）。
-> **媒体源只支持 `http(s)` 的 `.strm`**；`ed2k` 等非 HTTP 内容视为**不兼容**，在扫库/记录页提示，不进 Emby。
-> Web 提供**管理后台**（非影院浏览端），浏览海报墙通过 Yamby 等 Emby 客户端完成。
-> 支持规模 7000 → 1 万部。原则：不背历史包袱，大胆重构。
-> **技术选型：Go + Gin + SQLite(modernc) + Redis（必选缓存）+ 原生 JS 嵌入单二进制。**
->
-> **文档分层**：本文件是方案（目标/边界/契约）；逐项施工状态与放行门禁以
-> [PLAN-STATUS.md](PLAN-STATUS.md) 为唯一台账。方案与实现冲突时先改方案再改代码，
-> 不允许 README/计划继续描述已删除或未实现的功能。
+> 按当前实现整理，删除已被实现替代的早期伪代码与重复批次清单。
+> 使用与部署见 [README](<README.md>)；HTTP 兼容承诺见 [API 契约](<API-CONTRACT.md>)；
+> 历史决策、实施证据与部署验收见 [施工台账](<PLAN-STATUS.md>)。
+> 本地测试通过不等于生产放行，历史批次的测试数量和性能数字也不是当前构建的保证。
 
-## 1. 定位与边界（已确认）
+## 1. 产品边界
 
-| 维度 | 结论 |
+- 兼容 Emby API 的轻量媒体库服务，面向 NFO + HTTP(S) `.strm` 目录。
+- NFO 是影片元数据真源；SQLite 存储可重建的影片索引以及账户、个人状态、配置与审计等持久数据。
+- HTTP(S) 源有有效 NFO 后成为可见影片；缺失元数据进入 pending。非 HTTP(S) 源跳过，不建立“不兼容影片列表”。
+- 同目录 CD 分段按主段 CD1 堆叠；没有 CD1 时逐条处理。合集从 NFO `<set>` 聚合。
+- Emby 播放通过 302 交给客户端直拉；网页播放器可走鉴权代理兜底。不做转码、HLS、直播、音乐或通用刮削插件运行时。
+- Web 包含媒体墙、播放器与管理工具；不是只有配置表单。MetaTube 刮削、翻译、演员头像与 ffprobe 探测均为可选能力。
+- 支持管理员和普通用户、媒体库授权及按用户隔离的播放数据；普通用户默认无库授权。图片仍匿名公开，这是已批准的兼容边界。
+
+## 2. 技术结构
+
+| 模块 | 职责 |
 |---|---|
-| 产品 | Emby API 兼容的第三方媒体库服务端 |
-| 浏览入口 | **Yamby 等 Emby 客户端**（协议只对齐 Emby，不做 Jellyfin）；验收以 §7 接口级自测为准，不依赖 GUI |
-| Web 界面 | **管理后台**：设置 / 媒体库 / 扫描 / 影片记录（含未刮/**不兼容提示**）/ 刮削（预览-确认）/ 媒体探测 / 计划任务 / API 密钥 / 接口调试 |
-| 用户体系 | 本期**单用户**（现有管理员账号映射为唯一 Emby 用户） |
-| 元数据来源 | **NFO 为真源**（标题/原名/剧情/年份/评分/导演/演员/系列/制作商/标签等）；可选内置 MetaTube 刮削补全并写回 NFO；编辑/刮削统一写 NFO 后同步 DB 索引 |
-| 媒体源支持 | `.strm` 内容**只支持 `http/https`**；扫库时解析归类，`ed2k` 及其它 scheme → **incompatible（不兼容）**：**不进 Emby items**，在扫库/记录页醒目提示（数量+列表+原因），可换 http 源后“重读源/重扫”入库 |
-| 未刮影片 | 仅 http(s) 且无 NFO → 登记 pending；后台编辑字段或单条/批量刮削补全 → success 进入 Emby（独立“手动录入”端点已于 2026-10-12 移除，功能并入编辑/刮削链） |
-| 播放 | **302 直拉**：PlaybackInfo 返回本服务流地址 → `GET /videos/{itemId}/stream` 实时读 `.strm` → http(s) 则 **302 Location=真实地址** 客户端直拉；服务端不转发字节、不转码。实测遇防盗链/UA/Range 问题 → 同源**转发兜底**（§5.2） |
-| 失败反馈 | 播放遇到死链/上游 403/404 → 明确错误不白屏不崩溃（302 模式尽力透传，转发兜底可原样回上游状态码）；非 http 源根本不会进 Emby |
-| 未知接口探针 | NoRoute仅记录固定方法、脱敏资源分类和少量安全query，不记录原始未知路径/请求体；同类聚合、seen上限128。调试页用于观察未支持资源分类，不再从诊断记录恢复完整未知端点（隐私优先） |
-| 续播/进度 | 最小 UserData：`position_ticks / play_count / played / last_played_at`，Item 回填支持“继续播放” |
-| 播放带宽 | 直拉模式不占本服务带宽，适配万部规模 |
-| 主题 | 深色影院风服务于 Emby 客户端；Web 后台工具性但同套深色令牌 |
-| 收藏/多用户/插件规范/翻译 | 收藏、个人评分、标题/简介翻译已实现；多用户与权限、标准插件生态、转码仍在 roadmap |
+| [程序入口](<cmd/metatube/main.go>) | 配置、服务装配、监听与有界关闭 |
+| [配置](<internal/config/config.go>) | YAML 加载与校验；部分后台设置由数据库覆盖启动后备值 |
+| [服务与路由](<internal/server/server.go>) | Gin 路由、鉴权、HTTP 编排、后台任务与内嵌 Web |
+| [存储](<internal/store/store.go>)、[迁移](<internal/store/migrations.go>) | 手写 SQL、schema 台账、事务与版本域 |
+| [缓存](<internal/cache/cache.go>) | Redis 或进程内缓存；只加速、不作为事实源 |
+| [扫描](<internal/scanner/scanner.go>)、[NFO](<internal/nfo/nfo.go>) | STRM 分组、NFO 读取与写入、索引重建 |
+| [刮削](<internal/scraper/scraper.go>)、[MetaTube](<internal/metatube/client.go>) | 元数据和头像获取、写回与任务反馈 |
+| [调度](<internal/scheduler/scheduler.go>) | 进程内定时执行及同任务防重入 |
+| [出站](<internal/outbound/outbound.go>)、[Webhook](<internal/webhook/webhook.go>) | 出站安全边界与可订阅通知 |
+| [备份命令](<cmd/embybackup/main.go>) | SQLite 一致性快照与 NFO 副本 |
 
-## 2. 数据模型（重构后）
+Go 版本以 [go.mod](<go.mod>) 为准。前端为原生 JS/CSS，经 `go:embed` 随二进制发布，无独立前端构建链。
+Redis **可选**：未配置或连接失败时回退内存缓存。该回退仅有单实例语义，重启失效，不支持依靠内存缓存实现多实例一致性。
 
-> 以下是核心模型摘要，**完整列以 `internal/store/migrations.go` 为准**。2026-10 已增补：
-> `movies.provider_id / last_scrape_at / last_scrape_error / additional_parts / landscape_path`、
-> `userdata.is_favorite / likes / hide_from_resume / last_stopped_ticks`、`scheduled_tasks` 表、
-> `actors.avatar_tag` 与 `schema_migrations` 台账。新增列一律走新迁移，不改历史迁移定义。
+## 3. 必须保留的正确性边界
 
-```
-libraries(id, name, path UNIQUE, type, enabled, …)
+### 3.1 索引与文件
 
-movies(                                          -- 文件 + 元数据一体
-  id INTEGER PK AUTOINCREMENT,                   -- 稳定 ID == Emby ItemId
-  library_id INTEGER,
-  source_path TEXT UNIQUE,                       -- 指向 .strm（唯一，播放取址源）
-  file_size, file_mtime,                         -- .strm 自身 size/mtime，变更检测
-  source_protocol,                               -- http/https / ed2k / other
-  source_container,                              -- URL 路径后缀推断 mp4/mkv/ts/…
-  number,
-  status,            -- success(NFO已入库，Emby可见) / pending(http无NFO) /
-                     -- incompatible(非http源) / manual(手动录入,视为success族)
-  nfo_path,                                      -- 同目录 *.nfo 路径（真源）
-  output_dir,                                    -- NFO/图片所在目录
-  title, original_title, plot, year, premiered, rating,
-  director, series, maker, label,
-  collection,                                     -- NFO <set><name>：所属合集（BoxSet）
-  genres/tags/studios JSON, title_translated,
-  has_poster/has_fanart INTEGER(或按文件存在判定),
-  runtime_seconds,           -- NFO 有则填（续播百分比）
-  created_at, updated_at)
-actors(name PK, avatar_url, updated_at)
-movie_actors(movie_id, actor_name, PK(…))
+- 编辑、刮削、探测与独立翻译涉及 NFO 写入互斥；不能为了合并入口而改变锁的生命周期。
+- 独立翻译只请求现有翻译服务：标题取 NFO 原始标题，简介取当前内容；局部提交前检查相关字段与锁，失败不覆盖，不重新刮削或取图。服务缓存由自建翻译服务管理，应用不另建重复缓存或推断历史翻译失败状态。
+- NFO 与 SQLite 不是联合事务。NFO 已保存但索引失败时，明确报告部分成功，并保留恢复入口，不能报成全部成功或盲目回滚文件。
+- 影片、演员关系、特征及对应版本更新按现有事务边界提交。缓存版本不能提前发布，也不能在数据库提交后漏更新。
+- 扫描读取失败时不做缺失源清理；单文件重扫永不做整库清理。人工录入分类不能被普通重扫降级。
+- NFO 文件存在但无法解析时保留该条已索引的元数据、演员与可见状态，只刷新文件派生列并把原因写入 `last_scrape_error`（前缀 `[NFO 不可读]`），扫描结果计入 `unreadable_nfo`；不能把它当成「改为空元数据」的指令。NFO 恢复可解析后由后续扫描清除该备注。
+- 批量刮削使用 ID 游标；全量、分页和计数使用相同候选筛选条件，但全量入口不隐式加 `id > 0`。
 
-userdata(                                        -- 单用户；多用户加 user_id
-  movie_id INTEGER PK REFERENCES movies(id),
-  position_ticks INTEGER DEFAULT 0,
-  play_count INTEGER DEFAULT 0,
-  played INTEGER DEFAULT 0,
-  last_played_at TEXT)
+### 3.2 用户与缓存
 
-api_probe(                                       -- 未知接口探针（环形/上限截断）
-  id INTEGER PK AUTOINCREMENT,
-  method TEXT, path TEXT, query TEXT, body_preview TEXT,
-  created_at TEXT)
-```
+- 管理 API 要求管理员，普通用户只读写自己的个人状态；管理员跨用户活动查询只读，不代改。
+- 未授权影片的详情和播放按现有 404 语义处理；授权读取失败不能退化为全库可见。
+- 列表缓存保留用户、授权、版本、筛选和 Fields 等维度；共享缓存 DTO 不存会话凭据，输出时使用当前请求凭据。
+- SQLite 是认证事实源，不用 Redis 正缓存延长已撤销会话的有效性。
+- API 密钥是管理员全权长期凭据，不具有细粒度 scope；图片匿名不意味着详情或媒体流匿名。
+- 缩略图变体（`image_cache`）是纯派生数据：删目录、淘汰、改动尺寸档位都只该影响性能，不得改变接口语义——同一输入必须能重新算出一致的响应，缓存不可用时回退原图而不是报错。
 
-- 对外只暴露 `status` 属 success/manual 的影片；incompatible/pending/failed 仅 Web 后台可见
-- **合集（BoxSet）**：由 NFO `<set><name>` 聚合。Views 追加一个 `CollectionType=boxsets` 的「合集」媒体库（Id="boxsets"），其子项为 BoxSet（id 形如 `boxset:<base64>`）；某合集成员 = `collection=<该合集名>` 的可见影片；**合集范围内的类型（Genre/Tag/Studio/Person）列表只返回该上下文内数量≥1 的项**
-- **媒体库外部 id**：媒体库对 Emby 层暴露 `libraryIDBase(1e12)+内部库id`（影片 id 是小自增，二者全局不冲突，对齐 Emby 唯一 item id）。库封面取子项**宽图 fanart 优先**（4.9 auto_poster 观感），无则回退海报；Views 补 `PrimaryImageAspectRatio`
-- `source_protocol/source_container` 扫描时解析缓存；**播放时实时读 .strm 取最终 URL**，避免外部刷新链接后用陈旧地址
-- 刮削字段已落地：`movies.provider_id / last_scrape_at / last_scrape_error`；字段锁与人工覆盖策略见 PLAN-STATUS；标准 provider 插件体系仍 roadmap
-- `kv` 表存**失效版本号**（`lib:{id}:version`、`g:version`）：任何对该库 movies 的写（扫描/编辑/手动录入/删除）都 bump；缓存键带版本号即可整体失效，无需逐条删除
+### 3.3 任务与部署
 
-## 3. 技术选型
+- 扫描异步入口返回 202 + task_id；202 仅表示接收。同步旧入口仍在弃用期，不能因内部重构删除。
+- 任务状态与调度防重入是进程内机制；重启不承诺补跑或恢复。取消不等于撤销已落盘的文件和已提交索引。
+- Webhook 为提交后、限时、单次 best-effort 通知，不提供可靠队列、自动重试或远端执行保证。
+- 单实例部署；TLS 由反向代理承担。数字 port 监听全部网卡，首次初始化必须配合来源限制或网络隔离。
+- 保留有界关闭、请求预算、出站校验、日志敏感信息警告和备份恢复演练要求。
 
-| 项 | 选型 | 理由 |
+## 4. 后续工作
+
+以下是候选方向，不表示已授权自动实施，也不表示现有实现存在已复现故障：
+
+1. **部署与客户端验收**：按 [台账 §3](<PLAN-STATUS.md#3-验收-a01a15>) 回填真实客户端、反向代理、生产 Redis、真机、迁移和备份恢复证据。
+2. **任务持久恢复**：明确崩溃后的任务与 NFO/索引对账协议后，再考虑持久操作意图；不直接把各入口塞入通用任务框架。
+3. **模块边界**：有明确重复和测试保护时，小步提取纯解析或计算逻辑；server 拆 service、前端模块化不作为当前功能的前提。
+4. **规模优化**：用真实库、冷缓存、写放大与客户端延迟数据决定是否引入 FTS、轻量投影、keyset 或虚拟滚动，不能牺牲现有筛选/分页语义。
+5. **可访问性与观测**：补真实读屏、跨设备与自动化门禁；按需求评估缓存故障和数据库锁等待指标。
+
+通用插件规范、转码与分布式部署属于独立设计课题，不在当前兼容承诺内。
+
+### 4.1 MetaTube 能力对齐方案（2026-11-03 范围更新）
+
+本节是后续施工依据，不代表功能已经实现或本轮开始开发。对照官方插件 `f7c1f336fc2bd3b35b82af7c6e69da09a196e3d2`；施工状态集中登记在 [台账 §20](<PLAN-STATUS.md#20-metatube-能力对齐施工计划2026-11-03>)。与先前建议冲突时，以本节的范围裁剪为准。
+
+#### 已有基线与本轮排除项
+
+- 已有四种影片手动识别、官方 MetaTube 标记写入/导入/精准复用、历史标记兼容、演员头像补全、文件名版本标记及角标；这些不重复立项。当前能解析 Position/Update 后缀，但尚未执行其完整语义。
+- **暂缓**：预告片刮削及 STRM 生成、自定义标题/演员/类型替换表、标题与 Tagline 模板、全局来源过滤与排序。本阶段不增加相关设置、端点、任务或迁移，也不作为其他能力的前置条件；后续需要重新排期，不代表永久删除。
+- **翻译维持现状**：现有自建 DeepL 兼容服务、标题/简介开关、独立翻译及失败保护已够用；不扩展引擎、不重构现有链路，不另建翻译缓存。相关现有能力继续维护并纳入回归。
+
+#### 保留施工项与顺序
+
+| 顺序 / ID | 范围与设计边界 | 验收标准 |
 |---|---|---|
-| 语言/框架 | Go 1.27（go.mod 声明）+ **gin-gonic/gin** | 用户意向；v1 已验证，生态成熟 |
-| 数据库 | SQLite（`modernc.org/sqlite` 纯 Go，CGo-free） | 沿用 v1；万部规模单文件足够 |
-| 数据访问 | 手写 SQL（database/sql） | 轻量可控，避免 ORM 心智负担 |
-| 缓存 | **Redis 必选**（`github.com/redis/go-redis/v9`），共用 `internal/cache` 接口；memory 实现保留给测试注入 | 生产路径 `server.New` 强制连接并 Ping，缺失/失败拒绝启动（2026-10 现状；恢复可选化须先过 D04） |
-| 缓存一致性 | 单写者 bump 版本号；**缓存只作加速，真源 = SQLite/NFO** | 换缓存后端不失失效语义 |
-| 配置 | YAML（`gopkg.in/yaml.v3`） | 沿用 |
-| Web 前端 | `go:embed` 内嵌原生 HTML/JS/CSS | 单二进制，无构建链 |
-| HTTP 客户端 | `net/http`（自定义 Transport，区分直连/代理） | 302 为主；转发兜底按需 |
-| 并发/任务 | goroutine + channel + `golang.org/x/sync/errgroup` | 自研调度，无需外部队列 |
-| 日志 | `log/slog`（结构化 + 请求日志中间件） | 标准库 |
-| 测试 | `testing` + `httptest`；接口级断言脚本/`go test` 集成 | §7 验收依赖它 |
-| 部署 | 单二进制 + 单端口（沿用 18080） | 简单 |
+| 1 / MT-01 | 补齐标记后缀语义：在不破坏既有 ParseProviderID 调用方的前提下保留结构化 Position/Update；精准查询的 Update=true 对应 lazy=false，未设置/false 保持缓存优先。Position 只用于图片裁切，不改变影片身份或番号匹配规则。 | 覆盖编码 ID、历史前缀、可选后缀、非法输入；断言实际 lazy 参数。手动输入及已存标记路径语义一致，显式手动查询仍覆盖已存身份；404/错误不静默转搜其他片。读取/预览不写文件，已有锁与只补缺失策略不变。 |
+| 2 / MT-02 | 接入图片 ratio/pos/auto，并与 MT-01 的 Position 串联；保留旧图片请求默认行为及 quality/badge。具体参数取值范围按上游接口核对后固化，不臆造默认值。 | 请求参数与上游契约一致；不同裁切参数不得误命中同一图片缓存。参数缺省的旧调用回归通过；上游失败不覆盖已有图片；真实图片验证裁切效果，不以“字符串可解析”代替功能验收。 |
+| 3 / MT-03 | 接入 PreviewImages，提供剧照和多图片候选选择；不自动批量下载全部剧照。实施时明确 Primary/Thumb/Backdrop 映射及本地保存命名，保持现有客户端图片接口兼容。 | 候选去空去重；预览只读，确认后才写选中图片；覆盖取消、失败、并发选择、字段保护及缓存失效。桌面与移动端走查；多背景图持久化布局需先定协议再编码。 |
+| 4 / MT-04 | 增强中文字幕整理：结合文件名及同目录外置字幕判断，复用现有版本标记/角标能力；不把官方的文件名判断误称为字幕流内容检测，不为此新增全量媒体探测。 | 有/无字幕、字幕增删、既有 C/U/UC 标记、用户自定义分类和角标均有测试；只撤销程序自己生成的标记，不误删人工标签；锁、只补缺失、部分成功和索引恢复语义不变。独立任务入口需在实施时明确，默认不自动整库改写。 |
+| 5 / MT-05 | 完整演员资料：在现有头像能力上接入演员详情、精准身份及人工选择，覆盖生日、国籍、简介等；先明确演员资料真源、身份持久化和与影片 NFO 的关系，不能只改可重建索引。 | 同名演员不能仅取搜索首条自动覆盖；身份与姓名/别名可追溯。资料读取、确认写入、重扫重建、头像兼容及错误恢复均有测试；涉及 schema/API 的变更先补契约。 |
+| 6 / MT-06 | AVBASE 真实姓名转换：独立可选、默认关闭，基于作品匹配提供替换建议，不依赖暂缓的通用替换表。官方相似度阈值 0.8 仅作为对照，不直接当作安全自动替换保证。 | 验证来源适用范围、作品相似度、无命中/错配/上游失败；不静默覆盖人工演员名。转换前后可对比并经确认，影片关系、头像与重扫一致；不能破坏现有严格头像姓名匹配。 |
 
-> 缓存定位：**只加速不存真**。SQLite 是事实源，NFO 是元数据真源。当前生产强制 Redis，
-> 与最初“memory 默认”的设计相反：换取跨重启的缓存版本一致与会话可见性，代价是部署多一个必选组件。
-> **在 D04 批准改回可选之前，不得把 Redis 说成可选**；测试通过 `newApp` 注入 memory。
+依赖关系：MT-02 依赖 MT-01 的结构化后缀；MT-03 依赖 MT-02 的图片请求与缓存约定；MT-06 在 MT-05 的演员身份/持久化边界明确后实施。MT-04 不依赖上述图片候选或演员资料，但优先复用已有写入保护。以上是建议顺序，不意味着并行启动全部工作。
 
-**模块结构（伪代码级目录）**
+按系列自动创建合集、电影/演员外部链接及插件自身自动更新不混入上述批次；系列字段已有支持，合集创建和外链是否需要额外适配另行评估，插件自动更新不适用于本项目的发布模式。本节未宣布这些能力已完成或永久取消。
 
-```
-cmd/metatube/main.go         # 装配：config → store → services → gin 路由 → listen
-internal/config              # YAML + DB 设置合并
-internal/store               # sqlite 连接、schema、movies/userdata/api_probe DAO
-internal/cache               # 缓存抽象 Get/Set/Del/SetNX/TTL + KeyBuilder；memory LRU 默认，Redis adapter(可选)
-internal/scanner             # 扫库：strm 分类、NFO 解析、变更检测、状态机
-internal/nfo                 # MovieMeta 模型：Read/Write（NFO 真源契约）
-internal/auth                # 管理登录(会话) + Emby access token 签发与校验
-internal/media               # Emby API 处理器：Views/Items/Images/PlaybackInfo/stream/UserData
-internal/admin               # Web 管理 API + go:embed 前端
-internal/probe               # 未知接口记录器（NoRoute 捕获）
-internal/scheduler           # 扫描/重建索引等后台任务与任务日志
-```
+## 5. 变更与验证规则
 
-## 4. 关键流程伪代码
+- 路由、状态码、JSON 字段及弃用期按 [API 契约](<API-CONTRACT.md#5-变更规则v2>) 执行；内部重构不改变这些语义。
+- 代码和回归测试一起交付；文档中的使用说明与当前实现同步。批次历史集中在台账，不在多份方案中重复维护。
+- 不把临时实例、历史截图、性能样本或缺少原始证据的记录描述为当前生产验收通过。
+- 基本验证：`go build ./...`、`go vet ./...`、`go test ./...`、`node --test internal/server/web*_test.cjs`；并发关键路径按需补 race。
+- 不覆写无关的未提交改动；本地测试、暂存、提交与部署是不同动作，须分别说明。
 
-### 4.1 扫描（strm 分类 + NFO 同步）
-
-```
-func Scan(lib) ScanResult:
-  files := walk(lib.Path, ext==".strm")
-  for f in files:
-    proto, _ := readStrmFirstLine(f)          // 读首行 URL → scheme
-    rec := store.UpsertCandidate(f, proto)    // 登记/更新，mtime 变才重处理
-    switch:
-      proto ∈ {http,https}:
-        if meta := nfo.Read(siblingNfo(f)):   // 同目录 *.nfo
-          upsertMovie(rec, meta); rec.status = success
-        else: rec.status = pending            // 待手动补录
-      default:                                // ed2k / other
-        rec.status = incompatible             // 不进 Emby；扫库页提示
-        rec.note = "不兼容源: " + proto
-  return stats{success, pending, incompatible, failed}
-```
-
-### 4.2 NFO→DB upsert
-
-```
-func upsertMovie(rec, meta):
-  tx:
-    row := movies.upsert(
-      source_path, library_id, number=nfo.number? 或文件名解析,
-      title/original_title/plot/year/…,
-      genresJSON/tagsJSON/studiosJSON, title_translated,
-      runtime_seconds, has_poster=存在(poster.jpg), has_fanart=…)
-    actors.diff(meta.actors) → actor.upsert + movie_actors.replace
-  // 写侧：SaveNFO 后同样调用 upsertMovie（编辑/手动录入共用）
-```
-
-### 4.3 手动录入（无 NFO → 生成）
-
-```
-POST /api/admin/items/manual {source_path, number, title, …, source_url?, fields…}:
-  if source_url != "" && !isHTTP(source_url): 400 "仅支持 http(s) 源"
-  if source_url != "": writeStrm(source_path, source_url)   // 生成/覆写
-  meta := nfo.FromFields(...)
-  nfo.Save(siblingNfo(source_path), meta)       // 写 NFO
-  存图（上传/URL → poster/fanart.jpg）
-  upsertMovie(rec, meta); rec.status = success  // 即时进索引，Emby 端可见
-```
-
-### 4.4 Emby Items 查询映射
-
-```
-func Items(uid, q):                             // GET /Users/{uid}/Items
-  rows := store.Search(q, filters)              // SQL：仅 status∈{success,manual}
-    // 条件：IncludeItemTypes=Movie / ParentId=library → view / SortBy / Years
-    //       Genres / SearchTerm(LIKE title|original_title|number)
-    //       StartIndex/Limit / 支持 Filters(IsUnplayed…) 最小集
-  return { Items: rows.map(toEmbyItem), TotalRecordCount }
-toEmbyItem(row):
-  return { Id, Name=title, Type:"Movie", Container=source_container,
-           ImageTags:{Primary/Backdrop: 有图? "primary":省略},
-           ProductionYear, PremiereDate, Genres, Studios, CommunityRating,
-           RunTimeTicks, UserData: loadUserData(row.id) }
-```
-
-### 4.5 播放：PlaybackInfo + stream 302
-
-```
-POST /Items/{itemId}/PlaybackInfo:              // 仅对 Emby 可见影片
-  row := store.Get(itemId)                      // source_protocol 必为 http(s)
-  return { MediaSources:[{
-    Id, Name, Path:"/videos/{itemId}/stream",
-    Container: row.source_container, IsRemote:false, Type:"Default",
-    SupportsDirectStream:true, SupportsDirectPlay:true, SupportsTranscoding:false,
-    RunTimeTicks }] }
-
-GET|HEAD /videos/{itemId}/stream[.{ext}]:       // 吞掉可选扩展名
-  u := readStrmFirstLine(row.source_path)       // 实时读，URL 为 http(s)
-  if !u: 404 "strm 缺失"
-  if !isHTTP(u): 415 { error: "不支持的源" }     // 防御，正常不会发生
-  http.Redirect(w, r, u, 302)                   // 客户端携带 Range/Headers 原样去上游
-  // 可选转发兜底：若配置，则用自定义 Transport 转发（带 UA/Referer/Cookie），
-  //   处理 Range，并把上游 403/404 原样回给客户端（死链可见）
-```
-
-### 4.6 进度/续播（UserData）
-
-```
-on Sessions/Playing(Start):  if resumePos>0: 存为起点; else 清零
-on Sessions/Playing/Progress: store.SetPosition(itemId, PositionTicks)
-on Sessions/Playing/Stopped:  store.SetPosition(itemId, PositionTicks); play_count++
-on POST|DELETE PlayedItems:   store.SetPlayed(itemId, true/false)
-loadUserData(id): { PlaybackPositionTicks, PlayedPercentage=pos/runtime,
-                    PlayCount, Played, LastPlayedDate }
-```
-
-### 4.7 未知接口探针（NoRoute）
-
-```
-r.NoRoute(func(c):
-  p := c.Request.URL.Path
-  if p 属于 Emby 前缀 (/Users /Items /Videos /System /Sessions …) 或非 /api:
-    body := readLimit(c.Request.Body, 4KB)      // 防放大
-    probe.Append(method, path, query, body)     // 写 api_probe（上限截断）
-    c.JSON(404, gin.H{})                        // Emby 风格 404，不抛异常
-  else:                                          // /api 未知
-    c.JSON(404, {"error":"not found"})
-)
-// Web 调试页: GET /api/admin/probe 最近 N 条（清空按钮）
-```
-
-### 4.8 缓存层（可选 Redis，只加速不存真）
-
-```
-// cache 接口：默认 memory(LRU)，driver=redis 时切 go-redis
-type Cache interface { Get(k)/Set(k,v,ttl)/Del(k)/Incr(k) }
-
-// —— 读侧：缓存 Emby Items 分页 / 详情 / strm 分类，miss 则落 SQLite 回填 ——
-func EmbyItems(libId, q) page:
-  ver := store.KVGet("lib:{libId}:version")          // 失效版本
-  key := "emby:items:{libId}:{ver}:" + hash(q)
-  if hit := cache.Get(key): return hit
-  page := store.Search(q)                              // SQL 真源
-  cache.Set(key, page, TTL_items=5~60s)                // 带版本，扫描即整页失效
-  return page
-
-func ItemDetail(id):
-  if hit := cache.Get("movie:{id}"): return hit
-  row := store.Get(id); cache.Set("movie:{id}", row, TTL_detail=1h)
-  // 写侧 upsertMovie / deleteMovie 时同步 Del("movie:{id}")，保持强一致
-
-// —— strm 分类：只缓存 protocol/container 这种稳定结果 ——
-func StrmMeta(path) (proto, container):
-  if hit := cache.Get("strm:"+sha(path)); hit 且 stat(path).mtime==hit.mtime:
-    return hit                                   // 存 mtime，命中后比对，变则重读
-  proto, container, mtime := parseStrm(path)
-  cache.Set("strm:"+sha(path), {proto,container,mtime}, TTL=0 不过期)
-  // 注意：最终 URL 不缓存（要实时新鲜）；慢挂载仍可开短 TTL(30s) 缓存首行整条
-  // “重读源/重扫” = parseStrm + Del("strm:…") 强制刷新
-
-// —— 写侧统一失效（单写者，bump 即可） ——
-func bump(libId): store.KVIncr("lib:{libId}:version"); store.KVIncr("g:version")
-// 任意写路径(扫描 upsert/手动录入/编辑/删除/reindex)末尾调用 bump + Del 相关 movie:{id}
-
-// —— 会话/token（可选迁 Redis，带 TTL，重启不丢） ——
-tok 存 key "sess:{token}" TTL=7d（memory 驱动则退化为进程内 map）
-// —— 未来任务队列（Redis Streams/BLPOP）—— 本期仍用进程内 channel，不加。
-```
-
-## 5. 播放链路（本期核心子设计）
-
-### 5.1 源取址与分类
-
-- 扫描/重扫：对每个 `.strm` 读首行 → 归 `http/https`（有效）与 `ed2k/其它`（**incompatible**）→ URL path 后缀推 container → 写 `source_protocol/source_container`
-- **入库门槛 = http(s) + NFO**；ed2k 不进 Emby，扫库页提示“不兼容源”，数量与列表可见
-- 播放取址：`/videos/{itemId}/stream` 每次**实时读 .strm** 首行，取最新 URL；读不到/空 → 按失效处理
-- 刷新链路：外部工具更新 strm（新 token 链接）→ 无需重扫即生效；“重读源”可主动重解析协议列
-
-### 5.2 Emby 播放对话（契约校准 + 字段定稿）
-
-**P2.0 契约校准**：以 Emby 公开 API 行为为准定稿字段；若有 Yamby/真实 Emby 抓包仅用于校对可选字段。内置请求日志 + 探针辅助，**验收不依赖 GUI（§7 自测）**。
-
-- `POST /Items/{itemId}/PlaybackInfo`（兼容 GET）：返回单 MediaSource（Path 指向 `/videos/{id}/stream`，Container=source_container 或空，DirectStream/DirectPlay=true，Transcoding=false）
-- `GET|HEAD /videos/{itemId}/stream[.{container}]`：路由吞掉可选扩展名（客户端可能请求 `stream.mkv?Static=true&MediaSourceId=…`）；http(s) → **302**；非 http/读取失败 → 415/404 + JSON
-  - 302 客户端原样带 Range 到上游；上游支持 Range 则拖拽可用
-  - 若实录发现需特殊 UA/Referer/Cookie 或上游无视 Range → **同源转发兜底**：转发字节、按需带头、透传上游 403/404，逐源开关
-- 进度/续播：`Sessions/Playing`、`/Progress`、`/Stopped` 解析 PositionTicks 落库；`PlayedItems` 标记；Item 回填 `UserData{PlaybackPositionTicks, PlayedPercentage, PlayCount, Played, LastPlayedDate}`
-
-### 5.3 安全与边界
-
-- 仅 `http/https` 源入库；重定向只到 http(s)；不跟链、302 模式不服务端拉取
-- 不做转码/HLS/外挂字幕/倍速；m3u8 上游不保证起播
-- 播放不占本机带宽与转码 CPU，是万部规模前提
-
-## 6. 分阶段
-
-### P0 · 数据层 + 扫库分类 + NFO 索引同步
-- 新 schema（movies/actors/movie_actors + userdata + api_probe）；扫描登记并打 library_id
-- **strm 分类**：http/https → success/pending；ed2k/其它 → **incompatible**（扫库结果含不兼容统计与列表）
-- **NFO→DB upsert**：读现成 NFO 进索引；`POST /api/admin/reindex` 全量重建幂等；迁移工具（旧库 → 重扫重建）
-- 保留：libraries/settings/auth、图片端点、登录
-
-### P1 · 检索 API + 编辑/补录后端
-> 状态：已完成。独立“手动录入”端点在 2026-10-12 收敛进编辑/刮削链（见 PLAN-STATUS 漂移记录）。
-- `GET /api/admin/items`：SQL 检索（view/sort/filter/search/page），仅 success/manual；支持按源协议筛
-- 补录：pending 影片通过 `PATCH /api/admin/items/:id` 显式清空/填写，或单条刮削预览确认后写 NFO/图 → success 即时入 Emby
-- 编辑已刮元数据：写回 NFO 并 upsert；演员/详情/related 基础端点
-- **缓存层 `internal/cache`**：memory 默认 + Redis adapter 可选（`driver=redis`）；Items 分页/详情/strm 分类走读缓存，写侧 bump 版本失效（§4.8）
-
-### P2 · Emby 协议兼容层（核心，API 自测验收）
-- 路由总纲：`/api/*` → admin；Emby 前缀 + 静态/播放 → media；**NoRoute 落入探针（§4.7）**
-- 认证：`POST /Users/AuthenticateByName`、`GET /Users/Me`、access token
-- 系统：`/System/Info/Public`、`/System/Info`、`/System/Configuration`
-- 视图/浏览墙：`/Users/{id}/Views`（每库一个）；`/Users/{id}/Items`（ParentId、IncludeItemTypes、SortBy、Years、Genres、SearchTerm、StartIndex/Limit、Filters 最小集）映射 P1 检索；Item 带 UserData
-- 详情/图片：`/Users/{id}/Items/{itemId}`、`/Items/{id}/Images/Primary|Backdrop`
-- 播放/进度：PlaybackInfo、`/videos/{itemId}/stream`（302 + 可选转发兜底）、Sessions/Playing{Progress,Stopped}、PlayedItems（§5.2）
-- 验收 = §7 全量自测通过，不依赖 GUI；Yamby 仅可选冒烟
-
-### P3 · Web 管理后台
-- 深色工具型 UI（同套深色令牌）
-- 页面：总览/媒体库管理/影片记录/设置（库、认证、重建索引）/任务日志/**接口调试（探针列表）**
-- **扫库/记录页不兼容提示**：incompatible 统计卡片 + 列表（来源/原因/操作：换源后重读）
-- 影片列表网格+状态筛选，卡片标可播放（http 可播 vs 不兼容）；单部操作：编辑 / 手动录入 / 重读源 / 删除
-
-### P3+ · 原方案外的增补（2026-10 实装）
-- 内置 MetaTube 刮削（批量/单条预览-确认/演员头像）与标题/简介翻译
-- 媒体信息探测（ffprobe → NFO `<streamdetails>`，详情页「已探测」）
-- 计划任务（cron，保存即重建调度，支持条件更新）
-- API 密钥（长期等权令牌；权限隔离待 D02）
-- 网页播放代理 `/Videos/{id}/proxy`（仅网页播放器兜底，Emby 客户端仍 302）
-- 合集 BoxSet、多分段 AdditionalParts、收藏/个人评分/相似推荐
-
-### P4 · 打磨
-- 未刮/不兼容引导、错误/空状态、移动端触感、万部性能、a11y/reduced-motion
-
-### Roadmap（不在本期）
-- **标准刮削器插件规范**（当前是内置 MetaTube 适配器，不是通用插件运行时）；翻译增强
-- ed2k / 非 HTTP 网关（如需“整库可播”另行立项）
-- 转码/倍速/外挂字幕/m3u8 增强播放；多源/画质切换
-- 多用户与权限；观看统计、向量相关推荐（收藏/评分已实现）
-- （可选）Jellyfin 兼容子集
-
-## 7. 验收基准（接口级自测，不依赖 GUI）
-
-验收方式：**自动化接口测试**（`go test` 集成或断言脚本）对**真实运行服务** + **临时 fixture** 逐组断言；开发/Agent 跑通即通过。Yamby 等客户端仅可选人工冒烟，不设门槛。
-
-**7.1 fixture**
-- 临时库样本：
-  - A：`http-strm` + NFO + poster/fanart → success
-  - B：`ed2k-strm` + NFO → **incompatible**
-  - C：`http-strm` 无 NFO → pending
-- 可控上游：本地支持 Range 的静态文件 HTTP 服务充当 A 真实地址（断言不依赖外网）
-- 单用户账号 + access token
-
-**7.2 Emby API 断言组**
-- 认证与系统：AuthenticateByName 返回 token；/Users/Me；/System/Info{/Public,/Configuration} 200 且关键字段非空
-- 视图/浏览：Views 每库一个；Items 分页/排序/搜索/过滤与 P1 检索一致；**只返回 A（success）**，B/C 不在
-- 详情/图片：Items/{id} 带 UserData；Primary/Backdrop 200（本地图）；不存在 id → 404
-- 播放：A PlaybackInfo 返回可播 MediaSource；stream **302** 且 Location=可控上游、`Range: bytes=0-` 后对 Location 得 **206** 且字节一致、HEAD 预检通过
-- 进度/续播：Start→Progress→Stopped 后 Items/{id} 的 PlaybackPositionTicks/PlayCount 持久化；PlayedItems 翻转 Played
-- 错误路径：未认证、坏 id、非 http（防御性 415）等结构化错误，**不 5xx、不崩溃**
-
-**7.3 Web 管理 API 断言组**
-- 扫描：A→success、B→**incompatible（出现在不兼容列表）**、C→pending；重扫幂等
-- 手动录入：为 C 提交字段 + http 源 + 封面 → 生成 strm/NFO/图，C 变 success 且**即刻出现在 Emby Items**；提交 ed2k 源被 400 拒
-- 编辑写回：改标题后 NFO 文件变化且索引更新；reindex 幂等；未登录管理 API 被拒
-
-**7.4 未知接口探针断言组**
-- 向服务发一个未注册的 Emby 风格请求（如 `GET /Users/{uid}/GroupingOptions`、未知 POST + body）→ 返回 404 不崩溃
-- 稍后 GET 探针记录能看到该 method/path/body
-
-**7.5 可选人工冒烟（不设门槛）**
-- 环境若有 Yamby：登录 → 浏览墙 → 点开 A 起播 → 退出重进续播，作额外确认
-
-## 8. 执行顺序
-P0 → P1 → P2（Emby 核心尽早可用，P2.0 契约校准先行）→ P3（Web 管理）→ P4。
-
-> 2026-10-17 实际：P0–P3 已交付，P4 部分；另完成 P3+ 增补与 72 批工程整改（见 PLAN-STATUS §6）。后续顺序改由整改依赖决定：
-> R1-D 部署门禁（BE-05/09）→ R2 生命周期 → R3 持久任务 → R4 量化优化，且必须先关闭对应 D 决策。
-
-## 9. 施工治理（2026-10-17 修订）
-
-原方案只定义“做什么”，没有定义“怎么证明做完”。40 批施工暴露的问题全部在治理层，故补充为强制门禁。
-
-### 9.1 文档分层与单一台账
-- 本文件 = 方案；[PLAN-STATUS.md](PLAN-STATUS.md) = 唯一进度台账（35 项 + D01–D12 + A01–A15 + R0–R4 + 批次映射）。
-- README = 用户可操作事实（安装/配置/能力边界）。**README 与路由/代码不一致时以代码为准，并立即修 README**，不得留到下一批。
-- `docs/` 是内部施工记录（`.gitignore` 排除），不作为放行依据。
-
-### 9.2 提交纪律
-- 每批一个 commit，消息含批次号与条目编号（如 `feat(security): BE-05 request budgets`）。
-- 开工前工作区必须干净；禁止在大量未提交变更之上继续叠加（2026-10-17 已建立 checkpoint `1b93a06`）。
-- 测试与代码同批提交，不允许“测试稍后补”。
-
-### 9.3 文档一致性门禁
-- 功能删除/替换当批必须同步：README、本文件、路由表、PLAN-STATUS 四处。
-- 禁止描述未实现能力。历史反例：README 曾同时写“不内置刮削器 / 手动补录 / 可选 Redis”，三者均已失真。
-- 新增或改变“必选外部依赖”必须同时改 README、`config.example.yaml` 与本文件 §3。
-
-### 9.4 生产放行门禁（沿用审查方案）
-- A01–A15 未全过、或 BE/DB/FE 条目仍为“部分/未开始”、或未在部署环境验收时，不得宣称生产可用。
-- DB-01、A08/A09、整项认证安全、全应用退出、NFO 持久恢复在对应批次明确关闭前，一律不得标“完成”。
-- 本地 `go test` 全绿只证明本地回归，不替代真实客户端、浏览器、生产库与备份恢复演练。
-
-### 9.5 当前基线（2026-10-18）
-- 83 批本地施工完成（v1 冻结 72 批 + v2 至批次 83）；`go build/vet/test` 全绿（16 包、408 个 Go 测试、84 个前端 VM 测试）；GitHub CI run 39088015739 全绿。
-- 已落地：D01–D12 全部决策；BE-05 请求预算、BE-09 出站信任边界、BE-04 有界关闭、BE-07 扫描异步任务、DB-02 播放会话/事件、D03 密钥摘要、D04 初始化门禁、D06 版本域、D08 恢复提示、D11 备份、D12 验收矩阵。
-- 未闭合：BE-02（D02 风险接受，无 scope 执行）、BE-06 Redis 错误可见性、BE-07 探测/刮削未并入任务表、DB-01 真实历史 fixture、DB-04 50k 真实库复核、R4 写放大/冷缓存、FE-11 真机与 5k 以上规模，以及部署验收 A01/A04/A06/A08/A10/A11/A12/A14。
-- 批次 1–72 逐批主题见 [PLAN-STATUS.md](PLAN-STATUS.md) §6；详细实现在 `docs/implementation-progress-2026-10-16.md`（不入库）。
-
-## 10. v2：API 稳定化（2026-10-18 起）
-
-v1.5.0 已把安全与数据正确性整备完成；v2 的目标不是加功能，而是把已支持的接口变成**可验证、只增不改**的契约，避免客户端升级时被静默破坏。
-
-**范围**
-
-- 契约对象：Emby 兼容端点（根路径与 `/emby` 前缀）+ `/api/*` 管理与初始化端点。
-- 非契约：SQLite schema、Redis 缓存键、内部函数/字段、`docs/` 施工记录。
-- 非目标：不做 Jellyfin 兼容；不扩转码；不改单用户与“API key=管理员全权”的已批准决定（D02）。
-
-**规则**（详见 [API-CONTRACT.md](API-CONTRACT.md)）
-
-- v2 内允许：新增端点、新增 JSON 字段、新增可选参数、新增错误 `code`。
-- v2 内禁止：删除/改名已发布字段、改变状态码或 `code` 语义、改变认证载体、删除图片匿名。
-- 破坏性变更升 v3，且至少保留一个 minor 的弃用期。
-
-**批次**
-
-- 73 契约基线：`API-CONTRACT.md` + `internal/server/api_contract_test.go`（关键路由清单、错误信封、no-store）+ 未知路由补稳定 `NOT_FOUND`（✅ 本地完成）。
-- 74 管理面错误码补齐：`/api/*` 的 400/404/409/428/500/502/503 经统一 `apiError` 带 `code`（纯增量，专用 code 保留；✅ 本地完成）。
-- 75 弃用机制：登记表 + 运行时 `Deprecation`/`Sunset`/`Link` 头；首个登记项为同步 `POST /api/admin/scan`（Web 前端已迁移到异步任务入口）。（✅ 本地完成）
-- 76 协议抽检（不依赖抓包）：Emby 兼容端点错误统一 `code`、`emby_compat_test.go` 的形状/边界回归、修复评分接受但不回显（`UserData.Likes`）；旧客户端抓包与真机走查仍待部署环境（✅ 协议抽检部分本地完成）。
-
-**门禁**：契约测试通过；路由或错误信封变更必须同批更新 `API-CONTRACT.md`；未通过不得打 tag。
-
-## 11. 多用户（批次 84 起）
-
-在保持单管理员旧库兼容的前提下引入普通用户：管理员可创建/改密/停用/删除用户，普通用户只能读写自己的播放数据且不能创建 API 密钥（D02 已批）。
-
-- 批次 84：`users` 表与登录/会话绑定、`/api/admin/*` 管理员边界（已完成）。
-- 批次 85（已完成）：`userdata` 重建为 `(user_id, movie_id)`、播放会话带 `user_id`、新增登录审计表 `login_events`，读写按当前用户。
-- 批次 86（已完成）：管理端用户 CRUD、媒体库授权 `user_libraries`（默认无授权）、管理员只读审计 API（登录/播放）、自助改密撤销会话；删除用户保留审计。
-- 批次 87（已完成）：可见性强制——浏览/列表/搜索/续播/最新按授权库过滤，详情/PlaybackInfo/流/代理/播放 404；缓存键带用户与授权指纹；图片端点保持匿名（D02 边界）。
-- 批次 88：Web 用户管理 + 活动记录 + 媒体库授权 UI；普通用户设置页自助改密；非管理员隐藏入口。
-- 批次 89：活动记录从设置页拆为独立侧边栏页面（`activity`），设置页只保留服务设置/API 密钥/用户管理/改密。
-- 批次 90：架构复审 P0——播放会话按用户隔离（迁移 10：sessions 复合主键、events.user_id）。
-- 批次 91：影片 DTO 增 `CollectionIds`，并实现 `GET /Items/{id}/Collections`（生产反馈：客户端“所属合集”缺端点会列出全部合集）。
-
-详细台账与未决项见 [PLAN-STATUS.md](PLAN-STATUS.md) §9、§10。
-- 批次 92：相似作品分层推荐（同系列 > 同番号系列 > 演员/厂牌 > 类型标签），移除全库恒定的分级加分；候选按账户媒体库授权过滤，缓存键加账户。
+旧方案中已移除的独立手动录入端点、单用户模型、Redis 必选政策、固定会话缓存伪代码和重复批次清单不再作为施工依据；历史决策与未完成的部署验收仍保留在台账。

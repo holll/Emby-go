@@ -2055,25 +2055,57 @@ async function openScrapePreview(item) {
   const body = document.querySelector('#scrape-body');
   overlay.hidden = false;
   overlayPush('#scrape-overlay');
-  body.innerHTML = '<p class="hint">正在搜索候选…</p>';
-  // 捕获本次会话的状态对象：await 期间浮层可能被关掉（scrapeState 置 null）
-  // 或换成另一条影片，回写时必须认这个对象、而不是认全局变量。
-  // inspectSeq 只增不减：慢回包必须让位给更晚的点击（P1-10）。
-  const state = { movieId: item.id, preview: null, inspect: null, provider: '', id: '', inspectSeq: 0 };
+  body.innerHTML = `
+    <form id="scrape-manual-search" class="panel">
+      <div class="field-grid">
+        <label>标题 / 番号 / URL<input id="scrape-query" type="text" placeholder="输入番号或影片源链接" aria-describedby="scrape-search-help"></label>
+        <label>MetaTubeId<input id="scrape-metatube-id" type="text" placeholder="源名称 或 Provider1:movie-id" aria-describedby="scrape-search-help" autocapitalize="off" spellcheck="false"></label>
+      </div>
+      <p id="scrape-search-help" class="hint">番号可直接搜索；指定源时在 MetaTubeId 填源名称。精准识别填 源:ID（ID 是源网页中的固定 ID，不是番号）；源链接直接填左侧。搜索仅预览，不会写入文件。</p>
+      <button type="submit" class="btn btn-accent">手动搜索</button>
+      <button id="scrape-auto-search" type="button" class="btn">按影片信息搜索</button>
+    </form>
+    <div id="scrape-results" aria-live="polite"></div>`;
+  const state = { movieId: item.id, preview: null, inspect: null, provider: '', id: '', inspectSeq: 0, searchSeq: 0 };
   scrapeState = state;
+  body.querySelector('#scrape-manual-search').addEventListener('submit', event => {
+    event.preventDefault();
+    void searchScrapePreview(state, {
+      q: body.querySelector('#scrape-query').value.trim(),
+      metatube_id: body.querySelector('#scrape-metatube-id').value.trim()
+    });
+  });
+  body.querySelector('#scrape-auto-search').addEventListener('click', () => { void searchScrapePreview(state); });
+  await searchScrapePreview(state);
+}
+
+async function searchScrapePreview(state, manual = null) {
+  if (scrapeState !== state) return;
+  const seq = ++state.searchSeq;
+  ++state.inspectSeq; // 新搜索使旧候选的在途详情失效，避免写入错误的选择。
+  state.preview = null;
+  state.inspect = null;
+  state.provider = '';
+  state.id = '';
+  const body = document.querySelector('#scrape-results');
+  body.innerHTML = '<p class="hint" role="status">正在搜索候选…</p>';
   try {
-    const preview = await api(`/items/${item.id}/scrape/preview`);
-    if (scrapeState !== state) return; // 已关闭或已切到另一条
+    // 空白可选字段不发送；两个字段均空时仍保留 q=，让服务端明确报错而非自动搜索。
+    const params = manual ? Object.fromEntries(Object.entries(manual).filter(([, value]) => value !== '')) : null;
+    if (params && !Object.keys(params).length) params.q = '';
+    const suffix = params ? '?' + new URLSearchParams(params).toString() : '';
+    const preview = await api(`/items/${state.movieId}/scrape/preview${suffix}`);
+    if (scrapeState !== state || seq !== state.searchSeq) return;
     state.preview = preview;
     if (!preview.candidates || !preview.candidates.length) {
-      body.innerHTML = `<p class="hint">没有搜到候选（搜索词：${esc(preview.query || '—')}）。可先在详情里补番号，或在 NFO 里填好番号后重试。</p>`;
+      body.innerHTML = `<p class="hint" role="status">没有搜到候选（搜索词：${esc(preview.query || '—')}）。请修改上方搜索条件后重试。</p>`;
       return;
     }
     const pick = preview.candidates[preview.recommended >= 0 ? preview.recommended : 0];
     await loadScrapeInspect(pick.provider, pick.id);
   } catch (e) {
-    if (scrapeState !== state) return;
-    body.innerHTML = `<p class="hint" style="color:var(--danger)">${esc(e.message)}</p>`;
+    if (scrapeState !== state || seq !== state.searchSeq) return;
+    body.innerHTML = `<p class="hint" role="alert" style="color:var(--danger)">${esc(e.message)}</p>`;
   }
 }
 
@@ -2083,7 +2115,7 @@ async function loadScrapeInspect(provider, id) {
   // 同一会话内每次点击取号；只有最后一次点击的回包可以写状态与重绘。
   // 慢候选先发出、后返回时不得覆盖用户已经选中的新候选。
   const seq = ++state.inspectSeq;
-  const body = document.querySelector('#scrape-body');
+  const body = document.querySelector('#scrape-results');
   body.innerHTML = '<p class="hint">正在读取详情…</p>';
   let inspect;
   try {
@@ -2109,7 +2141,7 @@ async function loadScrapeInspect(provider, id) {
 function renderScrapePreview() {
   const gen = pageGen;
   const detailSession = detailGen;
-  const body = document.querySelector('#scrape-body');
+  const body = document.querySelector('#scrape-results');
   const state = scrapeState;
   if (!state || !state.preview || !state.inspect) return;
   const preview = state.preview;

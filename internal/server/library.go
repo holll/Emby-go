@@ -18,6 +18,8 @@ import (
 	"emby-go/internal/avatar"
 	"emby-go/internal/cache"
 	"emby-go/internal/imageutil"
+	"emby-go/internal/metatube"
+	"emby-go/internal/scraper"
 	"emby-go/internal/store"
 )
 
@@ -1052,7 +1054,20 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 		v["Taglines"] = m.Taglines
 	}
 	if m.ProviderID != "" {
-		v["ProviderIds"] = gin.H{"metatube": m.ProviderID}
+		// Keep the published lowercase key unchanged; expose the official plugin
+		// key as well. Old local metatube:provider:id values need normalization.
+		ids := gin.H{"metatube": m.ProviderID}
+		if strings.HasPrefix(m.ProviderID, "metatube:") {
+			if provider, id, ok := scraper.SplitProviderID(m.ProviderID); ok {
+				canonical := metatube.FormatProviderID(provider, id)
+				if _, _, valid := metatube.ParseProviderID(canonical); valid {
+					ids["MetaTube"] = canonical
+				}
+			}
+		} else if _, _, ok := metatube.ParseProviderID(m.ProviderID); ok {
+			ids["MetaTube"] = m.ProviderID
+		}
+		v["ProviderIds"] = ids
 	}
 	if len(m.Genres) > 0 {
 		v["Genres"] = m.Genres

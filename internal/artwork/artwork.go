@@ -118,9 +118,6 @@ func Run(ctx context.Context, db *store.Store, req Request, opts Options) (res R
 	if err = validate(req); err != nil {
 		return
 	}
-	if db == nil {
-		return res, errors.New("store required")
-	}
 	timeout := opts.Timeout
 	if timeout <= 0 || timeout > 90*time.Second {
 		timeout = 90 * time.Second

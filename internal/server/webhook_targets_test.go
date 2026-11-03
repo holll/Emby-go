@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -32,6 +33,7 @@ type webhookTargetsResponse struct {
 		ID             string   `json:"id"`
 		Name           string   `json:"name"`
 		Enabled        bool     `json:"enabled"`
+		URL            string   `json:"url"`
 		URLConfigured  bool     `json:"url_configured"`
 		Events         []string `json:"events"`
 		Format         string   `json:"format"`
@@ -45,9 +47,25 @@ func decodeWebhookTargets(t *testing.T, w *httptest.ResponseRecorder) webhookTar
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("administrator webhook response must not be cached")
+	}
 	var body webhookTargetsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
+	}
+	var raw struct {
+		Targets []map[string]json.RawMessage `json:"targets"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range raw.Targets {
+		var url string
+		value, ok := target["url"]
+		if !ok || string(value) == "null" || json.Unmarshal(value, &url) != nil {
+			t.Fatal("every administrator target must include a string URL, even when empty")
+		}
 	}
 	return body
 }
@@ -71,8 +89,9 @@ func TestWebhookTargetsPreconditionsMergeAndClear(t *testing.T) {
 	if !saved.Multi || len(saved.Targets) != 1 || !saved.Targets[0].URLConfigured || saved.Targets[0].TimeoutSeconds != 7 {
 		t.Fatalf("saved=%+v", saved)
 	}
-	if strings.Contains(webhookTargetsRequest(a, http.MethodGet, token, "", "").Body.String(), "example.com") {
-		t.Fatal("GET must never echo the URL")
+	loaded := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodGet, token, "", ""))
+	if saved.Targets[0].URL != "https://example.com/hook" || loaded.Targets[0].URL != saved.Targets[0].URL {
+		t.Fatal("administrator PUT and GET must return the saved URL")
 	}
 	// 旧单目标接口：GET 标注 multi_target，PUT 拒绝覆盖整个集合。
 	legacyReq := httptest.NewRequest(http.MethodGet, "/api/admin/webhook/settings", nil)
@@ -135,6 +154,96 @@ func TestWebhookTargetsPreconditionsMergeAndClear(t *testing.T) {
 	defer reopened.Close()
 	if len(reopened.webhookTargets) != 0 || !reopened.webhookMulti {
 		t.Fatalf("reopened specs=%+v multi=%v", reopened.webhookTargets, reopened.webhookMulti)
+	}
+}
+
+func TestWebhookTargetsAdminURLReadSaveReloadAndClear(t *testing.T) {
+	a, token := logsTestApp(t)
+	const legacyURL = "https://example.com/legacy-url-canary?key=legacy-query-canary"
+	const savedURL = "https://example.com/saved-url-canary?key=saved-query-canary"
+
+	// The multi-target view also exposes the URL adapted from legacy settings,
+	// while the legacy settings API itself remains write-only.
+	legacy := webhookSettingsCall(a, http.MethodGet, token, "", "")
+	legacySave := webhookSettingsCall(a, http.MethodPut, token, legacy.Header().Get("ETag"), webhookSettingsBody(legacyURL, false, "item.updated"))
+	if legacySave.Code != http.StatusOK || strings.Contains(legacySave.Body.String(), "legacy-url-canary") {
+		t.Fatal("legacy settings must save successfully without exposing its URL")
+	}
+	initial := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodGet, token, "", ""))
+	if initial.Multi || len(initial.Targets) != 1 || initial.Targets[0].URL != legacyURL || !initial.Targets[0].URLConfigured {
+		t.Fatal("administrator must be able to read the adapted legacy URL")
+	}
+	body := fmt.Sprintf(`{"targets":[{"id":%q,"name":"saved","enabled":false,"url":%q,"events":["item.updated"],"format":"json","timeout_seconds":5}]}`, initial.Targets[0].ID, savedURL)
+	saved := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodPut, token, initial.ETag, body))
+	if !saved.Multi || saved.Targets[0].URL != savedURL || !saved.Targets[0].URLConfigured {
+		t.Fatal("administrator PUT must return the saved URL")
+	}
+
+	cfg := a.cfg
+	a.Close()
+	reopened, err := newApp(cfg, cache.NewMemory(16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	loaded := decodeWebhookTargets(t, webhookTargetsRequest(reopened, http.MethodGet, token, "", ""))
+	if loaded.Targets[0].URL != savedURL || loaded.ETag != saved.ETag {
+		t.Fatal("saved URL and ETag must survive restart")
+	}
+	// Both empty and whitespace-only URL values retain the saved URL.
+	for _, blank := range []string{"", "  "} {
+		body = fmt.Sprintf(`{"targets":[{"id":%q,"name":"saved","enabled":false,"url":%q,"events":["item.updated"],"format":"json","timeout_seconds":5}]}`, loaded.Targets[0].ID, blank)
+		loaded = decodeWebhookTargets(t, webhookTargetsRequest(reopened, http.MethodPut, token, loaded.ETag, body))
+		if loaded.Targets[0].URL != savedURL || !loaded.Targets[0].URLConfigured {
+			t.Fatal("blank URL must retain the saved URL")
+		}
+	}
+	body = fmt.Sprintf(`{"targets":[{"id":%q,"name":"saved","enabled":false,"clear_url":true,"events":["item.updated"],"format":"json","timeout_seconds":5}]}`, loaded.Targets[0].ID)
+	cleared := decodeWebhookTargets(t, webhookTargetsRequest(reopened, http.MethodPut, token, loaded.ETag, body))
+	if cleared.Targets[0].URL != "" || cleared.Targets[0].URLConfigured {
+		t.Fatal("clear_url must return an empty URL and unset url_configured")
+	}
+	reopened.Close()
+	again, err := newApp(cfg, cache.NewMemory(16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	loaded = decodeWebhookTargets(t, webhookTargetsRequest(again, http.MethodGet, token, "", ""))
+	if loaded.Targets[0].URL != "" || loaded.Targets[0].URLConfigured {
+		t.Fatal("cleared URL must remain empty after restart")
+	}
+}
+
+func TestWebhookTargetsURLRequiresAdminAndNoStore(t *testing.T) {
+	a, token := logsTestApp(t)
+	initial := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodGet, token, "", ""))
+	const url = "https://example.com/admin-url-canary?key=query-canary"
+	body := fmt.Sprintf(`{"targets":[{"id":%q,"name":"admin","enabled":false,"url":%q,"events":["item.updated"],"format":"json","timeout_seconds":5}]}`, initial.Targets[0].ID, url)
+	saved := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodPut, token, initial.ETag, body))
+	user, err := a.db.CreateUser("ordinary-webhook", "test-password", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.SaveAccessTokenForUser("ordinary-webhook-token", user.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		for credential, want := range map[string]int{"": http.StatusUnauthorized, "invalid-token": http.StatusUnauthorized, "ordinary-webhook-token": http.StatusForbidden} {
+			w := webhookTargetsRequest(a, method, credential, saved.ETag, body)
+			if w.Code != want || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("%s unauthorized status=%d cache=%q", method, w.Code, w.Header().Get("Cache-Control"))
+			}
+			for _, canary := range []string{url, "admin-url-canary", "query-canary"} {
+				if strings.Contains(w.Body.String(), canary) {
+					t.Fatal("unauthorized response exposed a webhook URL")
+				}
+			}
+		}
+	}
+	loaded := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodGet, token, "", ""))
+	if loaded.ETag != saved.ETag || loaded.Targets[0].URL != url {
+		t.Fatal("unauthorized requests must not change saved configuration")
 	}
 }
 

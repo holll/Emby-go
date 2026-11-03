@@ -187,7 +187,7 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 		}
 	}
 	spec := legacyWebhookTargetSpec(cfg)
-	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec.target()}, webhook.DefaultEventBudget)
+	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec}, webhook.DefaultEventBudget)
 	if err != nil {
 		webhookSettingsError(c, 400, "WEBHOOK_INVALID_CONFIG", "Webhook 配置无效")
 		return
@@ -200,7 +200,7 @@ func (a *App) adminSaveWebhookSettings(c *gin.Context) {
 	}
 	// Persist first, then atomically publish an immutable dispatcher/config
 	// pair. Already-started deliveries finish on their original snapshot.
-	a.publishWebhook(dispatcher, []webhookTargetSpec{spec}, cfg, false)
+	a.publishWebhook(dispatcher, []webhook.Target{spec}, cfg, false)
 	view := webhookSettingsView(cfg)
 	view["multi_target"] = false
 	c.Header("ETag", webhookConfigETag(cfg))

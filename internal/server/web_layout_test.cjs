@@ -12,6 +12,7 @@ async function browser(t) {
   const { call, evaluate, navigate, dir } = await launchBrowser(t);
   const fixture = `
     window.__calls = []; window.__errors = []; window.__securityRules=[]; window.__logID=0;
+    window.__webhooks={multi_target:true,config_etag:'fixture',targets:[{id:'one',name:'通知目标',enabled:true,url:'https://example.invalid/hook?token=fixture',url_configured:true,events:['item.updated'],format:'json',timeout_seconds:5,allow_private:false}]};
     addEventListener('error', e => __errors.push(e.message));
     localStorage.setItem('emby_token','layout-fixture');
     window.confirm=()=>true;
@@ -30,7 +31,23 @@ async function browser(t) {
       else if(p.endsWith('/users'))data={users:[{id:1,name:'owner',is_admin:true,library_ids:[1]}]};
       else if(p.endsWith('/apikeys'))data={total:1,items:[{id:'stable',name:'本地脚本',key_prefix:'prefix',version:1}]};
       else if(p.endsWith('/recovery'))data={items:[]};
-      else if(p.endsWith('/webhook/targets'))data={config_etag:'fixture',targets:[{id:'one',name:'通知目标',enabled:true,url_configured:true,events:['item.updated'],format:'json',timeout_seconds:5,allow_private:false}]};
+      else if(p.endsWith('/webhook/test')){
+        window.__lastTestSignal=options.signal;
+        if(window.__testDelay)await new Promise(r=>window.__resolveTest=r);
+        if(window.__testThrow)throw Error('fixture network failure');
+        data=window.__testResult||{status:'sent',duration_ms:37,error_code:'',message:'测试通知已发送'};
+      }
+      else if(p.endsWith('/webhook/targets')){
+        if(options.method==='PUT'){
+          const draft=JSON.parse(options.body),previous=__webhooks.targets;
+          __webhooks.targets=draft.targets.map((target,i)=>{
+            const old=previous.find(t=>t.id===target.id),address=target.clear_url?'':(target.url||old?.url||'');
+            return {...target,id:target.id||'new_'+i,url:address,url_configured:!!address};
+          });
+          __webhooks.config_etag+='-saved';
+        }
+        data=structuredClone(__webhooks);
+      }
       else if(p.endsWith('/scheduled'))data={items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:true,config_etag:'fixture'}]};
       else if(p.endsWith('/dashboard')){
         // Deliberately synthetic layout fixture; real HTTP telemetry is verified by Go/CDP integration.
@@ -98,7 +115,9 @@ test('通知设置：hidden确认行不占空间，删除与清空后才显示',
     for (const row of initial) assert.deepEqual(row, { hidden:true, display:'none', rects:0 }, '初始确认行隐藏 '+width);
     const removed = await evaluate(`(()=>{document.querySelector('[data-target-index]').open=true;document.querySelector('[data-remove]').click();return ['wh-confirm-remove-row','wh-confirm-empty-row'].map(id=>{const e=document.getElementById(id);return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};});})()`);
     for (const row of removed) { assert.equal(row.hidden,false); assert.equal(row.display,'flex'); assert.ok(row.rects>0); }
-    const added = await evaluate(`(()=>{document.querySelector('#wh-add').click();const e=document.querySelector('#wh-confirm-empty-row');return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};})()`);
+    const opened = await evaluate(`(()=>{document.querySelector('#wh-add').click();return {open:document.querySelector('#wh-dialog').open,emptyHidden:document.querySelector('#wh-confirm-empty-row').hidden,cards:document.querySelectorAll('#wh-targets [data-target-index]').length};})()`);
+    assert.deepEqual(opened, {open:true,emptyHidden:false,cards:0}, '打开弹窗不添加空卡片');
+    const added = await evaluate(`(()=>{document.querySelector('#wh-draft-name').value='草稿';document.querySelector('#wh-draft-url').value='https://example.invalid/draft';document.querySelector('#wh-dialog [data-event="item.updated"]').checked=true;document.querySelector('#wh-dialog-form').requestSubmit();const e=document.querySelector('#wh-confirm-empty-row');return {hidden:e.hidden,display:getComputedStyle(e).display,rects:e.getClientRects().length};})()`);
     assert.deepEqual(added, { hidden:true, display:'none', rects:0 }, '添加后清空确认重新隐藏');
     assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '仅修改草稿');
   }
@@ -113,9 +132,136 @@ test('通知设置：动态编码和超时标签关联唯一控件，增删重�
     assert.equal(result.length, expected);
     assert.ok(result.every(e=>e.id&&e.unique&&e.label), JSON.stringify(result));
   }
+  async function addDraft() {
+    const modalLabels = await evaluate(`(()=>{const controls=[...document.querySelectorAll('#wh-dialog input,#wh-dialog select')];return controls.every(e=>e.id&&document.querySelectorAll('[id="'+e.id+'"]').length===1&&e.labels.length);})()`);
+    assert.equal(modalLabels,true,'弹窗内标签与主页面不冲突');
+    await evaluate(`(()=>{document.querySelector('#wh-draft-name').value='草稿';document.querySelector('#wh-draft-url').value='https://example.invalid/draft';document.querySelector('#wh-dialog [data-event="item.updated"]').checked=true;document.querySelector('#wh-dialog-form').requestSubmit();})()`);
+    await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
+  }
+  await checkLabels(2);
+  await addDraft();
   await checkLabels(4);
   await evaluate(`(()=>{document.querySelector('[data-target-index="0"]').open=true;document.querySelector('[data-target-index="0"] [data-remove]').click();document.querySelector('#wh-add').click();})()`);
+  await addDraft();
   await checkLabels(4);
+});
+
+test('通知设置：弹窗隔离草稿、取消与Esc归还焦点、小屏布局及明文地址保存重载', {timeout:90000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  const focusFailures=[];
+  const key=async (key,code,windowsVirtualKeyCode,modifiers=0)=>{
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode,modifiers});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode,modifiers});
+  };
+  for(const [width,height] of [[1440,1000],[390,844],[320,568],[844,390],[667,280]]){
+    await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<860});
+    await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();})()`);
+    for(const cancel of ['wh-dialog-cancel','wh-dialog-close','Escape']){
+      const opened=await evaluate(`(()=>{document.querySelector('#wh-add').focus();document.querySelector('#wh-add').click();document.querySelector('#wh-draft-name').value='丢弃草稿';const d=document.querySelector('#wh-dialog'),r=d.getBoundingClientRect();return {open:d.open,focus:document.activeElement.id,cards:document.querySelectorAll('#wh-targets [data-target-index]').length,x:r.x,y:r.y,right:r.right,bottom:r.bottom,overflow:d.scrollWidth>d.clientWidth,scroll:document.documentElement.scrollWidth};})()`);
+      assert.equal(opened.open,true);assert.equal(opened.focus,'wh-draft-name');assert.equal(opened.cards,1);
+      assert.ok(opened.x>=0&&opened.y>=0&&opened.right<=width+1&&opened.bottom<=height+1,JSON.stringify({width,height,...opened}));
+      assert.equal(opened.overflow,false);assert.ok(opened.scroll<=width+1);
+      await evaluate(`document.querySelector('#wh-dialog-close').focus()`);
+      await key('Tab','Tab',9,8);
+      if(!await evaluate(`document.activeElement.matches('#wh-dialog button[type="submit"]')`))focusFailures.push({width,height,direction:'reverse',focus:await evaluate('document.activeElement.outerHTML.slice(0,200)')});
+      await evaluate(`document.querySelector('#wh-dialog button[type="submit"]').focus()`);
+      await key('Tab','Tab',9);
+      if(await evaluate(`document.activeElement.id`)!=='wh-dialog-close')focusFailures.push({width,height,direction:'forward',focus:await evaluate('document.activeElement.outerHTML.slice(0,200)')});
+      if(process.env.EMBY_LAYOUT_ARTIFACT_DIR&&cancel==='Escape'){
+        const output=path.resolve(process.env.EMBY_LAYOUT_ARTIFACT_DIR);fs.mkdirSync(output,{recursive:true});
+        const shot=await call('Page.captureScreenshot',{format:'png'});
+        fs.writeFileSync(path.join(output,`webhook-modal-${width}-${height}.png`),Buffer.from(shot.data,'base64'));
+      }
+      if(cancel==='Escape')await key('Escape','Escape',27);
+      else await evaluate(`document.getElementById('${cancel}').click()`);
+      await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
+      assert.deepEqual(await evaluate(`({open:document.querySelector('#wh-dialog').open,body:document.querySelector('#wh-dialog-body').children.length,focus:document.activeElement.id,cards:document.querySelectorAll('#wh-targets [data-target-index]').length})`),{open:false,body:0,focus:'wh-add',cards:1});
+    }
+  }
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`),0);
+  const invalid=await evaluate(`(()=>{document.querySelector('#wh-add').click();const f=document.querySelector('#wh-dialog-form'),q=k=>f.querySelector('[data-field="'+k+'"]');const errors=[];f.requestSubmit();errors.push(document.querySelector('#wh-dialog-status').textContent);q('name').value='新通知';f.requestSubmit();errors.push(document.querySelector('#wh-dialog-status').textContent);f.querySelector('[data-event="item.rate"]').checked=true;for(const url of ['', 'not a url','ftp://example.invalid/hook','javascript:alert(1)']){q('url').value=url;f.requestSubmit();errors.push(document.querySelector('#wh-dialog-status').textContent);}return {errors,open:document.querySelector('#wh-dialog').open,cards:document.querySelectorAll('#wh-targets [data-target-index]').length,calls:__calls.filter(c=>c.method!=='GET').length};})()`);
+  assert.ok(invalid.errors.every(Boolean));assert.equal(invalid.open,true);assert.equal(invalid.cards,1);assert.equal(invalid.calls,0);
+  await evaluate(`(()=>{document.querySelector('#wh-draft-url').value='https://example.invalid/new?token=plain-fixture';document.querySelector('#wh-draft-format').value='form';document.querySelector('#wh-draft-timeout').value='17';document.querySelector('#wh-draft-allow-private').checked=true;document.querySelector('#wh-dialog-form').requestSubmit();})()`);
+  assert.equal(await evaluate(`document.querySelectorAll('#wh-targets [data-target-index]').length`),2);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`),0,'添加到草稿不保存');
+  const saved=await evaluate(`(async()=>{document.querySelector('#wh-save').click();for(let i=0;i<100&&document.querySelector('#wh-save').disabled;i++)await new Promise(r=>setTimeout(r,10));return __calls.filter(c=>c.method==='PUT');})()`);
+  assert.equal(saved.length,1);const payload=JSON.parse(saved[0].body);
+  assert.equal(payload.targets[1].url,'https://example.invalid/new?token=plain-fixture');assert.equal(payload.targets[1].format,'form');assert.equal(payload.targets[1].timeout_seconds,17);assert.equal(payload.targets[1].allow_private,true);
+  await evaluate(`(async()=>{document.querySelector('#wh-reload').click();for(let i=0;i<100&&document.querySelector('#wh-save').disabled;i++)await new Promise(r=>setTimeout(r,10));document.querySelectorAll('#wh-targets details').forEach(d=>d.open=true);})()`);
+  const addresses=await evaluate(`[...document.querySelectorAll('#wh-targets [data-field="url"]')].map(e=>({value:e.value,type:e.type,visible:!!e.getClientRects().length}))`);
+  assert.deepEqual(addresses,[{value:'https://example.invalid/hook?token=fixture',type:'text',visible:true},{value:'https://example.invalid/new?token=plain-fixture',type:'text',visible:true}]);
+  assert.deepEqual(await evaluate('__errors'),[]);
+  assert.deepEqual(focusFailures,[],'Tab/Shift+Tab必须始终在弹窗内循环');
+});
+
+test('通知设置：显式测试使用当前草稿、旧地址回退、验证和发送结果，不保存配置', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();for(let i=0;i<100&&!document.querySelector('[data-target-index]');i++)await new Promise(r=>setTimeout(r,10));if(!document.querySelector('[data-target-index]'))throw Error('Webhook fixture did not load: '+document.querySelector('#wh-status')?.textContent+'; '+__errors.join(';'));document.querySelector('[data-target-index]').open=true;})()`);
+  assert.equal(await evaluate(`__calls.filter(c=>c.url.split('?')[0].endsWith('/webhook/test')).length`),0,'页面加载不自动发送');
+  const before=await evaluate(`JSON.stringify(__webhooks)`);
+  for(const [format,url] of [['json','https://example.invalid/unsaved'],['form','']]){
+    const result=await evaluate(`(async()=>{const c=document.querySelector('[data-target-index]'),q=k=>c.querySelector('[data-field="'+k+'"]');q('name').value='';q('enabled').checked=false;c.querySelectorAll('[data-event]').forEach(e=>e.checked=false);q('url').value=${JSON.stringify(url)};q('format').value='${format}';q('timeout').value='19';q('allow-private').checked=true;const b=c.querySelector('[data-test]');b.click();for(let i=0;i<100&&b.disabled;i++)await new Promise(r=>setTimeout(r,10));const s=c.querySelector('[data-test-status]');return {type:b.type,text:s.textContent,role:s.getAttribute('role'),calls:__calls.filter(c=>c.url.split('?')[0].endsWith('/webhook/test'))};})()`);
+    assert.equal(result.type,'button');assert.ok(['status','alert'].includes(result.role));assert.match(result.text,/37/);assert.match(result.text,/成功|已发送|已获接收端确认/);
+    const request=result.calls.at(-1);assert.equal(request.method,'POST');
+    assert.deepEqual(JSON.parse(request.body),{url:url||'https://example.invalid/hook?token=fixture',format,timeout_seconds:19,allow_private:true});
+  }
+  for(const change of [`q('clear-url').checked=true`, `q('clear-url').checked=false;q('url').value='ftp://example.invalid'`, `q('url').value='https://example.invalid';q('timeout').value='0'`]){
+    const validation=await evaluate(`(()=>{const c=document.querySelector('[data-target-index]'),q=k=>c.querySelector('[data-field="'+k+'"]');${change};const n=__calls.length;c.querySelector('[data-test]').click();return {count:__calls.length-n,text:c.querySelector('[data-test-status]').textContent};})()`);
+    assert.equal(validation.count,0);assert.ok(validation.text);
+  }
+  const failed=await evaluate(`(async()=>{const c=document.querySelector('[data-target-index]');c.querySelector('[data-field="timeout"]').value='5';__testResult={status:'failed',duration_ms:81,error_code:'delivery_failed',message:'接收端返回失败'};const b=c.querySelector('[data-test]');b.click();for(let i=0;i<100&&b.disabled;i++)await new Promise(r=>setTimeout(r,10));return c.querySelector('[data-test-status]').textContent;})()`);
+  assert.match(failed,/81/);assert.match(failed,/失败|未通过/);
+  const networkFailure=await evaluate(`(async()=>{__testThrow=true;const c=document.querySelector('[data-target-index]'),b=c.querySelector('[data-test]'),n=__calls.length;b.click();for(let i=0;i<100&&b.disabled;i++)await new Promise(r=>setTimeout(r,10));await new Promise(r=>setTimeout(r,30));__testThrow=false;return {calls:__calls.length-n,text:c.querySelector('[data-test-status]').textContent,role:c.querySelector('[data-test-status]').getAttribute('role')};})()`);
+  assert.equal(networkFailure.calls,1,'连接失败也不自动重试');assert.equal(networkFailure.role,'alert');assert.ok(networkFailure.text);assert.doesNotMatch(networkFailure.text,/fixture network failure/);
+  assert.equal(await evaluate(`JSON.stringify(__webhooks)`),before);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method==='PUT').length`),0);
+  for(const width of [390,320]){
+    await call('Emulation.setDeviceMetricsOverride',{width,height:568,deviceScaleFactor:1,mobile:true});
+    const layout=await evaluate(`(()=>{document.querySelector('#wh-add').click();const c=document.querySelector('#wh-dialog');return {button:c.querySelector('[data-test]').type,role:c.querySelector('[data-test-status]').getAttribute('role'),overflow:c.scrollWidth>c.clientWidth,scroll:document.documentElement.scrollWidth};})()`);
+    assert.equal(layout.button,'button');assert.ok(['status','alert'].includes(layout.role));assert.equal(layout.overflow,false);assert.ok(layout.scroll<=width+1);
+    await evaluate(`document.querySelector('#wh-dialog-close').click()`);
+    await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
+  }
+  assert.deepEqual(await evaluate('__errors'),[]);
+});
+
+test('通知设置：测试待处理时防重复和锁定编辑，关闭与导航隔离迟到结果', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();for(let i=0;i<100&&document.querySelector('#wh-add').disabled;i++)await new Promise(r=>setTimeout(r,10));document.querySelector('#wh-add').click();if(!document.querySelector('#wh-draft-url'))throw Error('Webhook modal did not open: '+document.querySelector('#wh-status')?.textContent+'; '+__errors.join(';'));})()`);
+  for(const value of ['', 'not a URL','ftp://example.invalid']){
+    const invalid=await evaluate(`(()=>{document.querySelector('#wh-draft-url').value=${JSON.stringify(value)};const n=__calls.length;document.querySelector('#wh-dialog [data-test]').click();return {calls:__calls.length-n,text:document.querySelector('#wh-dialog [data-test-status]').textContent};})()`);
+    assert.equal(invalid.calls,0);assert.ok(invalid.text);
+  }
+  const modalSent=await evaluate(`(async()=>{document.querySelector('#wh-draft-url').value='https://example.invalid/modal-json';const b=document.querySelector('#wh-dialog [data-test]');b.click();for(let i=0;i<100&&b.disabled;i++)await new Promise(r=>setTimeout(r,10));return {text:document.querySelector('#wh-dialog [data-test-status]').textContent,cards:document.querySelectorAll('[data-target-index]').length,request:__calls.filter(c=>c.url.split('?')[0].endsWith('/webhook/test')).at(-1)};})()`);
+  assert.match(modalSent.text,/37/);assert.equal(modalSent.cards,1);assert.deepEqual(JSON.parse(modalSent.request.body),{url:'https://example.invalid/modal-json',format:'json',timeout_seconds:5,allow_private:false});
+  const pending=await evaluate(`(()=>{__testDelay=true;document.querySelector('#wh-draft-url').value='https://example.invalid/draft';document.querySelector('#wh-draft-format').value='form';document.querySelector('#wh-draft-timeout').value='13';document.querySelector('#wh-draft-allow-private').checked=true;const b=document.querySelector('#wh-dialog [data-test]');b.click();b.click();document.querySelector('#wh-dialog-form').requestSubmit();return {calls:__calls.filter(c=>c.url.split('?')[0].endsWith('/webhook/test')),main:['wh-save','wh-reload','wh-add'].map(id=>document.getElementById(id).disabled),fields:[...document.querySelectorAll('#wh-dialog-body input,#wh-dialog-body select')].every(e=>e.disabled),close:document.querySelector('#wh-dialog-close').disabled,submit:document.querySelector('#wh-dialog button[type="submit"]').disabled};})()`);
+  assert.equal(pending.calls.length,2);assert.deepEqual(JSON.parse(pending.calls.at(-1).body),{url:'https://example.invalid/draft',format:'form',timeout_seconds:13,allow_private:true});
+  assert.deepEqual(pending.main,[true,true,true]);assert.equal(pending.fields,true);assert.equal(pending.close,false);assert.equal(pending.submit,true);
+  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
+  const closed=await evaluate(`({open:document.querySelector('#wh-dialog').open,aborted:__lastTestSignal?.aborted,unlocked:!document.querySelector('#wh-add').disabled})`);
+  assert.equal(closed.open,false);assert.equal(closed.aborted,true);assert.equal(closed.unlocked,true);
+  await evaluate(`document.querySelector('#wh-add').click();document.querySelector('#wh-draft-url').value='https://example.invalid/fresh'`);
+  const clean=await evaluate(`document.querySelector('#wh-dialog [data-test-status]').textContent`);
+  await evaluate(`(async()=>{__resolveTest();await new Promise(r=>setTimeout(r,30));})()`);
+  assert.equal(await evaluate(`document.querySelector('#wh-dialog [data-test-status]').textContent`),clean,'旧请求不得覆盖新弹窗');
+  assert.equal(await evaluate(`document.querySelector('#wh-draft-url').value`),'https://example.invalid/fresh');
+  await evaluate(`document.querySelector('#wh-dialog-close').click()`);
+  await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
+  const cardPending=await evaluate(`(()=>{const c=document.querySelector('[data-target-index]');c.open=true;const b=c.querySelector('[data-test]');b.click();b.click();return {disabled:b.disabled,locked:['wh-save','wh-reload','wh-add'].every(id=>document.getElementById(id).disabled),fields:[...c.querySelectorAll('input,select,button')].every(e=>e.disabled)};})()`);
+  assert.deepEqual(cardPending,{disabled:true,locked:true,fields:true});
+  await evaluate(`page('overview')`);
+  assert.equal(await evaluate(`__lastTestSignal.aborted`),true,'导航中止当前测试请求');
+  const content=await evaluate(`document.querySelector('#content').innerHTML`);
+  await evaluate(`(async()=>{__resolveTest();await new Promise(r=>setTimeout(r,30));})()`);
+  assert.equal(await evaluate(`document.querySelector('#content').innerHTML`),content,'导航后迟到结果不能改变新页面');
+  assert.equal(await evaluate(`__calls.filter(c=>c.method==='PUT').length`),0);
+  assert.equal(await evaluate(`__calls.filter(c=>c.url.split('?')[0].endsWith('/webhook/test')).length`),3,'无自动重试');
+  assert.deepEqual(await evaluate('__errors'),[]);
 });
 
 test('完整前端：桌面与移动端页面布局、渐进表单和触控导航', { timeout: 120000 }, async t => {

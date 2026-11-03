@@ -135,8 +135,13 @@ func UpdateScraped(path string, f ScrapeFields) error {
 	}
 
 	// uniqueid 按 type 定位，不动其它 type（trailerurl 等由别的来源维护时不能误删）。
-	if id := strings.TrimSpace(f.ProviderID); !locked["uniqueid"] && id != "" && (f.Overwrite || !hasUniqueID(text, "metatube")) {
+	if id := strings.TrimSpace(f.ProviderID); !locked["uniqueid"] && id != "" && (f.Overwrite || existingMetaTubeID(text) == "") {
 		text = upsertUniqueID(text, "metatube", id, indent)
+		// Keep an existing legacy top-level marker in sync, but never create
+		// redundant tags or touch actor-level metatubeid elements.
+		if hasAnyBlock(text, "metatubeid") {
+			text = upsertScalar(text, "metatubeid", id, indent)
+		}
 	}
 	if url := strings.TrimSpace(f.TrailerURL); !locked["uniqueid"] && url != "" && (f.Overwrite || !hasUniqueID(text, "trailerurl")) {
 		text = upsertUniqueID(text, "trailerurl", url, indent)
@@ -576,10 +581,6 @@ func hasUniqueID(text, kind string) bool {
 	return len(uniqueIDElements(text, kind)) > 0
 }
 
-func uniqueIDPattern(kind string) *regexp.Regexp {
-	return regexp.MustCompile(`(?s)<uniqueid\s[^>]*type\s*=\s*"` + regexp.QuoteMeta(kind) + `"[^>]*>.*?</uniqueid\s*>`)
-}
-
 // upsertUniqueID 按 type 替换 <uniqueid>；同名 type 不存在则新增。
 func upsertUniqueID(text, kind, value, indent string) string {
 	replacement := `<uniqueid type="` + kind + `">` + escape(value) + "</uniqueid>"
@@ -604,6 +605,18 @@ func uniqueIDElements(text, kind string) []directElement {
 		}
 	}
 	return out
+}
+
+// existingMetaTubeID follows MovieMeta.ProviderID precedence while restricting
+// inspection to movie-level elements (actor IDs are unrelated).
+func existingMetaTubeID(text string) string {
+	for _, element := range uniqueIDElements(text, "metatube") {
+		var value string
+		if err := xml.Unmarshal([]byte(text[element.start:element.end]), &value); err == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ScrapedTagValue(text, "metatubeid")
 }
 
 // ScrapedTagValue 读取 NFO 里某个单值标签的当前内容（供「只补缺失」预览与 diff）。

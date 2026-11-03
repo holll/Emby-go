@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'web/artwork.js'), 'utf8');
+const runnerSource = fs.readFileSync(path.join(__dirname, 'web/task-runner.js'), 'utf8');
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 function fixture(api, confirm = () => true, options = {}) {
   let next = 0, current = true, completed = 0;
@@ -19,7 +20,7 @@ function fixture(api, confirm = () => true, options = {}) {
     return matches.map(m => { const n = node('candidate-' + m[1]); n.dataset.candidate = m[1]; return n; });
   } };
   const box = options.box || vm.createContext({ AbortController, URL: options.URL || URL, console, setTimeout(fn, ms) { const id = ++next; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); } });
-  if (!options.box) vm.runInContext(source, box);
+  if (!options.box) { vm.runInContext(runnerSource, box); vm.runInContext(source, box); }
   const dispose = box.mountArtwork(host, { movie: { id: 19, Title: '<unsafe>' }, confirm, imageRequest: options.imageRequest, isCurrent: () => current, onComplete: () => completed++, apiRequest: (p, o) => { calls.push([p, o]); return p === '/artwork/status' ? Promise.resolve(options.latest || { task_id: 0, instance_id: 'test-instance', running: false, movie_ids: null }) : api(p, o); } });
   return { box, host, calls, timers, node, dispose, completed: () => completed, stale: () => { current = false; }, click: key => node(key).events.get('click')?.(), async tick(ms) { const entry = [...timers].find(([, t]) => t.ms === ms); assert.ok(entry, 'timer ' + ms); timers.delete(entry[0]); entry[1].fn(); await flush(); } };
 }
@@ -27,7 +28,7 @@ test('real Chromium cover controls retain native keyboard focus, 44px targets an
   const { available, probe } = require('./web_browser_helper.cjs');
   if (!available(t)) return;
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8') + fs.readFileSync(path.join(__dirname, 'web/artwork.css'), 'utf8');
-  const doc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta charset="utf-8"><style>${css}body{padding:16px}#host{width:100%;max-width:343px}</style><div id="host"></div><script>${source}
+  const doc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta charset="utf-8"><style>${css}body{padding:16px}#host{width:100%;max-width:343px}</style><div id="host"></div><script>${runnerSource}\n${source}
     mountArtwork(document.querySelector('#host'), {movie:{id:19,Title:'A very long title '.repeat(20)},apiRequest:async path=>path.includes('capabilities')?({screenshot:true,provider:true}):({task_id:0,instance_id:'test-instance',running:false,movie_ids:null})});
     setTimeout(()=>{const button=document.querySelector('[data-art="screenshot"]'),select=document.querySelector('select'),input=document.querySelector('[data-art="position"]');button.focus(); const out={width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth,button:button.getBoundingClientRect().height,select:select.getBoundingClientRect().height,input:input.getBoundingClientRect().height,focus:document.activeElement===button,hidden:getComputedStyle(document.querySelector('[data-art="error"]')).display,gap:getComputedStyle(document.querySelector('.artwork-actions')).gap};document.body.innerHTML='<pre id="result"></pre>';document.querySelector('#result').textContent=JSON.stringify(out);},0);</script>`;
   const widths = [375, 768, 1280];

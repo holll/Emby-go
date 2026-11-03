@@ -25,36 +25,13 @@ const (
 	legacyWebhookTargetID   = "wh_legacy"
 )
 
-type webhookTargetSpec struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Enabled        bool     `json:"enabled"`
-	URL            string   `json:"url,omitempty"`
-	Events         []string `json:"events"`
-	Format         string   `json:"format"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	AllowPrivate   bool     `json:"allow_private"`
-}
-
 type webhookTargetsConfig struct {
-	Version int                 `json:"version"`
-	Targets []webhookTargetSpec `json:"targets"`
+	Version int              `json:"version"`
+	Targets []webhook.Target `json:"targets"`
 }
 
-func (s webhookTargetSpec) target() webhook.Target {
-	return webhook.Target{ID: s.ID, Name: s.Name, Enabled: s.Enabled, URL: s.URL,
-		Events: append([]string(nil), s.Events...), Format: s.Format,
-		TimeoutSeconds: s.TimeoutSeconds, AllowPrivate: s.AllowPrivate}
-}
-
-func webhookTargetSpecFromTarget(t webhook.Target) webhookTargetSpec {
-	return webhookTargetSpec{ID: t.ID, Name: t.Name, Enabled: t.Enabled, URL: t.URL,
-		Events: append([]string(nil), t.Events...), Format: t.Format,
-		TimeoutSeconds: t.TimeoutSeconds, AllowPrivate: t.AllowPrivate}
-}
-
-func legacyWebhookTargetSpec(cfg config.WebhookConfig) webhookTargetSpec {
-	return webhookTargetSpec{
+func legacyWebhookTargetSpec(cfg config.WebhookConfig) webhook.Target {
+	return webhook.Target{
 		ID:      legacyWebhookTargetID,
 		Name:    "默认目标",
 		Enabled: cfg.Enabled,
@@ -67,17 +44,9 @@ func legacyWebhookTargetSpec(cfg config.WebhookConfig) webhookTargetSpec {
 	}
 }
 
-func webhookTargetSpecsToTargets(specs []webhookTargetSpec) []webhook.Target {
-	targets := make([]webhook.Target, 0, len(specs))
-	for _, spec := range specs {
-		targets = append(targets, spec.target())
-	}
-	return targets
-}
-
 // loadWebhookTargets 读取运行配置：v2 权威；否则把 v1/YAML 封装为唯一
 // legacy 目标（仅内存适配，首次成功保存才写 v2）。
-func loadWebhookTargets(db *store.Store, fallback config.WebhookConfig) ([]webhook.Target, []webhookTargetSpec, config.WebhookConfig, bool, error) {
+func loadWebhookTargets(db *store.Store, fallback config.WebhookConfig) ([]webhook.Target, []webhook.Target, config.WebhookConfig, bool, error) {
 	values, err := db.Settings()
 	if err != nil {
 		return nil, nil, config.WebhookConfig{}, false, errors.New("webhook settings unavailable")
@@ -92,91 +61,38 @@ func loadWebhookTargets(db *store.Store, fallback config.WebhookConfig) ([]webho
 		}
 		seen := make(map[string]bool, len(stored.Targets))
 		for i := range stored.Targets {
-			spec := &stored.Targets[i]
-			if err := normalizeWebhookTargetSpec(spec, false); err != nil {
-				return nil, nil, config.WebhookConfig{}, true, errors.New("webhook multi-target settings invalid")
-			}
-			if seen[spec.ID] {
+			spec, err := webhook.NormalizeTarget(stored.Targets[i])
+			if err != nil || seen[spec.ID] {
 				return nil, nil, config.WebhookConfig{}, true, errors.New("webhook multi-target settings invalid")
 			}
 			seen[spec.ID] = true
+			stored.Targets[i] = spec
 		}
-		targets := webhookTargetSpecsToTargets(stored.Targets)
 		// v2 存在时旧单目标接口只保留升级提示；运行态不再读 v1。
-		return targets, stored.Targets, config.WebhookConfig{}, true, nil
+		return stored.Targets, stored.Targets, config.WebhookConfig{}, true, nil
 	}
 	legacyCfg, err := loadWebhookConfig(db, fallback)
 	if err != nil {
 		return nil, nil, config.WebhookConfig{}, false, err
 	}
-	spec := legacyWebhookTargetSpec(legacyCfg)
-	if err := normalizeWebhookTargetSpec(&spec, true); err != nil {
+	spec, err := webhook.NormalizeTarget(legacyWebhookTargetSpec(legacyCfg))
+	if err != nil {
 		return nil, nil, config.WebhookConfig{}, false, errors.New("webhook settings invalid")
 	}
-	return []webhook.Target{spec.target()}, []webhookTargetSpec{spec}, legacyCfg, false, nil
+	return []webhook.Target{spec}, []webhook.Target{spec}, legacyCfg, false, nil
 }
 
-// normalizeWebhookTargetSpec 复用 Dispatcher 的离线语义校验。allowEmptyID
-// 仅用于 legacy 迁移（服务端会分配固定 ID）。
-func normalizeWebhookTargetSpec(spec *webhookTargetSpec, allowEmptyID bool) error {
-	spec.Name = strings.TrimSpace(spec.Name)
-	if spec.Name == "" || len([]rune(spec.Name)) > 80 {
-		return errors.New("webhook: target name must be 1-80 characters")
-	}
-	if spec.ID == "" {
-		if !allowEmptyID {
-			return errors.New("webhook: target id required")
-		}
-		spec.ID = legacyWebhookTargetID
-	}
-	if len(spec.Events) == 0 || len(spec.Events) > 13 {
-		return errors.New("webhook: target needs explicit events")
-	}
-	for _, event := range spec.Events {
-		if !config.ValidWebhookEvent(event) {
-			return errors.New("webhook: invalid event")
-		}
-	}
-	if spec.Format == "" {
-		spec.Format = "json"
-	}
-	if spec.Format != "json" && spec.Format != "form" {
-		return errors.New("webhook: invalid format")
-	}
-	if spec.TimeoutSeconds == 0 {
-		spec.TimeoutSeconds = 5
-	}
-	if spec.TimeoutSeconds < 1 || spec.TimeoutSeconds > 30 {
-		return errors.New("webhook: timeout_seconds must be 1-30")
-	}
-	spec.URL = strings.TrimSpace(spec.URL)
-	if len(spec.URL) > 4096 {
-		return errors.New("webhook: url too long")
-	}
-	if spec.URL != "" {
-		probe := config.WebhookConfig{Enabled: true, URL: spec.URL, Events: spec.Events,
-			Format: spec.Format, TimeoutSeconds: spec.TimeoutSeconds, AllowPrivate: spec.AllowPrivate}
-		if probe.Validate() != nil {
-			return errors.New("webhook: invalid target url")
-		}
-	}
-	if spec.Enabled && spec.URL == "" {
-		return errors.New("webhook: enabled target requires a url")
-	}
-	return nil
-}
-
-func webhookTargetsETag(specs []webhookTargetSpec) string {
+func webhookTargetsETag(specs []webhook.Target) string {
 	raw, _ := json.Marshal(webhookTargetsConfig{Version: 2, Targets: specs})
 	return fmt.Sprintf("\"wh2-%x\"", sha256.Sum256(raw))
 }
 
-func webhookTargetsView(specs []webhookTargetSpec, multi bool) gin.H {
+func webhookTargetsView(specs []webhook.Target, multi bool) gin.H {
 	out := make([]gin.H, 0, len(specs))
 	for _, spec := range specs {
 		out = append(out, gin.H{
 			"id": spec.ID, "name": spec.Name, "enabled": spec.Enabled,
-			"url_configured": spec.URL != "", "events": spec.Events, "format": spec.Format,
+			"url": spec.URL, "url_configured": spec.URL != "", "events": spec.Events, "format": spec.Format,
 			"timeout_seconds": spec.TimeoutSeconds, "allow_private": spec.AllowPrivate,
 		})
 	}
@@ -184,11 +100,11 @@ func webhookTargetsView(specs []webhookTargetSpec, multi bool) gin.H {
 }
 
 // publishWebhook 原子替换运行快照；旧快照的已开始投递自行结束。
-func (a *App) publishWebhook(d *webhook.Dispatcher, specs []webhookTargetSpec, legacy config.WebhookConfig, multi bool) {
+func (a *App) publishWebhook(d *webhook.Dispatcher, specs []webhook.Target, legacy config.WebhookConfig, multi bool) {
 	a.webhookMu.Lock()
 	old := a.webhook
 	a.webhook = d
-	a.webhookTargets = append([]webhookTargetSpec(nil), specs...)
+	a.webhookTargets = append([]webhook.Target(nil), specs...)
 	a.webhookConfig = legacy
 	a.webhookMulti = multi
 	a.webhookMu.Unlock()
@@ -198,7 +114,7 @@ func (a *App) publishWebhook(d *webhook.Dispatcher, specs []webhookTargetSpec, l
 func (a *App) adminWebhookTargets(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	a.webhookMu.RLock()
-	specs := append([]webhookTargetSpec(nil), a.webhookTargets...)
+	specs := append([]webhook.Target(nil), a.webhookTargets...)
 	multi := a.webhookMulti
 	a.webhookMu.RUnlock()
 	c.Header("ETag", webhookTargetsETag(specs))
@@ -256,21 +172,21 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 		return
 	}
 	a.webhookMu.RLock()
-	current := append([]webhookTargetSpec(nil), a.webhookTargets...)
+	current := append([]webhook.Target(nil), a.webhookTargets...)
 	a.webhookMu.RUnlock()
 	if c.GetHeader("If-Match") != webhookTargetsETag(current) {
 		webhookSettingsError(c, http.StatusPreconditionFailed, "WEBHOOK_CONFIG_CHANGED", "Webhook 配置已被修改；请重新加载后核对，不要覆盖旧配置")
 		return
 	}
-	oldByID := make(map[string]webhookTargetSpec, len(current))
+	oldByID := make(map[string]webhook.Target, len(current))
 	for _, spec := range current {
 		oldByID[spec.ID] = spec
 	}
 	seen := make(map[string]bool, len(req.Targets))
-	next := make([]webhookTargetSpec, 0, len(req.Targets))
+	next := make([]webhook.Target, 0, len(req.Targets))
 	for _, update := range req.Targets {
 		id := strings.TrimSpace(update.ID)
-		var old webhookTargetSpec
+		var old webhook.Target
 		oldExists := false
 		switch {
 		case id == "":
@@ -286,7 +202,7 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 			return
 		}
 		seen[id] = true
-		spec := webhookTargetSpec{ID: id, Name: update.Name, Enabled: update.Enabled,
+		spec := webhook.Target{ID: id, Name: update.Name, Enabled: update.Enabled,
 			Events: append([]string(nil), update.Events...), Format: update.Format,
 			TimeoutSeconds: update.TimeoutSeconds, AllowPrivate: update.AllowPrivate}
 		// 未提交/空白 URL 表示保留旧秘密；按目标 ID 合并，绝不按数组位置。
@@ -302,7 +218,7 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 		} else if update.URL != nil && strings.TrimSpace(*update.URL) != "" {
 			spec.URL = strings.TrimSpace(*update.URL)
 		}
-		if err := normalizeWebhookTargetSpec(&spec, false); err != nil {
+		if spec, err = webhook.NormalizeTarget(spec); err != nil {
 			webhookSettingsError(c, http.StatusBadRequest, "WEBHOOK_INVALID_CONFIG", "目标配置无效：检查名称、事件、地址、编码格式与 1–30 秒超时")
 			return
 		}
@@ -318,7 +234,7 @@ func (a *App) adminSaveWebhookTargets(c *gin.Context) {
 		webhookSettingsError(c, http.StatusBadRequest, "WEBHOOK_EMPTY_CONFIRMATION_REQUIRED", "清空全部 Webhook 目标需要显式确认")
 		return
 	}
-	dispatcher, err := webhook.NewDispatcher(webhookTargetSpecsToTargets(next), webhook.DefaultEventBudget)
+	dispatcher, err := webhook.NewDispatcher(next, webhook.DefaultEventBudget)
 	if err != nil {
 		webhookSettingsError(c, http.StatusBadRequest, "WEBHOOK_INVALID_CONFIG", "Webhook 目标配置无效，未保存")
 		return

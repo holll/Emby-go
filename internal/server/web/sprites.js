@@ -1,20 +1,12 @@
 /* 独立雪碧图维护与精确时间轴预览；不修改封面或元数据。 */
 (function (global) {
   'use strict';
-  // Retain ambiguous submissions across drawer mounts. Never replay a POST.
-  const submissions = new Map(), completedTasks = new Set();
   function mountSprites(host, options) {
     const { apiRequest, movie, onComplete = () => {}, isCurrent = () => true } = options;
     const confirmAction = options.confirm || (message => global.confirm(message));
-    let disposed = false, acceptedTaskID = null, busy = false, ready = false, cancelling = false;
+    let disposed = false, capabilities = {};
     const movieKey = String(movie.id);
-    let uncertain = submissions.has(movieKey), observingOther = false, latestTaskID = 0;
-    let acceptedInstance = null, latestInstance = null, targetVerified = false;
-    const identityKey = (instance, taskID) => JSON.stringify([instance, taskID]);
-    const taskPath = (instance, taskID) => '/sprites/status?task_id=' + taskID + '&instance_id=' + encodeURIComponent(instance);
-    let capabilities = {}, timer = null, request = null, failures = 0;
     const listeners = [];
-    let cancelTimeout = null;
     const current = () => !disposed && host.isConnected !== false && isCurrent();
     host.innerHTML = `<section class="sprites-panel" aria-label="视频预览雪碧图">
       <header><h3>视频预览雪碧图 <small>独立生成 · 不改封面</small></h3><p class="hint">仅从可信 STRM 生成时间轴预览。不会触发刮削、翻译或改写元数据；关闭面板不会停止后台任务。</p></header>
@@ -29,151 +21,45 @@
     const listen = (node, event, callback) => { node.addEventListener(event, callback); listeners.push(() => node.removeEventListener(event, callback)); };
     const state = message => { if (current()) el('state').textContent = message; };
     const error = message => { if (current()) { el('error').textContent = message; el('error').hidden = !message; } };
-    function controls() {
+    function controls(snap) {
       if (!current()) return;
-      el('generate').disabled = !ready || !capabilities.enabled || busy || uncertain || acceptedTaskID !== null;
-      el('cancel').hidden = acceptedTaskID === null || observingOther;
-      el('cancel').disabled = cancelling || !targetVerified;
+      el('generate').disabled = !snap.ready || !capabilities.enabled || snap.blocked;
+      el('cancel').hidden = !snap.accepted || snap.observingOther;
+      el('cancel').disabled = snap.cancelling || !snap.targetVerified;
+      el('retry').hidden = !snap.retry;
     }
-    async function read(path) {
-      if (request) throw new Error('正在读取，请稍候');
-      const controller = new AbortController();
-      let timeout;
-      const pending = { controller };
-      request = pending;
-      try {
-        return await Promise.race([
-          apiRequest(path, { signal: controller.signal }),
-          new Promise((_, reject) => { timeout = setTimeout(() => { controller.abort(); reject(new Error('读取超时')); }, 10000); pending.timeout = timeout; })
-        ]);
-      } finally { clearTimeout(timeout); if (request === pending) request = null; }
-    }
-    function schedule(delay) { clearTimeout(timer); timer = setTimeout(() => { timer = null; poll(); }, delay); }
-    function taskTargetsMovie(status) {
-      return Array.isArray(status.movie_ids) && status.movie_ids.some(id => String(id) === movieKey);
-    }
-    async function recover() {
-      if (!current() || request) return;
-      clearTimeout(timer); timer = null;
-      busy = true; controls();
-      state('正在核对后台任务，请勿重复提交…');
-      try {
-        const saved = submissions.get(movieKey);
-        const status = await read(saved?.taskID ? taskPath(saved.instance, saved.taskID) : '/sprites/status');
-        if (!current()) return;
-        if (typeof status.instance_id !== 'string' || !status.instance_id || !Number.isSafeInteger(status.task_id) || status.task_id < 0 || typeof status.running !== 'boolean') throw new Error('任务状态无效');
-        if (saved?.taskID && (status.task_id !== saved.taskID || status.instance_id !== saved.instance)) throw new Error('恢复任务身份不匹配');
-        ready = true; latestTaskID = status.task_id; latestInstance = status.instance_id;
-        const recoverable = !saved || (saved.instance === status.instance_id && saved.taskID === status.task_id) || (saved.baselineInstance === status.instance_id && status.task_id > saved.baseline);
-        if (recoverable && status.task_id > 0 && (status.running || taskTargetsMovie(status))) {
-          acceptedTaskID = status.task_id; acceptedInstance = status.instance_id; targetVerified = taskTargetsMovie(status); observingOther = !targetVerified;
-          if (!observingOther) { uncertain = false; submissions.delete(movieKey); }
-          busy = false; failures = 0; controls(); poll();
-          return;
-        }
-        busy = false; ready = true; el('retry').hidden = !uncertain; controls();
-        const unavailable = !capabilities.enabled ? '预览生成不可用，请检查 FFmpeg / FFprobe 配置。' : '';
-        state(uncertain ? '提交结果未确认，已禁止重复提交。请重新读取后台状态。' : unavailable || '默认保留已有预览。生成前将再次确认。');
-        if (uncertain) error('尚未找到可确认的本片任务。后台请求可能仍在处理中，不会自动重复提交。');
-      } catch (_) {
-        if (!current()) return;
-        busy = false; ready = false; controls(); el('retry').hidden = false;
-        error('无法核对后台任务。为避免重复提交，操作暂不可用；请重新读取状态。');
-      }
-    }
-    async function poll() {
-      if (!current() || acceptedTaskID === null || request) return;
-      const taskID = acceptedTaskID, instance = acceptedInstance;
-      try {
-        const status = await read(taskPath(instance, taskID));
-        if (!current() || acceptedTaskID !== taskID || acceptedInstance !== instance) return;
-        if (status.task_id !== taskID || status.instance_id !== instance || typeof status.running !== 'boolean') { targetVerified = false; controls(); throw new Error('任务身份不匹配'); }
-        targetVerified = taskTargetsMovie(status);
-        if (!observingOther && !targetVerified) { controls(); throw new Error('任务目标不匹配'); }
-        controls();
-        failures = 0; error(''); el('retry').hidden = true;
-        state(`${observingOther ? '其他影片任务 · ' : ''}${status.running ? '处理中' : status.cancelled ? '已取消' : '已结束'} · ${status.done || 0}/${status.total || 0} · 成功 ${status.success || 0} · 跳过 ${status.skipped || 0} · 失败 ${status.failed || 0} · 帧 ${status.frames_done || 0}/${status.frames_total || 0}`);
-        if (status.error) error('任务报告错误，请检查服务配置或源文件后重试。');
-        if (status.running) { schedule(1200); return; }
-        acceptedTaskID = null; cancelling = false; controls();
-        if (!observingOther && taskTargetsMovie(status) && !completedTasks.has(identityKey(instance, taskID)) && status.success > 0 && current()) {
-          completedTasks.add(identityKey(instance, taskID)); onComplete(status);
-        }
-        observingOther = false;
-        if (uncertain && current()) recover();
-      } catch (err) {
-        if (!current() || acceptedTaskID !== taskID || acceptedInstance !== instance) return;
-        failures++; error('状态读取失败，任务可能仍在运行。' + (err.status === 404 ? '任务已不在当前记录中，请重新打开详情核对。' : '可重新读取状态或取消；不会自动重复提交。'));
-        el('retry').hidden = false;
-        if (failures < 5 && ![401, 403, 404].includes(err.status)) schedule(Math.min(15000, 1000 * 2 ** failures));
-      }
-    }
-    async function run(payload, message) {
-      if (!current() || busy || uncertain || acceptedTaskID !== null || !ready) return;
-      if (!confirmAction(message) || !current()) return;
-      busy = true; uncertain = true;
-      const submission = { baseline: latestTaskID, baselineInstance: latestInstance }; submissions.set(movieKey, submission);
-      error(''); controls(); state('正在提交任务，请勿重复操作…');
-      let timeout;
-      try {
-        const pending = Promise.resolve().then(() => apiRequest('/sprites/run', { method: 'POST', body: JSON.stringify(payload) })).then(result => {
-          if (typeof result.instance_id !== 'string' || !result.instance_id || !Number.isSafeInteger(result.task_id) || result.task_id <= 0) throw new Error('无有效任务身份');
-          submission.taskID = result.task_id; submission.instance = result.instance_id;
-          return result;
-        });
-        const result = await Promise.race([pending, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('提交超时')), 10000); submission.timeout = timeout; })]);
-        if (!current()) return;
-        submissions.delete(movieKey); uncertain = false;
-        acceptedTaskID = result.task_id; acceptedInstance = result.instance_id; latestTaskID = result.task_id; latestInstance = result.instance_id; targetVerified = false; observingOther = false; failures = 0; busy = false; controls();
-        state('任务已接受，正在读取进度…'); poll();
-      } catch (err) {
-        if (!current()) return;
-        if ([400, 401, 403, 404, 409, 422].includes(err.status)) {
-          submissions.delete(movieKey); uncertain = false; busy = false; controls();
-          if (err.status === 409) { await recover(); return; }
-          state('任务未提交'); error('服务端拒绝了本次操作，请检查权限、参数或服务配置。');
-          return;
-        }
-        busy = false; controls(); el('retry').hidden = false;
-        error('提交未确认，可能已在后台执行。不会自动重试，请重新读取状态核对。');
-        state('提交结果未确认');
-      } finally { clearTimeout(timeout); }
-    }
+    const runner = global.TaskRunner({
+      apiRequest, movieKey, scope: 'sprites', current, confirm: confirmAction,
+      runPath: '/sprites/run', cancelPath: '/sprites/cancel', statusBase: '/sprites/status',
+      statusPath: (instance, taskID) => '/sprites/status?task_id=' + taskID + '&instance_id=' + encodeURIComponent(instance),
+      onState: state, onError: error, onChange: controls,
+      targetsMovie: status => Array.isArray(status.movie_ids) && status.movie_ids.some(id => String(id) === movieKey),
+      completed: status => status.success > 0,
+      unavailable: () => !capabilities.enabled ? '预览生成不可用，请检查 FFmpeg / FFprobe 配置。' : '',
+      idleText: '默认保留已有预览。生成前将再次确认。',
+      onComplete: status => onComplete(status),
+      describe: (status, other) => `${other ? '其他影片任务 · ' : ''}${status.running ? '处理中' : status.cancelled ? '已取消' : '已结束'} · ${status.done || 0}/${status.total || 0} · 成功 ${status.success || 0} · 跳过 ${status.skipped || 0} · 失败 ${status.failed || 0} · 帧 ${status.frames_done || 0}/${status.frames_total || 0}`
+    });
     listen(el('generate'), 'click', () => {
       const overwrite = el('overwrite').checked;
-      run({ movie_ids: [movie.id], overwrite }, `${overwrite ? '覆盖已有预览' : '仅生成缺失预览'}：沿用媒体库采样密度（每 ${capabilities.interval_seconds} 秒）。仅生成雪碧图，不修改封面、标题或其他元数据。确认执行？`);
+      runner.run({ movie_ids: [movie.id], overwrite }, `${overwrite ? '覆盖已有预览' : '仅生成缺失预览'}：沿用媒体库采样密度（每 ${capabilities.interval_seconds} 秒）。仅生成雪碧图，不修改封面、标题或其他元数据。确认执行？`);
     });
-    listen(el('retry'), 'click', () => { clearTimeout(timer); timer = null; if (acceptedTaskID !== null) poll(); else recover(); });
-    listen(el('cancel'), 'click', async () => {
-      if (!current() || acceptedTaskID === null || observingOther || !targetVerified || cancelling) return;
-      const taskID = acceptedTaskID, instance = acceptedInstance; cancelling = true; controls();
-      try {
-        const result = await Promise.race([
-          apiRequest('/sprites/cancel', { method: 'POST', body: JSON.stringify({ task_id: taskID, instance_id: instance }) }),
-          new Promise((_, reject) => { cancelTimeout = setTimeout(() => reject(new Error('取消超时')), 10000); })
-        ]);
-        if (!current() || acceptedTaskID !== taskID || acceptedInstance !== instance) return;
-        if (result.task_id !== taskID || result.instance_id !== instance) throw new Error('任务身份不匹配');
-        state('取消已请求；正在执行的写入可能已完成，等待服务端确认…');
-        if (!request) { clearTimeout(timer); poll(); }
-      } catch (_) { if (current() && acceptedTaskID === taskID) { error('取消未确认，任务可能仍在运行。请读取状态核对，不会自动重复发送取消请求。'); cancelling = false; controls(); el('retry').hidden = false; if (!request) schedule(1200); } }
-      finally { clearTimeout(cancelTimeout); cancelTimeout = null; }
-    });
-    controls();
+    listen(el('retry'), 'click', () => runner.retry());
+    listen(el('cancel'), 'click', () => runner.cancel());
+    runner.refresh();
     (async () => {
       try {
-        capabilities = await read('/sprites/capabilities?movie_id=' + encodeURIComponent(movieKey));
+        capabilities = await runner.read('/sprites/capabilities?movie_id=' + encodeURIComponent(movieKey));
         if (!current()) return;
         if (!Number.isSafeInteger(capabilities.interval_seconds) || capabilities.interval_seconds < 10 || capabilities.interval_seconds > 86400) throw new Error('媒体库采样密度无效');
         el('density').textContent = `继承媒体库采样密度：每 ${capabilities.interval_seconds} 秒一帧。修改库设置不会自动生成或覆盖已有预览。`;
-        await recover();
+        await runner.recover();
       } catch (_) { error('无法读取视频预览能力，请重新打开详情重试。'); }
     })();
     return function dispose() {
       if (disposed) return;
-      disposed = true; clearTimeout(timer); timer = null;
-      clearTimeout(cancelTimeout); clearTimeout(submissions.get(movieKey)?.timeout);
-      if (request) { clearTimeout(request.timeout); request.controller.abort(); }
+      disposed = true;
+      runner.dispose();
       listeners.forEach(remove => remove());
       // Closing a drawer stops observation, never implicitly cancels server work.
     };

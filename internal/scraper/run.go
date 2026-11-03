@@ -224,6 +224,19 @@ func (s *Scraper) runMoviesInto(ctx context.Context, movies []store.Movie, opts 
 func (s *Scraper) scrapeOne(ctx context.Context, movie store.Movie, opts RunOptions) ItemResult {
 	result := ItemResult{MovieID: movie.ID, Title: displayTitle(movie)}
 
+	if provider, id, ok := SplitProviderID(movie.ProviderID); ok {
+		info, err := s.client.MovieInfo(ctx, provider, id, true)
+		if metatube.IsNotFound(err) {
+			return s.recordSkip(movie, result, confirmMessage("已存 MetaTube 身份无结果（"+movie.ProviderID+"）"))
+		}
+		if err != nil {
+			return s.recordFailure(movie, result, err, "取已存身份详情失败")
+		}
+		chosen := metatube.MovieSearchResult{Provider: provider, ID: id, Number: info.Number, Title: info.Title, Score: info.Score}
+		logScrapeChoice(movie, movie.ProviderID, expectedNumber(movie), chosen, metatube.SameNumber(info.Number, expectedNumber(movie)))
+		return s.applyScrapeChoice(ctx, movie, result, chosen, info, opts)
+	}
+
 	query := searchQuery(movie)
 	if query == "" {
 		return s.recordSkip(movie, result, "无法构造搜索词：番号、文件名与标题都为空")
@@ -252,6 +265,10 @@ func (s *Scraper) scrapeOne(ctx context.Context, movie store.Movie, opts RunOpti
 		return s.recordFailure(movie, result, err, "取详情失败")
 	}
 	logScrapeChoice(movie, query, expected, chosen, true)
+	return s.applyScrapeChoice(ctx, movie, result, chosen, info, opts)
+}
+
+func (s *Scraper) applyScrapeChoice(ctx context.Context, movie store.Movie, result ItemResult, chosen metatube.MovieSearchResult, info metatube.MovieInfo, opts RunOptions) ItemResult {
 	result.Provider, result.Number = chosen.Provider, chosen.Number
 
 	applied, err := s.Apply(ctx, movie, info, ApplyOptions{

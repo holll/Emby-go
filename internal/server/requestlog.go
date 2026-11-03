@@ -10,14 +10,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-
-	"emby-go/internal/logging"
 )
 
 // Diagnostics contain route templates with validated uid/id parameters and an
 // explicit scalar query allowlist. Other parameters (notably API keys), headers,
 // bodies and arbitrary errors are never log payloads.
-func requestLogger() gin.HandlerFunc { return requestLoggerTo(logging.RequestWriter()) }
 func requestLoggerTo(w io.Writer) gin.HandlerFunc {
 	logger := gin.LoggerWithConfig(gin.LoggerConfig{Output: w, Skip: skipRequestLog, Formatter: requestLogFormatter})
 	return func(c *gin.Context) {
@@ -237,7 +234,6 @@ func quietPath(path string) bool {
 
 // Debug is metadata-only, including login, initialization, config and unknown
 // routes. Never read even a preview of a body or enumerate arbitrary headers.
-func requestContentLogger() gin.HandlerFunc { return requestContentLoggerTo(logging.RequestWriter()) }
 func requestContentLoggerTo(w io.Writer) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		fmt.Fprintf(w, "[API REQUEST] method=%s route=%q query=%q content_length=%d headers=[OMITTED] body=[OMITTED]\n", diagnosticMethod(c.Request.Method), diagnosticRoute(c), redactedRequestQuery(c.Request.URL.RawQuery), c.Request.ContentLength)

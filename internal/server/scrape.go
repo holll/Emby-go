@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -177,12 +178,6 @@ func (a *App) endScrape(err error) {
 	a.scrapeCancel = nil
 	a.scrapeCtx = nil
 	a.scrapeTaskMu.Unlock()
-}
-
-func (a *App) scraping() bool {
-	a.scrapeTaskMu.RLock()
-	defer a.scrapeTaskMu.RUnlock()
-	return a.scrapeStatus.Running
 }
 
 func (a *App) scrapeContext() context.Context {
@@ -487,6 +482,29 @@ func displayItem(item scraper.ItemResult) string {
 // —— 单条手动刮削：预览 → 确认 ——
 
 func (a *App) adminScrapePreview(c *gin.Context) {
+	// Presence matters: ?q= is an invalid manual request, not automatic search.
+	values, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		apiError(c, http.StatusBadRequest, "invalid query parameters")
+		return
+	}
+	var manual scraper.ManualSearch
+	for name, target := range map[string]**string{"q": &manual.Query, "metatube_id": &manual.MetaTubeID} {
+		if entries, exists := values[name]; exists {
+			if len(entries) != 1 {
+				apiError(c, http.StatusBadRequest, name+" must occur exactly once")
+				return
+			}
+			*target = &entries[0]
+		}
+	}
+	explicit := manual.Query != nil || manual.MetaTubeID != nil
+	if explicit {
+		if err := manual.Validate(); err != nil {
+			apiError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	movie, ok := a.movieParam(c)
 	if !ok {
 		return
@@ -498,7 +516,13 @@ func (a *App) adminScrapePreview(c *gin.Context) {
 	}
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
-	preview, err := scraper.New(cfg, a.db).Preview(ctx, movie)
+	s := scraper.New(cfg, a.db)
+	var preview scraper.PreviewResult
+	if explicit {
+		preview, err = s.PreviewManual(ctx, movie, manual)
+	} else {
+		preview, err = s.Preview(ctx, movie)
+	}
 	if err != nil {
 		apiError(c, http.StatusBadGateway, err.Error())
 		return

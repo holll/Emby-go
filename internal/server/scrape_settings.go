@@ -79,7 +79,10 @@ func (a *App) scrapeConfigChecked() (scraper.Config, error) {
 	cfg.TimeoutSeconds = settingInt(values, settingTimeout, cfg.TimeoutSeconds)
 	cfg.Concurrency = settingInt(values, settingConcurrency, cfg.Concurrency)
 	cfg.DownloadImages = settingBool(values, settingDownloadImages, cfg.DownloadImages)
-	cfg.ImageQuality = settingInt(values, settingImageQuality, cfg.ImageQuality)
+	// 范围校验只在这里做一次：DB 里的越界值回落到默认值，消费端不再钳制。
+	if quality := settingInt(values, settingImageQuality, cfg.ImageQuality); quality >= 1 && quality <= 100 {
+		cfg.ImageQuality = quality
+	}
 	cfg.Overwrite = settingBool(values, settingOverwrite, cfg.Overwrite)
 	// 头像目录统一走 a.avatarsDir()：详情接口与头像任务必须落在同一个目录，
 	// 否则会出现「头像写进去了但详情页看不到」。

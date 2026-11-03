@@ -15,7 +15,7 @@ import (
 func webhookDispatcherForTest(t *testing.T, cfg config.WebhookConfig) *webhook.Dispatcher {
 	t.Helper()
 	spec := legacyWebhookTargetSpec(normalizeWebhookConfig(cfg))
-	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec.target()}, webhook.DefaultEventBudget)
+	dispatcher, err := webhook.NewDispatcher([]webhook.Target{spec}, webhook.DefaultEventBudget)
 	if err != nil {
 		t.Fatal(err)
 	}

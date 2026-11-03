@@ -834,18 +834,6 @@ func (a *App) setProbeCurrent(title string) {
 	a.probeTaskMu.Unlock()
 }
 
-func (a *App) markProbeDone() {
-	a.probeTaskMu.Lock()
-	a.probeStatus.Done++
-	a.probeTaskMu.Unlock()
-}
-
-func (a *App) countProbe(apply func(*probeStatus)) {
-	a.probeTaskMu.Lock()
-	apply(&a.probeStatus)
-	a.probeTaskMu.Unlock()
-}
-
 // evictNFOStream 让单条影片的流信息缓存立即失效（下次请求重新解析刚写入的 NFO）。
 func (a *App) evictNFOStream(path string) {
 	a.dropNFOCache(path)

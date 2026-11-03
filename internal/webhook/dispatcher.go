@@ -45,15 +45,16 @@ func NewTargetID() (string, error) {
 }
 
 // Target 是已验证、可投递的单目标配置。URL 不参与日志与响应。
+// JSON 标签同时用于管理端视图与 v2 持久化：服务端不再维护一份镜像 DTO。
 type Target struct {
-	ID             string
-	Name           string
-	Enabled        bool
-	URL            string
-	Events         []string
-	Format         string
-	TimeoutSeconds int
-	AllowPrivate   bool
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Enabled        bool     `json:"enabled"`
+	URL            string   `json:"url,omitempty"`
+	Events         []string `json:"events"`
+	Format         string   `json:"format"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	AllowPrivate   bool     `json:"allow_private"`
 }
 
 // TargetOutcome 是单目标结果；ErrorCode 为稳定分类，不含 URL 或响应原文。
@@ -107,7 +108,7 @@ func NewDispatcher(targets []Target, budget time.Duration) (*Dispatcher, error) 
 		}
 	}
 	for _, target := range targets {
-		spec, err := normalizeTarget(target)
+		spec, err := NormalizeTarget(target)
 		if err != nil {
 			closeBuilt()
 			return nil, err
@@ -127,7 +128,9 @@ func NewDispatcher(targets []Target, budget time.Duration) (*Dispatcher, error) 
 	return d, nil
 }
 
-func normalizeTarget(target Target) (Target, error) {
+// NormalizeTarget 是目标配置的唯一校验与规范化入口：管理端保存与 Dispatcher
+// 构造共用同一套规则，避免两层各写一遍后漂移（保存接受、运行拒绝）。
+func NormalizeTarget(target Target) (Target, error) {
 	target.ID = strings.TrimSpace(target.ID)
 	target.Name = strings.TrimSpace(target.Name)
 	if target.ID == "" || len(target.ID) > 64 {
@@ -319,14 +322,16 @@ func classifyTargetError(err error) string {
 		return "status_" + fmt.Sprint(status.StatusCode)
 	case errors.Is(err, ErrInvalidEvent):
 		return "invalid_event"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
 	case errors.Is(err, ErrReadResponse):
 		return "read_response"
 	case errors.Is(err, ErrResponseTooLarge):
 		return "response_too_large"
 	case errors.Is(err, ErrIgnored):
 		return "ignored"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
 	default:
 		return "request_failed"
 	}

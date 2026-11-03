@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -23,12 +24,87 @@ func (a *App) notifyWebhook(c *gin.Context, event webhook.Event) {
 	}
 	event.Server = webhook.Server{Id: a.serverID, Name: a.serverName}
 	event.Timestamp = time.Now().UTC()
+	started := time.Now()
 	result := sender.Send(a.rootCtx, event)
 	c.Header("X-Webhook-Status", result.Status)
+	logWebhookDelivery(event, result, time.Since(started))
+}
+
+// Include the essential diagnostics in msg because the disk log viewer does not
+// expose structured attributes. Frequent progress acknowledgments stay at DEBUG;
+// failures always remain WARN. Acknowledgment does not prove remote side effects.
+func logWebhookDelivery(event webhook.Event, result webhook.Result, elapsed time.Duration) {
+	sent, failed, skipped := webhookResultCounts(result)
+	level := slog.LevelInfo
+	if event.Event == webhook.PlaybackProgress || result.Status == webhook.ResultDisabled {
+		level = slog.LevelDebug
+	}
+	ackLevel := level
 	if result.Status == webhook.ResultFailed || result.Status == webhook.ResultPartial {
-		sent, failed, skipped := webhookResultCounts(result)
-		slog.Warn("Webhook delivery incomplete", "event", event.Event, "status", result.Status,
-			"sent", sent, "failed", failed, "skipped_budget", skipped)
+		level = slog.LevelWarn
+	}
+	content := webhookLogContent(event)
+	description := webhookEventDescription(event.Event)
+	message := fmt.Sprintf("Webhook 投递结果：event=%s item_id=%s status=%s targets=%d sent=%d failed=%d skipped_budget=%d duration_ms=%d；通知=%s；内容（脱敏摘要）=%s",
+		event.Event, event.Item.Id, result.Status, len(result.Targets), sent, failed, skipped, elapsed.Milliseconds(), description, content)
+	slog.Log(nil, level, message, "event", event.Event, "item_id", event.Item.Id,
+		"status", result.Status, "targets", len(result.Targets), "sent", sent,
+		"failed", failed, "skipped_budget", skipped, "duration_ms", elapsed.Milliseconds(),
+		"notification", description, "notification_content", content)
+	for _, outcome := range result.Targets {
+		if outcome.Status != webhook.TargetSent {
+			continue
+		}
+		message := fmt.Sprintf("Webhook 接收端已确认：event=%s item_id=%s target_id=%s status=%s；仅表示接收确认，不代表远端业务执行完成",
+			event.Event, event.Item.Id, outcome.ID, outcome.Status)
+		slog.Log(nil, ackLevel, message, "event", event.Event, "item_id", event.Item.Id,
+			"target_id", outcome.ID, "status", outcome.Status)
+	}
+	logWebhookTargetFailures(event, result)
+}
+
+// Put safe diagnostic fields in the message as well: the disk log viewer only
+// exposes msg, not arbitrary structured attributes. Never log target names,
+// URLs, payload paths, response bodies or raw transport errors here.
+func logWebhookTargetFailures(event webhook.Event, result webhook.Result) {
+	for _, outcome := range result.Targets {
+		if outcome.Status != webhook.TargetFailed && outcome.Status != webhook.TargetSkippedBudget {
+			continue
+		}
+		reason := webhookFailureReason(outcome.ErrorCode)
+		message := fmt.Sprintf("Webhook 投递失败：event=%s item_id=%s target_id=%s status=%s error_code=%s；%s",
+			event.Event, event.Item.Id, outcome.ID, outcome.Status, outcome.ErrorCode, reason)
+		if event.Event == webhook.ItemDeleted {
+			message += "；索引已删除，远端结果未知，请人工核对，不要重复删除或自动重发"
+		}
+		slog.Warn(message, "event", event.Event, "item_id", event.Item.Id,
+			"target_id", outcome.ID, "status", outcome.Status, "error_code", outcome.ErrorCode)
+	}
+}
+
+func webhookFailureReason(code string) string {
+	if strings.HasPrefix(code, "status_") {
+		if status, err := strconv.Atoi(strings.TrimPrefix(code, "status_")); err == nil && status >= 100 && status <= 599 {
+			return fmt.Sprintf("接收端返回 HTTP %d，请检查接收端日志和配置", status)
+		}
+	}
+	switch code {
+	case "timeout":
+		return "等待接收端响应超时，远端可能已执行"
+	case "canceled":
+		return "投递上下文已取消（例如服务关闭）"
+	case "ignored":
+		return "接收端明确忽略通知，请检查接收端事件开关"
+	case "read_response":
+		return "读取接收端确认失败，远端可能已执行"
+	case "response_too_large":
+		return "接收端确认响应过大，无法确认结果"
+	case "invalid_event":
+		return "事件参数不符合投递要求"
+	case "budget_exhausted":
+		return "总投递预算耗尽，该目标未发送"
+	default:
+		return "请求失败，请检查网络、DNS、TLS及出站地址安全限制"
 	}
 }
 
@@ -136,15 +212,8 @@ func (a *App) notifyMovieDeleted(c *gin.Context, movie store.Movie) {
 	}
 	// Do not use Request.Context: a disconnect after the committed deletion must
 	// not itself suppress delivery. App shutdown still cancels this request.
+	started := time.Now()
 	result := sender.Send(a.rootCtx, event)
 	c.Header("X-Webhook-Status", result.Status)
-	if result.Status == webhook.ResultFailed || result.Status == webhook.ResultPartial {
-		sent, failed, skipped := webhookResultCounts(result)
-		slog.Warn("Webhook deletion delivery incomplete", "event", webhook.ItemDeleted, "item_id", movie.ID,
-			"status", result.Status, "sent", sent, "failed", failed, "skipped_budget", skipped)
-		return
-	}
-	if result.Status == webhook.ResultSent {
-		slog.Info("Webhook receivers acknowledged item deletion", "event", webhook.ItemDeleted, "item_id", movie.ID)
-	}
+	logWebhookDelivery(event, result, time.Since(started))
 }

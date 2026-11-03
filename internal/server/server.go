@@ -40,7 +40,7 @@ type App struct {
 	webhookMu         sync.RWMutex // immutable dispatcher/config snapshots; never held during HTTP delivery
 	webhookUpdateMu   sync.Mutex   // serialize persistent saves with shutdown
 	webhookConfig     config.WebhookConfig
-	webhookTargets    []webhookTargetSpec
+	webhookTargets    []webhook.Target
 	webhookMulti      bool
 	webhookClosed     bool
 	logRetentionMu    sync.Mutex
@@ -717,6 +717,7 @@ func (a *App) routes() {
 	admin.PUT("/image-cache/settings", a.adminSaveImageCacheSettings)
 	admin.POST("/image-cache/trim", a.adminTrimImageCache)
 	admin.GET("/settings", a.adminSettings)
+	admin.POST("/webhook/test", a.adminWebhookTest)
 	admin.GET("/webhook/settings", a.adminWebhookSettings)
 	admin.PUT("/webhook/settings", a.adminSaveWebhookSettings)
 	admin.GET("/webhook/targets", a.adminWebhookTargets)

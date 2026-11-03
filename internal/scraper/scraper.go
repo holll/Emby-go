@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -83,14 +84,6 @@ func (c Config) Workers() int {
 		return 8
 	}
 	return c.Concurrency
-}
-
-// ImageQualityValue 生效的图片质量。
-func (c Config) ImageQualityValue() int {
-	if c.ImageQuality > 0 && c.ImageQuality <= 100 {
-		return c.ImageQuality
-	}
-	return defaultImageQuality
 }
 
 // Scraper 一次运行期内的刮削器。
@@ -176,6 +169,21 @@ const candidateLimit = 5
 // Preview 搜索候选供人工确认。全程无副作用（不翻译、不下载、不写盘）。
 func (s *Scraper) Preview(ctx context.Context, m store.Movie) (PreviewResult, error) {
 	result := PreviewResult{MovieID: m.ID, Recommended: -1}
+	if provider, id, ok := SplitProviderID(m.ProviderID); ok {
+		result.Query = providerID(provider, id)
+		result.Expected = expectedNumber(m)
+		info, err := s.client.MovieInfo(ctx, provider, id, true)
+		if metatube.IsNotFound(err) {
+			return result, nil
+		}
+		if err != nil {
+			return result, err
+		}
+		return previewCandidates(result, []metatube.MovieSearchResult{{
+			Provider: provider, ID: id, Number: info.Number, Title: info.Title,
+			Score: info.Score, ReleaseDate: info.ReleaseDate,
+		}}), nil
+	}
 	query := searchQuery(m)
 	if query == "" {
 		return result, errors.New("无法构造搜索词：番号、文件名与标题都为空")
@@ -187,6 +195,11 @@ func (s *Scraper) Preview(ctx context.Context, m store.Movie) (PreviewResult, er
 	if err != nil {
 		return result, err
 	}
+	return previewCandidates(result, results), nil
+}
+
+// previewCandidates shares presentation only; automatic query construction stays in Preview.
+func previewCandidates(result PreviewResult, results []metatube.MovieSearchResult) PreviewResult {
 	results = pickCandidates(results, result.Expected, candidateLimit)
 	for index, item := range results {
 		exact := result.Expected != "" && metatube.SameNumber(item.Number, result.Expected)
@@ -205,7 +218,7 @@ func (s *Scraper) Preview(ctx context.Context, m store.Movie) (PreviewResult, er
 	if result.Recommended < 0 && len(result.Candidates) > 0 {
 		result.Recommended = 0
 	}
-	return result, nil
+	return result
 }
 
 // pickCandidates 优先展示番号精确命中的候选，其余按原顺序补齐到 limit 条。
@@ -264,7 +277,7 @@ func proxyImageURL(kind, provider, id string) string {
 	if provider == "" || id == "" {
 		return ""
 	}
-	return fmt.Sprintf("/api/admin/scrape/image?kind=%s&provider=%s&id=%s", kind, provider, id)
+	return fmt.Sprintf("/api/admin/scrape/image?kind=%s&provider=%s&id=%s", url.QueryEscape(kind), url.QueryEscape(provider), url.QueryEscape(id))
 }
 
 // logScrapeChoice 把「选了哪条、相似度多少、是否番号精确命中」记进日志（验收项要求）。

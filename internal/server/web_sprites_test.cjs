@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'web/sprites.js'), 'utf8');
+const runnerSource = fs.readFileSync(path.join(__dirname, 'web/task-runner.js'), 'utf8');
 const flush = async () => { for (let i=0;i<40;i++) await Promise.resolve(); };
 function fixture(api, options={}) {
   let current=true, next=0, completed=0; const nodes=new Map(), calls=[], timers=new Map();
@@ -12,7 +13,7 @@ function fixture(api, options={}) {
   node('interval').value='10';
   const host={isConnected:true,innerHTML:'',querySelector:s=>node(s.match(/data-sprite="([^"]+)"/)[1])};
   const box=options.box||vm.createContext({AbortController,console,setTimeout(fn,ms){const id=++next;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}});
-  if(!options.box)vm.runInContext(source,box);
+  if(!options.box){vm.runInContext(runnerSource,box);vm.runInContext(source,box);}
   const dispose=box.mountSprites(host,{movie:{id:19},confirm:options.confirm||(()=>true),isCurrent:()=>current,onComplete:()=>completed++,apiRequest:(p,o)=>{calls.push([p,o]);return p==='/sprites/capabilities?movie_id=19'?Promise.resolve({enabled:options.enabled!==false,interval_seconds:options.interval??10}):p==='/sprites/status'?Promise.resolve(options.latest||{task_id:0,instance_id:'instance',running:false,movie_ids:null}):api(p,o);}});
   return {box,host,node,calls,timers,dispose,completed:()=>completed,stale:()=>{current=false;},click:key=>node(key).events.get('click')?.(),async tick(ms){const entry=[...timers].find(([,t])=>t.ms===ms);assert.ok(entry,'timer '+ms);timers.delete(entry[0]);entry[1].fn();await flush();}};
 }
@@ -75,7 +76,7 @@ function previewFixture() {
   function element(tag){const e={tag,hidden:false,style:{},children:[],events:new Map(),clientWidth:400,clientHeight:300,append(...v){this.children.push(...v);},appendChild(v){this.children.push(v);},setAttribute(k,v){this[k]=v;},addEventListener(k,fn){this.events.set(k,fn);},removeEventListener(k){this.events.delete(k);},remove(){this.removed=true;},querySelector(s){if(!this.parts)this.parts=new Map();if(!this.parts.has(s))this.parts.set(s,element(s));return this.parts.get(s);}};nodes.push(e);return e;}
   const player=element('player'),stage={after(e){this.rail=e;},parentElement:{classList:{add(){},remove(){}}}};
   class ImageStub {constructor(){this.naturalWidth=3200;this.naturalHeight=1800;decoding.push(this);}set src(v){this.url=v;}}
-  const box=vm.createContext({AbortController,console,document:{createElement:element},Image:ImageStub,getComputedStyle:()=>({bottom:'64px'}),URL:{createObjectURL:()=> 'blob:sheet-'+(++urlID),revokeObjectURL:u=>revoked.push(u)},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}});vm.runInContext(source,box);
+  const box=vm.createContext({AbortController,console,document:{createElement:element},Image:ImageStub,getComputedStyle:()=>({bottom:'64px'}),URL:{createObjectURL:()=> 'blob:sheet-'+(++urlID),revokeObjectURL:u=>revoked.push(u)},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}});vm.runInContext(runnerSource,box);vm.runInContext(source,box);
   const art={template:{$player:player},on(k,fn){handlers.set(k,fn);},off(k){handlers.delete(k);}};
   const dispose=box.SpritePreview.mount(art,{movieID:19,stage,requestJSON:async()=>manifest(),requestImage:(url,{signal})=>new Promise(resolve=>requests.push({url,signal,resolve})),isCurrent:()=>true});
   return{box,art,player,stage,nodes,timers,requests,decoding,revoked,handlers,dispose,hover:f=>handlers.get('setBar')('hover',f,{type:'mousemove'})};
