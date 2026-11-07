@@ -314,9 +314,13 @@ go run ./cmd/embybackup -db ./data/emby.db -out /backups/emby -retain 7
 ```bash
 sudo ./deploy/install.sh                        # 安装最新 Release
 sudo EMBY_GO_VERSION=v2.2.7 ./deploy/install.sh # 指定 Release 标签
+sudo EMBY_GO_MIRROR=https://mirror.example.com/github.com ./deploy/install.sh
+                                                # 无法直连 GitHub 时用镜像下载资产
 ```
 
 脚本以 root 运行：按架构下载 `emby-go-linux-<arch>` 与 `SHA256SUMS`，校验后把程序装到 `/opt/emby-go/emby-go`；首次写入 `/etc/emby-go/config.yaml`（已有配置不覆盖），注册 `emby-go.service` 并启动。它不保留旧版本、不创建 `releases/` 或 `backups/`、不使用 `current` 软链接，也不迁移 `/var/lib/emby-go` 旧数据。
+
+页面自升级同样支持镜像：在 `emby-go.service` 里设置 `Environment=EMBY_GO_RELEASE_MIRROR=https://mirror.example.com/github.com` 并重启一次服务，之后下载会改写到 `<镜像>/<owner>/<repo>/releases/download/<tag>/<资产>`。镜像只影响下载地址，`SHA256SUMS` 校验、`-version` 核对与原子替换不变；镜像必须是 `https://`，否则检查阶段直接报错。当前自升级单次下载预算为 10 分钟（含校验与替换），直连 GitHub 过慢时它会失败并保持旧程序不动。
 
 安装与 Web 自升级都要求目标 Release 附带 `SHA256SUMS` 和同批部署材料（当前 release workflow 会生成）。缺少校验和时脚本或管理端直接报错停止，不会退化成无校验安装；旧发布流程产出的 Release（如仅含二进制的 `v2.2.6`）需先用新 workflow 出包，才能用于首装或页面升级。`EMBY_GO_VERSION` 仍可指向任一包含这些资产的标签。
 

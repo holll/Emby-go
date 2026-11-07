@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -412,7 +413,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	a.ipBlocks.publish(blockRules)
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
-	a.updater = upgrade.New(upgrade.Options{CurrentVersion: BuildVersion})
+	a.updater = upgrade.New(upgrade.Options{CurrentVersion: BuildVersion, MirrorBase: os.Getenv("EMBY_GO_RELEASE_MIRROR")})
 	// N-02：上次进程遗留的未完成任务不具备继续执行的条件，只标记中断；
 	// 任务 id 从摘要序列继续，避免重启后新旧 id 重叠。
 	if n, err := db.MarkInterruptedTaskRecords(time.Now().UTC().Format(time.RFC3339)); err != nil {

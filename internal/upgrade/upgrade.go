@@ -61,14 +61,18 @@ type Options struct {
 	APIBase        string
 	CurrentVersion string
 	Client         *http.Client
+	// MirrorBase 可选，形如 https://mirror.example.com/github.com，用于无法
+	// 直连 GitHub 资产的环境；为空时直接使用 Release 里的资产地址。
+	MirrorBase string
 }
 
 // Manager 串行化检查与安装，并把升级进度暴露给管理端。
 type Manager struct {
-	repo    string
-	apiBase string
-	current string
-	client  *http.Client
+	repo       string
+	apiBase    string
+	mirrorBase string
+	current    string
+	client     *http.Client
 
 	// executable 为空时取 os.Executable()；测试注入临时路径，
 	// 避免测试进程替换自己的二进制。
@@ -123,12 +127,13 @@ func New(o Options) *Manager {
 		o.Client = &http.Client{}
 	}
 	return &Manager{
-		repo:    o.Repo,
-		apiBase: strings.TrimRight(o.APIBase, "/"),
-		current: o.CurrentVersion,
-		client:  o.Client,
-		restart: make(chan struct{}),
-		state:   State{Phase: PhaseIdle, UpdatedAt: time.Now()},
+		repo:       o.Repo,
+		apiBase:    strings.TrimRight(o.APIBase, "/"),
+		mirrorBase: strings.TrimRight(o.MirrorBase, "/"),
+		current:    o.CurrentVersion,
+		client:     o.Client,
+		restart:    make(chan struct{}),
+		state:      State{Phase: PhaseIdle, UpdatedAt: time.Now()},
 	}
 }
 
@@ -325,23 +330,34 @@ func (m *Manager) fetchRelease(ctx context.Context) (*release, error) {
 		publishedAt: payload.PublishedAt,
 		asset:       asset,
 	}
+	var foundBinary, foundSums bool
 	for _, candidate := range payload.Assets {
 		switch candidate.Name {
 		case asset:
 			rel.binaryURL = candidate.BrowserDownloadURL
+			foundBinary = true
 		case checksumsAsset:
 			rel.sumsURL = candidate.BrowserDownloadURL
+			foundSums = true
 		}
 	}
 	var missing []string
-	if rel.binaryURL == "" {
+	if !foundBinary {
 		missing = append(missing, asset)
 	}
-	if rel.sumsURL == "" {
+	if !foundSums {
 		missing = append(missing, checksumsAsset)
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("Release %s 缺少资产：%s", rel.version, strings.Join(missing, "、"))
+	}
+	if m.mirrorBase != "" {
+		if err := requireHTTPS(m.mirrorBase); err != nil {
+			return nil, fmt.Errorf("升级镜像地址无效：%w", err)
+		}
+		base := m.mirrorBase + "/" + m.repo + "/releases/download/" + url.PathEscape(rel.version) + "/"
+		rel.binaryURL = base + asset
+		rel.sumsURL = base + checksumsAsset
 	}
 	return rel, nil
 }

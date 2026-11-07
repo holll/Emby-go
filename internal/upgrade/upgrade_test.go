@@ -281,3 +281,81 @@ func TestNewerVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckRejectsNonHTTPSMirror(t *testing.T) {
+	srv, _ := fakeAPI(t, fakeRelease{tag: "v1.2.3", binary: fakeBinary("v1.2.3")})
+	m := New(Options{Repo: "o/r", APIBase: srv.URL, CurrentVersion: "v1.0.0", Client: srv.Client(), MirrorBase: "http://mirror.example.com"})
+	_, err := m.Check(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "镜像地址无效") {
+		t.Fatalf("非 https 镜像应报错，得到 %v", err)
+	}
+}
+
+func TestRunDownloadsFromMirrorBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("升级资产是 Linux 部署形态，Windows 不执行该测试")
+	}
+	tag := "v2.0.0"
+	bin := fakeBinary(tag)
+	asset := "emby-go-" + runtime.GOOS + "-" + runtime.GOARCH
+	sum := sha256.Sum256(bin)
+	sums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), asset)
+	var directHits, mirrorHits atomic.Int64
+	mux := http.NewServeMux()
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/repos/o/r/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": tag,
+			"assets": []map[string]string{
+				{"name": asset, "browser_download_url": srv.URL + "/direct/binary"},
+				{"name": checksumsAsset, "browser_download_url": srv.URL + "/direct/SHA256SUMS"},
+			},
+		})
+	})
+	mux.HandleFunc("/direct/", func(w http.ResponseWriter, r *http.Request) {
+		directHits.Add(1)
+		http.Error(w, "must not fetch direct", http.StatusBadGateway)
+	})
+	mux.HandleFunc("/mirror/github.com/o/r/releases/download/"+tag+"/"+asset, func(w http.ResponseWriter, r *http.Request) {
+		mirrorHits.Add(1)
+		_, _ = w.Write(bin)
+	})
+	mux.HandleFunc("/mirror/github.com/o/r/releases/download/"+tag+"/"+checksumsAsset, func(w http.ResponseWriter, r *http.Request) {
+		mirrorHits.Add(1)
+		_, _ = w.Write([]byte(sums))
+	})
+	m := New(Options{Repo: "o/r", APIBase: srv.URL, CurrentVersion: "v1.0.0", Client: srv.Client(), MirrorBase: srv.URL + "/mirror/github.com"})
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "emby-go")
+	if err := os.WriteFile(exe, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.executable = exe
+	result, err := m.Check(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Begin(result.Latest); err != nil {
+		t.Fatal(err)
+	}
+	m.Run(context.Background(), result.Latest)
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bin) {
+		t.Fatalf("程序未被镜像资产替换：%q", got)
+	}
+	if directHits.Load() != 0 {
+		t.Fatalf("配置镜像后仍访问了直连资产 %d 次", directHits.Load())
+	}
+	if mirrorHits.Load() != 2 {
+		t.Fatalf("镜像命中 %d 次，期望 2", mirrorHits.Load())
+	}
+	select {
+	case <-m.Restart():
+	default:
+		t.Fatal("镜像替换成功后必须发出重启信号")
+	}
+}
