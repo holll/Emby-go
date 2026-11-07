@@ -135,7 +135,7 @@ func TestSchema13MigrationSIGKILLAndRetry(t *testing.T) {
 	mustExec(t, db, "UPDATE movies SET source_path=?,nfo_path=?,output_dir=? WHERE id=42", filepath.Join(media, "A.strm"), filepath.Join(media, "A.nfo"), media)
 	// All pending schema work precedes ledger18 insertion in migrate(). Also
 	// assert the schema17/18 columns and ledger17 in the actual transaction.
-	mustExec(t, db, `CREATE TRIGGER stability_pause_v18 BEFORE INSERT ON schema_migrations
+	mustExec(t, db, `CREATE TRIGGER stability_pause_v20 BEFORE INSERT ON schema_migrations
 WHEN NEW.version=18 BEGIN
  SELECT CASE WHEN
   (SELECT count(*) FROM pragma_table_info('movies') WHERE name IN ('extra_backdrops','auto_marks'))=2
@@ -205,7 +205,7 @@ END`)
 		scalar(t, db, "SELECT count(*) FROM sqlite_master WHERE name IN ('scan_groups','scan_group_sources')") != 0 {
 		t.Fatal("interrupted migration left committed partial schema")
 	}
-	mustExec(t, db, "DROP TRIGGER stability_pause_v18")
+	mustExec(t, db, "DROP TRIGGER stability_pause_v20")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +215,8 @@ END`)
 		t.Fatal(err)
 	}
 	db = rawDB(t, path)
-	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 18 {
-		t.Fatal("retry did not migrate to schema18")
+	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 20 {
+		t.Fatal("retry did not migrate to schema20")
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

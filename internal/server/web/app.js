@@ -168,6 +168,7 @@ const META = {
   activity: { title: '活动记录', crumb: 'Archive / Activity' },
   logs: { title: '运行日志', crumb: 'Archive / Logs' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
+  diagnostics: { title: '诊断', crumb: 'Archive / Diagnostics' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
   translate: { title: '独立翻译', crumb: 'Archive / Translate' },
   probe: { title: '接口探针', crumb: 'Archive / Probe' },
@@ -2588,7 +2589,7 @@ const CRON_PRESETS = [
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
 const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成' };
-const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
+const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', interrupted: '进程重启中断', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
 let scheduledFocus = null;
 let scheduledWatchStop = null;
@@ -2637,6 +2638,139 @@ function scheduledFormParams(kind, editing, stored, visible) {
     delete params.movie_ids; // 计划任务不支持固定影片ID列表。
   }
   return params;
+}
+
+
+/* ---------------------------------------------------------------- 诊断 */
+function lastBackupText(last) {
+  if (!last) return '尚未备份';
+  const result = last.result || {};
+  const when = fmtTime(last.finished_at || last.started_at);
+  const detail = last.error
+    ? ` · <span class="sub">${esc(last.error)}</span>`
+    : ` · NFO ${esc(result.nfo_count || 0)} · 缩略图 ${esc(result.extra_backdrop_count || 0)}`;
+  return `${runBadge(last.status)} · ${esc(when)}${detail}`;
+}
+
+async function pageDiagnostics() {
+  const gen = pageGen;
+  const load = async () => {
+    const [data, backup] = await Promise.all([api('/diagnostics'), api('/backup')]);
+    if (gen !== pageGen) return;
+    const app = data.app || {}, store = data.store || {}, runtime = data.runtime || {};
+    const probe = runtime.probe || {}, scrape = runtime.scrape || {};
+    const cache = data.image_cache || {}, hook = data.webhook || {}, ff = data.ffprobe || {};
+    const movies = store.movies || {}, schedTasks = store.scheduled_tasks || {};
+    const schedules = data.scheduler || [];
+    const running = value => value ? '<strong>运行中</strong>' : '空闲';
+    const probeText = probe.running
+      ? `${esc(probe.done || 0)} / ${esc(probe.total || 0)}，失败 ${esc(probe.failed || 0)}`
+      : '空闲';
+    const scrapeText = scrape.running
+      ? `${esc(scrape.kind || '')} ${esc(scrape.done || 0)} / ${esc(scrape.total || 0)}，失败 ${esc(scrape.failed || 0)}`
+      : '空闲';
+    content.innerHTML = `
+      <section class="panel">
+        <div class="panel-head"><h2>诊断证据</h2>
+          <div class="panel-actions">
+            <span class="hint" style="margin:0">生成于 ${esc(fmtTime(data.generated_at))}</span>
+            <button id="diag-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
+          </div>
+        </div>
+        <p class="hint">只读聚合；不会现场执行 ffprobe，也不向外部服务发请求。运行中的动作请在原入口操作。</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th style="width:220px">版本与运行</th><th>值</th></tr></thead>
+          <tbody>
+            <tr><td>程序版本</td><td class="mono">${esc(app.version || '')} <span class="sub">${esc(app.commit || '')}</span></td></tr>
+            <tr><td>构建时间</td><td class="mono">${esc(app.build_time || '')}</td></tr>
+            <tr><td>启动时间 / 已运行</td><td>${esc(fmtTime(app.started_at))} · ${esc(fmtDuration(app.uptime_seconds || 0))}</td></tr>
+            <tr><td>运行环境</td><td class="mono">${esc(app.go_version || '')} · ${esc(app.os || '')}/${esc(app.arch || '')}</td></tr>
+            <tr><td>ffprobe</td><td class="mono">${esc(ff.path || '未配置')}${ff.error ? ` <span class="sub">${esc(ff.error)}</span>` : ''}</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>数据与任务</h2></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th style="width:220px">对象</th><th>当前值</th></tr></thead>
+          <tbody>
+            <tr><td>数据库</td><td class="mono">${esc(store.path || '')} · ${esc(fmtSize(store.size_bytes || 0))} · schema ${esc(store.schema_version ?? '')}</td></tr>
+            <tr><td>影片</td><td>可播放 ${esc(movies.success || 0)} · 待探测 ${esc(movies.pending || 0)} · 手动 ${esc(movies.manual || 0)}</td></tr>
+            <tr><td>媒体库 / 任务摘要</td><td>${esc(store.libraries ?? 0)} 个库 · ${esc(store.task_records || 0)} 条任务摘要（最多保留 500 条）</td></tr>
+            <tr><td>计划任务</td><td>${esc(schedTasks.enabled || 0)} 启用 / ${esc(schedTasks.total || 0)} 总数</td></tr>
+            <tr><td>扫描</td><td>${running(runtime.scan_running)}</td></tr>
+            <tr><td>媒体探测</td><td>${probeText}</td></tr>
+            <tr><td>刮削</td><td>${scrapeText}</td></tr>
+            <tr><td>Webhook</td><td>${esc(hook.enabled_targets || 0)} 启用 / ${esc(hook.targets || 0)} 个目标${hook.multi_target ? ' · 多目标配置' : ' · 旧单目标兼容'}</td></tr>
+            <tr><td>缩略图磁盘缓存</td><td>${cache.enabled ? `${esc(cache.files || 0)} 个文件 · ${esc(fmtSize(cache.bytes || 0))} / 上限 ${esc(fmtSize(cache.max_bytes || 0))}` : '未启用'}</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>备份</h2>
+          <div class="panel-actions">
+            <span class="hint" style="margin:0">保留 ${esc(backup.retention ?? 7)} 份</span>
+            <button id="diag-backup-run" class="btn btn-sm"${backup.running ? ' disabled' : ''}>${icon('archive')}<span>${backup.running ? '备份中…' : '立即备份'}</span></button>
+          </div>
+        </div>
+        <p class="hint">固定备份数据库快照、NFO 与 extrafanart 到 <span class="mono">${esc(backup.dir || '')}</span>。快照含凭据材料，不提供网页下载或恢复，请用服务器文件工具取回。</p>
+        <p style="margin:0">最近一次：${lastBackupText(backup.last)}</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>计划任务调度</h2><span class="hint" style="margin:0">cron 按服务器本地时区</span></div>
+        ${schedules.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>任务</th><th>cron</th><th>下次执行</th><th>上次结果</th></tr></thead>
+          <tbody>${schedules.map(task => `<tr>
+            <td><strong>${esc(task.name || ('#' + task.id))}</strong><span class="sub">${esc(task.type || '')}${task.enabled ? '' : ' · 已停用'}</span></td>
+            <td class="mono">${esc(task.cron || '')}</td>
+            <td>${task.next_run ? esc(fmtTime(task.next_run)) : '—'}</td>
+            <td>${task.last_status ? `${esc(task.last_status)}${task.last_message ? ` · <span class="sub">${esc(task.last_message)}</span>` : ''}` : '尚未执行'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : '<p class="hint">还没有计划任务。</p>'}
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>相关入口</h2></div>
+        <p class="hint">诊断只聚合证据，修复仍由原有入口执行。</p>
+        <div class="preset-row">
+          <button class="btn btn-sm" data-diag-page="scheduled">${icon('film')}<span>计划任务</span></button>
+          <button class="btn btn-sm" data-diag-page="probe">${icon('probe')}<span>接口探针</span></button>
+          <button class="btn btn-sm" data-diag-page="logs">${icon('archive')}<span>运行日志</span></button>
+          <button class="btn btn-sm" data-diag-page="settings">${icon('edit')}<span>设置</span></button>
+        </div>
+      </section>`;
+    const runBackup = document.querySelector('#diag-backup-run');
+    if (runBackup) runBackup.addEventListener('click', async () => {
+      runBackup.disabled = true;
+      try {
+        const started = await api('/backup/run', { method: 'POST' });
+        for (let i = 0; i < 120; i += 1) {
+          await delay(1000);
+          if (gen !== pageGen) return;
+          const state = await api('/backup');
+          if (state.running) continue;
+          const last = state.last;
+          if (last && last.task_id === started.task_id) {
+            if (last.status === 'success') toast('备份完成');
+            else toast('备份失败：' + (last.error || last.status), 'error');
+            break;
+          }
+        }
+      } catch (error) {
+        if (gen === pageGen) toast(error.message || String(error), 'error');
+      }
+      if (gen === pageGen) await load().catch(() => {});
+    });
+    const refresh = document.querySelector('#diag-refresh');
+    if (refresh) refresh.addEventListener('click', () => load().catch(error => { if (gen === pageGen) toast(error.message || String(error), 'error'); }));
+    content.querySelectorAll('[data-diag-page]').forEach(btn => {
+      btn.addEventListener('click', () => page(btn.dataset.diagPage));
+    });
+  };
+  await load();
 }
 
 async function pageScheduled() {
@@ -3292,6 +3426,7 @@ const pages = {
   scrape: pageScrape,
   translate: pageTranslate,
   scheduled: pageScheduled,
+  diagnostics: pageDiagnostics,
   probe: pageProbe,
   security: pageSecurity
 };

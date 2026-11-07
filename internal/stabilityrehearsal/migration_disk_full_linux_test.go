@@ -79,7 +79,7 @@ func TestSchema13MigrationDiskFullAndRetry(t *testing.T) {
  (702,'deleted-viewer','192.0.2.8',0,'2026-01-02T00:00:00Z')`)
 	// The synchronous trigger runs after all pending DDL but before ledger18
 	// insertion/commit. It returns success: SQLite itself must fail its writes.
-	mustExec(t, db, `CREATE TRIGGER stability_fill_v18 BEFORE INSERT ON schema_migrations
+	mustExec(t, db, `CREATE TRIGGER stability_fill_v20 BEFORE INSERT ON schema_migrations
 WHEN NEW.version=18 BEGIN
  SELECT CASE WHEN
   (SELECT count(*) FROM pragma_table_info('movies') WHERE name IN ('extra_backdrops','auto_marks'))=2
@@ -158,7 +158,7 @@ END`)
 		}
 		integrity(t, path)
 		// Remove only the fixture trigger, after proving rollback including DDL.
-		mustExec(t, db, "DROP TRIGGER stability_fill_v18")
+		mustExec(t, db, "DROP TRIGGER stability_fill_v20")
 	}) {
 		return
 	}
@@ -166,11 +166,11 @@ END`)
 		s := openStore(t, path)
 		retained(t, s)
 		db := rawDB(t, path)
-		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 18 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 18 {
-			t.Fatal("retry did not reach complete schema18")
+		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 20 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 20 {
+			t.Fatal("retry did not reach complete schema20")
 		}
 		if scalar(t, db, "SELECT count(*) FROM playback_sessions") != 2 || scalar(t, db, "SELECT count(*) FROM playback_events") != 2 || scalar(t, db, "SELECT count(*) FROM movies WHERE id=42 AND auto_marks='[]'") != 1 {
-			t.Fatal("retry lost retained history or schema18 defaults")
+			t.Fatal("retry lost retained history or schema20 defaults")
 		}
 		var liveTokens, keptKeys int
 		if err := db.QueryRow(`SELECT count(*) FROM access_tokens WHERE token=? AND user_id=7

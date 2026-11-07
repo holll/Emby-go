@@ -208,8 +208,8 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 		}
 	}
 	db := rawDB(t, path)
-	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 18 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 18 {
-		t.Fatal("migration ledger is not complete v18")
+	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 20 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 20 {
+		t.Fatal("migration ledger is not complete v20")
 	}
 	if scalar(t, db, "SELECT count(*) FROM users WHERE auth_generation=1") != 3 {
 		t.Fatal("generation backfill")
@@ -257,7 +257,7 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 		query string
 		want  int64
 	}{
-		{"SELECT count(*) FROM schema_migrations", 18},
+		{"SELECT count(*) FROM schema_migrations", 20},
 		{"SELECT count(*) FROM movies WHERE id=42 AND auto_marks='[\"中文字幕\"]'", 1},
 		{"SELECT count(*) FROM movies WHERE id=42 AND extra_backdrops='[\"/fixture/extrafanart/fanart2.jpg\",\"/fixture/extrafanart/fanart10.jpg\"]'", 1},
 		{"SELECT count(*) FROM playback_sessions WHERE session_key='shared-session' AND movie_id=42 AND ((user_id=7 AND position_ticks=1234567) OR (user_id=9 AND position_ticks=999))", 2},

@@ -28,6 +28,17 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
     <p id="wh-save-impact" class="hint">保存影响：整集合原子替换，即时生效、重启保留；只保存配置，不会发送测试通知。</p>
     <p id="wh-status" class="hint" role="status" aria-live="polite">正在加载通知目标…</p>
     <div class="form-foot"><button id="wh-add" class="btn btn-sm" type="button">+ 添加目标</button><button id="wh-save" class="btn btn-accent" type="button" disabled>保存全部目标</button></div>
+    <section class="wh-history" aria-labelledby="wh-history-title">
+      <div class="panel-head"><h3 id="wh-history-title">投递历史</h3>
+        <div class="panel-actions">
+          <span id="wh-history-status" class="hint" role="status" aria-live="polite"></span>
+          <button id="wh-history-refresh" class="btn btn-sm" type="button">刷新</button>
+          <button id="wh-history-clear" class="btn btn-sm" type="button">清空</button>
+        </div>
+      </div>
+      <p class="hint">记录每个目标的投递结果，只保留事件、影片 ID、目标 ID、状态与时间；不保存接收地址、请求体、响应头或响应内容。最多保留 1000 条、7 天。</p>
+      <div id="wh-history-body" class="table-wrap" aria-live="polite"><p class="hint">正在加载投递历史…</p></div>
+    </section>
     <dialog id="wh-dialog" class="wh-dialog" aria-labelledby="wh-dialog-title" aria-describedby="wh-dialog-hint">
       <form id="wh-dialog-form" novalidate>
         <div class="wh-dialog-head"><h2 id="wh-dialog-title">添加 Webhook 目标</h2><button id="wh-dialog-close" type="button" class="btn btn-sm" aria-label="关闭添加 Webhook 目标">关闭</button></div>
@@ -288,6 +299,74 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
     } finally { if (current()) setBusy(false); }
   };
 
+  const historyBody = find('#wh-history-body');
+  const historyLabels = { sent: '已确认', failed: '失败', skipped_budget: '预算跳过' };
+  const renderHistory = items => {
+    historyBody.textContent = '';
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = '暂无投递记录。启用目标并触发事件后才会出现；清空只删除历史，不影响配置。';
+      historyBody.append(empty);
+      return;
+    }
+    const table = document.createElement('table');
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    for (const label of ['时间', '事件', '影片 ID', '目标', '结果']) {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      th.textContent = label;
+      headRow.append(th);
+    }
+    head.append(headRow);
+    table.append(head);
+    const body = document.createElement('tbody');
+    for (const item of items) {
+      const tr = document.createElement('tr');
+      const result = historyLabels[item.status] || item.status;
+      const cells = [item.created_at, item.event, item.item_id || '—', item.target_id, item.error_code ? result + '（' + item.error_code + '）' : result];
+      for (const value of cells) {
+        const td = document.createElement('td');
+        td.textContent = String(value);
+        tr.append(td);
+      }
+      body.append(tr);
+    }
+    table.append(body);
+    historyBody.append(table);
+  };
+  const loadHistory = async () => {
+    if (!current()) return;
+    find('#wh-history-status').textContent = '正在刷新…';
+    try {
+      const data = await apiRequest('/webhook/deliveries?limit=50');
+      if (!current()) return;
+      if (!data || !Array.isArray(data.items)) throw Error('invalid response');
+      renderHistory(data.items);
+      find('#wh-history-status').textContent = '最近 ' + data.items.length + ' 条';
+    } catch {
+      if (current()) find('#wh-history-status').textContent = '投递历史加载失败，可稍后刷新';
+    }
+  };
+  find('#wh-history-refresh').addEventListener('click', () => {
+    if (!busy) void loadHistory();
+  });
+  find('#wh-history-clear').addEventListener('click', async () => {
+    if (busy || !current()) return;
+    if (!confirm('清空全部 Webhook 投递历史？只删除历史记录，不影响目标配置、业务数据或重发。')) return;
+    setBusy(true);
+    try {
+      await apiRequest('/webhook/deliveries', { method: 'DELETE' });
+      if (current()) {
+        find('#wh-history-status').textContent = '历史已清空';
+        renderHistory([]);
+      }
+    } catch {
+      if (current()) find('#wh-history-status').textContent = '清空失败，请稍后重试';
+    } finally { if (current()) setBusy(false); }
+  });
+
   find('#wh-reload').addEventListener('click', () => {
     if (busy) return;
     capture();
@@ -413,4 +492,5 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
   });
 
   await load();
+  void loadHistory();
 }

@@ -190,11 +190,16 @@ func (a *App) startTask(kind string) int64 {
 	defer a.taskMu.Unlock()
 	a.nextTaskID++
 	id := a.nextTaskID
-	a.tasks = append([]task{{ID: id, Type: kind, Status: "running", StartedAt: time.Now().UTC().Format(time.RFC3339)}}, a.tasks...)
+	now := time.Now().UTC().Format(time.RFC3339)
+	a.tasks = append([]task{{ID: id, Type: kind, Status: "running", StartedAt: now}}, a.tasks...)
 	if len(a.tasks) > 100 {
 		a.tasks = a.tasks[:100]
 	}
 	slog.Info("任务开始", "task_id", id, "type", kind)
+	// N-02：摘要落库是尽力而为；扫描入口会在 202 前单独确认写入。
+	if err := a.db.UpsertTaskRecord(store.TaskRecord{ID: id, Type: kind, Status: "running", CreatedAt: now, StartedAt: now}); err != nil {
+		slog.Warn("任务摘要写入失败", "task_id", id, "error", err)
+	}
 	return id
 }
 
@@ -205,14 +210,21 @@ func (a *App) finishTask(id int64, err error) {
 		if a.tasks[i].ID != id {
 			continue
 		}
-		a.tasks[i].EndedAt = time.Now().UTC().Format(time.RFC3339)
+		now := time.Now().UTC().Format(time.RFC3339)
+		a.tasks[i].EndedAt = now
 		if err != nil {
 			a.tasks[i].Status, a.tasks[i].Error = "failed", err.Error()
 			slog.Error("任务失败", "task_id", id, "type", a.tasks[i].Type, "error", err)
+			if e := a.db.FinishTaskRecord(id, "failed", now, err.Error(), ""); e != nil {
+				slog.Warn("任务摘要素更新失败", "task_id", id, "error", e)
+			}
 			return
 		}
 		a.tasks[i].Status = "success"
 		slog.Info("任务成功", "task_id", id, "type", a.tasks[i].Type)
+		if e := a.db.FinishTaskRecord(id, "success", now, "", ""); e != nil {
+			slog.Warn("任务摘要素更新失败", "task_id", id, "error", e)
+		}
 		return
 	}
 }
@@ -225,9 +237,13 @@ func (a *App) finishTaskBusy(id int64, reason string) {
 		if a.tasks[i].ID != id {
 			continue
 		}
-		a.tasks[i].EndedAt = time.Now().UTC().Format(time.RFC3339)
+		now := time.Now().UTC().Format(time.RFC3339)
+		a.tasks[i].EndedAt = now
 		a.tasks[i].Status, a.tasks[i].Error = "skipped", reason
 		slog.Info("任务跳过", "task_id", id, "type", a.tasks[i].Type, "reason", reason)
+		if e := a.db.FinishTaskRecord(id, "skipped", now, reason, ""); e != nil {
+			slog.Warn("任务摘要素更新失败", "task_id", id, "error", e)
+		}
 		return
 	}
 }
@@ -904,18 +920,47 @@ func (a *App) adminSettings(c *gin.Context) {
 	})
 }
 
+// adminTasks 返回进程内实时任务与持久摘要的并集：同一 id 以内存状态为准，
+// 重启前未完成的行由启动标记为 interrupted，重启后仍可查询。
 func (a *App) adminTasks(c *gin.Context) {
 	a.taskMu.Lock()
 	items := append([]task(nil), a.tasks...)
 	a.taskMu.Unlock()
-	running := false
+	records, err := a.db.ListTaskRecords(100)
+	if err != nil {
+		// 摘要不可读时仍返回实时列表，并明确标出历史缺失。
+		records = nil
+		slog.Warn("任务摘要读取失败", "error", err)
+	}
+	seen := make(map[int64]bool, len(items))
 	for _, item := range items {
-		if item.Status == "running" {
+		seen[item.ID] = true
+	}
+	merged := make([]task, 0, len(items)+len(records))
+	merged = append(merged, items...)
+	for _, rec := range records {
+		if seen[rec.ID] {
+			continue
+		}
+		merged = append(merged, task{ID: rec.ID, Type: rec.Type, Status: rec.Status, StartedAt: rec.StartedAt, EndedAt: rec.FinishedAt, Error: rec.Error})
+	}
+	// 内存与摘要各自按 id 降序；合并后按 id 降序截断。
+	for i := 1; i < len(merged); i++ {
+		for j := i; j > 0 && merged[j].ID > merged[j-1].ID; j-- {
+			merged[j], merged[j-1] = merged[j-1], merged[j]
+		}
+	}
+	if len(merged) > 100 {
+		merged = merged[:100]
+	}
+	running := false
+	for _, item := range merged {
+		if item.Status == "running" || item.Status == "queued" {
 			running = true
 			break
 		}
 	}
-	c.JSON(200, gin.H{"items": items, "running": running})
+	c.JSON(200, gin.H{"items": merged, "running": running, "history_error": err != nil})
 }
 
 func (a *App) adminStatus(c *gin.Context) {

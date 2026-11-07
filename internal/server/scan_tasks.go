@@ -1,8 +1,10 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,11 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"emby-go/internal/scanner"
+	"emby-go/internal/store"
 )
 
 // D10（已批）：长扫描改为进程内任务表 + 202/task_id + 1 小时幂等键。
-// 明确边界：表在内存，重启即丢（不恢复、不补跑）；旧同步 POST /api/admin/scan
-// 保留到验收集通过；任务表容量 200，满时只淘汰已完成任务，全在跑则拒绝。
+// N-02：摘要同步落库（202 前确认写入），重启后状态标为 interrupted；执行器
+// 状态仍在内存，重启不恢复、不补跑；旧同步 POST /api/admin/scan 保留到验收
+// 集通过；任务表容量 200，满时只淘汰已完成任务，全在跑则拒绝。
 const (
 	scanTaskCapacity  = 200
 	scanIdemTTL       = time.Hour
@@ -108,6 +112,14 @@ func (a *App) registerScanTask(id int64, kind string, libraryID int64, mode scan
 			return asyncScanTask{}, false, errScanTaskCapacity
 		}
 	}
+	createdAt := now.UTC().Format(time.RFC3339)
+	// 202 前的可靠登记：写库失败即拒绝受理，避免「页面显示已提交、重启后查不到」。
+	if err := a.db.UpsertTaskRecord(store.TaskRecord{
+		ID: id, Type: kind, Status: "queued", LibraryID: libraryID, Mode: string(mode),
+		AllowEmpty: allowEmpty, CreatedAt: createdAt,
+	}); err != nil {
+		return asyncScanTask{}, false, err
+	}
 	task := &asyncScanTask{
 		ID:         id,
 		Type:       kind,
@@ -115,7 +127,7 @@ func (a *App) registerScanTask(id int64, kind string, libraryID int64, mode scan
 		LibraryID:  libraryID,
 		Mode:       string(mode),
 		AllowEmpty: allowEmpty,
-		CreatedAt:  now.UTC().Format(time.RFC3339),
+		CreatedAt:  createdAt,
 		IdemKey:    idemKey,
 		IdemDigest: digest,
 	}
@@ -170,26 +182,42 @@ func (a *App) scanTaskByID(id int64) (asyncScanTask, error) {
 }
 
 func (a *App) setScanTaskRunning(id int64) {
+	now := time.Now().UTC().Format(time.RFC3339)
 	a.scanTaskMu.Lock()
 	defer a.scanTaskMu.Unlock()
 	if task, ok := a.scanTasks[id]; ok {
 		task.Status = "running"
-		task.StartedAt = time.Now().UTC().Format(time.RFC3339)
+		task.StartedAt = now
+	}
+	if err := a.db.SetTaskRecordStarted(id, now); err != nil {
+		slog.Warn("任务摘要开始时间更新失败", "task_id", id, "error", err)
 	}
 }
 
 func (a *App) finishScanTask(id int64, status string, result *scanner.Result, err error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	raw := ""
+	if result != nil {
+		if b, marshalErr := json.Marshal(result); marshalErr == nil {
+			raw = string(b)
+		} else {
+			slog.Warn("任务摘要结果序列化失败", "task_id", id, "error", marshalErr)
+		}
+	}
+	errMsg := ""
 	a.scanTaskMu.Lock()
 	defer a.scanTaskMu.Unlock()
-	task, ok := a.scanTasks[id]
-	if !ok {
-		return
+	if task, ok := a.scanTasks[id]; ok {
+		task.Status = status
+		task.FinishedAt = now
+		task.Result = result
+		if err != nil {
+			task.Error = err.Error()
+		}
+		errMsg = task.Error
 	}
-	task.Status = status
-	task.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	task.Result = result
-	if err != nil {
-		task.Error = err.Error()
+	if e := a.db.FinishTaskRecord(id, status, now, errMsg, raw); e != nil {
+		slog.Warn("任务摘要终态更新失败", "task_id", id, "error", e)
 	}
 }
 
@@ -295,6 +323,28 @@ func (a *App) adminScanTaskStatus(c *gin.Context) {
 	}
 	task, err := a.scanTaskByID(id)
 	if err != nil {
+		// 进程重启后内存任务已丢，回落到摘要；只提供摘要里有的字段。
+		rec, ok, recErr := a.db.TaskRecordByID(id)
+		if recErr != nil {
+			apiError(c, http.StatusInternalServerError, recErr.Error())
+			return
+		}
+		if ok {
+			task = asyncScanTask{
+				ID: rec.ID, Type: rec.Type, Status: rec.Status,
+				LibraryID: rec.LibraryID, Mode: rec.Mode, AllowEmpty: rec.AllowEmpty,
+				CreatedAt: rec.CreatedAt, StartedAt: rec.StartedAt, FinishedAt: rec.FinishedAt,
+				Error: rec.Error,
+			}
+			if rec.ResultJSON != "" {
+				var result scanner.Result
+				if json.Unmarshal([]byte(rec.ResultJSON), &result) == nil {
+					task.Result = &result
+				}
+			}
+			c.JSON(http.StatusOK, task)
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "code": "TASK_NOT_FOUND"})
 		return
 	}

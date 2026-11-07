@@ -63,6 +63,8 @@ type App struct {
 	taskMu     sync.Mutex
 	tasks      []task
 	nextTaskID int64
+	// N-05：备份单飞标记；只防同一进程内的重复点击，跨进程互斥由 backup 包的目录锁负责。
+	backupRunning atomic.Bool
 
 	// 登录/初始化失败限流：进程内固定窗口，按 TCP 对端 IP 与账号计数。
 	authGuard *authGuard
@@ -411,6 +413,18 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	a.updater = upgrade.New(upgrade.Options{CurrentVersion: BuildVersion})
+	// N-02：上次进程遗留的未完成任务不具备继续执行的条件，只标记中断；
+	// 任务 id 从摘要序列继续，避免重启后新旧 id 重叠。
+	if n, err := db.MarkInterruptedTaskRecords(time.Now().UTC().Format(time.RFC3339)); err != nil {
+		slog.Warn("标记中断任务失败", "error", err)
+	} else if n > 0 {
+		slog.Info("重启中断的任务已标记", "count", n)
+	}
+	if id, err := db.MaxTaskRecordID(); err != nil {
+		slog.Warn("读取任务摘要序列失败", "error", err)
+	} else if id > a.nextTaskID {
+		a.nextTaskID = id
+	}
 	// 变体目录：启动时清一次（过期 + 超限），之后由写入侧按十分钟节流触发。
 	a.imgDisk = openImageDisk(cfg)
 	a.imageCacheMaxBytes = effectiveImageCacheMaxBytes(cfg)
@@ -723,6 +737,11 @@ func (a *App) routes() {
 	admin.DELETE("/access-tokens", a.adminRevokeAllSessions)
 	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
+	admin.GET("/diagnostics", a.adminDiagnostics)
+	admin.GET("/backup", a.adminBackupStatus)
+	admin.POST("/backup/run", a.adminBackupRun)
+	admin.GET("/webhook/deliveries", a.adminWebhookDeliveries)
+	admin.DELETE("/webhook/deliveries", a.adminClearWebhookDeliveries)
 	admin.GET("/metrics", a.adminMetrics)
 	admin.GET("/dashboard", a.adminDashboard)
 	admin.GET("/logs", a.adminLogs)

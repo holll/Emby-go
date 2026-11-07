@@ -244,6 +244,44 @@
 
 版本核对：进程执行新程序的 `-version` 并与目标标签比较；页面在服务恢复后读取公开 `GET /api/version`，仅当实际版本等于目标或等于「目标 + `-commit` 后缀」才显示成功。没有回滚端点或备份目录：替换前失败时旧程序仍在运行，替换后启动失败由运维按部署文档处置。升级复用既有有界关闭与 `Restart=always`，不新增独立守护进程、sudo 代理、通用任务队列或自动回退。
 
+### 4.12 扫描任务中心（N-02）
+
+任务摘要持久化在 `task_records`，迁移 19。不是新队列：提交仍复用既有异步扫描执行器，首版不可取消、进程重启不恢复、不补跑；重启时未完成任务只标记中断。
+
+- `POST /api/admin/tasks/scan`：语义不变（202 仅表示已接受）。202 之前先写入摘要行，写入失败直接返回错误，不会出现「已受理但查不到任务」。
+- `GET /api/admin/tasks`：`{"items":[{"id","type","status","started_at","ended_at?","error?"}],"running":bool,"history_error":bool}`。items 是进程内实时任务与最近 100 条持久摘要按 `id` 降序合并，同一 id 以内存状态为准；`history_error=true` 表示摘要读取失败但实时列表仍返回。
+- `GET /api/admin/tasks/{id}`：内存命中返回异步扫描 DTO（`task_id` 等既有字段）；内存已丢失时回落摘要，返回同一 DTO 形状的只读视图（含 `library_id`、`created_at`、`finished_at`、`error`，有结果时含 `result`）。都不存在返回 404。
+- 留存：摘要最多 500 条，超出按 id 淘汰最旧；启动时 `queued`/`running` 标为 `interrupted`（`error` 说明进程重启），任务 id 从摘要最大 id 继续递增，避免重启后 id 重叠。
+- 幂等：`Idempotency-Key` 的窗口与重放行为不变；重放仍返回原任务 id，不新建执行。
+
+### 4.13 诊断证据（N-03）
+
+- `GET /api/admin/diagnostics`：只读聚合，不触发 ffprobe、不访问外部服务、不修改任何状态。字段：
+  - `app`：`version`/`commit`/`build_time`/`started_at`/`uptime_seconds`/`go_version`/`os`/`arch`。
+  - `store`：`path`/`size_bytes`/`schema_version`/`movies{success,pending,manual}`/`libraries`/`task_records`/`scheduled_tasks{total,enabled}`。
+  - `runtime`：`scan_running`，`probe{running,total,done,failed,started_at,finished_at,error}`，`scrape{running,kind,total,done,failed,started_at}`。
+  - `scheduler`：数组，条目为 `id`/`name`/`type`/`cron`/`enabled`/`last_run_at`/`last_status`/`last_message`，启用任务附 `next_run`（服务器本地时区计算后的 RFC3339）。
+  - `webhook{targets,enabled_targets,multi_target}`、`image_cache{enabled,dir,files,bytes,max_bytes}`、`ffprobe{path,error}`。
+- 读取数据库结构版本/文件信息失败时返回 500，不返回部分推测值；单个运行中任务的状态是读取瞬间快照，不做一致性等待。
+- 诊断页只展示证据与跳转到既有动作入口，不提供「一键修复」、远程探测或自动变更范围。
+
+### 4.14 Webhook 投递历史（N-04）
+
+- 记录点：业务事件在 `send` 返回后按目标逐行写入；管理员测试消息（任意 draft 地址）不记录。写入 best-effort，失败只记日志，不回滚业务结果、不触发重发。
+- 字段白名单：`event`/`item_id`/`target_id`/`status`/`error_code`/`created_at`。不存接收地址、请求体、响应体或响应头。
+- `status`：`sent`（接收端已确认）/`failed`/`skipped_budget`；`error_code` 为稳定分类。
+- `GET /api/admin/webhook/deliveries?limit=`：`limit` 为 1–500 的整数，默认 100；返回 `{"items":[{"id","event","item_id","target_id","status","error_code","created_at"}],"retention":{"max_rows":1000,"days":7}}`，按 `id` 倒序。
+- `DELETE /api/admin/webhook/deliveries`：清空历史，返回 `{"cleared":n}`；只删除历史记录，不重发、不回滚业务、不影响目标配置。
+- 留存：最多 1000 条且 7 天，任一超限即淘汰；不建 outbox、不自动重试。非管理员访问返回 403。
+
+### 4.15 固定范围备份（N-05）
+
+- `GET /api/admin/backup`：`{"dir","retention","running","last"}`。`dir` 固定为数据库同级的 `backups/`；`retention` 恒为 7；`last` 为最近一条 `type=backup` 的任务摘要（`task_id`/`status`/`started_at`/`finished_at`/`error`/`result`），没有记录时为 `null`。只读，不访问媒体盘。
+- `POST /api/admin/backup/run`：受理返回 202 `{"task_id"}`，后台执行一次固定范围备份。已有备份在进行时返回 409；服务关停登记期返回 503。
+- 固定范围：SQLite 一致性快照（`VACUUM INTO`）+ 媒体库 NFO + 规范 extrafanart 目录，保留 7 份；不提供网页恢复、任意路径、匿名下载或删除指定备份。
+- 结果元数据：`result{dir,nfo_count,extra_backdrop_count,pruned,finished_at}`，`dir` 为该次备份的时间戳子目录。快照含凭据材料（密码哈希/令牌/API Key）与媒体信息，因此目录由进程以 `0700` 建立、不回显内容、不经 Web 提供下载；取回请用服务器文件工具。
+- 落库复用 `task_records`（`type=backup`），失败原因写入任务摘要；单飞：进程内 atomic 标记 + `internal/backup` 输出目录锁（跨进程）。任务不自动重试，失败后由管理员重新发起。非管理员访问返回 403。
+
 ## 5. 变更规则（v2）
 
 - **允许（增量）**：新增端点、新增 JSON 字段、新增可选查询参数/请求头、新增 `code`。

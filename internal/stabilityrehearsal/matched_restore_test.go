@@ -18,9 +18,9 @@ import (
 	"emby-go/internal/backup"
 )
 
-// This rehearses an offline, same-version schema18 matched restore. It is not
+// This rehearses an offline, same-version schema20 matched restore. It is not
 // an old-binary downgrade, nor evidence of atomic DB/NFO snapshots while live.
-func TestSchema18MatchedSnapshotRestore(t *testing.T) {
+func TestSchema20MatchedSnapshotRestore(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "restored.sqlite")
 	lib := filepath.Join(root, "media")
@@ -106,7 +106,7 @@ func TestSchema18MatchedSnapshotRestore(t *testing.T) {
 		return values
 	}
 	var before map[string]string
-	if !t.Run("prepare-schema18-and-stop", func(t *testing.T) {
+	if !t.Run("prepare-schema20-and-stop", func(t *testing.T) {
 		db := rawDB(t, path)
 		mustExec(t, db, "UPDATE libraries SET path=? WHERE id=11", lib)
 		mustExec(t, db, "UPDATE movies SET source_path=?,nfo_path=?,output_dir=? WHERE id=42", filepath.Join(lib, "A.strm"), nfoPath, lib)
@@ -123,8 +123,8 @@ func TestSchema18MatchedSnapshotRestore(t *testing.T) {
 		}
 		db = rawDB(t, path)
 		mustExec(t, db, `UPDATE movies SET tags='["manual-keep","中文字幕"]',extra_backdrops=?,last_scrape_error='retained-warning' WHERE id=42`, string(backdropJSON))
-		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 18 {
-			t.Fatal("snapshot is not schema18")
+		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 20 {
+			t.Fatal("snapshot is not schema20")
 		}
 		before = readBusiness(t, db)
 		if err := db.Close(); err != nil {

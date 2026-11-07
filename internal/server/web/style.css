@@ -941,6 +941,13 @@ body.player-open { overflow: hidden; }
 #webhook-settings .btn, #webhook-settings .check { min-height: 44px; }
 #webhook-settings .check { cursor: pointer; }
 #webhook-settings .field > .check { font: inherit; letter-spacing: normal; text-transform: none; color: var(--muted); }
+.wh-history { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
+.wh-history .panel-head { margin-bottom: 10px; }
+.wh-history .panel-head h3 { margin: 0; font-size: 16px; }
+.wh-history .panel-actions { align-items: center; }
+.wh-history .panel-actions .hint { margin: 0; }
+.wh-history table { min-width: 520px; }
+.wh-history td { white-space: nowrap; }
 .wh-dialog { width: min(760px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); padding: 0; color: var(--text); background: var(--bg-soft); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow); }
 .wh-dialog::backdrop { background: rgba(0, 0, 0, 0.72); }
 .wh-dialog[open] { display: flex; }

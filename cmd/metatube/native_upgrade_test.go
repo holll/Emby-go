@@ -429,7 +429,7 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 		t.Fatal(err)
 	}
 	var extras, marks string
-	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&schema); err != nil || schema != 18 {
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&schema); err != nil || schema != 20 {
 		t.Fatalf("upgraded schema=%d error=%v", schema, err)
 	}
 	if err := db.QueryRow("SELECT extra_backdrops,auto_marks FROM movies WHERE id=1").Scan(&extras, &marks); err != nil || extras != "[]" || marks != "[]" {

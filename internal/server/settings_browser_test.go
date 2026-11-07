@@ -49,6 +49,12 @@ with sync_playwright() as p:
             window.fixture = structuredClone(data); window.calls = [];
             window.mockAPI = async (path, options) => {
                 calls.push({path, options});
+                if (path.startsWith('/webhook/deliveries')) {
+                    return options ? {cleared: 0} : {items: [
+                        {id: 2, event: 'item.updated', item_id: '43', target_id: 'wh_2', status: 'failed', error_code: 'timeout', created_at: '2026-11-07T00:00:00Z'},
+                        {id: 1, event: 'item.updated', item_id: '43', target_id: 'wh_1', status: 'sent', error_code: '', created_at: '2026-11-07T00:00:00Z'}
+                    ], retention: {max_rows: 1000, days: 7}};
+                }
                 if (options) {
                     const draft = JSON.parse(options.body);
                     const previous = fixture.targets;
@@ -69,6 +75,9 @@ with sync_playwright() as p:
             assert node.is_visible() != hidden, selector
             if hidden:
                 assert node.evaluate('(el) => getComputedStyle(el).display') == 'none', selector
+        page.wait_for_function('document.querySelectorAll("#wh-history-body tbody tr").length === 2')
+        assert '失败' in page.locator('#wh-history-body tbody tr').nth(0).inner_text()
+        assert '已确认' in page.locator('#wh-history-body tbody tr').nth(1).inner_text()
         for selector in ['#wh-remove-preview', '#wh-confirm-remove-row', '#wh-confirm-empty-row']:
             check_hidden(selector, True)
         assert page.locator('#wh-confirm-delete').get_attribute('type') == 'checkbox'
@@ -113,7 +122,7 @@ with sync_playwright() as p:
             page.wait_for_function('!document.querySelector("#wh-dialog").open && !document.querySelector("#wh-dialog-body").children.length')
             assert boxes.count() == original_count
             assert page.locator('#wh-add').evaluate('(el) => document.activeElement === el')
-            assert page.evaluate('calls.length') == 1
+            assert page.evaluate('calls.length') == 2
         open_draft()
         assert page.locator('#wh-draft-name').input_value() == ''
         assert page.locator('#wh-draft-url').get_attribute('type') == 'text'
@@ -147,7 +156,7 @@ with sync_playwright() as p:
             assert page.locator('#wh-dialog').evaluate('(el) => el.open')
             assert 'HTTP(S)' in page.locator('#wh-dialog-status').inner_text()
             assert boxes.count() == original_count
-            assert page.evaluate('calls.length') == 1
+            assert page.evaluate('calls.length') == 2
         fill_draft()
         page.locator('#wh-draft-format').select_option('form')
         page.locator('#wh-draft-timeout').fill('17')
@@ -155,25 +164,25 @@ with sync_playwright() as p:
         submit.click()
         page.wait_for_function('!document.querySelector("#wh-dialog").open')
         assert boxes.count() == original_count + 1
-        assert page.evaluate('calls.length') == 1, 'adding a draft must not call API'
+        assert page.evaluate('calls.length') == 2, 'adding a draft must not call API'
         # Real DOM checkbox toggles and the resulting PUT payload remain boolean.
         page.locator('[data-field="enabled"]').first.check()
         page.locator('[data-event="item.deleted"]').first.check()
         page.locator('#wh-save').click()
-        assert page.evaluate('calls.length') == 1, 'unconfirmed subscription must not save'
+        assert page.evaluate('calls.length') == 2, 'unconfirmed subscription must not save'
         page.get_by_text('对新增的删除订阅，我已理解并确认上述风险。', exact=True).click()
         assert checkbox.is_checked()
         page.locator('#wh-save').click()
-        assert page.evaluate('JSON.parse(calls[1].options.body).confirm_delete') is True
+        assert page.evaluate('JSON.parse(calls[2].options.body).confirm_delete') is True
         assert not checkbox.is_checked()
-        saved = page.evaluate('JSON.parse(calls[1].options.body)')
+        saved = page.evaluate('JSON.parse(calls[2].options.body)')
         assert saved['targets'][2]['url'] == 'https://example.invalid/new?token=plain-fixture'
         assert saved['targets'][2]['format'] == 'form'
         assert saved['targets'][2]['timeout_seconds'] == 17
         assert saved['targets'][2]['allow_private'] is True
         page.on('dialog', lambda dialog: dialog.accept())
         page.locator('#wh-reload').click()
-        page.wait_for_function('calls.length === 3 && !document.querySelector("#wh-save").disabled')
+        page.wait_for_function('calls.length === 4 && !document.querySelector("#wh-save").disabled')
         for card in boxes.all():
             card.locator('summary').click()
             address = card.locator('[data-field="url"]')
@@ -184,8 +193,8 @@ with sync_playwright() as p:
         boxes.nth(1).locator('[data-field="url"]').fill('http://example.invalid/replaced')
         boxes.nth(2).locator('[data-field="clear-url"]').check()
         page.locator('#wh-save').click()
-        page.wait_for_function('calls.length === 4 && !document.querySelector("#wh-save").disabled')
-        changed = page.evaluate('JSON.parse(calls[3].options.body).targets')
+        page.wait_for_function('calls.length === 5 && !document.querySelector("#wh-save").disabled')
+        changed = page.evaluate('JSON.parse(calls[4].options.body).targets')
         assert 'url' not in changed[0], 'blank URL must preserve the stored address'
         assert changed[1]['url'] == 'http://example.invalid/replaced'
         assert changed[2]['clear_url'] is True and 'url' not in changed[2]
@@ -247,6 +256,9 @@ with sync_playwright() as p:
             window.fixture = structuredClone(data); window.calls = []; window.current = true;
             window.mockAPI = async (path, options) => {
                 calls.push({path, options});
+                if (path.startsWith('/webhook/deliveries')) {
+                    return options ? {cleared: 0} : {items: [], retention: {max_rows: 1000, days: 7}};
+                }
                 if (path === '/webhook/test') {
                     window.testSignal = options.signal;
                     if (window.testDelay) await new Promise(resolve => window.resolveTest = resolve);
@@ -257,7 +269,7 @@ with sync_playwright() as p:
             };
             await mountWebhookSettings(document.querySelector('#webhook-settings'), mockAPI, () => current);
         }''', fixture)
-        assert page.evaluate('calls.length') == 1, 'mount must not send a test'
+        assert page.evaluate('calls.length') == 2, 'mount must not send a test'
         card = page.locator('[data-target-index]').first
         card.locator('summary').click()
         assert card.locator('[data-test]').get_attribute('type') == 'button'

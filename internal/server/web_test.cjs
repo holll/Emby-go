@@ -1677,7 +1677,8 @@ function webhookPanel(api) {
     showModal() { this.open = true; }, close() { this.open = false; this.listeners.close?.(); } });
   const ids = ['webhook-title', 'wh-reload', 'wh-targets', 'wh-empty', 'wh-remove-preview', 'wh-confirm-remove-row',
     'wh-confirm-remove', 'wh-confirm-empty-row', 'wh-confirm-empty', 'wh-confirm-delete', 'wh-status', 'wh-add', 'wh-save',
-    'wh-dialog', 'wh-dialog-form', 'wh-dialog-body', 'wh-dialog-status', 'wh-dialog-close', 'wh-dialog-cancel', 'wh-dialog-submit'];
+    'wh-dialog', 'wh-dialog-form', 'wh-dialog-body', 'wh-dialog-status', 'wh-dialog-close', 'wh-dialog-cancel', 'wh-dialog-submit',
+    'wh-history-status', 'wh-history-refresh', 'wh-history-clear'];
   const nodes = Object.fromEntries(ids.map(id => [id, makeNode()]));
   const targetsHost = nodes['wh-targets'];
   let cards = [];
@@ -1706,7 +1707,12 @@ function webhookPanel(api) {
     };
   };
   const host = { isConnected: true, innerHTML: '', querySelector: selector => nodes[selector.replace(/^#/, '')] };
+  const historyBody = makeNode();
+  historyBody.append = () => {};
+  nodes['wh-history-body'] = historyBody;
   const calls = [], prompts = [];
+  // 投递历史是独立只读面，不参与保存/清空的调用序号断言。
+  const deliveries = { items: [], retention: { max_rows: 1000, days: 7 } };
   let active = true, confirms = true;
   let draftCard;
   nodes['wh-dialog-body'].appendChild = card => { draftCard = card; };
@@ -1714,7 +1720,10 @@ function webhookPanel(api) {
   const box = sandbox({ URL, document: { createElement: () => cardStub() },
     confirm: text => { prompts.push(text); return confirms; } });
   vm.runInContext(webhookUI, box);
-  const mounted = box.mountWebhookSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
+  const mounted = box.mountWebhookSettings(host, async (...args) => {
+    if (String(args[0]).startsWith('/webhook/deliveries')) return deliveries;
+    calls.push(args); return api(...args);
+  }, () => active);
   const card = index => cards[index];
   return {
     nodes, calls, host, mounted, prompts,
@@ -1975,7 +1984,7 @@ test('Webhook多目标独立资源在app之前加载，管理员设置挂载且�
   assert.match(webhookUI, /data-field="url" type="text" inputmode="url".*autocomplete="off"/);
   assert.doesNotMatch(webhookUI, /type="password"/);
   assert.ok(!webhookUI.includes('localStorage'));
-  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 3, '读取、保存与用户主动发送测试使用独立接口');
+  assert.equal((webhookUI.match(/apiRequest\('/g) || []).length, 5, '目标读取/保存/测试与投递历史读取/清空各自独立');
   assert.match(webhookUI, /apiRequest\('\/webhook\/test', \{ method: 'POST'/);
   assert.match(webhookUI, /If-Match/);
   assert.match(webhookUI, /confirm_empty_targets/);

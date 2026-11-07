@@ -206,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1166,6 +1166,16 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case taskRecordsMigrationVersion:
+			if checksum != migration19Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case webhookDeliveriesMigrationVersion:
+			if checksum != migration20Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1267,6 +1277,16 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[taskRecordsMigrationVersion] {
+		if err := applyMigration19(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[webhookDeliveriesMigrationVersion] {
+		if err := applyMigration20(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1359,6 +1379,16 @@ func (s *Store) migrate() error {
 	if !applied[autoMarksMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", autoMarksMigrationVersion, migration18Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", autoMarksMigrationVersion, err)
+		}
+	}
+	if !applied[taskRecordsMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", taskRecordsMigrationVersion, migration19Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", taskRecordsMigrationVersion, err)
+		}
+	}
+	if !applied[webhookDeliveriesMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", webhookDeliveriesMigrationVersion, migration20Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", webhookDeliveriesMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

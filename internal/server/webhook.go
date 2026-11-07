@@ -27,6 +27,7 @@ func (a *App) notifyWebhook(c *gin.Context, event webhook.Event) {
 	started := time.Now()
 	result := sender.Send(a.rootCtx, event)
 	c.Header("X-Webhook-Status", result.Status)
+	a.recordWebhookDeliveries(event, result)
 	logWebhookDelivery(event, result, time.Since(started))
 }
 

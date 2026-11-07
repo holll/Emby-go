@@ -42,6 +42,10 @@ func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 		"POST /api/admin/image-cache/trim":        "request-snapshot",
 		"PUT /api/admin/webhook/settings":         "configuration-snapshot",
 		"PUT /api/admin/webhook/targets":          "configuration-snapshot",
+		// 备份创建会登记后台 worker 并操作磁盘；固定范围与目录由服务端决定。
+		"POST /api/admin/backup/run": "admission",
+		// 投递历史是只读审计面；清空只删除本地历史行，不触碰配置或远端。
+		"DELETE /api/admin/webhook/deliveries": "request-snapshot",
 		// Explicit one-shot draft validation uses request-time admin authority,
 		// like scrape/test; it never persists configuration or admits a job.
 		"POST /api/admin/webhook/test":                     "request-snapshot",
