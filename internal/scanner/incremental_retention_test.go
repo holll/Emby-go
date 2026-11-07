@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,7 +73,7 @@ func TestIncrementalRetainsManualIdentityAndUserData(t *testing.T) {
 	}
 }
 
-func TestIncrementalNFOSelectionSwitchesAndReadFailure(t *testing.T) {
+func TestIncrementalNFOSelectionSwitchesAndDirectorySkip(t *testing.T) {
 	root := t.TempDir()
 	for _, part := range []string{"Film-CD1", "Film-CD2"} {
 		scanWrite(t, filepath.Join(root, part+".strm"), "https://media.test/a.mp4")
@@ -112,13 +111,33 @@ func TestIncrementalNFOSelectionSwitchesAndReadFailure(t *testing.T) {
 	}
 	check("Shared")
 	before := s.Version("g:version")
-	// A directory is a deterministic read error even when tests run as root.
+	states, err := s.LoadScanGroups(lib.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.MovieIDByPath(filepath.Join(root, "Film-CD1.strm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	movieBefore, err := s.Movie(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory is a non-regular input: skip the whole CD group unchanged.
 	if err := os.Mkdir(sidecar, 0755); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
-	if !errors.Is(err, ErrScanIncomplete) || !got.Incomplete || got.CleanupPerformed || s.Version("g:version") != before {
-		t.Fatalf("I/O error accepted: %+v %v", got, err)
+	if err != nil || got.Skipped != 2 || got.Failed != 0 || got.UnreadableNFO != 0 || !got.Incomplete || got.CleanupPerformed || s.Version("g:version") != before {
+		t.Fatalf("directory skip policy: %+v %v", got, err)
+	}
+	movieAfter, err := s.Movie(id)
+	if err != nil || !reflect.DeepEqual(movieAfter, movieBefore) {
+		t.Fatalf("directory changed movie: %+v %v", movieAfter, err)
+	}
+	statesAfter, err := s.LoadScanGroups(lib.ID)
+	if err != nil || !reflect.DeepEqual(statesAfter, states) {
+		t.Fatalf("directory changed baseline: %v", err)
 	}
 	if err := os.Remove(sidecar); err != nil {
 		t.Fatal(err)

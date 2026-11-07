@@ -343,7 +343,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 		}
 		result, runErr := probe.Run(ctx, ffprobe, url, a.cfg.ProbeTimeout())
 		if runErr != nil {
-			failures = append(failures, item.label()+"："+runErr.Error())
+			failures = append(failures, item.label()+"："+logging.SanitizeText(runErr.Error()))
 			finish("failed", "FFPROBE_FAILED")
 			continue
 		}

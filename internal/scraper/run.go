@@ -224,17 +224,17 @@ func (s *Scraper) runMoviesInto(ctx context.Context, movies []store.Movie, opts 
 func (s *Scraper) scrapeOne(ctx context.Context, movie store.Movie, opts RunOptions) ItemResult {
 	result := ItemResult{MovieID: movie.ID, Title: displayTitle(movie)}
 
-	if provider, id, ok := SplitProviderID(movie.ProviderID); ok {
-		info, err := s.client.MovieInfo(ctx, provider, id, true)
+	if pid, ok := ParseStoredProviderID(movie.ProviderID); ok {
+		info, err := s.client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
 		if metatube.IsNotFound(err) {
 			return s.recordSkip(movie, result, confirmMessage("已存 MetaTube 身份无结果（"+movie.ProviderID+"）"))
 		}
 		if err != nil {
 			return s.recordFailure(movie, result, err, "取已存身份详情失败")
 		}
-		chosen := metatube.MovieSearchResult{Provider: provider, ID: id, Number: info.Number, Title: info.Title, Score: info.Score}
+		chosen := metatube.MovieSearchResult{Provider: pid.Provider, ID: pid.ID, Number: info.Number, Title: info.Title, Score: info.Score}
 		logScrapeChoice(movie, movie.ProviderID, expectedNumber(movie), chosen, metatube.SameNumber(info.Number, expectedNumber(movie)))
-		return s.applyScrapeChoice(ctx, movie, result, chosen, info, opts)
+		return s.applyScrapeChoice(ctx, movie, result, chosen, info, pid.Position, opts)
 	}
 
 	query := searchQuery(movie)
@@ -265,20 +265,24 @@ func (s *Scraper) scrapeOne(ctx context.Context, movie store.Movie, opts RunOpti
 		return s.recordFailure(movie, result, err, "取详情失败")
 	}
 	logScrapeChoice(movie, query, expected, chosen, true)
-	return s.applyScrapeChoice(ctx, movie, result, chosen, info, opts)
+	return s.applyScrapeChoice(ctx, movie, result, chosen, info, nil, opts)
 }
 
-func (s *Scraper) applyScrapeChoice(ctx context.Context, movie store.Movie, result ItemResult, chosen metatube.MovieSearchResult, info metatube.MovieInfo, opts RunOptions) ItemResult {
+func (s *Scraper) applyScrapeChoice(ctx context.Context, movie store.Movie, result ItemResult, chosen metatube.MovieSearchResult, info metatube.MovieInfo, position *float64, opts RunOptions) ItemResult {
 	result.Provider, result.Number = chosen.Provider, chosen.Number
 
 	applied, err := s.Apply(ctx, movie, info, ApplyOptions{
-		Provider: chosen.Provider, ID: chosen.ID, Overwrite: opts.Overwrite, Refresh: opts.RefreshPerMovie,
+		Provider: chosen.Provider, ID: chosen.ID, Position: position,
+		Overwrite: opts.Overwrite, Refresh: opts.RefreshPerMovie,
 	})
 	if err != nil {
 		return s.recordFailure(movie, result, err, "写入失败")
 	}
 	result.Status = StatusSuccess
 	result.Images = applied.Images
+	if applied.AutoMarksError != "" {
+		result.Reason = autoMarksReviewMessage
+	}
 	return result
 }
 
@@ -355,12 +359,14 @@ func confirmMessage(reason string) string {
 
 // ScrapeOneMovie 单条手动刮削：直接按指定候选写入（预览已由人工确认），
 // 写完立即单文件重扫刷新索引，并回报落盘的图片路径。
-func (s *Scraper) ScrapeOneMovie(ctx context.Context, movie store.Movie, provider, id string, overwrite bool) (ApplyResult, error) {
-	info, err := s.client.MovieInfo(ctx, provider, id, true)
+func (s *Scraper) ScrapeOneMovie(ctx context.Context, movie store.Movie, pid metatube.ProviderID, overwrite bool) (ApplyResult, error) {
+	info, err := s.client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	applied, err := s.Apply(ctx, movie, info, ApplyOptions{Provider: provider, ID: id, Overwrite: overwrite, Refresh: true})
+	applied, err := s.Apply(ctx, movie, info, ApplyOptions{
+		Provider: pid.Provider, ID: pid.ID, Position: pid.Position, Overwrite: overwrite, Refresh: true,
+	})
 	if err != nil {
 		return applied, err
 	}

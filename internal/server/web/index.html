@@ -81,7 +81,7 @@
       </section>
     </nav>
 
-    <footer class="side-foot"><span class="status-dot" aria-hidden="true"></span><a class="foot-link" href="{{REPO_URL}}" target="_blank" rel="noopener noreferrer">holll/Emby-go</a><span class="foot-sep">·</span><span class="foot-ver">{{VERSION}}</span></footer>
+    <footer class="side-foot"><span class="status-dot" aria-hidden="true"></span><a class="foot-link" href="{{REPO_URL}}" target="_blank" rel="noopener noreferrer">holll/Emby-go</a><span class="foot-sep">·</span><button id="version-btn" class="foot-ver" type="button" title="检查更新" aria-haspopup="dialog"><span id="version-text">{{VERSION}}</span><span id="version-badge" class="foot-badge" hidden>有新版本</span></button></footer>
   </aside>
 
   <div id="nav-backdrop" class="nav-backdrop" hidden aria-hidden="true"></div>
@@ -150,6 +150,29 @@
   </div>
   <div class="scan-progress-bar"><i id="scan-progress-fill"></i></div>
   <small id="scan-progress-detail"></small>
+</div>
+
+<div id="update-overlay" class="scrape-overlay" role="dialog" aria-modal="true" aria-labelledby="update-title" hidden tabindex="-1">
+  <div class="scrape-modal update-modal">
+    <div class="update-head">
+      <strong id="update-title">更新 Emby-go</strong>
+      <button id="update-close" class="icon-btn" type="button" title="关闭 (Esc)">✕</button>
+    </div>
+    <div class="update-body">
+      <p class="update-line">当前版本 <code id="update-current">—</code></p>
+      <p class="update-line">最新版本 <code id="update-latest">—</code></p>
+      <p id="update-summary" class="update-summary">正在检查更新…</p>
+      <div id="update-notes" class="update-notes" hidden></div>
+      <p id="update-status" class="update-status" hidden></p>
+      <p class="update-hint">升级会下载并校验新程序，成功后服务正常关闭并由 systemd 重启；不保留旧版本，也不支持自动回退。升级期间请勿重复操作。</p>
+    </div>
+    <div class="update-actions">
+      <button id="update-check" class="btn" type="button">重新检查</button>
+      <button id="update-apply" class="btn btn-accent" type="button" hidden>立即升级</button>
+      <button id="update-reload" class="btn btn-accent" type="button" hidden>重新加载页面</button>
+      <button id="update-later" class="btn" type="button">关闭</button>
+    </div>
+  </div>
 </div>
 
 <div id="toasts" class="toasts" aria-live="assertive"></div>

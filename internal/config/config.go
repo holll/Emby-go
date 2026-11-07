@@ -47,8 +47,8 @@ type Config struct {
 
 	// 媒体信息探测（独立于扫库）：调用系统 ffprobe 读取真实技术参数并写回 NFO。
 	FFProbePath      string `yaml:"ffprobe_path"`          // ffprobe 可执行文件路径；留空则从 PATH 查找
-	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测超时（秒），默认 90
-	ProbeConcurrency int    `yaml:"probe_concurrency"`     // 并发探测数，默认 2
+	ProbeTimeoutSec  int    `yaml:"probe_timeout_seconds"` // 单条探测预算（秒），默认及上限 60，含等待进程名额
+	ProbeConcurrency int    `yaml:"probe_concurrency"`     // 批量 worker 数，默认及上限 2；子进程另受共享名额约束
 
 	// Webhook 为显式订阅的 Emby 风格事件通知；默认仅管理删除影片，扫描与删库不得触发删除通知。
 	Webhook WebhookConfig `yaml:"webhook"`
@@ -223,7 +223,7 @@ func (s AuthGuardSettings) Validate() error {
 
 // 探测相关默认值：超时给足远程直链建连+读取的时间；并发压低避免把网盘/代理打爆。
 const (
-	defaultProbeTimeoutSec  = 90
+	defaultProbeTimeoutSec  = 60
 	defaultProbeConcurrency = 2
 	defaultSessionTTLDays   = 30
 )
@@ -288,23 +288,23 @@ func (c ImageCacheConfig) TTL() time.Duration {
 	return time.Duration(hours) * time.Hour
 }
 
-// ProbeTimeout 返回单条探测超时。
+// ProbeTimeout 返回有效探测预算；保留历史非正值默认语义，正值最多 60 秒。
 func (c Config) ProbeTimeout() time.Duration {
 	seconds := c.ProbeTimeoutSec
-	if seconds <= 0 {
+	if seconds <= 0 || seconds > defaultProbeTimeoutSec {
 		seconds = defaultProbeTimeoutSec
 	}
 	return time.Duration(seconds) * time.Second
 }
 
-// ProbeWorkers 返回并发探测协程数，上限 8（再高对远程源没有收益，只会互相拖慢）。
+// ProbeWorkers 返回批量 worker 数；沿用历史上限截取语义，上限收紧为 2。
 func (c Config) ProbeWorkers() int {
 	workers := c.ProbeConcurrency
 	if workers <= 0 {
 		return defaultProbeConcurrency
 	}
-	if workers > 8 {
-		return 8
+	if workers > defaultProbeConcurrency {
+		return defaultProbeConcurrency
 	}
 	return workers
 }

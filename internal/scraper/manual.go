@@ -24,13 +24,13 @@ type ManualSearch struct {
 
 // Validate checks the explicit search without contacting MetaTube or changing state.
 func (o ManualSearch) Validate() error {
-	_, _, _, err := o.parse()
+	_, _, err := o.parse()
 	return err
 }
 
-func (o ManualSearch) parse() (query, provider, id string, err error) {
-	invalid := func(message string) (string, string, string, error) {
-		return "", "", "", fmt.Errorf("%w: %s", ErrInvalidManualSearch, message)
+func (o ManualSearch) parse() (query string, pid metatube.ProviderID, err error) {
+	invalid := func(message string) (string, metatube.ProviderID, error) {
+		return "", metatube.ProviderID{}, fmt.Errorf("%w: %s", ErrInvalidManualSearch, message)
 	}
 	if o.Query != nil {
 		query = strings.TrimSpace(*o.Query)
@@ -51,51 +51,53 @@ func (o ManualSearch) parse() (query, provider, id string, err error) {
 		selector := strings.TrimSpace(*o.MetaTubeID)
 		if strings.Contains(selector, ":") {
 			var ok bool
-			provider, id, ok = metatube.ParseProviderID(selector)
+			pid, ok = metatube.ParseProviderIDValue(selector)
 			if !ok {
 				return invalid("metatube_id must be a valid Provider:movie-id plugin identity")
 			}
 		} else {
-			provider = selector
+			pid = metatube.ProviderID{Provider: selector}
 		}
-		if provider == "" || strings.ContainsAny(provider, ":/\\?#") || strings.ContainsFunc(provider, func(r rune) bool {
+		if pid.Provider == "" || strings.ContainsAny(pid.Provider, ":/\\?#") || strings.ContainsFunc(pid.Provider, func(r rune) bool {
 			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-')
 		}) {
 			return invalid("metatube_id must be Provider or Provider:movie-id")
 		}
-		if strings.Contains(selector, ":") && (id == "" || id == "." || id == ".." || strings.ContainsAny(id, ":/\\?#") || strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })) {
+		if strings.Contains(selector, ":") && (pid.ID == "" || pid.ID == "." || pid.ID == ".." || strings.ContainsAny(pid.ID, ":/\\?#") || strings.ContainsFunc(pid.ID, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })) {
 			return invalid("metatube_id requires a nonempty movie ID after the colon")
 		}
 	}
-	if query == "" && id == "" {
+	if query == "" && pid.ID == "" {
 		return invalid("q is required unless metatube_id is Provider:movie-id")
 	}
-	return query, provider, id, nil
+	return query, pid, nil
 }
 
 // PreviewManual explicitly searches user input. It never infers a query from the
 // existing movie and never translates, downloads artwork, or writes local state.
 func (s *Scraper) PreviewManual(ctx context.Context, m store.Movie, opts ManualSearch) (PreviewResult, error) {
 	result := PreviewResult{MovieID: m.ID, Recommended: -1}
-	query, provider, id, err := opts.parse()
+	query, pid, err := opts.parse()
 	if err != nil {
 		return result, err
 	}
-	if id != "" {
+	if pid.ID != "" {
 		// A provider's movie ID need not resemble its displayed movie number.
 		// Do not keyword-search it or substitute the existing movie's number.
-		result.Query = providerID(provider, id)
-		info, err := s.client.MovieInfo(ctx, provider, id, true)
+		result.Query = pid.String()
+		info, err := s.client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
 		if metatube.IsNotFound(err) {
 			return result, nil
 		}
 		if err != nil {
 			return result, err
 		}
-		return previewCandidates(result, []metatube.MovieSearchResult{{
+		result = previewCandidates(result, []metatube.MovieSearchResult{{
 			Provider: info.Provider, ID: info.ID, Number: info.Number, Title: info.Title,
 			Score: info.Score, ReleaseDate: info.ReleaseDate,
-		}}), nil
+		}})
+		carryLookupOptions(result.Candidates, pid)
+		return result, nil
 	}
 	result.Query = query
 	// Match against the manual number, never stale metadata from the item being
@@ -103,16 +105,16 @@ func (s *Scraper) PreviewManual(ctx context.Context, m store.Movie, opts ManualS
 	if u, err := url.Parse(query); err != nil || u.Scheme == "" {
 		result.Expected = metatube.Normalize(query)
 	}
-	results, err := s.client.SearchMovies(ctx, query, provider, true)
+	results, err := s.client.SearchMovies(ctx, query, pid.Provider, true)
 	if err != nil {
 		return result, err
 	}
 	// The upstream URL resolver ignores its provider argument. Keep an explicit
 	// restriction strict even for URLs (and never offer cross-provider fallbacks).
-	if provider != "" {
+	if pid.Provider != "" {
 		filtered := results[:0]
 		for _, candidate := range results {
-			if strings.EqualFold(candidate.Provider, provider) {
+			if strings.EqualFold(candidate.Provider, pid.Provider) {
 				filtered = append(filtered, candidate)
 			}
 		}

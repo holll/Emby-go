@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"emby-go/internal/avatar"
 	"emby-go/internal/cache"
@@ -221,5 +222,53 @@ func TestAdminItemDetailNotFound(t *testing.T) {
 	resp, _ := embyCall(t, ts, "GET", "/api/admin/items/999/detail", token, "")
 	if resp.StatusCode != 404 {
 		t.Errorf("不存在的影片应 404，得到 %d", resp.StatusCode)
+	}
+}
+
+// TestAdminItemDetailMetatubeID 覆盖详情里「已保存 MetaTube 身份」的派生字段：
+// saved 原样返回索引值，canonical 只在可复用时给出官方格式（含可选后缀），
+// valid 决定前端能否回填搜索框。
+func TestAdminItemDetailMetatubeID(t *testing.T) {
+	root := t.TempDir()
+	app, libDir := detailTestApp(t, root, "<movie><title>ABF-018</title></movie>\n")
+	if _, err := app.db.AddLibrary("L", libDir); err != nil {
+		t.Fatal(err)
+	}
+	ts, token := detailServer(t, app)
+	scanOnce(t, ts, token)
+
+	movie, err := app.db.Movie(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, raw, canonical string
+		valid                bool
+	}{
+		{"无值", "", "", false},
+		{"官方格式保留后缀", "FANZA:abc%2B00123:0:true", "FANZA:abc%2B00123:0:true", true},
+		{"历史前缀可复用", "metatube:FANZA:abc00123", "FANZA:abc00123", true},
+		{"历史前缀不可复用", "metatube:FANZA:raw%2Bid", "", false},
+		{"非法值", "FANZA:%zz", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			movie.ProviderID = tc.raw
+			if _, err := app.db.UpsertMovie(movie, 0, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			resp, detail := embyCall(t, ts, "GET", "/api/admin/items/1/detail", token, "")
+			if resp.StatusCode != 200 {
+				t.Fatalf("详情接口: %d %v", resp.StatusCode, detail)
+			}
+			got, _ := detail["metatube_id"].(map[string]any)
+			if got["saved"] != tc.raw || got["canonical"] != tc.canonical || got["valid"] != tc.valid {
+				t.Fatalf("metatube_id = %v，期望 saved=%q canonical=%q valid=%v",
+					got, tc.raw, tc.canonical, tc.valid)
+			}
+			// 既有字段语义不变：movie.provider_id 仍是原始存储值。
+			if stored, _ := detail["movie"].(map[string]any); stored["provider_id"] != tc.raw {
+				t.Fatalf("movie.provider_id = %v，期望原样返回 %q", stored["provider_id"], tc.raw)
+			}
+		})
 	}
 }

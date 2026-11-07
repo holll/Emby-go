@@ -36,7 +36,7 @@ async function fixture(t) {
       __calls.push({url, method:options.method || 'GET', body:options.body, resolve, reject});
     });
     ${scrapeCode}
-    window.__open = () => { void openScrapePreview({id:7}); };
+    window.__open = () => { void openScrapePreview({id:7}, {saved:'', canonical:'', valid:false}); };
     window.__settle = (index, data, error) => {
       if (error) __calls[index].reject(Error(error)); else __calls[index].resolve(data);
     };

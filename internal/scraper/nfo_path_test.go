@@ -43,7 +43,7 @@ func TestWriteStackedNFOAndRescan(t *testing.T) {
 	if movie.NFOPath != "" || len(movie.AdditionalParts) != 1 {
 		t.Fatalf("fixture=%+v", movie)
 	}
-	if err := writeNFO(movie, nfo.ScrapeFields{Title: "Shared title", Number: "GOPJ-559"}); err != nil {
+	if _, err := writeNFO(movie, nfo.ScrapeFields{Title: "Shared title", Number: "GOPJ-559"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	shared := filepath.Join(dir, "GOPJ-559.nfo")
@@ -73,7 +73,7 @@ func TestWriteNFOKeepsRegisteredPath(t *testing.T) {
 	}
 	movie := store.Movie{SourcePath: filepath.Join(dir, "GOPJ-559-CD1.strm"), NFOPath: legacy,
 		AdditionalParts: []string{filepath.Join(dir, "GOPJ-559-CD2.strm")}}
-	if err := writeNFO(movie, nfo.ScrapeFields{Title: "Updated", Overwrite: true}); err != nil {
+	if _, err := writeNFO(movie, nfo.ScrapeFields{Title: "Updated", Overwrite: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(legacy)

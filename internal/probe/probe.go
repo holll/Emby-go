@@ -5,7 +5,6 @@
 package probe
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -182,40 +181,32 @@ type Result struct {
 func Verify(ctx context.Context, ffprobePath string) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, ffprobePath, "-version")
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = err.Error()
-		}
-		return fmt.Errorf("ffprobe 无法执行（%s）: %s", ffprobePath, firstLine(message))
+	stdout, stderr, err := execute(ctx, ffprobePath, "-version")
+	if err != nil {
+		return fmt.Errorf("ffprobe 无法执行（%s）: %w: %s", ffprobePath, err, firstLine(strings.TrimSpace(string(stderr))))
 	}
-	if !strings.Contains(stdout.String(), "ffprobe version") {
-		return fmt.Errorf("ffprobe 输出异常（%s）: %s", ffprobePath, firstLine(strings.TrimSpace(stdout.String())))
+	if !strings.Contains(string(stdout), "ffprobe version") {
+		return fmt.Errorf("ffprobe 输出异常（%s）: %s", ffprobePath, firstLine(strings.TrimSpace(string(stdout))))
 	}
 	return nil
 }
 
-// Run 探测 target（本地路径或 http(s) 直链）。timeout<=0 时用 90 秒兜底。
+// Run 探测 target（本地路径或 http(s) 直链）。timeout<=0 或超过60秒时用60秒。
+// 预算包含等待进程名额；继承管道收尾最多额外等待1秒，不计入执行预算。
 // 失败时返回的 error 带 ffprobe 的 stderr 摘要，便于在管理端定位（如链接失效返回 5XX）。
 func Run(ctx context.Context, ffprobePath, target string, timeout time.Duration) (Result, error) {
-	if timeout <= 0 {
-		timeout = 90 * time.Second
+	if timeout <= 0 || timeout > MaxTimeout {
+		timeout = MaxTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, ffprobePath,
+	stdout, stderr, err := execute(ctx, ffprobePath,
 		"-v", "error",
 		"-print_format", "json",
 		"-show_format", "-show_streams",
 		target,
 	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
 	// 先看 ctx 再看退出码：ctx 结束会杀掉 ffprobe，err 只剩「退出码 -1（无错误输出）」
 	// 这类残影。若直接当 ffprobe 故障上报，「调用方取消」就会被记成该条源探测失败：
 	// 批量探测里每条都在跑的 ffprobe 都会被取消，取消 100 条等于 100 次失败，
@@ -223,28 +214,31 @@ func Run(ctx context.Context, ffprobePath, target string, timeout time.Duration)
 	// 所以 ctx 的两种结束都原样返回（包装后调用方可 errors.Is 判定）。
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return Result{}, fmt.Errorf("探测超时（%s）", timeout)
+			return Result{}, fmt.Errorf("探测超时（%s）: %w", timeout, ctxErr)
 		}
 		return Result{}, fmt.Errorf("探测被取消: %w", ctxErr)
 	}
 	if err != nil {
+		if errors.Is(err, ErrStdoutTooLarge) || errors.Is(err, ErrStderrTooLarge) || errors.Is(err, exec.ErrWaitDelay) {
+			return Result{}, err
+		}
 		// 区分「ffprobe 根本没跑起来」与「跑起来了但报错」：两者的排查方向完全不同
 		// （前者是环境问题、需整体中止；后者是本条源的问题、跳过继续即可）。
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
 			return Result{}, fmt.Errorf("ffprobe 无法启动（%s）: %s", ffprobePath, firstLine(err.Error()))
 		}
-		message := strings.TrimSpace(stderr.String())
+		message := strings.TrimSpace(string(stderr))
 		if message == "" {
 			message = fmt.Sprintf("ffprobe 退出码 %d（无错误输出）", exitErr.ExitCode())
 		}
 		return Result{}, errors.New(firstLine(message))
 	}
-	info, err := Parse(stdout.Bytes())
+	info, err := Parse(stdout)
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Info: info, Raw: stdout.Bytes()}, nil
+	return Result{Info: info, Raw: stdout}, nil
 }
 
 // Parse 解析 ffprobe -print_format json 的输出。

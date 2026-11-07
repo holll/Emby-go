@@ -45,7 +45,7 @@ test('latest search wins and closed sessions ignore responses', async () => {
   assert.equal(env.state.inspectSeq, 6, 'search invalidates previous detail requests');
   pending[1]({ candidates: [{ provider: 'p', id: 'new' }], recommended: 0 }); await second;
   pending[0]({ candidates: [{ provider: 'p', id: 'old' }], recommended: 0 }); await first;
-  assert.deepEqual(env.inspected, [['p', 'new']]);
+  assert.deepEqual(env.inspected, [['p', 'new', undefined, undefined]]);
   const closing = env.box.searchScrapePreview(env.state);
   env.box.scrapeState = null; env.body.innerHTML = 'closed';
   pending[2]({ candidates: [{ provider: 'p', id: 'closed' }] }); await closing;

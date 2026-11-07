@@ -856,9 +856,112 @@ function renderEditRecovery(panel, id, result, onRecovered, isCurrent) {
   });
 }
 
+/* ------------------------------------------------------ 本地字幕标记整理 */
+function bindSubtitleMarks(panel, toggle, movieId, isCurrent) {
+  let preview = null, overwrite = false, busy = false, finished = false;
+  const imageNote = '未重下载海报，旧图角标可能未同步';
+  const close = () => {
+    panel.hidden = true;
+    toggle.disabled = false;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.focus();
+  };
+  const render = (message = '') => {
+    panel.setAttribute('aria-labelledby', 'subtitle-marks-title');
+    panel.innerHTML = `<h3 id="subtitle-marks-title">本地字幕标记整理</h3>
+      <p class="hint">仅整理当前主片的版本标签与程序归属，不抓取资料、不重下载图片，不需要 MetaTube 配置。</p>
+      <label class="check"><input id="subtitle-marks-overwrite" type="checkbox"${overwrite ? ' checked' : ''}${busy ? ' disabled' : ''}> 覆盖已有程序标记（仍保留人工标签与字段锁）</label>
+      <p class="hint">默认只补缺失；更改模式后必须重新预览。</p>
+      <div id="subtitle-marks-preview" aria-live="polite">${message ? `<p role="${busy ? 'status' : 'alert'}">${esc(message)}</p>` : ''}
+      ${preview ? `<dl class="detail-meta">
+        ${detailMetaRow('影片', preview.title)}${detailMetaRow('媒体库', preview.library_name)}${detailMetaRow('当前主片', preview.main_file)}
+        ${detailMetaRow('当前标签', preview.before.length ? preview.before : ['无'])}
+        ${detailMetaRow('当前程序归属', preview.previous_owned.length ? preview.previous_owned : ['无（不追认人工同名标签）'])}
+        ${detailMetaRow('拟提交归属', preview.owned.length ? preview.owned : ['无'])}
+        ${detailMetaRow('拟新标签', preview.after.length ? preview.after : ['无'])}
+        ${detailMetaRow('推断标记', preview.evidence.tag || '无')}${detailMetaRow('证据代码', preview.evidence.code)}
+        ${detailMetaRow('推断来源', preview.evidence.source)}${detailMetaRow('匹配文件', preview.evidence.matches.length ? preview.evidence.matches : ['无'])}
+      </dl><p>${preview.protected ? '受保护：字段锁或只补缺失规则使现有标签保持不变；覆盖模式也不会解除字段锁。' : preview.changed ? '将按以上预览整理标签，仅撤销程序拥有的旧标记。' : '无变化：当前标签无需整理。'}</p>` : ''}</div>
+      <p class="hint">${esc(preview?.image_note || imageNote)}</p>
+      <div class="detail-actions"><button id="subtitle-marks-preview-button" type="button" class="btn"${busy ? ' disabled' : ''}>重新预览</button>
+      ${preview ? `<button id="subtitle-marks-confirm" type="button" class="btn btn-accent"${busy ? ' disabled' : ''}>确认整理${overwrite ? '（覆盖程序标记）' : '（只补缺失）'}</button>` : ''}
+      <button id="subtitle-marks-close" type="button" class="btn"${busy ? ' disabled' : ''}>关闭</button></div>`;
+    panel.setAttribute('aria-busy', String(busy));
+    panel.querySelector('#subtitle-marks-overwrite').addEventListener('change', event => {
+      if (busy || finished || !isCurrent()) return;
+      overwrite = event.target.checked;
+      void loadPreview();
+    });
+    panel.querySelector('#subtitle-marks-preview-button').addEventListener('click', loadPreview);
+    panel.querySelector('#subtitle-marks-close').addEventListener('click', close);
+    panel.querySelector('#subtitle-marks-confirm')?.addEventListener('click', confirm);
+  };
+  const loadPreview = async () => {
+    if (busy || finished || !isCurrent()) return;
+    preview = null;
+    busy = true;
+    render('正在只读预览本地文件…');
+    let message = '';
+    try {
+      const result = await api(`/items/${movieId}/subtitle-marks/preview`, { method: 'POST', body: JSON.stringify({ overwrite }) });
+      if (!isCurrent()) return;
+      preview = result;
+    } catch (error) {
+      if (!isCurrent()) return;
+      message = error.message;
+    }
+    busy = false;
+    render(message);
+    panel.querySelector(preview ? '#subtitle-marks-confirm' : '#subtitle-marks-preview-button').focus();
+  };
+  const confirm = async () => {
+    if (busy || finished || !preview || !isCurrent()) return;
+    const body = { overwrite, version: preview.version };
+    busy = true;
+    render('正在确认整理；关闭详情不会取消服务端写入。');
+    try {
+      const result = await api(`/items/${movieId}/subtitle-marks`, { method: 'POST', body: JSON.stringify(body) });
+      if (!isCurrent()) return;
+      finished = true;
+      busy = false;
+      preview = null;
+      panel.setAttribute('aria-busy', 'false');
+      panel.setAttribute('aria-labelledby', 'subtitle-marks-result-title');
+      panel.innerHTML = `<section class="panel" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="subtitle-marks-result-title">
+        <h3 id="subtitle-marks-result-title">${result.status === 'partial_success' ? '整理有事项需核对' : result.status === 'unchanged' ? '无变化' : '字幕标记整理完成'}</h3>
+        <p>${result.saved ? 'NFO 已保存。' : '本次未保存新的 NFO。'}不会自动重试写入。</p>
+        <dl class="detail-meta">${detailMetaRow('标签保存', result.saved ? '已保存' : '未保存新内容')}${detailMetaRow('程序归属', result.ownership_saved ? '已保存' : '未保存')}${detailMetaRow('单片索引', result.indexed ? '已更新' : '未更新')}</dl>
+        ${!result.ownership_saved || result.auto_marks_error ? `<h4>标记归属需人工核对</h4><p>请人工核对标签与归属记录，不要直接重新整理。重扫不能恢复归属记录。</p><p class="hint">${esc(result.auto_marks_error || '程序归属未保存')}</p>` : ''}
+        ${!result.indexed || result.refresh_error ? `<h4>索引需重扫</h4><p>请核对后在媒体库中手动重扫；这不会恢复程序归属。</p><p class="hint">${esc(result.refresh_error || '单片索引未更新')}</p>` : ''}
+        ${result.canceled ? '<p>请求已中止，请以上述真实保存范围为准。</p>' : ''}
+        ${result.warnings.length ? `<h4>整理警告</h4><ul>${result.warnings.map(warning => `<li>${esc(warning)}</li>`).join('')}</ul>` : ''}
+        <p class="hint">${esc(imageNote)}</p><button id="subtitle-marks-done" type="button" class="btn btn-accent">完成</button></section>`;
+      panel.querySelector('#subtitle-marks-done').addEventListener('click', close);
+      panel.querySelector('#subtitle-marks-done').focus();
+    } catch (error) {
+      if (!isCurrent()) return;
+      preview = null; // A failed response is not evidence of zero writes; never replay this version.
+      busy = false;
+      render(error.status === 409
+        ? `预览已失效，请重新预览并再次明确确认。${error.message}`
+        : `${!error.status || error.status >= 500 ? '结果未知，先核对再重试。' : '确认未完成，请先核对保存状态，再重新预览。'}不能据 HTTP 失败判断零写入。${error.message}`);
+      panel.querySelector('#subtitle-marks-preview-button').focus();
+    }
+  };
+  toggle.addEventListener('click', () => {
+    if (toggle.disabled || !isCurrent()) return;
+    toggle.disabled = true;
+    toggle.setAttribute('aria-expanded', 'true');
+    panel.hidden = false;
+    finished = false;
+    overwrite = false;
+    void loadPreview();
+  });
+}
+
 /* 遮罩焦点：z-index 顺序与 Esc/Tab 行为一致（FE-04）。 */
 const overlayFocusStack = [];
-const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay'];
+const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay', '#update-overlay'];
 let overlayBackground = null;
 function syncOverlayIsolation() {
   const top = topOverlaySelector();
@@ -893,6 +996,7 @@ function topOverlaySelector() {
 
 // 路由切换时按层级从上到下收起浮层，避免播放器/详情跨页残留。
 function closeOverlaysForNavigation() {
+  if (overlayVisible('#update-overlay')) closeUpdateDialog();
   if (overlayVisible('#scrape-overlay')) closeScrapePreview();
   if (overlayVisible('#player-overlay')) closePlayer();
   if (overlayVisible('#detail-overlay')) closeDetail();
@@ -1017,6 +1121,9 @@ async function openDetail(item) {
   const actors = data.actors || [];
   const lockedFields = data.locked_fields || [];
   const lockedNames = new Set(lockedFields.map(name => name.toLowerCase()));
+  const metaTubeId = data.metatube_id;
+  // 展示与复制都用官方格式：历史 metatube: 前缀去掉，后缀不丢；无法解析时原样作文本。
+  const metaTubeIDText = metaTubeId.valid ? metaTubeId.canonical : metaTubeId.saved;
 
   document.querySelector('#detail-content').innerHTML = `
     <div class="detail-hero">
@@ -1042,7 +1149,9 @@ async function openDetail(item) {
         <button id="detail-scrape" class="btn">${icon('search')}<span>刮削</span></button>
         <button id="detail-reread" class="btn">${icon('refresh')}<span>重读源</span></button>
         <button id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit">${icon('edit')}<span>编辑元数据</span></button>
+        ${typeof me !== 'undefined' && me?.is_admin ? `<button id="detail-subtitle-marks-toggle" type="button" class="btn" aria-expanded="false" aria-controls="detail-subtitle-marks">${icon('edit')}<span>字幕标记整理</span></button>` : ''}
       </div>
+      ${typeof me !== 'undefined' && me?.is_admin ? '<section id="detail-subtitle-marks" class="detail-section subtitle-marks" aria-labelledby="subtitle-marks-title" hidden></section>' : ''}
 
       ${typeof me !== 'undefined' && me?.is_admin ? '<div id="detail-artwork"></div><div id="detail-sprites"></div>' : ''}
       ${typeof me !== 'undefined' && me?.is_admin ? `<section class="detail-section"><h3>仅翻译</h3>${translationWidget('detail-translate')}</section>` : ''}
@@ -1093,6 +1202,9 @@ async function openDetail(item) {
           ${detailMetaRow('合集', m.collection, 'collection')}
           ${detailMetaRow('媒体库', data.library_name)}
           ${detailMetaRow('来源', m.source_protocol ? String(m.source_protocol).toUpperCase() : '')}
+          <div class="detail-meta-row"><dt>MetaTube ID</dt><dd>${metaTubeIDText
+            ? `<code>${esc(metaTubeIDText)}</code> <button id="detail-metatube-copy" type="button" class="btn btn-sm">复制</button>${metaTubeId.valid ? '' : ' <span class="hint">已存值无法解析，不能精准复用；可在刮削弹窗手动填写</span>'}`
+            : '<span class="hint">未设置</span>'}</dd></div>
         </dl>
       </section>
 
@@ -1188,7 +1300,15 @@ async function openDetail(item) {
       });
   }
   // 单条刮削走「预览 → 人工确认」，取消则零写入零请求（需求 5j）。
-  document.querySelector('#detail-scrape').addEventListener('click', () => openScrapePreview(item));
+  const copyMetaTube = document.querySelector('#detail-metatube-copy');
+  if (copyMetaTube) copyMetaTube.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(metaTubeIDText); toast('MetaTube ID 已复制', 'ok'); }
+    catch { toast('复制失败，请手动选择', 'error'); }
+  });
+  if (typeof me !== 'undefined' && me?.is_admin) {
+    bindSubtitleMarks(document.querySelector('#detail-subtitle-marks'), document.querySelector('#detail-subtitle-marks-toggle'), m.id, isCurrent);
+  }
+  document.querySelector('#detail-scrape').addEventListener('click', () => openScrapePreview(m, metaTubeId));
   document.querySelector('#detail-reread').addEventListener('click', async () => {
     try {
       const r = await api(`/items/${m.id}/reread`, { method: 'POST' });
@@ -2050,18 +2170,27 @@ function closeScrapePreview() {
 }
 
 // openScrapePreview 打开单条刮削预览：先取候选，再自动 inspect 推荐项。
-async function openScrapePreview(item) {
+// metatubeId 是详情里已保存的标记（{saved, canonical, valid}），只用于展示与回填草稿，
+// 不参与自动搜索：首次预览仍由服务端按影片信息精准复用。
+async function openScrapePreview(item, metatubeId) {
+  const savedText = metatubeId.valid ? metatubeId.canonical : metatubeId.saved;
   const overlay = document.querySelector('#scrape-overlay');
   const body = document.querySelector('#scrape-body');
   overlay.hidden = false;
   overlayPush('#scrape-overlay');
   body.innerHTML = `
     <form id="scrape-manual-search" class="panel">
+      <div class="scrape-saved">
+        <span>已保存 MetaTube ID</span>
+        ${savedText
+          ? `<code>${esc(savedText)}</code>${metatubeId.valid ? '' : '<span class="hint">格式无法解析，不能精准复用，也未回填</span>'}`
+          : '<span class="hint">未设置</span>'}
+      </div>
       <div class="field-grid">
         <label>标题 / 番号 / URL<input id="scrape-query" type="text" placeholder="输入番号或影片源链接" aria-describedby="scrape-search-help"></label>
-        <label>MetaTubeId<input id="scrape-metatube-id" type="text" placeholder="源名称 或 Provider1:movie-id" aria-describedby="scrape-search-help" autocapitalize="off" spellcheck="false"></label>
+        <label>MetaTubeId<input id="scrape-metatube-id" type="text" placeholder="源名称 或 Provider1:movie-id" value="${metatubeId.valid ? esc(metatubeId.canonical) : ''}" aria-describedby="scrape-search-help" autocapitalize="off" spellcheck="false"></label>
       </div>
-      <p id="scrape-search-help" class="hint">番号可直接搜索；指定源时在 MetaTubeId 填源名称。精准识别填 源:ID（ID 是源网页中的固定 ID，不是番号）；源链接直接填左侧。搜索仅预览，不会写入文件。</p>
+      <p id="scrape-search-help" class="hint">番号可直接搜索；指定源时在 MetaTubeId 填源名称。精准识别填 源:ID（ID 是源网页中的固定 ID，不是番号）；源链接直接填左侧。两个输入框都是本次搜索草稿，与上方已保存值互不影响；搜索仅预览，不会写入文件。</p>
       <button type="submit" class="btn btn-accent">手动搜索</button>
       <button id="scrape-auto-search" type="button" class="btn">按影片信息搜索</button>
     </form>
@@ -2080,13 +2209,16 @@ async function openScrapePreview(item) {
 }
 
 async function searchScrapePreview(state, manual = null) {
-  if (scrapeState !== state) return;
+  if (scrapeState !== state || state.busy) return;
+  state.selectedStills = [];
   const seq = ++state.searchSeq;
   ++state.inspectSeq; // 新搜索使旧候选的在途详情失效，避免写入错误的选择。
   state.preview = null;
   state.inspect = null;
   state.provider = '';
   state.id = '';
+  state.update = undefined;
+  state.position = undefined;
   const body = document.querySelector('#scrape-results');
   body.innerHTML = '<p class="hint" role="status">正在搜索候选…</p>';
   try {
@@ -2102,16 +2234,16 @@ async function searchScrapePreview(state, manual = null) {
       return;
     }
     const pick = preview.candidates[preview.recommended >= 0 ? preview.recommended : 0];
-    await loadScrapeInspect(pick.provider, pick.id);
+    await loadScrapeInspect(pick.provider, pick.id, pick.update, pick.position);
   } catch (e) {
     if (scrapeState !== state || seq !== state.searchSeq) return;
     body.innerHTML = `<p class="hint" role="alert" style="color:var(--danger)">${esc(e.message)}</p>`;
   }
 }
 
-async function loadScrapeInspect(provider, id) {
+async function loadScrapeInspect(provider, id, update, position) {
   const state = scrapeState;
-  if (!state) return; // 浮层已关闭，不必也无法渲染
+  if (!state || state.busy) return; // 浮层关闭或正在确认时不换候选
   // 同一会话内每次点击取号；只有最后一次点击的回包可以写状态与重绘。
   // 慢候选先发出、后返回时不得覆盖用户已经选中的新候选。
   const seq = ++state.inspectSeq;
@@ -2120,7 +2252,7 @@ async function loadScrapeInspect(provider, id) {
   let inspect;
   try {
     inspect = await api(`/items/${state.movieId}/scrape/inspect`, {
-      method: 'POST', body: JSON.stringify({ provider, id })
+      method: 'POST', body: JSON.stringify({ provider, id, update, position })
     });
   } catch (error) {
     if (scrapeState !== state || seq !== state.inspectSeq) return;
@@ -2128,14 +2260,33 @@ async function loadScrapeInspect(provider, id) {
     if (state.inspect) renderScrapePreview();
     else body.innerHTML = '';
     body.insertAdjacentHTML('afterbegin', `<div role="alert"><p class="hint">读取详情失败：${esc(error.message)}</p><button id="scrape-inspect-retry" type="button" class="btn btn-sm">重试读取详情</button></div>`);
-    body.querySelector('#scrape-inspect-retry').addEventListener('click', () => { void loadScrapeInspect(provider, id); });
+    body.querySelector('#scrape-inspect-retry').addEventListener('click', () => { void loadScrapeInspect(provider, id, update, position); });
     return;
   }
   if (scrapeState !== state || seq !== state.inspectSeq) return; // 已关闭、已换片或已被更新的点击取代
+  state.selectedStills = [];
   state.inspect = inspect;
   state.provider = provider;
   state.id = id;
+  state.update = update;
+  state.position = position;
   renderScrapePreview();
+}
+
+// 确认写入期间锁定当前会话的输入；关闭入口仍可用，不意味着取消服务端写入。
+function setScrapeBusy(state, busy) {
+  state.busy = busy;
+  if (busy) {
+    state.disabledControls = [...document.querySelector('#scrape-body').querySelectorAll('input, button')]
+      .filter(control => control.id !== 'scrape-cancel-btn').map(control => [control, control.disabled]);
+    state.disabledControls.forEach(([control]) => { control.disabled = true; });
+  } else {
+    state.disabledControls.forEach(([control, disabled]) => { control.disabled = disabled; });
+    state.disabledControls = null;
+  }
+  const confirm = document.querySelector('#scrape-results').querySelector('#scrape-confirm');
+  confirm.disabled = busy;
+  confirm.textContent = busy ? '正在写入…' : '确认写入';
 }
 
 function renderScrapePreview() {
@@ -2146,6 +2297,9 @@ function renderScrapePreview() {
   if (!state || !state.preview || !state.inspect) return;
   const preview = state.preview;
   const inspect = state.inspect;
+  const selected = state.selectedStills ||= [];
+  const version = new URLSearchParams((inspect.stills?.[0]?.preview || '').split('?')[1] || '').get('version');
+  const selectable = /^[a-f0-9]{64}$/.test(version || '');
 
   const candidates = preview.candidates.map((item, index) => `
     <button class="scrape-candidate ${item.provider === state.provider && item.id === state.id ? 'is-active' : ''}"
@@ -2168,6 +2322,13 @@ function renderScrapePreview() {
       ${image.preview ? `<img src="${esc(image.preview)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}
       <span>${esc(image.name)}${image.exists ? '（已存在，只补缺失时不覆盖）' : ''}</span>
     </div>`).join('');
+
+  const stills = (inspect.stills || []).map(still => `
+    <label class="scrape-still" for="scrape-still-${esc(still.index)}">
+      <img src="${esc(still.preview)}" alt="" loading="lazy">
+      <span class="scrape-still-caption"><input id="scrape-still-${esc(still.index)}" class="scrape-still-check" type="checkbox" data-index="${esc(still.index)}"${selected.includes(still.index) ? ' checked' : ''}${selectable ? '' : ' disabled'} aria-describedby="scrape-stills-help">
+        <span>剧照 #${esc(still.index)} <strong id="scrape-still-order-${esc(still.index)}">${selected.includes(still.index) ? `→ fanart${selected.indexOf(still.index) + 1}.jpg` : '未选择'}</strong></span></span>
+    </label>`).join('');
 
   body.innerHTML = `
     <div class="scrape-cols">
@@ -2192,6 +2353,12 @@ function renderScrapePreview() {
           <h3 class="scrape-h3">图片</h3>
           <div class="scrape-images">${images}</div>
         </div>
+        <div>
+          <div class="scrape-stills-toolbar"><h3 class="scrape-h3">剧照选择</h3><span id="scrape-stills-count" role="status" aria-live="polite">已选 ${selected.length} 张</span><button id="scrape-stills-clear" type="button" class="btn btn-sm"${selected.length ? '' : ' disabled'}>清空选择</button><button id="scrape-inspect-reload" type="button" class="btn btn-sm">重新读取详情</button></div>
+          <p id="scrape-stills-help" class="hint" style="margin:0 0 8px">预览与勾选不写文件，确认写入后才保存。按勾选先后写入 extrafanart/fanart1.jpg…；取消后顺序压紧，重新勾选排到末尾。默认不选，不写额外剧照。只补缺失跳过已有目标，强制覆盖可替换；不会删除未涉及的旧尾图。实际下载遵循刮削图片下载设置。</p>
+          ${stills && !selectable ? '<p class="hint" role="alert">剧照版本不可用，请重新读取详情后选择。</p>' : ''}
+          ${stills ? `<div class="scrape-stills">${stills}</div>` : '<p class="hint" style="margin:0">上游没有剧照</p>'}
+        </div>
       </div>
     </div>
     <div class="scrape-foot">
@@ -2200,26 +2367,91 @@ function renderScrapePreview() {
       <button id="scrape-confirm" class="btn btn-accent">确认写入</button>
     </div>`;
 
+  const updateSelection = () => {
+    body.querySelector('#scrape-stills-count').textContent = `已选 ${selected.length} 张`;
+    body.querySelector('#scrape-stills-clear').disabled = !selected.length;
+    body.querySelectorAll('.scrape-still-check').forEach(input => {
+      const index = Number(input.dataset.index), order = selected.indexOf(index);
+      input.checked = order >= 0;
+      body.querySelector(`#scrape-still-order-${index}`).textContent = order >= 0 ? `→ fanart${order + 1}.jpg` : '未选择';
+    });
+  };
+  body.querySelectorAll('.scrape-still-check').forEach(input => input.addEventListener('change', () => {
+    if (scrapeState !== state || state.inspect !== inspect || state.busy || !selectable) return;
+    const index = Number(input.dataset.index), previous = selected.indexOf(index);
+    if (previous >= 0) selected.splice(previous, 1);
+    if (input.checked) selected.push(index);
+    updateSelection();
+  }));
+  body.querySelector('#scrape-stills-clear').addEventListener('click', () => {
+    if (scrapeState !== state || state.inspect !== inspect || state.busy) return;
+    selected.length = 0;
+    updateSelection();
+  });
+  body.querySelector('#scrape-inspect-reload').addEventListener('click', () => {
+    if (scrapeState !== state || state.inspect !== inspect || state.busy) return;
+    void loadScrapeInspect(state.provider, state.id, state.update, state.position);
+  });
   body.querySelectorAll('.scrape-candidate').forEach(button => button.addEventListener('click', async () => {
+    if (scrapeState !== state || state.inspect !== inspect || state.busy) return;
     const pick = preview.candidates[Number(button.dataset.idx)];
-    try { await loadScrapeInspect(pick.provider, pick.id); }
+    try { await loadScrapeInspect(pick.provider, pick.id, pick.update, pick.position); }
     catch (e) { toast(e.message, 'error'); }
   }));
   body.querySelector('#scrape-cancel-btn').addEventListener('click', closeScrapePreview);
   body.querySelector('#scrape-confirm').addEventListener('click', async () => {
     const confirmBtn = body.querySelector('#scrape-confirm');
-    confirmBtn.disabled = true;
+    if (gen !== pageGen || scrapeState !== state || state.inspect !== inspect || state.busy || confirmBtn.disabled) return;
+    setScrapeBusy(state, true);
     try {
       const result = await api(`/items/${state.movieId}/scrape`, {
         method: 'POST',
-        body: JSON.stringify({ provider: state.provider, id: state.id, overwrite: body.querySelector('#scrape-force').checked })
+        body: JSON.stringify({ provider: state.provider, id: state.id, overwrite: body.querySelector('#scrape-force').checked, update: state.update, position: state.position,
+          ...(selected.length ? { stills: { version, indices: [...selected] } } : {}) })
       });
-      toast(`已写入「${result.title}」（图片 ${result.images} 张）`);
       if (gen !== pageGen || scrapeState !== state) return;
-      closeScrapePreview();
-      if (detailSession === detailGen) closeDetail();
+      if (result.auto_marks_error || result.refresh_error || result.warnings?.length) {
+        // 已提交的结果替换整个搜索/确认区，不能通过旧操作再次写入。
+        ++state.searchSeq;
+        ++state.inspectSeq;
+        state.preview = null;
+        state.inspect = null;
+        const resultBody = document.querySelector('#scrape-body');
+        resultBody.innerHTML = `
+          <section class="panel" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="scrape-result-title">
+            <h3 id="scrape-result-title">NFO 已保存，仍有事项需处理</h3>
+            <p>已写入「${esc(result.title)}」（图片 ${esc(result.images)} 张）。不会自动重试写入。</p>
+            ${result.auto_marks_error ? `<h4>标记归属需人工核对</h4><p>NFO 文件已保存，但自动标记归属未记录；请人工核对标签与归属记录，不要直接重新刮削。重扫不能恢复归属记录。</p><p class="hint">${esc(result.auto_marks_error)}</p>` : ''}
+            ${result.refresh_error ? `<h4>索引需重扫</h4><p>NFO 文件已保存，但索引刷新失败；请在媒体库中手动重扫以更新索引，不必再次确认刮削。</p><p class="hint">${esc(result.refresh_error)}</p>` : ''}
+            ${result.warnings?.length ? `<h4>图片警告</h4><ul>${result.warnings.map(warning => `<li>${esc(warning)}</li>`).join('')}</ul>` : ''}
+          </section>
+          <div class="scrape-foot"><button id="scrape-done" type="button" class="btn btn-accent">完成</button></div>`;
+        const done = resultBody.querySelector('#scrape-done');
+        done.addEventListener('click', closeScrapePreview);
+        if (detailSession === detailGen) closeDetail();
+        done.focus();
+      } else {
+        toast(`已写入「${result.title}」（图片 ${result.images} 张）`);
+        closeScrapePreview();
+        if (detailSession === detailGen) closeDetail();
+      }
       refreshPage(pageItems, gen);
-    } catch (e) { toast(e.message, 'error'); confirmBtn.disabled = false; }
+    } catch (e) {
+      if (gen !== pageGen || scrapeState !== state) return;
+      setScrapeBusy(state, false);
+      toast(e.message, 'error');
+      if (e.status === 409) {
+        // 409 也可能是 NFO 写入门繁忙；没有专用 code，不能断言列表已变化。
+        if (!body.querySelector('#scrape-conflict')) {
+          body.insertAdjacentHTML('afterbegin', '<div id="scrape-conflict" role="alert"><p class="hint">确认未完成，未自动重试。若需核对剧照版本，请重新读取详情、重新选择后再确认；其他任务繁忙时请稍后操作。</p><button id="scrape-conflict-reload" type="button" class="btn">重新读取详情</button></div>');
+          body.querySelector('#scrape-conflict-reload').addEventListener('click', () => {
+            if (scrapeState !== state || state.inspect !== inspect || state.busy) return;
+            void loadScrapeInspect(state.provider, state.id, state.update, state.position);
+          });
+        }
+        body.querySelector('#scrape-conflict-reload').focus();
+      }
+    }
   });
 }
 
@@ -3530,6 +3762,201 @@ function identityStorageChanged(event) {
   }
 }
 
+/* —— U-01 自升级：左下角版本号、更新弹窗，以及「下载 → 校验 → 替换 → 重启」进度 ——
+   仅管理员可操作。页面打开时静默检查一次（走后端 10 分钟缓存），有新版本就在
+   左下角版本号旁显示徽标；管理员点击版本号才打开弹窗。升级流程不允许指定版本或
+   下载源：POST 的 version 必须是刚检查到的那一个，由后端重新核对。 */
+const updateOverlay = document.querySelector('#update-overlay');
+const updateVersionBtn = document.querySelector('#version-btn');
+const updateVersionText = document.querySelector('#version-text');
+const updateBadge = document.querySelector('#version-badge');
+const updateCache = { version: '', current: '', notes: '' };
+let updateBusy = false;
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function setUpdateBadge(version) {
+  if (!updateBadge) return;
+  updateBadge.hidden = !version;
+  updateBadge.title = version ? '有新版本 ' + version : '';
+}
+
+function showUpdateStatus(text, kind) {
+  const status = document.querySelector('#update-status');
+  if (!status) return;
+  status.hidden = !text;
+  status.textContent = text || '';
+  status.classList.toggle('is-error', kind === 'error');
+  status.classList.toggle('is-ok', kind === 'ok');
+}
+
+function renderUpdate(result) {
+  document.querySelector('#update-current').textContent = result.current || '未知';
+  document.querySelector('#update-latest').textContent = result.latest || '未知';
+  document.querySelector('#update-summary').textContent = result.available
+    ? `发现新版本 ${result.latest}，可以升级。`
+    : '当前已是最新版本。';
+  const notes = document.querySelector('#update-notes');
+  notes.hidden = !result.notes;
+  notes.textContent = result.notes || '';
+  const apply = document.querySelector('#update-apply');
+  apply.hidden = !result.available;
+  apply.disabled = updateBusy;
+  apply.textContent = '立即升级';
+  document.querySelector('#update-check').disabled = updateBusy;
+  document.querySelector('#update-reload').hidden = true;
+}
+
+async function refreshUpdate(force) {
+  const summary = document.querySelector('#update-summary');
+  if (summary && !updateCache.version) summary.textContent = '正在检查更新…';
+  try {
+    const result = await api(force ? '/update/check' : '/update', force ? { method: 'POST' } : {});
+    updateCache.current = result.current || '';
+    updateCache.version = result.available ? (result.latest || '') : '';
+    updateCache.notes = result.notes || '';
+    setUpdateBadge(updateCache.version);
+    if (updateOverlay && !updateOverlay.hidden) renderUpdate(result);
+    return result;
+  } catch (error) {
+    if (updateOverlay && !updateOverlay.hidden) {
+      showUpdateStatus('检查更新失败：' + (error.message || '网络错误'), 'error');
+      if (summary) summary.textContent = '暂时无法检查更新。';
+      const apply = document.querySelector('#update-apply');
+      if (apply) apply.hidden = true;
+    }
+    return null;
+  }
+}
+
+async function openUpdateDialog() {
+  if (!updateOverlay || !updateOverlay.hidden) return;
+  updateOverlay.hidden = false;
+  overlayPush('#update-overlay');
+  showUpdateStatus('');
+  const apply = document.querySelector('#update-apply');
+  apply.hidden = true;
+  if (updateCache.version) {
+    renderUpdate({ current: updateCache.current, latest: updateCache.version, available: true, notes: updateCache.notes });
+  } else {
+    document.querySelector('#update-summary').textContent = '正在检查更新…';
+  }
+  await refreshUpdate(false);
+}
+
+function closeUpdateDialog() {
+  if (!updateOverlay || updateOverlay.hidden) return;
+  updateOverlay.hidden = true;
+  overlayPop('#update-overlay');
+}
+
+function updateFailed(message) {
+  updateBusy = false;
+  const apply = document.querySelector('#update-apply');
+  if (apply) { apply.hidden = false; apply.disabled = false; }
+  document.querySelector('#update-check').disabled = false;
+  showUpdateStatus('升级失败：' + (message || '未知原因'), 'error');
+}
+
+function updateSucceeded(version) {
+  updateBusy = false;
+  updateCache.current = version;
+  updateCache.version = '';
+  setUpdateBadge('');
+  if (updateVersionText) updateVersionText.textContent = version;
+  document.querySelector('#update-summary').textContent = `已升级到 ${version}。`;
+  showUpdateStatus(`已升级到 ${version}。重新加载页面即可使用新版本前端资源。`, 'ok');
+  document.querySelector('#update-apply').hidden = true;
+  document.querySelector('#update-check').disabled = false;
+  document.querySelector('#update-reload').hidden = false;
+  toast('升级完成：' + version);
+}
+
+async function waitForRestart(target) {
+  showUpdateStatus('程序已替换，服务正在重启，等待恢复…');
+  const deadline = Date.now() + 10 * 60 * 1000;
+  // 重启窗口内可能短暂读到旧进程的 /api/version；只有服务持续在线
+  // 90 秒仍是旧版本才判失败，避免把关停前的正常响应误报成失败。
+  let upSince = 0;
+  while (Date.now() < deadline) {
+    await delay(1000);
+    let up = false;
+    try {
+      const health = await fetch('/healthz', { cache: 'no-store' });
+      up = health.ok;
+    } catch { /* 进程重启中 */ }
+    if (!up) { upSince = 0; continue; }
+    if (!upSince) upSince = Date.now();
+    try {
+      const response = await fetch('/api/version', { cache: 'no-store' });
+      if (!response.ok) continue;
+      const info = await response.json();
+      const version = String(info.version || '');
+      // 构建版本形如 v2.2.7-234a220：允许 tag 后缀，但必须落在同一版本上。
+      if (version === target || version.startsWith(target + '-')) {
+        updateSucceeded(version);
+        return;
+      }
+      if (Date.now() - upSince > 90000) {
+        updateFailed(`版本核对失败：服务运行 ${version || '未知'}，预期 ${target}。`);
+        return;
+      }
+    } catch { /* 首个版本请求可能落在重启窗口，重试 */ }
+  }
+  updateFailed('等待升级恢复超时，请刷新页面或查看服务日志。');
+}
+
+async function pollUpgrade(target) {
+  const labels = { idle: '准备升级…', downloading: '正在下载升级包…', verifying: '正在校验升级包…', installing: '正在替换程序…' };
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    let state;
+    try {
+      state = await api('/update/status');
+    } catch {
+      // 服务已经开始关闭：直接转入等待恢复，不再把网络失败当升级失败。
+      await waitForRestart(target);
+      return;
+    }
+    if (state.phase === 'failed') { updateFailed(state.message); return; }
+    if (state.phase === 'restarting') { await waitForRestart(target); return; }
+    showUpdateStatus(labels[state.phase] || '正在升级…');
+    await delay(1000);
+  }
+  updateFailed('升级等待超时，请查看服务日志确认状态。');
+}
+
+async function applyUpdate() {
+  if (updateBusy || !updateCache.version) return;
+  const target = updateCache.version;
+  updateBusy = true;
+  document.querySelector('#update-apply').disabled = true;
+  document.querySelector('#update-check').disabled = true;
+  showUpdateStatus('正在下载升级包…');
+  try {
+    await api('/update/apply', { method: 'POST', body: JSON.stringify({ version: target }) });
+  } catch (error) {
+    updateBusy = false;
+    document.querySelector('#update-apply').disabled = false;
+    document.querySelector('#update-check').disabled = false;
+    showUpdateStatus('升级未开始：' + (error.message || '请求失败'), 'error');
+    return;
+  }
+  await pollUpgrade(target);
+}
+
+function initUpgrade() {
+  if (!updateVersionBtn || !updateOverlay) return;
+  updateVersionBtn.addEventListener('click', () => { void openUpdateDialog(); });
+  document.querySelector('#update-close').addEventListener('click', closeUpdateDialog);
+  document.querySelector('#update-later').addEventListener('click', closeUpdateDialog);
+  updateOverlay.addEventListener('click', event => { if (event.target.id === 'update-overlay') closeUpdateDialog(); });
+  document.querySelector('#update-check').addEventListener('click', () => { void refreshUpdate(true); });
+  document.querySelector('#update-apply').addEventListener('click', () => { void applyUpdate(); });
+  document.querySelector('#update-reload').addEventListener('click', () => window.location.reload());
+  void refreshUpdate(false);
+}
+
 async function boot() {
   if (!token) { window.location.replace('/'); return; }
   const requestToken = token;
@@ -3563,6 +3990,12 @@ async function boot() {
     });
     if (location.hash !== '#settings') location.hash = '#settings';
   }
+  // 自升级只对管理员开放：普通用户保持版本号可读，但不再响应点击。
+  if (updateVersionBtn && (!me || !me.is_admin)) {
+    updateVersionBtn.disabled = true;
+    updateVersionBtn.title = '仅管理员可检查更新';
+  }
+  if (me && me.is_admin) initUpgrade();
   // 导航写 hash 并压入历史，配合 popstate 让浏览器前进/后退在页面间往返。
   document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
     if (location.hash !== '#' + button.dataset.page) location.hash = button.dataset.page;
@@ -3601,6 +4034,7 @@ async function boot() {
       if (top === '#scrape-overlay') closeScrapePreview();
       else if (top === '#player-overlay') closePlayer();
       else if (top === '#detail-overlay') closeDetail();
+      else if (top === '#update-overlay') closeUpdateDialog();
       return;
     }
     overlayTrapTab(event);

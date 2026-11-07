@@ -1,27 +1,32 @@
-# /etc/systemd/system/emby-go.service
-# 安装：install -m0755 emby-go /usr/local/bin/；配置文件 /etc/emby-go/config.yaml；
-# 数据目录 /var/lib/emby-go（SQLite/WAL、NFO 索引可放这里）。
-# 停止时二进制自带上限 15s 有界关闭；systemd 宽限 30s 足够。
 [Unit]
-Description=Emby-go media server
+Description=Emby-go
+Documentation=https://github.com/holll/Emby-go
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=emby
-Group=emby
-WorkingDirectory=/var/lib/emby-go
-ExecStart=/usr/local/bin/emby-go -c /etc/emby-go/config.yaml
-Restart=on-failure
+# 平铺部署：程序、数据库与缓存都在 /opt/emby-go，以 root 运行。
+# Web 自升级要在该目录写临时文件并原子替换程序，因此不能再降权到专用用户。
+User=root
+Group=root
+WorkingDirectory=/opt/emby-go
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+ExecStart=/opt/emby-go/emby-go -c /etc/emby-go/config.yaml
+# Web 自升级成功后程序以 0 正常退出，必须由 systemd 立即拉起新版本；
+# 手动 systemctl stop 仍会保持停止，不会被 Restart 拉回。
+Restart=always
 RestartSec=3s
 TimeoutStopSec=30s
-# 加固：只允许写数据目录与运行时目录（WAL/temp）
+KillMode=control-group
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/emby-go /run/emby-go
+# /opt/emby-go 承载 SQLite、图片缓存与升级临时文件；/etc/emby-go 放配置。
+# 因为 ProtectSystem=strict 把 /opt 设为只读，这里必须同时放行整棵数据目录。
+ReadWritePaths=/opt/emby-go /etc/emby-go
 LimitNOFILE=65536
 
 [Install]

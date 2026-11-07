@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"emby-go/internal/regularfile"
 )
 
 // pathLock 是「某个 NFO 路径一把锁」的条目。
@@ -286,8 +288,32 @@ func (m MovieMeta) RuntimeSeconds() int64 {
 	return 0
 }
 
+// MaxFileSize is the largest accepted NFO document, in bytes (8 MiB).
+const MaxFileSize = 8 << 20
+
+// ErrTooLarge identifies an NFO file exceeding MaxFileSize.
+var ErrTooLarge = errors.New("nfo: file exceeds 8 MiB limit")
+
+// ReadFile reads an NFO document with a bounded allocation, including when the
+// file grows while being read. Callers that modify it retain their path lock.
+func ReadFile(path string) ([]byte, error) {
+	f, err := regularfile.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, MaxFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxFileSize {
+		return nil, ErrTooLarge
+	}
+	return b, nil
+}
+
 func Read(path string) (MovieMeta, error) {
-	b, err := os.ReadFile(path)
+	b, err := ReadFile(path)
 	if err != nil {
 		return MovieMeta{}, err
 	}
@@ -365,7 +391,7 @@ func SaveFileInfo(path string, meta FileInfoMeta, details *StreamDetails) error 
 	if details == nil {
 		return errors.New("nfo: 流信息为空")
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if err != nil {
 		return err
 	}

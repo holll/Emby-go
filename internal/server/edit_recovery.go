@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -27,7 +26,7 @@ func editNFOPath(m store.Movie) string {
 }
 
 func nfoDigest(path string) (string, error) {
-	b, err := os.ReadFile(path)
+	b, err := nfo.ReadFile(path)
 	if err != nil {
 		return "", err
 	}

@@ -78,23 +78,56 @@ var listTags = []string{"genre", "tag", "studio", "tagline"}
 
 // UpdateScraped 把刮削结果写入 NFO。文件不存在时按新建处理（整体生成）。
 func UpdateScraped(path string, f ScrapeFields) error {
+	_, err := updateScraped(path, f, nil, nil, false)
+	return err
+}
+
+// UpdateScrapedWithAutoMarks 在既有路径锁内合并标签，只撤销 previous 记录的归属。
+// f.Tags 是上游标签，current 是本次程序标记；返回成功保存后的实际归属。
+// 无归属旧标签或上游标签与 current 同名时不认领，锁/补缺失不扩大归属。
+func UpdateScrapedWithAutoMarks(path string, f ScrapeFields, previous, current []string) ([]string, error) {
+	return updateScraped(path, f, previous, current, true)
+}
+
+func updateScraped(path string, f ScrapeFields, previous, current []string, mergeMarks bool) ([]string, error) {
 	// 与 SetActorThumb / SaveFileInfo 共用同一把路径锁：整段读-改-写期间独占，
 	// 新建分支走 saveAtomicLocked（本函数已持锁，不能再进 SaveAtomic）。
 	defer lockNFOPath(path)()
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return saveAtomicLocked(path, metaFromScrape(f))
-	}
-	if err != nil {
-		return err
+	raw, err := ReadFile(path)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return nil, err
 	}
 	text := string(raw)
-	if _, err := findClosingMovie(text); err != nil {
-		return err
+	if !missing {
+		if _, err := findClosingMovie(text); err != nil {
+			return nil, err
+		}
 	}
 	indent := childIndent(text)
 	// 已持有路径锁，读取本次最新原文的锁；禁止用调用方缓存的元数据判定。
 	locked := lockedTags(text, f.ManualEdit)
+	var owned []string
+	if mergeMarks {
+		plan, err := mergeAutoMarkTags(text, previous, f.Tags, current, f.Overwrite, locked["tag"])
+		if err != nil {
+			return nil, err
+		}
+		owned = plan.Owned
+		if !plan.Protected {
+			f.Tags = plan.After
+			// 空合并也要撤销 previous 归属，不能沿用旧接口的空字段跳过语义。
+			if !missing {
+				text = replaceBlocks(text, "tag", renderList("tag", plan.After, indent), indent)
+			}
+		}
+	}
+	if missing {
+		if err := saveAtomicLocked(path, metaFromScrape(f)); err != nil {
+			return nil, err
+		}
+		return owned, nil
+	}
 	clear := map[string]bool{}
 	if f.ManualEdit {
 		for _, tag := range f.ClearFields {
@@ -117,6 +150,9 @@ func UpdateScraped(path string, f ScrapeFields) error {
 
 	// 列表标签
 	for _, tag := range listTags {
+		if mergeMarks && tag == "tag" {
+			continue // 标签已在同一把路径锁内合并，或因锁/补缺失保持原文。
+		}
 		values := listValue(f, tag)
 		if locked[tag] || (len(values) == 0 && !clear[tag]) || (hasAnyBlock(text, tag) && !f.Overwrite) {
 			continue
@@ -158,10 +194,12 @@ func UpdateScraped(path string, f ScrapeFields) error {
 			text = upsertScalar(text, "lockdata", strconv.FormatBool(*f.LockData), indent)
 		}
 	}
-	if text == string(raw) {
-		return nil
+	if text != string(raw) {
+		if err := writeFileAtomic(path, text); err != nil {
+			return nil, err
+		}
 	}
-	return writeFileAtomic(path, text)
+	return owned, nil
 }
 
 // lockedTags 将 Emby canonical 字段锁映射到可更新的 movie 直系标签。
@@ -508,7 +546,7 @@ func SetActorThumb(path, name, thumb string) (bool, error) {
 	if name == "" || thumb == "" {
 		return false, nil
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -633,7 +671,7 @@ func ScrapedTagValue(text, tag string) string {
 // TagPreview 返回 NFO 原文里若干单值标签的当前值（缺失为空串），
 // 供单条手动刮削的「与现有值 diff」展示。
 func TagPreview(path string, tags []string) (map[string]string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]string{}, nil
 	}
@@ -650,7 +688,7 @@ func TagPreview(path string, tags []string) (map[string]string, error) {
 
 // ListPreview 返回多个列表标签的当前值与演员名清单，供预览 diff。
 func ListPreview(path string) (map[string][]string, []Actor, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string][]string{}, nil, nil
 	}

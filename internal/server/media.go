@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -29,6 +30,17 @@ import (
 	"emby-go/internal/store"
 )
 
+// movieBackdropPaths keeps the legacy backdrop first and the indexed extras in order.
+// Do not filter missing files here: that would silently reassign client image indexes.
+func movieBackdropPaths(m store.Movie) []string {
+	if m.BackdropPath == "" {
+		return m.ExtraBackdrops
+	}
+	paths := make([]string, 0, 1+len(m.ExtraBackdrops))
+	paths = append(paths, m.BackdropPath)
+	return append(paths, m.ExtraBackdrops...)
+}
+
 // movieImagePath 返回影片某 Emby 图片类型对应的磁盘文件路径。
 // Thumb（宽图）在缺 landscape 时回退主海报，保证给客户端的 Thumb 标记始终可取图。
 func movieImagePath(m store.Movie, kind string) string {
@@ -41,7 +53,9 @@ func movieImagePath(m store.Movie, kind string) string {
 		}
 		return m.PosterPath
 	case "backdrop", "fanart":
-		return m.BackdropPath
+		if paths := movieBackdropPaths(m); len(paths) > 0 {
+			return paths[0]
+		}
 	case "landscape":
 		return m.LandscapePath
 	}
@@ -63,7 +77,25 @@ func (a *App) image(c *gin.Context) {
 		}
 		// 数值 id 优先命中影片；影片不存在/不可见时回退为该媒体库的封面。
 		if m, ok := a.cachedMovie(id); ok && m.IsVisible() {
-			if p := movieImagePath(m, kind); p != "" {
+			var p string
+			if strings.EqualFold(kind, "Backdrop") || strings.EqualFold(kind, "Fanart") {
+				index := 0
+				if raw := c.Param("index"); raw != "" {
+					var err error
+					index, err = strconv.Atoi(raw)
+					if err != nil || index < 0 {
+						apiError(c, http.StatusBadRequest, "invalid image index")
+						return
+					}
+				}
+				paths := movieBackdropPaths(m)
+				if index < len(paths) {
+					p = paths[index]
+				}
+			} else {
+				p = movieImagePath(m, kind)
+			}
+			if p != "" {
 				a.serveImage(c, p)
 				return
 			}
@@ -515,26 +547,26 @@ func (a *App) imageInfo(c *gin.Context) {
 }
 
 // movieImageInfo 组装与真实 Emby 一致的图片清单：
-// poster→Primary、landscape→Thumb、fanart→Backdrop（首个 index 0）。
+// poster→Primary、landscape→Thumb，主背景与额外背景共享连续的 Backdrop 下标。
 func (a *App) movieImageInfo(m store.Movie) []gin.H {
-	images := make([]gin.H, 0, 3)
+	images := make([]gin.H, 0, 3+len(m.ExtraBackdrops))
 	for _, item := range []struct {
 		imageType string
 		path      string
 	}{
 		{"Primary", m.PosterPath},
 		{"Thumb", m.LandscapePath},
-		{"Backdrop", m.BackdropPath},
 	} {
 		if item.path == "" {
 			continue
 		}
 		// 兼容 3.5.2 的 ImageInfo 契约：带 ImageTag（真机 4.9 列表无此键，多给无害）。
 		info := gin.H{"ImageType": item.imageType, "Path": item.path, "Filename": filepath.Base(item.path), "ImageTag": a.posterTag(item.path)}
-		if item.imageType == "Backdrop" {
-			info["ImageIndex"] = 0
-		}
 		images = append(images, info)
+	}
+	for index, p := range movieBackdropPaths(m) {
+		images = append(images, gin.H{"ImageType": "Backdrop", "ImageIndex": index,
+			"Path": p, "Filename": filepath.Base(p), "ImageTag": a.posterTag(p)})
 	}
 	return images
 }
@@ -1351,6 +1383,10 @@ func (a *App) playing(c *gin.Context) {
 		PositionTicks: req.PositionTicks,
 		Now:           time.Now(),
 	})
+	if errors.Is(err, store.ErrPlaybackSessionMovieConflict) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "PLAYBACK_SESSION_MOVIE_CONFLICT"})
+		return
+	}
 	if err != nil {
 		apiError(c, 500, err.Error())
 		return
@@ -1433,7 +1469,7 @@ func virtualPartID(movieID int64, part int) string {
 func (a *App) partItem(m store.Movie, index int) gin.H {
 	part := index + 2
 	imageTags := gin.H{}
-	backdrops := make([]string, 0, 1)
+	backdrops := make([]string, 0, 1+len(m.ExtraBackdrops))
 	if m.PosterPath != "" {
 		imageTags["Primary"] = a.posterTag(m.PosterPath)
 	}
@@ -1442,10 +1478,11 @@ func (a *App) partItem(m store.Movie, index int) gin.H {
 	} else if m.PosterPath != "" {
 		imageTags["Thumb"] = a.posterTag(m.PosterPath)
 	}
-	if m.BackdropPath != "" {
-		tag := a.posterTag(m.BackdropPath)
-		backdrops = append(backdrops, tag)
-		imageTags["Backdrop"] = tag
+	for _, p := range movieBackdropPaths(m) {
+		backdrops = append(backdrops, a.posterTag(p))
+	}
+	if len(backdrops) > 0 {
+		imageTags["Backdrop"] = backdrops[0]
 	}
 	item := gin.H{
 		"Id":                virtualPartID(m.ID, part),

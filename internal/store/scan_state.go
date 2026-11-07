@@ -389,10 +389,14 @@ func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool
 func updateManualScanStructureTx(tx *sql.Tx, id int64, entry ScanGroupMovie) (bool, error) {
 	m := entry.Movie
 	parts, mtime := jsonText(m.AdditionalParts), entry.Mtime.UTC().Format(time.RFC3339)
-	result, err := tx.Exec(`UPDATE movies SET file_size=?,file_mtime=?,source_protocol=?,source_container=?,additional_parts=?,updated_at=?
-  WHERE id=? AND (COALESCE(file_size,0)<>? OR COALESCE(file_mtime,'')<>? OR COALESCE(source_protocol,'')<>? OR COALESCE(source_container,'')<>? OR COALESCE(additional_parts,'null')<>?)`,
-		entry.Size, mtime, m.SourceProtocol, m.SourceContainer, parts, time.Now().UTC().Format(time.RFC3339), id,
-		entry.Size, mtime, m.SourceProtocol, m.SourceContainer, parts)
+	extraBackdrops := "[]"
+	if len(m.ExtraBackdrops) > 0 {
+		extraBackdrops = jsonText(m.ExtraBackdrops)
+	}
+	result, err := tx.Exec(`UPDATE movies SET file_size=?,file_mtime=?,source_protocol=?,source_container=?,additional_parts=?,extra_backdrops=?,updated_at=?
+  WHERE id=? AND (COALESCE(file_size,0)<>? OR COALESCE(file_mtime,'')<>? OR COALESCE(source_protocol,'')<>? OR COALESCE(source_container,'')<>? OR COALESCE(additional_parts,'null')<>? OR extra_backdrops<>?)`,
+		entry.Size, mtime, m.SourceProtocol, m.SourceContainer, parts, extraBackdrops, time.Now().UTC().Format(time.RFC3339), id,
+		entry.Size, mtime, m.SourceProtocol, m.SourceContainer, parts, extraBackdrops)
 	if err != nil {
 		return false, err
 	}

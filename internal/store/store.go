@@ -84,6 +84,7 @@ type Movie struct {
 	Collection      string `json:"collection"` // NFO <set><name>：所属合集（BoxSet）
 	Genres          []string
 	Tags            []string
+	AutoMarks       []string `json:"auto_marks"` // Scraper-owned provenance; ordinary indexing never writes it.
 	Studios         []string
 	Taglines        []string
 	OfficialRating  string `json:"official_rating"` // NFO <mpaa>
@@ -91,6 +92,7 @@ type Movie struct {
 	ProviderID      string `json:"provider_id"`     // NFO uniqueid type=metatube
 	PosterPath      string
 	BackdropPath    string
+	ExtraBackdrops  []string // Absolute extrafanart paths in natural numeric order.
 	LandscapePath   string
 	RuntimeSeconds  int64
 	AdditionalParts []string
@@ -657,9 +659,13 @@ func (s *Store) UpsertMovie(m Movie, size int64, mtime time.Time) (int64, error)
 // related actor changes, and owns commit/rollback and version publication.
 func upsertMovieTx(tx *sql.Tx, m Movie, size int64, mtime time.Time) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	q := `INSERT INTO movies(library_id,source_path,file_size,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,collection,official_rating,sortname,taglines,provider_id,genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,additional_parts,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET library_id=excluded.library_id,file_size=excluded.file_size,file_mtime=excluded.file_mtime,source_protocol=excluded.source_protocol,source_container=excluded.source_container,number=excluded.number,status=excluded.status,nfo_path=excluded.nfo_path,output_dir=excluded.output_dir,title=excluded.title,original_title=excluded.original_title,plot=excluded.plot,year=excluded.year,premiered=excluded.premiered,rating=excluded.rating,director=excluded.director,series=excluded.series,maker=excluded.maker,label=excluded.label,collection=excluded.collection,official_rating=excluded.official_rating,sortname=excluded.sortname,taglines=excluded.taglines,provider_id=excluded.provider_id,genres=excluded.genres,tags=excluded.tags,studios=excluded.studios,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,landscape_path=excluded.landscape_path,runtime_seconds=excluded.runtime_seconds,additional_parts=excluded.additional_parts,updated_at=excluded.updated_at`
-	if _, err := tx.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), now, now); err != nil {
+	extraBackdrops := "[]"
+	if len(m.ExtraBackdrops) > 0 {
+		extraBackdrops = jsonText(m.ExtraBackdrops)
+	}
+	q := `INSERT INTO movies(library_id,source_path,file_size,file_mtime,source_protocol,source_container,number,status,nfo_path,output_dir,title,original_title,plot,year,premiered,rating,director,series,maker,label,collection,official_rating,sortname,taglines,provider_id,genres,tags,studios,poster_path,backdrop_path,landscape_path,runtime_seconds,additional_parts,extra_backdrops,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET library_id=excluded.library_id,file_size=excluded.file_size,file_mtime=excluded.file_mtime,source_protocol=excluded.source_protocol,source_container=excluded.source_container,number=excluded.number,status=excluded.status,nfo_path=excluded.nfo_path,output_dir=excluded.output_dir,title=excluded.title,original_title=excluded.original_title,plot=excluded.plot,year=excluded.year,premiered=excluded.premiered,rating=excluded.rating,director=excluded.director,series=excluded.series,maker=excluded.maker,label=excluded.label,collection=excluded.collection,official_rating=excluded.official_rating,sortname=excluded.sortname,taglines=excluded.taglines,provider_id=excluded.provider_id,genres=excluded.genres,tags=excluded.tags,studios=excluded.studios,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,landscape_path=excluded.landscape_path,runtime_seconds=excluded.runtime_seconds,additional_parts=excluded.additional_parts,extra_backdrops=excluded.extra_backdrops,updated_at=excluded.updated_at`
+	if _, err := tx.Exec(q, m.LibraryID, m.SourcePath, size, mtime.UTC().Format(time.RFC3339), m.SourceProtocol, m.SourceContainer, m.Number, m.Status, m.NFOPath, m.OutputDir, m.Title, m.OriginalTitle, m.Plot, m.Year, m.Premiere, m.Rating, m.Director, m.Series, m.Maker, m.Label, m.Collection, m.OfficialRating, m.SortName, jsonText(m.Taglines), m.ProviderID, jsonText(m.Genres), jsonText(m.Tags), jsonText(m.Studios), m.PosterPath, m.BackdropPath, m.LandscapePath, m.RuntimeSeconds, jsonText(m.AdditionalParts), extraBackdrops, now, now); err != nil {
 		return 0, err
 	}
 	var id int64
@@ -1142,19 +1148,21 @@ func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{})
 
 func movieScan(row *sql.Rows) (Movie, error) {
 	var m Movie
-	var genres, tags, studios, taglines, parts, mt string
-	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &m.CreatedAt, &m.UpdatedAt, &m.LastScrapeAt, &m.LastScrapeError)
+	var genres, tags, studios, taglines, parts, extraBackdrops, autoMarks, mt string
+	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &extraBackdrops, &autoMarks, &m.CreatedAt, &m.UpdatedAt, &m.LastScrapeAt, &m.LastScrapeError)
 	m.Genres = parseStrings(genres)
 	m.Tags = parseStrings(tags)
 	m.Studios = parseStrings(studios)
 	m.Taglines = parseStrings(taglines)
 	m.AdditionalParts = parseStrings(parts)
+	m.ExtraBackdrops = parseStrings(extraBackdrops)
+	m.AutoMarks = parseStrings(autoMarks)
 	return m, err
 }
 
 // Default only nullable metadata at the read boundary; preserve stored values,
 // scan conversion errors, and the raw columns used by filtering and ordering.
-const movieCols = "id,library_id,source_path,COALESCE(file_mtime,''),COALESCE(source_protocol,''),COALESCE(source_container,''),COALESCE(number,''),status,COALESCE(nfo_path,''),COALESCE(output_dir,''),COALESCE(title,''),COALESCE(original_title,''),COALESCE(plot,''),COALESCE(year,0),COALESCE(premiered,''),COALESCE(rating,0),COALESCE(director,''),COALESCE(series,''),COALESCE(maker,''),COALESCE(label,''),COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),COALESCE(genres,''),COALESCE(tags,''),COALESCE(studios,''),COALESCE(poster_path,''),COALESCE(backdrop_path,''),COALESCE(landscape_path,''),COALESCE(runtime_seconds,0),COALESCE(additional_parts,'[]'),COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
+const movieCols = "id,library_id,source_path,COALESCE(file_mtime,''),COALESCE(source_protocol,''),COALESCE(source_container,''),COALESCE(number,''),status,COALESCE(nfo_path,''),COALESCE(output_dir,''),COALESCE(title,''),COALESCE(original_title,''),COALESCE(plot,''),COALESCE(year,0),COALESCE(premiered,''),COALESCE(rating,0),COALESCE(director,''),COALESCE(series,''),COALESCE(maker,''),COALESCE(label,''),COALESCE(collection,''),COALESCE(official_rating,''),COALESCE(sortname,''),COALESCE(taglines,''),COALESCE(provider_id,''),COALESCE(genres,''),COALESCE(tags,''),COALESCE(studios,''),COALESCE(poster_path,''),COALESCE(backdrop_path,''),COALESCE(landscape_path,''),COALESCE(runtime_seconds,0),COALESCE(additional_parts,'[]'),extra_backdrops,auto_marks,COALESCE(created_at,''),COALESCE(updated_at,''),COALESCE(last_scrape_at,''),COALESCE(last_scrape_error,'')"
 
 func (s *Store) Movie(id int64) (Movie, error) {
 	row, err := s.db.Query("SELECT "+movieCols+" FROM movies WHERE id=?", id)

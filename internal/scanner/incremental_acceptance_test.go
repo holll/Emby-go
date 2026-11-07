@@ -204,7 +204,7 @@ func TestIncrementalSnapshotStability(t *testing.T) {
 				case "member":
 					scanWrite(t, filepath.Join(root, "Film-CD3.strm"), "https://media.test/3.mp4")
 				}
-				if inputs.stillMatches() {
+				if err := inputs.stillMatches(); err == nil {
 					t.Fatal("changed dependency accepted")
 				}
 			}

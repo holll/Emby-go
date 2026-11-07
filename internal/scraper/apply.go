@@ -23,6 +23,8 @@ import (
 // officialRating 与官方 Jellyfin 插件保持一致：AV 类内容统一分级。
 const officialRating = "JP-18+"
 
+const autoMarksReviewMessage = "NFO 已保存，自动标记归属记录失败；请人工核对标签与归属记录，不要直接重新刮削；重扫不能恢复归属记录。"
+
 // maxImageBytes 单张图片的下载上限，避免上游返回异常大文件把内存打满。
 const maxImageBytes = 32 << 20
 
@@ -44,6 +46,10 @@ type ApplyOptions struct {
 	// Refresh 为真时写入后立即单文件重扫该片（单条手动路径用）；
 	// 批量/定时路径传 false，由调用方在全部结束后整库扫一次。
 	Refresh bool
+	// Position 是标记里的裁切位置，只作用于主海报（primary）；nil 表示沿用上游默认。
+	Position *float64
+	// StillURLs contains trusted selected image URLs resolved by the server, never client input.
+	StillURLs []string
 }
 
 // ApplyResult 一次刮削的结果。
@@ -59,6 +65,8 @@ type ApplyResult struct {
 	ImageWarn  []string
 	// RefreshError 记录「元数据已写入但索引刷新失败」，供上层提示（不算整体失败）。
 	RefreshError string
+	// AutoMarksError 记录 NFO 已保存但生成标签归属未持久化；重扫不能恢复归属。
+	AutoMarksError string
 }
 
 // MovieInfo 取详情（单条手动确认后按 provider:id 重新取，预览不落中间态）。
@@ -84,8 +92,9 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 	}
 	result.Title, result.Translated = title, translated
 
-	// 版本标记（-C / -U / -UC）取自文件名：既写进 NFO 标签，也给主海报贴角标。
-	mark, hasMark := detectVersionMark(movie.SourcePath)
+	// 版本标记（-C / -U / -UC）取自文件名，文件名没有标记时再看同目录外挂字幕：
+	// 既写进 NFO 标签，也给主海报贴角标。
+	mark, hasMark := versionMarkFor(movie.SourcePath)
 
 	// 图片落盘（只补缺失时不覆盖已有文件）。
 	dir := strings.TrimSpace(movie.OutputDir)
@@ -99,10 +108,14 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 			}
 			// 角标只贴主海报（primary）：thumb/backdrop 在客户端是宽幅背景图，贴角标会挡画面。
 			badge := ""
-			if hasMark && target.kind == "primary" {
-				badge = mark.Badge
+			var position *float64
+			if target.kind == "primary" {
+				if hasMark {
+					badge = mark.Badge
+				}
+				position = opts.Position
 			}
-			path, err := s.downloadImage(ctx, info, target.kind, filepath.Join(dir, target.name), badge, opts.Overwrite)
+			path, err := s.downloadImage(ctx, info, target.kind, filepath.Join(dir, target.name), badge, position, opts.Overwrite)
 			if err != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return result, ctxErr
@@ -117,22 +130,62 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 				result.ImageCount++
 			}
 		}
+		for i, url := range opts.StillURLs {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			name := fmt.Sprintf("fanart%d.jpg", i+1)
+			path, err := s.downloadExtraBackdrop(ctx, info, url, filepath.Join(dir, "extrafanart", name), opts.Overwrite)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, ctxErr
+				}
+				slog.Warn("刮削下载剧照失败", "movie_id", movie.ID, "image", name, "error", err)
+				result.ImageWarn = append(result.ImageWarn, "extrafanart/"+name+": "+err.Error())
+				continue
+			}
+			if path != "" {
+				result.Images = append(result.Images, path)
+				result.ImageCount++
+			}
+		}
 	}
 
-	fields := buildFields(info, title, plot, opts.Overwrite, mark)
+	fields := buildFields(info, title, plot, opts.Overwrite)
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := writeNFO(movie, fields); err != nil {
+	var currentMarks []string
+	if hasMark {
+		currentMarks = []string{mark.Tag}
+	}
+	owned, err := writeNFO(movie, fields, currentMarks)
+	if err != nil {
 		return result, err
+	}
+	// NFO 已提交，先记下实际归属再检查取消，避免后续重扫或取消漏记已提交的标签。
+	// 这不是联合事务；失败必须保留为部分成功，不能用重扫猜回归属。
+	if !slices.Equal(movie.AutoMarks, owned) {
+		if s.store == nil {
+			result.AutoMarksError = "auto marks persistence unavailable: store is nil"
+		} else if err := s.store.SetAutoMarks(movie.ID, owned); err != nil {
+			result.AutoMarksError = err.Error()
+		}
+		if result.AutoMarksError != "" {
+			slog.Warn("NFO 已保存但标记归属记录失败", "movie_id", movie.ID, "error", result.AutoMarksError)
+		}
 	}
 	// 已提交的文件不回滚，但取消后不再更新刮削状态或触发重扫。
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	if s.store != nil {
-		// 记录本次刮削结果；成功时清空上次的错误/待确认标记。
-		if err := s.store.SetScrapeResult(movie.ID, ""); err != nil {
+		// NFO 成功但归属失败仍计成功，同时保留可供批量诊断的人工核对提示。
+		note := ""
+		if result.AutoMarksError != "" {
+			note = autoMarksReviewMessage
+		}
+		if err := s.store.SetScrapeResult(movie.ID, note); err != nil {
 			slog.Warn("写入刮削结果失败", "movie_id", movie.ID, "error", err)
 		}
 	}
@@ -243,7 +296,7 @@ func lockImageCommit(key string) func() {
 // downloadImage 下载一张图并转 webp 落盘；只补缺失模式下已有文件则跳过（返回空路径）。
 // badge 非空时由后端把角标合成进图里再返回（只对主海报传）。
 func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, kind, dest, badge string,
-	overwrite bool) (string, error) {
+	position *float64, overwrite bool) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -254,7 +307,9 @@ func (s *Scraper) downloadImage(ctx context.Context, info metatube.MovieInfo, ki
 	}
 	// 不传 url 参数：后端按 provider:id 自己取源图并按类型裁到约定比例。
 	// 某些来源没有某类图时后端会返回错误，我们记 warn 跳过（图片尽力而为）。
-	url := s.client.ImageURL(kind, info.Provider, info.ID, s.cfg.ImageQuality, "", badge)
+	url := s.client.ImageURL(kind, info.Provider, info.ID, metatube.ImageOptions{
+		Quality: s.cfg.ImageQuality, Badge: badge, Position: position,
+	})
 	data, err := s.client.Download(ctx, url, maxImageBytes)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", ctxErr
@@ -314,22 +369,53 @@ func providerID(provider, id string) string {
 	return metatube.FormatProviderID(provider, id)
 }
 
-// SplitProviderID accepts plugin identities and the old metatube:provider:id
-// marker. Legacy IDs are opaque raw values: never percent-decode them.
-func SplitProviderID(raw string) (provider, id string, ok bool) {
+// ParseStoredProviderID accepts plugin identities and the old
+// metatube:provider:id marker. Legacy IDs are opaque raw values: never
+// percent-decode them, and they carry no Position/Update suffix.
+func ParseStoredProviderID(raw string) (metatube.ProviderID, bool) {
 	if !strings.HasPrefix(raw, "metatube:") {
-		return metatube.ParseProviderID(raw)
+		return metatube.ParseProviderIDValue(raw)
 	}
 	parts := strings.SplitN(strings.TrimPrefix(raw, "metatube:"), ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+		return metatube.ProviderID{}, false
 	}
-	return parts[0], parts[1], true
+	return metatube.ProviderID{Provider: parts[0], ID: parts[1]}, true
+}
+
+// CanonicalProviderID turns a stored marker into the official search value the
+// admin UI may display and prefill. Legacy metatube: markers are opaque: the
+// text after the prefix is only reusable when it already is that identity's
+// official format, otherwise callers must not build a search from it (the
+// opaque ID could name a different film).
+func CanonicalProviderID(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if rest, legacy := strings.CutPrefix(raw, "metatube:"); legacy {
+		pid, ok := ParseStoredProviderID(raw)
+		if !ok || providerID(pid.Provider, pid.ID) != rest {
+			return "", false
+		}
+		return rest, true
+	}
+	pid, ok := metatube.ParseProviderIDValue(raw)
+	if !ok {
+		return "", false
+	}
+	return pid.String(), true
+}
+
+// SplitProviderID keeps the lookup pair for callers that do not act on the suffix.
+func SplitProviderID(raw string) (provider, id string, ok bool) {
+	pid, ok := ParseStoredProviderID(raw)
+	return pid.Provider, pid.ID, ok
 }
 
 // buildFields 把详情映射为 NFO 字段（映射表见需求 4.4）。
-// mark 为零值表示文件名没带版本标记。
-func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool, mark versionMark) nfo.ScrapeFields {
+// 生成的版本标签独立交给 NFO 归属合并，不混入上游 Tags。
+func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool) nfo.ScrapeFields {
 	premiered, year := splitReleaseDate(info.ReleaseDate)
 	// 映射表：genres → Genres（不翻译）、label → Label + Tags。
 	// 刻意不把 genres 也塞进 tags：Emby 里两者是不同维度，重复写入会让客户端
@@ -337,11 +423,6 @@ func buildFields(info metatube.MovieInfo, title, plot string, overwrite bool, ma
 	tags := []string{}
 	if label := strings.TrimSpace(info.Label); label != "" {
 		tags = append(tags, label)
-	}
-	// 版本标记（中文字幕/无码破解/中文无码）是「版本属性」而非「题材」，所以进 tags 不进 genres。
-	// 与 label 撞名时不重复：列表标签是块级替换，重复项会原样写进 NFO。
-	if mark.Tag != "" && !slices.Contains(tags, mark.Tag) {
-		tags = append(tags, mark.Tag)
 	}
 	studios := []string{}
 	if maker := strings.TrimSpace(info.Maker); maker != "" {
@@ -487,13 +568,13 @@ func splitReleaseDate(raw string) (string, int) {
 
 // writeNFO 走标签级更新器写盘。NFO 位置以影片已登记的 NFOPath 为准；
 // 没有时按 scanner 的约定新建，多分段影片使用去掉 CD 后缀的共享 NFO。
-func writeNFO(movie store.Movie, fields nfo.ScrapeFields) error {
+func writeNFO(movie store.Movie, fields nfo.ScrapeFields, current []string) ([]string, error) {
 	path := strings.TrimSpace(movie.NFOPath)
 	if path == "" {
 		path = nfo.SidecarPath(movie.SourcePath, len(movie.AdditionalParts) > 0)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return nil, err
 	}
-	return nfo.UpdateScraped(path, fields)
+	return nfo.UpdateScrapedWithAutoMarks(path, fields, movie.AutoMarks, current)
 }

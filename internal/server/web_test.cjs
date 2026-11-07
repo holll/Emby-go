@@ -2705,3 +2705,194 @@ test('计划列表与刮削执行先于收起配置，墙和详情维护为原�
   assert.match(detail, /<details class="disclosure detail-maintenance"><summary/);
   assert.match(section('function overlayFocusables(', 'function overlayContains('), /summary,/);
 });
+
+function detailFixture(metatubeId) {
+  const nodes = new Map();
+  const node = selector => {
+    if (!nodes.has(selector)) nodes.set(selector, {
+      hidden: false, innerHTML: '', value: '', checked: false, dataset: {}, handlers: {},
+      addEventListener(type, fn) { this.handlers[type] = fn; },
+      setAttribute() {}, querySelectorAll: () => [], querySelector: () => null
+    });
+    return nodes.get(selector);
+  };
+  const copied = [], toasts = [], opened = [];
+  const box = sandbox({ detailGen: 0, detailDrawer: node('#detail-drawer'), detailOverlay: node('#detail-overlay'),
+    esc: value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+    icon: () => '', movieDisplayTitle: m => m.Title || '', cleanDisplayName: v => v || '',
+    numberUnlessInTitle: () => '', fmtDuration: () => '', statusBadge: () => '', fmtSize: () => '',
+    fmtTime: () => '', streamTable: () => '', EDIT_LOCK_FIELDS: [], pageItems: [], wallGen: 0,
+    toast: (...args) => toasts.push(args), overlayPush() {}, overlayFocusFirst() {}, gotoEntity() {},
+    closeDetail() {}, refreshPage() {}, reloadWall() {},
+    openScrapePreview: (...args) => { opened.push(args); },
+    navigator: { clipboard: { writeText: async value => { copied.push(value); } } },
+    document: { querySelector: node, querySelectorAll: () => [] },
+    api: async () => ({ movie: { id: 1, Title: '示例影片' }, actors: [], files: [], metatube_id: metatubeId }) });
+  vm.runInContext(section('function detailMetaRow(', 'const EDIT_LOCK_FIELDS'), box);
+  vm.runInContext(section('async function openDetail(', '// entityIdOf 生成与后端一致的虚拟实体 id'), box);
+  return { box, node, copied, toasts, opened };
+}
+
+test('详情抽屉只读展示已保存 MetaTube ID：未设置、可复制、不可解析只作文本并提示', async () => {
+  const empty = detailFixture({ saved: '', canonical: '', valid: false });
+  await empty.box.openDetail({ id: 1 });
+  const emptyMarkup = empty.node('#detail-content').innerHTML;
+  assert.match(emptyMarkup, /<dt>MetaTube ID<\/dt>/);
+  assert.match(emptyMarkup, /未设置/);
+  assert.doesNotMatch(emptyMarkup, /detail-metatube-copy/);
+  assert.doesNotMatch(emptyMarkup, /无法解析/);
+
+  // 历史 metatube: 前缀不展示，回填/展示都用官方格式；后缀保留。
+  const valid = detailFixture({ saved: 'metatube:FANZA:abc%2B00123', canonical: 'FANZA:abc%2B00123:1', valid: true });
+  await valid.box.openDetail({ id: 1 });
+  const validMarkup = valid.node('#detail-content').innerHTML;
+  assert.match(validMarkup, /<code>FANZA:abc%2B00123:1<\/code>/);
+  assert.doesNotMatch(validMarkup, /metatube:/);
+  assert.match(validMarkup, /id="detail-metatube-copy"/);
+  assert.doesNotMatch(validMarkup, /无法解析/);
+  await valid.node('#detail-metatube-copy').handlers.click();
+  assert.deepEqual(valid.copied, ['FANZA:abc%2B00123:1']);
+  assert.deepEqual(valid.toasts.at(-1), ['MetaTube ID 已复制', 'ok']);
+  valid.box.navigator.clipboard.writeText = async () => { throw Error('denied'); };
+  await valid.node('#detail-metatube-copy').handlers.click();
+  assert.deepEqual(valid.toasts.at(-1), ['复制失败，请手动选择', 'error']);
+
+  const broken = detailFixture({ saved: '<img src=x onerror="alert(1)">', canonical: '', valid: false });
+  await broken.box.openDetail({ id: 1 });
+  const brokenMarkup = broken.node('#detail-content').innerHTML;
+  assert.match(brokenMarkup, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.doesNotMatch(brokenMarkup, /<img src=x/);
+  assert.match(brokenMarkup, /无法解析，不能精准复用/);
+  assert.doesNotMatch(brokenMarkup, /未设置/);
+  // 刮削入口拿到详情对象与同一份 metatube_id，而不是墙 item。
+  broken.node('#detail-scrape').handlers.click();
+  assert.equal(broken.opened[0][0].id, 1);
+  assert.equal(broken.opened[0][1].valid, false);
+});
+
+function scrapeOpenFixture(metatubeId) {
+  const calls = [], inspected = [];
+  const overlay = { hidden: true };
+  const body = { innerHTML: '', querySelector: () => ({ addEventListener() {} }) };
+  const results = { innerHTML: '' };
+  const box = sandbox({ scrapeState: null, overlayPush() {},
+    esc: value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+    document: { querySelector: selector => selector === '#scrape-overlay' ? overlay : selector === '#scrape-results' ? results : body },
+    api: async (path, options) => { calls.push({ path, options }); return { candidates: [{ provider: 'p', id: 'i', update: true, position: 0.3 }], recommended: 0 }; },
+    loadScrapeInspect: async (...args) => { inspected.push(args); } });
+  vm.runInContext(section('async function openScrapePreview(', 'async function loadScrapeInspect('), box);
+  return { box, overlay, body, results, calls, inspected, metatubeId };
+}
+
+test('刮削弹窗独立展示已保存标记，只回填有效标记且打开仍走无参自动预览', async () => {
+  const valid = scrapeOpenFixture({ saved: 'metatube:FANZA:abc%2B00123', canonical: 'FANZA:abc%2B00123:1', valid: true });
+  await valid.box.openScrapePreview({ id: 7 }, valid.metatubeId);
+  assert.equal(valid.overlay.hidden, false);
+  assert.match(valid.body.innerHTML, /已保存 MetaTube ID/);
+  assert.match(valid.body.innerHTML, /<code>FANZA:abc%2B00123:1<\/code>/, '已保存区展示官方格式');
+  assert.doesNotMatch(valid.body.innerHTML, /metatube:/, '不展示历史前缀');
+  assert.match(valid.body.innerHTML, /value="FANZA:abc%2B00123:1"/, '有效标记回填官方格式');
+  assert.equal(valid.calls.length, 1);
+  assert.equal(valid.calls[0].path, '/items/7/scrape/preview', '回填不改变打开时的自动精准复用');
+  assert.deepEqual(valid.inspected, [['p', 'i', true, 0.3]], '推荐候选的 update 与 position 透传到 inspect');
+
+  const broken = scrapeOpenFixture({ saved: '<b>bad</b>', canonical: '', valid: false });
+  await broken.box.openScrapePreview({ id: 7 }, broken.metatubeId);
+  assert.match(broken.body.innerHTML, /&lt;b&gt;bad&lt;\/b&gt;/);
+  assert.match(broken.body.innerHTML, /格式无法解析，不能精准复用，也未回填/);
+  assert.match(broken.body.innerHTML, /value=""/, '不可解析的已存值不回填');
+  assert.equal(broken.calls[0].path, '/items/7/scrape/preview');
+
+  const empty = scrapeOpenFixture({ saved: '', canonical: '', valid: false });
+  await empty.box.openScrapePreview({ id: 7 }, empty.metatubeId);
+  assert.match(empty.body.innerHTML, /未设置/);
+  assert.doesNotMatch(empty.body.innerHTML, /无法解析/);
+});
+
+test('候选 update/position 透传到 inspect 与 confirm 请求体，缺省时不发送该字段', async () => {
+  const inspectCalls = [];
+  const inspectBody = { innerHTML: '' };
+  const inspectState = { movieId: 7, inspectSeq: 0, preview: {}, inspect: null, provider: '', id: '' };
+  const inspectBox = sandbox({ scrapeState: inspectState, esc: String,
+    document: { querySelector: () => inspectBody }, renderScrapePreview() {},
+    api: async (path, options) => { inspectCalls.push({ path, options }); return { title: 'new' }; } });
+  vm.runInContext(section('async function loadScrapeInspect(', 'function renderScrapePreview()'), inspectBox);
+  await inspectBox.loadScrapeInspect('p', 'i', true, 0.3);
+  assert.equal(inspectCalls[0].path, '/items/7/scrape/inspect');
+  assert.deepEqual(JSON.parse(inspectCalls[0].options.body), { provider: 'p', id: 'i', update: true, position: 0.3 });
+  await inspectBox.loadScrapeInspect('p', 'i');
+  assert.deepEqual(JSON.parse(inspectCalls[1].options.body), { provider: 'p', id: 'i' });
+  // 只带位置不带 update 时也不能把 update 变成显式 false。
+  await inspectBox.loadScrapeInspect('p', 'i', undefined, 0);
+  assert.deepEqual(JSON.parse(inspectCalls[2].options.body), { provider: 'p', id: 'i', position: 0 });
+
+  for (const [update, position] of [[true, undefined], [false, undefined], [undefined, undefined], [true, 0.4], [undefined, 0.4]]) {
+    const handlers = {}, calls = [];
+    const body = { innerHTML: '', querySelectorAll: () => [],
+      querySelector: selector => selector === '#scrape-force' ? { checked: true }
+        : { disabled: false, addEventListener(type, fn) { handlers[type] = fn; } } };
+    const state = { movieId: 7, searchSeq: 1, inspectSeq: 1, provider: 'p', id: 'i', update, position,
+      preview: { candidates: [{ provider: 'p', id: 'i', update, position }], query: '' },
+      inspect: { fields: [], images: [], title: '候选' } };
+    const box = sandbox({ scrapeState: state, detailGen: 1, pageItems: [], esc: String,
+      numberUnlessInTitle: () => '', toast() {}, closeScrapePreview() {}, closeDetail() {},
+      refreshPage() {}, document: { querySelector: () => body },
+      api: async (path, options) => { calls.push({ path, options }); return { title: 'x', images: 0 }; } });
+    vm.runInContext(section('function setScrapeBusy(', '/* ------------------------------------------------------------ 独立翻译 */'), box);
+    box.renderScrapePreview();
+    await handlers.click();
+    assert.equal(calls[0].path, '/items/7/scrape');
+    const sent = JSON.parse(calls[0].options.body);
+    const expected = { provider: 'p', id: 'i', overwrite: true };
+    if (update !== undefined) expected.update = update;
+    if (position !== undefined) expected.position = position;
+    assert.deepEqual(sent, expected);
+  }
+});
+
+function stillsMarkup(stills) {
+  const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const body = { innerHTML: '', querySelectorAll: () => [],
+    querySelector: () => ({ checked: false, disabled: false, addEventListener() {} }) };
+  const inspect = { fields: [], images: [], title: '候选' };
+  if (stills !== undefined) inspect.stills = stills;
+  const state = { movieId: 7, searchSeq: 1, inspectSeq: 1, provider: 'p', id: 'i',
+    preview: { candidates: [{ provider: 'p', id: 'i' }], query: '' }, inspect };
+  const box = sandbox({ scrapeState: state, detailGen: 1, pageItems: [], esc: escapeHtml,
+    numberUnlessInTitle: () => '', toast() {}, closeScrapePreview() {}, closeDetail() {},
+    refreshPage() {}, document: { querySelector: () => body } });
+  vm.runInContext(section('function setScrapeBusy(', '/* ------------------------------------------------------------ 独立翻译 */'), box);
+  box.renderScrapePreview();
+  return body.innerHTML;
+}
+
+test('刮削弹窗在图片之后渲染显式剧照选择：全部 index、esc 地址与懒加载', () => {
+  const stills = [0, 1, 12].map(index => ({ index, preview: `/api/admin/scrape/image?kind=still&provider=FANZA&id=abc%2B00123&index=${index}` }));
+  const markup = stillsMarkup(stills);
+  assert.match(markup, /<h3 class="scrape-h3">剧照选择<\/h3>/);
+  assert.match(markup, /预览与勾选不写文件/);
+  assert.match(markup, /默认不选，不写额外剧照/);
+  assert.match(markup, /<div class="scrape-stills">/);
+  assert.equal((markup.match(/class="scrape-still"/g) || []).length, 3);
+  for (const still of stills) {
+    assert.ok(markup.includes(`src="/api/admin/scrape/image?kind=still&amp;provider=FANZA&amp;id=abc%2B00123&amp;index=${still.index}" alt="" loading="lazy"`), `剧照 ${still.index} 使用 esc 地址与懒加载`);
+    assert.ok(markup.includes(`data-index="${still.index}"`), `剧照 ${still.index} 输出选择 index`);
+    assert.ok(markup.includes(`剧照 #${still.index}`), `剧照 ${still.index} 输出可访问标签`);
+  }
+  assert.doesNotMatch(markup, /kind=still&provider=/, '地址中的 & 必须转义');
+  assert.doesNotMatch(markup, /上游没有剧照/);
+  // 既有区块不受影响：图片与字段差异仍在，剧照在图片之后。
+  assert.match(markup, /<h3 class="scrape-h3">图片<\/h3>/);
+  assert.match(markup, /<h3 class="scrape-h3">字段差异/);
+  assert.ok(markup.indexOf('剧照选择') > markup.indexOf('<h3 class="scrape-h3">图片</h3>'));
+});
+
+test('剧照缺失或为空时只提示上游没有剧照，不渲染空网格也不报错', () => {
+  for (const stills of [undefined, []]) {
+    const markup = stillsMarkup(stills);
+    assert.match(markup, /上游没有剧照/);
+    assert.doesNotMatch(markup, /class="scrape-stills"/);
+    assert.doesNotMatch(markup, /<figure/);
+    assert.match(markup, /<h3 class="scrape-h3">图片<\/h3>/);
+  }
+});

@@ -14,13 +14,14 @@ func main() {
 	out := flag.String("out", "", "备份根目录（必填）")
 	retain := flag.Int("retain", 7, "保留最近 N 份")
 	nfo := flag.Bool("nfo", true, "同时备份媒体库中的 .nfo 文件")
+	extra := flag.Bool("extra-backdrops", true, "同时备份规范 extrafanart/fanartN.jpg 文件")
 	flag.Parse()
-	result, err := backup.Run(backup.Options{DBPath: *db, OutDir: *out, Retain: *retain, NFORoot: *nfo})
+	result, err := backup.Run(backup.Options{DBPath: *db, OutDir: *out, Retain: *retain, NFORoot: *nfo, ExtraBackdrops: *extra})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "备份失败:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("备份完成: %s（NFO %d 个）\n", result.Dir, result.NFOCount)
+	fmt.Printf("备份完成: %s（NFO %d 个，额外背景图 %d 个）\n", result.Dir, result.NFOCount, result.ExtraBackdropCount)
 	for _, name := range result.Pruned {
 		fmt.Println("已清理旧备份:", name)
 	}

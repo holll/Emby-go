@@ -107,6 +107,9 @@ type MovieInfo struct {
 	Score       float64  `json:"score"`
 	Runtime     int      `json:"runtime"`
 	ReleaseDate string   `json:"release_date"`
+	// PreviewImages 剧照地址（上游按来源解析的样张，可能为空）。
+	// 只作为候选预览的来源：客户端拿不到这些 URL，只能提交下标由服务端重新解析。
+	PreviewImages []string `json:"preview_images"`
 }
 
 // ActorSearchResult 演员搜索结果（Images 首张即头像）。
@@ -200,21 +203,39 @@ func (c *Client) SearchActors(ctx context.Context, q, provider string, fallback 
 	return out, err
 }
 
+// ImageOptions 图片请求的可选参数；零值即旧行为（不下发任何可选参数）。
+//
+// ratio/pos 只对 primary 有意义：上游 thumb/backdrop 使用固定常量裁切，
+// 传进去也不会生效，因此调用方只在 primary 上填这两个字段。
+type ImageOptions struct {
+	Quality   int
+	RemoteURL string
+	Badge     string
+	Ratio     *float64 // 裁切比例，上游有效区间 [0.01, 100]
+	Position  *float64 // 裁切位置（长边比例，0..1），省略时由上游按番号决定
+}
+
 // ImageURL 拼出图片地址。图片端点是公开的（不需要鉴权），由后端裁剪到指定比例。
 //
 // badge 非空时后端会把该角标合成到图上再返回：取值可以是后端内置名
 // （zimu.png 中文字幕 / u.png 无码破解 / uc.png 中文无码），也可以是一个角标图片 URL。
 // 后端把它缩放到源图高度的 1/5 后贴左上角（见 metatube-sdk-go 的 imageutil/badge）。
-func (c *Client) ImageURL(kind, provider, id string, quality int, remoteURL, badge string) string {
+func (c *Client) ImageURL(kind, provider, id string, opts ImageOptions) string {
 	query := url.Values{}
-	if quality > 0 {
-		query.Set("quality", strconv.Itoa(quality))
+	if opts.Quality > 0 {
+		query.Set("quality", strconv.Itoa(opts.Quality))
 	}
-	if strings.TrimSpace(remoteURL) != "" {
-		query.Set("url", remoteURL)
+	if strings.TrimSpace(opts.RemoteURL) != "" {
+		query.Set("url", opts.RemoteURL)
 	}
-	if strings.TrimSpace(badge) != "" {
-		query.Set("badge", badge)
+	if strings.TrimSpace(opts.Badge) != "" {
+		query.Set("badge", opts.Badge)
+	}
+	if opts.Ratio != nil {
+		query.Set("ratio", strconv.FormatFloat(*opts.Ratio, 'g', -1, 64))
+	}
+	if opts.Position != nil {
+		query.Set("pos", strconv.FormatFloat(*opts.Position, 'g', -1, 64))
 	}
 	target := c.baseURL + "/v1/images/" + url.PathEscape(kind) + "/" +
 		url.PathEscape(provider) + "/" + url.PathEscape(id)

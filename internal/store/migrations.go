@@ -206,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1156,6 +1156,16 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case extraBackdropsMigrationVersion:
+			if checksum != migration17Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case autoMarksMigrationVersion:
+			if checksum != migration18Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1247,6 +1257,16 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[extraBackdropsMigrationVersion] {
+		if err := applyMigration17(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[autoMarksMigrationVersion] {
+		if err := applyMigration18(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1329,6 +1349,16 @@ func (s *Store) migrate() error {
 	if !applied[scanStateMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", scanStateMigrationVersion, migration16Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", scanStateMigrationVersion, err)
+		}
+	}
+	if !applied[extraBackdropsMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", extraBackdropsMigrationVersion, migration17Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", extraBackdropsMigrationVersion, err)
+		}
+	}
+	if !applied[autoMarksMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", autoMarksMigrationVersion, migration18Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", autoMarksMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

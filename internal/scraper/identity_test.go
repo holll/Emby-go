@@ -161,3 +161,42 @@ func TestPluginAndLegacyIdentityParsing(t *testing.T) {
 		t.Fatalf("new identity=%q", got)
 	}
 }
+
+func TestStoredIdentityUpdateForcesRefresh(t *testing.T) {
+	calls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/movies/FANZA/opaque+id" || r.URL.Query().Get("lazy") != "false" {
+			t.Errorf("stored Update=true must refresh: %s", r.URL)
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"data":{"provider":"FANZA","id":"opaque+id","number":"NEW-002","title":"refreshed film"}}`)
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	m := store.Movie{ID: 42, ProviderID: "FANZA:opaque%2Bid:0:true", Number: "OLD-001", OutputDir: dir, SourcePath: filepath.Join(dir, "OLD-001.strm"), NFOPath: filepath.Join(dir, "movie.nfo")}
+	s := New(Config{BaseURL: ts.URL, Token: "test"}, nil)
+
+	preview, err := s.Preview(context.Background(), m)
+	if err != nil || len(preview.Candidates) != 1 || preview.Query != "FANZA:opaque%2Bid:0:true" {
+		t.Fatalf("preview=%+v error=%v", preview, err)
+	}
+	if pick := preview.Candidates[0]; pick.Update == nil || !*pick.Update {
+		t.Fatalf("precise candidate must carry the stored Update option: %+v", pick)
+	}
+
+	result := s.scrapeOne(context.Background(), m, RunOptions{Overwrite: true})
+	if result.Status != StatusSuccess || calls != 2 {
+		t.Fatalf("batch=%+v calls=%d", result, calls)
+	}
+	raw, err := os.ReadFile(m.NFOPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 身份只写 provider/id，Position/Update 是请求选项，不进 NFO。
+	if !strings.Contains(string(raw), "FANZA:opaque%2Bid") || strings.Contains(string(raw), "0:true") {
+		t.Fatalf("NFO identity must drop the suffix: %s", raw)
+	}
+}

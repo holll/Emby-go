@@ -40,7 +40,7 @@ func TestSchema13UpgradeLateFailureAndRetry(t *testing.T) {
 	mustExec(t, db, "DROP TRIGGER stability_reject_v16")
 	recovered := openStore(t, path)
 	retained(t, recovered)
-	if got := scalar(t, db, "SELECT max(version) FROM schema_migrations"); got != 16 {
+	if got := scalar(t, db, "SELECT max(version) FROM schema_migrations"); got != 18 {
 		t.Fatalf("retry version=%d", got)
 	}
 	integrity(t, path)

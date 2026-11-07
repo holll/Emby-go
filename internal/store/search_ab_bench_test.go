@@ -26,13 +26,15 @@ const benchSearchWhere = ` WHERE status IN ('success','manual') AND (title LIKE 
 // 是为了让"为什么否决"这件事可以随时复现。
 func benchMovieScanTotal(row *sql.Rows, total *int) (Movie, error) {
 	var m Movie
-	var genres, tags, studios, taglines, parts, mt string
-	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &m.CreatedAt, &m.UpdatedAt, &m.LastScrapeAt, &m.LastScrapeError, total)
+	var genres, tags, studios, taglines, parts, extraBackdrops, autoMarks, mt string
+	err := row.Scan(&m.ID, &m.LibraryID, &m.SourcePath, &mt, &m.SourceProtocol, &m.SourceContainer, &m.Number, &m.Status, &m.NFOPath, &m.OutputDir, &m.Title, &m.OriginalTitle, &m.Plot, &m.Year, &m.Premiere, &m.Rating, &m.Director, &m.Series, &m.Maker, &m.Label, &m.Collection, &m.OfficialRating, &m.SortName, &taglines, &m.ProviderID, &genres, &tags, &studios, &m.PosterPath, &m.BackdropPath, &m.LandscapePath, &m.RuntimeSeconds, &parts, &extraBackdrops, &autoMarks, &m.CreatedAt, &m.UpdatedAt, &m.LastScrapeAt, &m.LastScrapeError, total)
 	m.Genres = parseStrings(genres)
 	m.Tags = parseStrings(tags)
 	m.Studios = parseStrings(studios)
 	m.Taglines = parseStrings(taglines)
 	m.AdditionalParts = parseStrings(parts)
+	m.ExtraBackdrops = parseStrings(extraBackdrops)
+	m.AutoMarks = parseStrings(autoMarks)
 	return m, err
 }
 

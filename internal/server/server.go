@@ -24,6 +24,7 @@ import (
 	"emby-go/internal/metatube"
 	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
+	"emby-go/internal/upgrade"
 	"emby-go/internal/webhook"
 )
 
@@ -99,6 +100,9 @@ type App struct {
 	// scrapeSem 限制同时向上游拉取的缩略图数量：刮削预览页一次十几张，
 	// 不加限制就是十几路并发上游请求，慢上游会把 goroutine 堆起来。
 	scrapeSem chan struct{}
+	// scrapeStills 缓存 (provider,id) → 剧照地址列表（换行分隔），
+	// 供图片代理按受限下标取图时免去重复解析上游元数据。
+	scrapeStills *cache.Memory
 
 	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
 	// instanceID 每次启动随机生成，runID 只在本实例内递增；前端用二者区分
@@ -172,6 +176,10 @@ type App struct {
 
 	translation translationState
 	artwork     artworkState
+
+	// updater 是 /opt/emby-go 平铺部署的 Web 自升级入口：检查、下载、原子替换，
+	// 然后通过 UpgradeRestart 让 main 走正常退出，由 systemd 拉起新程序。
+	updater *upgrade.Manager
 }
 
 // errServerShuttingDown 是关停窗口内拒绝新后台工作的统一错误。
@@ -392,6 +400,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
 		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
+		scrapeStills: cache.NewMemory(scrapeStillCacheSize),
 		thumbFlights: make(map[string]*thumbFlight), thumbGenerate: imageutil.Thumbnail,
 		instanceID:   newInstanceID(),
 		authGuard:    newAuthGuard(authGuardConfig{IPRequestRate: cfg.Security.Auth.IPRequestRate, IPRequestBurst: cfg.Security.Auth.IPRequestBurst, GlobalRequestRate: cfg.Security.Auth.GlobalRequestRate, GlobalRequestBurst: cfg.Security.Auth.GlobalRequestBurst, BcryptConcurrency: cfg.Security.Auth.BcryptConcurrency, CredentialBodyBytes: int64(cfg.Security.Auth.CredentialBodyBytes), MaxKeys: cfg.Security.Auth.MaxKeys, AccountCooldownMaxSeconds: cfg.Security.Auth.AccountCooldownMaxSeconds}),
@@ -401,6 +410,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	a.ipBlocks.publish(blockRules)
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
+	a.updater = upgrade.New(upgrade.Options{CurrentVersion: BuildVersion})
 	// 变体目录：启动时清一次（过期 + 超限），之后由写入侧按十分钟节流触发。
 	a.imgDisk = openImageDisk(cfg)
 	a.imageCacheMaxBytes = effectiveImageCacheMaxBytes(cfg)
@@ -645,6 +655,7 @@ func (a *App) routes() {
 	r.GET("/web/log-settings.js", a.webAsset)
 	r.GET("/web/image-cache-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
+	r.GET("/web/task-runner.js", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
 	r.GET("/api/health", a.health)
 	r.GET("/healthz", a.health)
@@ -686,6 +697,12 @@ func (a *App) routes() {
 	admin.GET("/probe/media/progress", a.adminProbeMediaProgress)
 	admin.POST("/probe/media/cancel", a.adminProbeMediaCancel)
 	admin.POST("/reindex", a.adminReindex)
+	// U-01 Web 自升级：GET 走 10 分钟缓存（页面打开自动检查），POST 强制刷新；
+	// apply 只接受最近一次检查到的版本，下载与校验在后台执行。
+	admin.GET("/update", a.adminUpdate)
+	admin.POST("/update/check", a.adminUpdate)
+	admin.POST("/update/apply", a.adminUpdateApply)
+	admin.GET("/update/status", a.adminUpdateStatus)
 	admin.GET("/items", a.adminItems)
 	admin.GET("/items/:id/detail", a.adminItemDetail)
 	admin.DELETE("/items/:id", a.adminDelete)
@@ -759,6 +776,8 @@ func (a *App) routes() {
 	admin.GET("/recovery", a.adminEditRecoveryList)
 	admin.POST("/items/:id/reread", a.adminReread)
 	admin.POST("/items/:id/probe", a.adminProbeMediaItem)
+	admin.POST("/items/:id/subtitle-marks/preview", a.adminSubtitleMarksPreview)
+	admin.POST("/items/:id/subtitle-marks", a.adminSubtitleMarksConfirm)
 	// 单条手动刮削：预览 → 看 diff → 确认写入（无状态，取消零副作用）。
 	admin.GET("/items/:id/scrape/preview", a.adminScrapePreview)
 	admin.POST("/items/:id/scrape/inspect", a.adminScrapeInspect)

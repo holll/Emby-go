@@ -47,14 +47,18 @@ func TestPreviewManualRequests(t *testing.T) {
 		path            string
 		params          url.Values
 		query, expected string
+		update          bool // 候选是否携带显式 Update 选项（true/false 都算携带）
 	}{
-		{"query", ManualSearch{Query: manualString(" NEW-002 ")}, "/v1/movies/search", url.Values{"q": {"NEW-002"}, "provider": {""}, "fallback": {"true"}}, "NEW-002", "NEW-002"},
-		{"provider", ManualSearch{Query: manualString("NEW-002"), MetaTubeID: manualString("FANZA")}, "/v1/movies/search", url.Values{"q": {"NEW-002"}, "provider": {"FANZA"}, "fallback": {"true"}}, "NEW-002", "NEW-002"},
-		{"opaque ID", ManualSearch{MetaTubeID: manualString("FANZA:abc00123")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", ""},
-		{"encoded plugin ID", ManualSearch{MetaTubeID: manualString("FANZA:abc%300123")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", ""},
-		{"plugin suffix", ManualSearch{MetaTubeID: manualString("FANZA:abc00123:0")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", ""},
-		{"ID overrides query", ManualSearch{MetaTubeID: manualString("FANZA:abc00123"), Query: manualString("NEW-002")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", ""},
-		{"URL intact", ManualSearch{Query: manualString(rawURL)}, "/v1/movies/search", url.Values{"q": {rawURL}, "provider": {""}, "fallback": {"true"}}, rawURL, ""},
+		{"query", ManualSearch{Query: manualString(" NEW-002 ")}, "/v1/movies/search", url.Values{"q": {"NEW-002"}, "provider": {""}, "fallback": {"true"}}, "NEW-002", "NEW-002", false},
+		{"provider", ManualSearch{Query: manualString("NEW-002"), MetaTubeID: manualString("FANZA")}, "/v1/movies/search", url.Values{"q": {"NEW-002"}, "provider": {"FANZA"}, "fallback": {"true"}}, "NEW-002", "NEW-002", false},
+		{"opaque ID", ManualSearch{MetaTubeID: manualString("FANZA:abc00123")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", "", false},
+		{"encoded plugin ID", ManualSearch{MetaTubeID: manualString("FANZA:abc%300123")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", "", false},
+		{"plugin suffix", ManualSearch{MetaTubeID: manualString("FANZA:abc00123:0")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123:0", "", false},
+		{"plugin update", ManualSearch{MetaTubeID: manualString("FANZA:abc00123:0:true")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"false"}}, "FANZA:abc00123:0:true", "", true},
+		{"plugin update without position", ManualSearch{MetaTubeID: manualString("FANZA:abc00123::t")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"false"}}, "FANZA:abc00123::t", "", true},
+		{"plugin update false", ManualSearch{MetaTubeID: manualString("FANZA:abc00123:1.5:false")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123:1.5:false", "", true},
+		{"ID overrides query", ManualSearch{MetaTubeID: manualString("FANZA:abc00123"), Query: manualString("NEW-002")}, "/v1/movies/FANZA/abc00123", url.Values{"lazy": {"true"}}, "FANZA:abc00123", "", false},
+		{"URL intact", ManualSearch{Query: manualString(rawURL)}, "/v1/movies/search", url.Values{"q": {rawURL}, "provider": {""}, "fallback": {"true"}}, rawURL, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,6 +86,9 @@ func TestPreviewManualRequests(t *testing.T) {
 			}
 			if got.Candidates[0].ID != "abc00123" || got.Candidates[0].Number != "NEW-002" || got.Exact != (tc.expected != "") {
 				t.Fatalf("identity or exact matching incorrect: %+v", got)
+			}
+			if carried := got.Candidates[0].Update != nil; carried != tc.update {
+				t.Fatalf("candidate update = %v, want carried=%v", got.Candidates[0].Update, tc.update)
 			}
 		})
 	}

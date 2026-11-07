@@ -1,10 +1,9 @@
 package scanner
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 
 	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
+	"emby-go/internal/regularfile"
 	"emby-go/internal/store"
 )
 
@@ -32,8 +32,8 @@ type Result struct {
 	IndexChanged     bool   `json:"index_changed,omitempty"`
 	CleanupPerformed bool   `json:"cleanup_performed"`
 	Incomplete       bool   `json:"incomplete,omitempty"`
-	// Skipped 本次扫描跳过的文件数（非 http(s) 源的 .strm）。
-	// 这类文件不再进入 movies 表，只在扫描结果里报个数。
+	// Skipped counts non-HTTP sources and members of oversized/non-regular input groups.
+	// Rejected inputs preserve their old index; Incomplete prevents cleanup.
 	Skipped int `json:"skipped"`
 	Failed  int `json:"failed"`
 	// UnreadableNFO 表示侧车存在但解析失败的条目数。这类条目保留上一版元数据
@@ -127,7 +127,14 @@ func rescanOne(s *store.Store, lib store.Library, strmPath string, nonDestructiv
 	}
 
 	paths := make(map[string]struct{})
-	if err := scanGroup(s, lib, collectGroup(candidate), opts, &result, paths); err != nil {
+	group := collectGroup(candidate)
+	if err := scanGroup(s, lib, group, opts, &result, paths); err != nil {
+		if errors.Is(err, ErrSourceTooLarge) || errors.Is(err, nfo.ErrTooLarge) || errors.Is(err, regularfile.ErrNotRegular) {
+			result.Skipped += len(group)
+			result.Incomplete = true
+			slog.Warn("重扫跳过超限或非普通文件所在分组", "source", strmPath, "error", err)
+			return result, nil
+		}
 		return result, err
 	}
 	return finishIndexScan(result)
@@ -206,6 +213,13 @@ func scanGroup(s *store.Store, lib store.Library, group []candidate, opts scanOp
 	if !ok {
 		for _, item := range group {
 			if err := scanCandidate(s, lib, item, nil, opts, result, paths); err != nil {
+				if errors.Is(err, ErrSourceTooLarge) || errors.Is(err, nfo.ErrTooLarge) || errors.Is(err, regularfile.ErrNotRegular) {
+					// Without CD1 these are independent rows, not a stack.
+					result.Skipped++
+					result.Incomplete = true
+					slog.Warn("重扫跳过超限或非普通文件", "source", item.path, "error", err)
+					continue
+				}
 				return err
 			}
 		}
@@ -213,6 +227,10 @@ func scanGroup(s *store.Store, lib store.Library, group []candidate, opts scanOp
 	}
 	partPaths := make([]string, 0, len(parts))
 	for _, part := range parts {
+		// A stacked row depends on every member, not only its primary URL.
+		if _, err := readSourceFile(part.path); err != nil {
+			return err
+		}
 		partPaths = append(partPaths, part.path)
 	}
 	return scanCandidate(s, lib, primary, partPaths, opts, result, paths)
@@ -223,20 +241,55 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	movie := store.Movie{LibraryID: lib.ID, SourcePath: item.path, OutputDir: filepath.Dir(item.path), Status: "pending", AdditionalParts: additionalParts}
 	line, err := ReadSource(item.path)
 	if err != nil {
+		if errors.Is(err, ErrSourceTooLarge) || errors.Is(err, regularfile.ErrNotRegular) {
+			return err
+		}
 		result.Failed++
 		// Continue indexing readable items, but report an incomplete scan at
 		// the end and never run missing-source cleanup on this inventory.
 		return nil
 	}
 	setSource(&movie, line)
-	// 非 http(s) 源（ed2k 等）直接跳过：它们永远无法通过 Emby 播放，
-	// 写进 movies 表只会污染列表与统计。只在扫描结果里报个数。
+	var actors []store.ActorRef
+	// Retain legacy discovery precedence: existing registered CD1 sidecars
+	// must still be read after edits even if a shared NFO also exists.
+	// New stacks without a sidecar are written to the shared path.
+	nfoPath := nfo.SidecarPath(item.path, false)
+	meta, nfoErr := nfo.Read(nfoPath)
+	if errors.Is(nfoErr, nfo.ErrTooLarge) || errors.Is(nfoErr, regularfile.ErrNotRegular) {
+		return nfoErr
+	}
+	// 记住「文件在但读不出来」的候选；只有回退到共享 NFO 并读成功才清掉。
+	unreadablePath, unreadableErr := "", error(nil)
+	if nfoErr != nil && !errors.Is(nfoErr, os.ErrNotExist) {
+		unreadablePath, unreadableErr = nfoPath, nfoErr
+	}
+	if len(additionalParts) > 0 {
+		// Library scans fingerprint both sidecars even when CD1's wins.
+		// Enforce the same size boundary before any single-row mutation,
+		// while retaining the existing metadata/fallback error policy.
+		sharedPath := nfo.SidecarPath(item.path, true)
+		sharedMeta, sharedErr := nfo.Read(sharedPath)
+		if errors.Is(sharedErr, nfo.ErrTooLarge) || errors.Is(sharedErr, regularfile.ErrNotRegular) {
+			return sharedErr
+		}
+		if nfoErr != nil {
+			nfoPath, meta, nfoErr = sharedPath, sharedMeta, sharedErr
+			switch {
+			case nfoErr == nil:
+				unreadablePath, unreadableErr = "", nil
+			case !errors.Is(nfoErr, os.ErrNotExist):
+				unreadablePath, unreadableErr = nfoPath, nfoErr
+			}
+		}
+	}
+	// Non-HTTP sources keep their existing removal policy, but only after
+	// dependencies have passed the size boundary, like library scans.
 	if !ValidHTTP(line) {
 		if opts.nonDestructive {
 			result.Skipped++
 			return nil
 		}
-		// 同一路径可能曾经是有效源，单文件重扫也必须剔除旧的可播放索引。
 		if id, err := s.MovieIDByPath(item.path); err == nil {
 			if err := s.DeleteIndexedMovie(id); err != nil && !store.NotFound(err) {
 				return err
@@ -246,27 +299,6 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		}
 		result.Skipped++
 		return nil
-	}
-	var actors []store.ActorRef
-	// Retain legacy discovery precedence: existing registered CD1 sidecars
-	// must still be read after edits even if a shared NFO also exists.
-	// New stacks without a sidecar are written to the shared path.
-	nfoPath := nfo.SidecarPath(item.path, false)
-	meta, nfoErr := nfo.Read(nfoPath)
-	// 记住「文件在但读不出来」的候选；只有回退到共享 NFO 并读成功才清掉。
-	unreadablePath, unreadableErr := "", error(nil)
-	if nfoErr != nil && !errors.Is(nfoErr, os.ErrNotExist) {
-		unreadablePath, unreadableErr = nfoPath, nfoErr
-	}
-	if nfoErr != nil && len(additionalParts) > 0 {
-		nfoPath = nfo.SidecarPath(item.path, true)
-		meta, nfoErr = nfo.Read(nfoPath)
-		switch {
-		case nfoErr == nil:
-			unreadablePath, unreadableErr = "", nil
-		case !errors.Is(nfoErr, os.ErrNotExist):
-			unreadablePath, unreadableErr = nfoPath, nfoErr
-		}
 	}
 	if nfoErr == nil {
 		applyMeta(&movie, meta, nfoPath)
@@ -285,6 +317,13 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 	movie.PosterPath = imageutil.FindMoviePoster(movie.OutputDir, movie.SourcePath)
 	movie.BackdropPath = imageutil.FindImage(movie.OutputDir, "fanart")
 	movie.LandscapePath = imageutil.FindImage(movie.OutputDir, "landscape")
+	extra, err := extraBackdropSnapshots(movie.OutputDir, movie.SourcePath)
+	if err != nil {
+		return err
+	}
+	for _, image := range extra {
+		movie.ExtraBackdrops = append(movie.ExtraBackdrops, image.Path)
+	}
 	if unreadablePath != "" {
 		// 侧车存在但读不出来：这不是「删掉元数据」的信号。已索引的行保留旧元数据
 		// 与可见状态，只跟随文件刷新派生列；原因写进 last_scrape_error。
@@ -363,19 +402,6 @@ func setSource(movie *store.Movie, raw string) {
 
 func container(path string) string {
 	return strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-}
-
-func ReadSource(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	line, err := bufio.NewReader(file).ReadString('\n')
-	if errors.Is(err, io.EOF) && strings.TrimSpace(line) != "" {
-		err = nil
-	}
-	return strings.TrimSpace(line), err
 }
 
 func ValidHTTP(raw string) bool {

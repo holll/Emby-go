@@ -71,7 +71,8 @@ func TestMovieInfoAndLazyParam(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":{"id":"abc","provider":"fanza","number":"ABF-018","title":"T",
 			"summary":"S","maker":"M","label":"L","series":"Ser","genres":["剧情"],"score":8.1,
 			"runtime":120,"release_date":"2024-01-02","actors":["A","B"],
-			"cover_url":"https://c/1.jpg","big_cover_url":"https://c/big.jpg"}}`))
+			"cover_url":"https://c/1.jpg","big_cover_url":"https://c/big.jpg",
+			"preview_images":["https://p/1.jpg","https://p/2.jpg"]}}`))
 	})
 	info, err := client.MovieInfo(context.Background(), "fanza", "abc", true)
 	if err != nil {
@@ -79,6 +80,9 @@ func TestMovieInfoAndLazyParam(t *testing.T) {
 	}
 	if info.Title != "T" || info.Runtime != 120 || len(info.Actors) != 2 || info.ReleaseDate != "2024-01-02" {
 		t.Fatalf("详情不对: %+v", info)
+	}
+	if len(info.PreviewImages) != 2 || info.PreviewImages[1] != "https://p/2.jpg" {
+		t.Fatalf("剧照没解析出来: %+v", info.PreviewImages)
 	}
 	request := (*seen)[0]
 	if got := request.URL.Path; got != "/v1/movies/fanza/abc" {
@@ -126,21 +130,21 @@ func TestSearchActors(t *testing.T) {
 
 func TestImageURL(t *testing.T) {
 	client := New("https://mt.example.com/", "", 0)
-	got := client.ImageURL("primary", "fanza", "abc", 90, "", "")
+	got := client.ImageURL("primary", "fanza", "abc", ImageOptions{Quality: 90})
 	want := "https://mt.example.com/v1/images/primary/fanza/abc?quality=90"
 	if got != want {
 		t.Errorf("ImageURL = %q，期望 %q", got, want)
 	}
-	got = client.ImageURL("thumb", "p", "i", 0, "https://remote/x.jpg", "")
+	got = client.ImageURL("thumb", "p", "i", ImageOptions{RemoteURL: "https://remote/x.jpg"})
 	if !strings.Contains(got, "url=") || strings.Contains(got, "quality") {
 		t.Errorf("带远端 url 且不指定质量时不应出现 quality: %q", got)
 	}
 	// badge 只在非空时出现：空串不能让上游收到 badge=。
-	got = client.ImageURL("primary", "fanza", "abc", 90, "", "u.png")
+	got = client.ImageURL("primary", "fanza", "abc", ImageOptions{Quality: 90, Badge: "u.png"})
 	if !strings.Contains(got, "badge=u.png") {
 		t.Errorf("指定 badge 时应带上参数: %q", got)
 	}
-	got = client.ImageURL("primary", "fanza", "abc", 90, "", "   ")
+	got = client.ImageURL("primary", "fanza", "abc", ImageOptions{Quality: 90, Badge: "   "})
 	if strings.Contains(got, "badge") {
 		t.Errorf("空白 badge 不应出现参数: %q", got)
 	}

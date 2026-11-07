@@ -106,8 +106,10 @@ security:
 # 探测不写索引库；NFO 与 mediainfo.json 是数据真源，参数在下一次扫库时被带回库中。
 # 前置条件：影片已有 NFO（无 NFO 的待补录条目会被跳过）。
 ffprobe_path: ""          # ffprobe 可执行文件路径；留空则从 PATH 查找
-probe_timeout_seconds: 90 # 单条探测超时（秒）：远程直链建连+读取较慢，建议不低于 30
-probe_concurrency: 2      # 并发探测数（上限 8）：过高会拖慢网盘/代理，反而整体变慢
+probe_timeout_seconds: 60 # 探测预算（秒，含等待名额）；默认/上限 60，1..60 保留，非正值用默认
+probe_concurrency: 2      # 批量 worker 数；默认/上限 2，1 保留，非正值用默认；旧高值按上限执行
+# Verify/Run 在本进程共享 2 个子进程名额；stdout ≤4MiB、stderr ≤64KiB，超限失败。
+# Unix 取消时杀子进程组；继承管道另有最多 1 秒收尾预算，不是严格硬实时退出保证。
 
 # ---- 缩略图磁盘缓存 ----
 # 客户端按 maxWidth/maxHeight 请求的封面会实时缩放：webp 解码 + 缩放 + 编码

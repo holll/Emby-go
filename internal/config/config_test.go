@@ -55,24 +55,19 @@ func TestPersistServerIDInsertMissingKey(t *testing.T) {
 }
 
 func TestProbeDefaults(t *testing.T) {
-	var cfg Config
-	if got := cfg.ProbeTimeout(); got != 90*time.Second {
-		t.Errorf("默认探测超时 = %v, want 90s", got)
+	for _, tc := range []struct{ input, want int }{
+		{0, 60}, {-1, 60}, {1, 1}, {30, 30}, {60, 60}, {61, 60}, {90, 60}, {int(^uint(0) >> 1), 60},
+	} {
+		if got := (Config{ProbeTimeoutSec: tc.input}).ProbeTimeout(); got != time.Duration(tc.want)*time.Second {
+			t.Errorf("探测预算(%d) = %v, want %ds", tc.input, got, tc.want)
+		}
 	}
-	if got := cfg.ProbeWorkers(); got != 2 {
-		t.Errorf("默认并发 = %d, want 2", got)
-	}
-	cfg.ProbeTimeoutSec, cfg.ProbeConcurrency = 30, 4
-	if got := cfg.ProbeTimeout(); got != 30*time.Second {
-		t.Errorf("探测超时 = %v, want 30s", got)
-	}
-	if got := cfg.ProbeWorkers(); got != 4 {
-		t.Errorf("并发 = %d, want 4", got)
-	}
-	// 并发上限 8：过高对远程源没有收益。
-	cfg.ProbeConcurrency = 64
-	if got := cfg.ProbeWorkers(); got != 8 {
-		t.Errorf("并发上限 = %d, want 8", got)
+	for _, tc := range []struct{ input, want int }{
+		{0, 2}, {-1, 2}, {1, 1}, {2, 2}, {3, 2}, {8, 2}, {64, 2},
+	} {
+		if got := (Config{ProbeConcurrency: tc.input}).ProbeWorkers(); got != tc.want {
+			t.Errorf("探测 worker(%d) = %d, want %d", tc.input, got, tc.want)
+		}
 	}
 }
 
@@ -89,8 +84,27 @@ func TestProbeConfigFromYAML(t *testing.T) {
 	if cfg.FFProbePath != "/usr/bin/ffprobe" {
 		t.Errorf("ffprobe_path = %q", cfg.FFProbePath)
 	}
-	if cfg.ProbeTimeout() != 45*time.Second || cfg.ProbeWorkers() != 3 {
+	if cfg.ProbeTimeout() != 45*time.Second || cfg.ProbeWorkers() != 2 {
 		t.Errorf("探测配置 = %v/%d", cfg.ProbeTimeout(), cfg.ProbeWorkers())
+	}
+}
+
+func TestLegacyProbeConfigEffectiveLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const src = "probe_timeout_seconds: 90\nprobe_concurrency: 8\n"
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProbeTimeoutSec != 90 || cfg.ProbeConcurrency != 8 || cfg.ProbeTimeout() != time.Minute || cfg.ProbeWorkers() != 2 {
+		t.Fatalf("legacy probe configuration: raw=%d/%d effective=%v/%d", cfg.ProbeTimeoutSec, cfg.ProbeConcurrency, cfg.ProbeTimeout(), cfg.ProbeWorkers())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != src {
+		t.Fatalf("load changed configuration: %q %v", got, err)
 	}
 }
 

@@ -1,10 +1,11 @@
 name: ci
 
-# main 分支推送与 PR 跑完整回归；发布仍由 release.yml 的 v* tag 触发。
+# main/PR 跑完整回归；release 复用同一工作流，按同一事件 SHA 验证后才构建发布。
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -21,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -87,6 +90,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -123,6 +128,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -141,6 +148,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4

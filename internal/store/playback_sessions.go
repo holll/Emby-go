@@ -69,6 +69,9 @@ type PlaybackEvent struct {
 	Now           time.Time
 }
 
+// ErrPlaybackSessionMovieConflict 表示同一用户的会话已绑定另一影片。
+var ErrPlaybackSessionMovieConflict = errors.New("playback session is bound to a different movie")
+
 // PlaybackResult 返回本次上报后的播放次数，以及是否发生了计数（仅 stopped）。
 type PlaybackResult struct {
 	PlayCount int64
@@ -99,6 +102,15 @@ func (s *Store) RecordPlaybackEvent(ev PlaybackEvent) (PlaybackResult, error) {
 	}
 	var out PlaybackResult
 	err := s.writeTx(func(tx *sql.Tx) error {
+		// 在同一写事务中先核对身份，不能让冲突被重复停止/迟到心跳分支吞掉。
+		var movieID int64
+		err := tx.QueryRow(`SELECT movie_id FROM playback_sessions WHERE user_id=? AND session_key=?`, userID, key).Scan(&movieID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && movieID != ev.MovieID {
+			return ErrPlaybackSessionMovieConflict
+		}
 		switch ev.Kind {
 		case PlaybackStopped:
 			var seq int64

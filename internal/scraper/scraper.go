@@ -127,6 +127,12 @@ type Candidate struct {
 	// 直接给客户端地址会被混合内容拦截或根本不可达。
 	Thumb string `json:"thumb,omitempty"`
 	Exact bool   `json:"exact"` // 番号是否与预期精确一致
+	// Update 只有「精准复用已存标记」的候选才可能为 true：后续 inspect 与
+	// confirm 必须把同一选项带回去，否则确认重取会退回缓存优先。
+	Update *bool `json:"update,omitempty"`
+	// Position 只有「精准复用已存标记」的候选才可能非空：主海报裁切位置，
+	// 同样要带进 inspect 与 confirm，预览与落盘才是同一张图。
+	Position *float64 `json:"position,omitempty"`
 }
 
 // PreviewResult 单条手动刮削的预览：候选列表 + 推荐项。不翻译、不下图、不写盘。
@@ -169,20 +175,22 @@ const candidateLimit = 5
 // Preview 搜索候选供人工确认。全程无副作用（不翻译、不下载、不写盘）。
 func (s *Scraper) Preview(ctx context.Context, m store.Movie) (PreviewResult, error) {
 	result := PreviewResult{MovieID: m.ID, Recommended: -1}
-	if provider, id, ok := SplitProviderID(m.ProviderID); ok {
-		result.Query = providerID(provider, id)
+	if pid, ok := ParseStoredProviderID(m.ProviderID); ok {
+		result.Query = pid.String()
 		result.Expected = expectedNumber(m)
-		info, err := s.client.MovieInfo(ctx, provider, id, true)
+		info, err := s.client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
 		if metatube.IsNotFound(err) {
 			return result, nil
 		}
 		if err != nil {
 			return result, err
 		}
-		return previewCandidates(result, []metatube.MovieSearchResult{{
-			Provider: provider, ID: id, Number: info.Number, Title: info.Title,
+		result = previewCandidates(result, []metatube.MovieSearchResult{{
+			Provider: pid.Provider, ID: pid.ID, Number: info.Number, Title: info.Title,
 			Score: info.Score, ReleaseDate: info.ReleaseDate,
-		}}), nil
+		}})
+		carryLookupOptions(result.Candidates, pid)
+		return result, nil
 	}
 	query := searchQuery(m)
 	if query == "" {
@@ -196,6 +204,17 @@ func (s *Scraper) Preview(ctx context.Context, m store.Movie) (PreviewResult, er
 		return result, err
 	}
 	return previewCandidates(result, results), nil
+}
+
+// carryLookupOptions hands a stored marker's request options to the single
+// candidate resolved from it, so preview → inspect → confirm keeps the same
+// semantics. Candidates without options keep the cache-first default.
+func carryLookupOptions(candidates []Candidate, pid metatube.ProviderID) {
+	if len(candidates) != 1 {
+		return
+	}
+	candidates[0].Update = pid.Update
+	candidates[0].Position = pid.Position
 }
 
 // previewCandidates shares presentation only; automatic query construction stays in Preview.

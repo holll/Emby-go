@@ -3,7 +3,6 @@ package nfo
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 )
 
@@ -39,7 +38,7 @@ func translationBlocks(text, tag string) string {
 // during any network operation. It never creates a missing sidecar.
 func ReadTranslationSnapshot(path string) (TranslationSnapshot, error) {
 	defer lockNFOPath(path)()
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if err != nil {
 		return TranslationSnapshot{}, err
 	}
@@ -67,7 +66,7 @@ func CommitTranslation(ctx context.Context, path string, snap TranslationSnapsho
 	if snap.path != path || snap.fields == nil {
 		return false, ErrTranslationConflict
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if err != nil {
 		return false, err
 	}

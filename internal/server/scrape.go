@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -52,7 +55,8 @@ var errScrapeIndexRefresh = errors.New("刮削文件已保存，但索引刷新�
 // claimNFO 独占 NFO 写入通道。kind 为 scan / probe / scrape / scrape_avatars / translate / edit。
 // 独立翻译还持有自己的单任务门，整个翻译与逐片索引刷新期间占用 translate 通道。
 //
-// 同类型任务通过引用计数共用通道；人工编辑/重读源必须独占，避免索引旧快照互相覆盖。
+// 同类型探测等任务通过引用计数共用通道；独立刮削与人工编辑/重读源必须独占，
+// 避免 NFO 写入、归属记录与索引刷新使用不同的旧快照。
 //
 // 注意 scrape 与 scrape_avatars 用的是**不同 kind**，因此二者互斥而不是可并行——
 // 需求原计划写的是「可并行（写不同表）」，但头像任务要往每部参演影片的 NFO 里写
@@ -61,7 +65,7 @@ var errScrapeIndexRefresh = errors.New("刮削文件已保存，但索引刷新�
 func (a *App) claimNFO(kind string) bool {
 	a.nfoGate.Lock()
 	defer a.nfoGate.Unlock()
-	if a.nfoOwner != "" && (a.nfoOwner != kind || kind == "edit" || kind == "artwork" || kind == "sprites") {
+	if a.nfoOwner != "" && (a.nfoOwner != kind || kind == "scrape" || kind == "edit" || kind == "artwork" || kind == "sprites" || kind == "subtitle_marks") {
 		return false
 	}
 	a.nfoOwner = kind
@@ -107,6 +111,8 @@ func (a *App) nfoBusyOwner() string {
 		return "图片操作"
 	case "sprites":
 		return "视频预览生成"
+	case "subtitle_marks":
+		return "字幕标记整理"
 	}
 	return ""
 }
@@ -305,7 +311,7 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 		if len(item.Images) > 0 {
 			a.invalidateImageTag(item.Images...)
 		}
-		if item.Status != scraper.StatusSuccess {
+		if item.Status != scraper.StatusSuccess || item.Reason != "" {
 			a.addScrapeFailure(displayItem(item))
 		}
 	}
@@ -473,6 +479,8 @@ func displayItem(item scraper.ItemResult) string {
 	prefix := "失败"
 	if item.Status == scraper.StatusSkipped {
 		prefix = "跳过"
+	} else if item.Status == scraper.StatusSuccess {
+		prefix = "已保存待核对"
 	}
 	// 待人工确认的原因已经带了前缀，避免叠加成「跳过 [待人工确认]」。
 	reason := strings.TrimPrefix(item.Reason, store.ScrapeConfirmPrefix)
@@ -537,11 +545,17 @@ func (a *App) adminScrapeInspect(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Provider string `json:"provider"`
-		ID       string `json:"id"`
+		Provider string   `json:"provider"`
+		ID       string   `json:"id"`
+		Update   *bool    `json:"update"`
+		Position *float64 `json:"position"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Provider == "" || req.ID == "" {
 		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
+		return
+	}
+	if !validPosition(req.Position) {
+		apiError(c, http.StatusBadRequest, "position 必须是 [0, 1] 内的数字")
 		return
 	}
 	cfg := a.scrapeConfig()
@@ -552,12 +566,13 @@ func (a *App) adminScrapeInspect(c *gin.Context) {
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
-	info, err := client.MovieInfo(ctx, req.Provider, req.ID, true)
+	pid := metatube.ProviderID{Provider: req.Provider, ID: req.ID, Position: req.Position, Update: req.Update}
+	info, err := client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
 	if err != nil {
 		apiError(c, http.StatusBadGateway, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, a.buildInspect(cfg, movie, info))
+	c.JSON(http.StatusOK, a.buildInspect(cfg, movie, info, pid.Position))
 }
 
 // adminScrapeConfirm 确认写入（无状态预览：按 provider:id 重新取详情后落盘）。
@@ -567,13 +582,39 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Provider  string `json:"provider"`
-		ID        string `json:"id"`
-		Overwrite *bool  `json:"overwrite"`
+		Provider  string   `json:"provider"`
+		ID        string   `json:"id"`
+		Overwrite *bool    `json:"overwrite"`
+		Update    *bool    `json:"update"`
+		Position  *float64 `json:"position"`
+		Stills    *struct {
+			Version string `json:"version"`
+			Indices []*int `json:"indices"`
+		} `json:"stills"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Provider == "" || req.ID == "" {
 		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
 		return
+	}
+	if !validPosition(req.Position) {
+		apiError(c, http.StatusBadRequest, "position 必须是 [0, 1] 内的数字")
+		return
+	}
+	if req.Stills != nil {
+		selection := req.Stills
+		_, err := hex.DecodeString(selection.Version)
+		if len(selection.Version) != 64 || err != nil || selection.Version != strings.ToLower(selection.Version) || len(selection.Indices) == 0 || len(selection.Indices) > maxScrapeStills {
+			apiError(c, http.StatusBadRequest, "stills 必须包含有效列表版本和 1 至 24 个下标")
+			return
+		}
+		seen := make(map[int]bool, len(selection.Indices))
+		for _, index := range selection.Indices {
+			if index == nil || *index < 0 || *index >= maxScrapeStills || seen[*index] {
+				apiError(c, http.StatusBadRequest, "剧照下标必须唯一且在 [0, 23] 内")
+				return
+			}
+			seen[*index] = true
+		}
 	}
 	if !a.admitAdminOperation(c) {
 		return
@@ -588,13 +629,50 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 		return
 	}
 	defer a.releaseNFO("scrape")
+	// movieParam 在取得写入通道前读取；归属必须使用上一次持有者提交后的记录。
+	movie, err := a.db.Movie(movie.ID)
+	if err != nil {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
 	overwrite := cfg.Overwrite
 	if req.Overwrite != nil {
 		overwrite = *req.Overwrite
 	}
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
-	result, err := scraper.New(cfg, a.db).ScrapeOneMovie(ctx, movie, req.Provider, req.ID, overwrite)
+	pid := metatube.ProviderID{Provider: req.Provider, ID: req.ID, Position: req.Position, Update: req.Update}
+	s := scraper.New(cfg, a.db)
+	var result scraper.ApplyResult
+	if req.Stills == nil {
+		result, err = s.ScrapeOneMovie(ctx, movie, pid, overwrite)
+	} else {
+		// 确认必须重新取详情核对列表，不能仅信任仍存活的预览缓存。
+		client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
+		info, lookupErr := client.MovieInfo(ctx, pid.Provider, pid.ID, pid.Lazy())
+		if lookupErr != nil {
+			apiError(c, http.StatusBadGateway, lookupErr.Error())
+			return
+		}
+		urls := stillURLs(info)
+		_, version := encodeStillList(urls)
+		if version != req.Stills.Version {
+			apiError(c, http.StatusConflict, "剧照列表已变化，请重新预览后确认")
+			return
+		}
+		selected := make([]string, 0, len(req.Stills.Indices))
+		for _, index := range req.Stills.Indices {
+			if *index >= len(urls) {
+				apiError(c, http.StatusBadRequest, "剧照下标超出列表范围")
+				return
+			}
+			selected = append(selected, urls[*index])
+		}
+		result, err = s.Apply(ctx, movie, info, scraper.ApplyOptions{
+			Provider: pid.Provider, ID: pid.ID, Position: pid.Position,
+			Overwrite: overwrite, Refresh: true, StillURLs: selected,
+		})
+	}
 	// 覆盖同名图片后立即失效 tag 缓存。
 	if len(result.Images) > 0 {
 		a.invalidateImageTag(result.Images...)
@@ -610,10 +688,18 @@ func (a *App) adminScrapeConfirm(c *gin.Context) {
 	}
 	slog.Info("单条刮削完成", "movie_id", movie.ID, "provider", req.Provider, "id", req.ID,
 		"images", result.ImageCount, "overwrite", overwrite)
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"status": "success", "provider": result.Provider, "number": result.Number,
 		"title": result.Title, "images": result.ImageCount, "warnings": result.ImageWarn,
-	})
+	}
+	if result.AutoMarksError != "" {
+		response["auto_marks_error"] = "NFO 已保存，自动标记归属记录失败；请人工核对标签与归属记录，不要直接重新刮削；重扫不能恢复归属记录。"
+	}
+	if result.RefreshError != "" {
+		// NFO 已提交；提示通过重扫恢复，不能把它当作未写入或暴露底层路径/SQL。
+		response["refresh_error"] = "NFO 已保存，索引刷新失败；请重新扫描该影片或媒体库。"
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // adminScrapeImage 图片代理：预览用的缩略图**只转发不落盘**。
@@ -628,7 +714,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 	}
 	kind := strings.ToLower(c.Query("kind"))
 	switch kind {
-	case "primary", "thumb", "backdrop":
+	case "primary", "thumb", "backdrop", "still":
 	default:
 		apiError(c, http.StatusBadRequest, "unsupported image kind")
 		return
@@ -638,11 +724,57 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, "provider 与 id 必填")
 		return
 	}
-	// 同一张缩略图在一次预览里会被反复要（切候选、重开抽屉），
-	// 结果只依赖 provider/id/kind，进程内短缓存即可，避免重复打上游。
-	cacheKey := "scrapeimg:" + kind + ":" + provider + ":" + id
-	// 图片 URL 是内容寻址的（provider/id/kind 决定内容），浏览器端也可以短缓存：
-	// 切换候选来回对比时不必重复下载。失败响应不加，免得 5 分钟内的 400/502 被缓存。
+	// ratio/pos 只在 primary 生效：上游 thumb/backdrop 用固定常量裁切，
+	// 别处传进来只会被忽略，静默忽略比直接拒绝更容易让人误以为生效。
+	ratio, err := optionalFloatQuery(c, "ratio")
+	if err != nil || !validRatio(ratio) {
+		apiError(c, http.StatusBadRequest, "ratio 必须是 [0.01, 100] 内的数字")
+		return
+	}
+	position, err := optionalFloatQuery(c, "pos")
+	if err != nil || !validPosition(position) {
+		apiError(c, http.StatusBadRequest, "pos 必须是 [0, 1] 内的数字")
+		return
+	}
+	// 剧照的裁切由服务端固定（16:9 居中），调用方传裁切参数一律拒绝：
+	// 静默忽略会让人误以为自己的比例生效了。
+	if kind == "still" {
+		if ratio != nil || position != nil {
+			apiError(c, http.StatusBadRequest, "剧照不支持 ratio 与 pos")
+			return
+		}
+	} else if kind != "primary" && (ratio != nil || position != nil) {
+		apiError(c, http.StatusBadRequest, "ratio 与 pos 只支持 primary")
+		return
+	}
+	// 新预览用 version + index 绑定列表快照；不带 version 的旧链接保留原语义。
+	stillVersion := c.Query("version")
+	if _, err := hex.DecodeString(stillVersion); stillVersion != "" && (kind != "still" || len(stillVersion) != 64 || err != nil || stillVersion != strings.ToLower(stillVersion)) {
+		apiError(c, http.StatusBadRequest, "version 必须是剧照列表的 64 位小写十六进制版本")
+		return
+	}
+	// index 是剧照的受限候选标识：客户端只提交下标，地址由服务端重新解析。
+	stillIndex := -1
+	if kind == "still" {
+		value, err := strconv.Atoi(strings.TrimSpace(c.Query("index")))
+		if err != nil || value < 0 {
+			apiError(c, http.StatusBadRequest, "index 必须是非负整数")
+			return
+		}
+		stillIndex = value
+	}
+	// 同一张图在一次预览里会被反复要（切候选、重开抽屉），结果只依赖
+	// provider/id/kind 与裁切参数，进程内短缓存即可，避免重复打上游。
+	// 裁切参数必须进 key，否则换位置后会拿到上一张裁好的图。
+	cacheKey := joinCacheKey("scrapeimg", kind, provider, id, cropKey(ratio, position))
+	if kind == "still" {
+		cacheKey += ":i=" + strconv.Itoa(stillIndex)
+		if stillVersion != "" {
+			cacheKey += ":v=" + stillVersion
+		}
+	}
+	// 剧照 URL 带列表版本，不同列表不会命中同一个浏览器缓存；版本是地址列表
+	// 的摘要，不承诺同一远端 URL 的图片字节永久不变。失败响应不加缓存头。
 	serveThumb := func(raw []byte) {
 		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
 		c.Data(http.StatusOK, "image/jpeg", raw)
@@ -653,21 +785,40 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 	}
 	ctx, cancel := a.requestContext(c)
 	defer cancel()
-	// 限流：预览页一次十几张图，不加限制就是十几路并发上游请求。
+	// 下载名额满时立即拒绝，不让预览图片请求排队；字节缓存命中无需名额。
 	select {
 	case a.scrapeSem <- struct{}{}:
 		defer func() { <-a.scrapeSem }()
-	case <-ctx.Done():
-		c.Status(http.StatusBadGateway)
+	default:
+		c.Status(http.StatusServiceUnavailable)
 		return
 	}
-	if raw, ok := a.imgThumb.Get(cacheKey); ok { // 等锁期间可能已被别的请求填上
+	if raw, ok := a.imgThumb.Get(cacheKey); ok { // 取得名额前可能已被别的请求填上
 		serveThumb(raw)
 		return
 	}
 	client := metatube.New(cfg.BaseURL, cfg.Token, cfg.Timeout())
 	// 预览缩略图不带 badge：候选列表里贴角标只会干扰挑选。
-	data, err := client.Download(ctx, client.ImageURL(kind, provider, id, 70, "", ""), maxScrapeImageBytes)
+	options := metatube.ImageOptions{Quality: 70, Ratio: ratio, Position: position}
+	upstreamKind := kind
+	if kind == "still" {
+		urls, err := a.scrapeStillURLs(ctx, client, provider, id, stillVersion)
+		if err != nil {
+			c.Status(http.StatusBadGateway)
+			return
+		}
+		if stillIndex >= len(urls) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		// 剧照在上游走 primary + url= 分支：样张多是横图，固定 16:9 居中。
+		upstreamKind = "primary"
+		options = metatube.ImageOptions{
+			Quality: 70, RemoteURL: urls[stillIndex],
+			Ratio: &stillRatio, Position: &stillPosition,
+		}
+	}
+	data, err := client.Download(ctx, client.ImageURL(upstreamKind, provider, id, options), maxScrapeImageBytes)
 	if err != nil {
 		c.Status(http.StatusBadGateway)
 		return
@@ -679,6 +830,80 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 	serveThumb(data)
 }
 
+// scrapeStillURLs 优先使用 inspect 缓存的版本快照。快照过期或被淘汰后，
+// 只在上游列表仍为同一版本时重建；列表变化就返回空列表，由代理回 404，不能偷换下标。
+// 无版本的旧链接仍按 (provider,id) 缓存当前列表，不保证跨次 inspect 的稳定性。
+func (a *App) scrapeStillURLs(ctx context.Context, client *metatube.Client, provider, id, version string) ([]string, error) {
+	key := joinCacheKey("scrapestills", provider, id)
+	if version != "" {
+		key = joinCacheKey("scrapestills", provider, id, version)
+	}
+	if raw, ok := a.scrapeStills.Get(key); ok {
+		var urls []string
+		err := json.Unmarshal(raw, &urls)
+		return urls, err
+	}
+	info, err := client.MovieInfo(ctx, provider, id, true)
+	if err != nil {
+		return nil, err
+	}
+	urls := stillURLs(info)
+	raw, currentVersion := encodeStillList(urls)
+	if version != "" && version != currentVersion {
+		return nil, nil
+	}
+	a.scrapeStills.Set(key, raw, scrapeImageTTL)
+	return urls, nil
+}
+
+// optionalFloatQuery 读取可选浮点查询参数：缺省返回 nil，非法返回错误。
+// 查询串是不可信输入，只在这里解析一次，之后按具体值使用。
+func optionalFloatQuery(c *gin.Context, name string) (*float64, error) {
+	values, present := c.Request.URL.Query()[name]
+	if !present {
+		return nil, nil
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(values[0]), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil, errors.New("非法数字")
+	}
+	return &value, nil
+}
+
+// validRatio 对齐上游裁切区间：超出 [0.01, 100] 时上游不裁切，这里直接拒绝。
+func validRatio(ratio *float64) bool {
+	return ratio == nil || (*ratio >= 0.01 && *ratio <= 100)
+}
+
+// validPosition 校验裁切位置：上游按图片长边比例解释，取值 [0, 1]。
+func validPosition(position *float64) bool {
+	return position == nil || (*position >= 0 && *position <= 1)
+}
+
+// cropKey 把裁切参数拼进缓存 key；缺省不带后缀，旧 key 保持原样。
+// joinCacheKey 把多段值编成互不歧义的缓存 key：每段都带字节长度前缀。
+//
+// provider/id 来自查询参数，属于不可信输入，任何字符都可能出现；直接拼 ':' 会让
+// (provider="a:b", id="c") 与 (provider="a", id="b:c") 撞成一条，互相冒充缓存条目。
+func joinCacheKey(prefix string, parts ...string) string {
+	key := prefix
+	for _, part := range parts {
+		key += ":" + strconv.Itoa(len(part)) + ":" + part
+	}
+	return key
+}
+
+func cropKey(ratio, position *float64) string {
+	key := ""
+	if ratio != nil {
+		key += ":r=" + strconv.FormatFloat(*ratio, 'g', -1, 64)
+	}
+	if position != nil {
+		key += ":p=" + strconv.FormatFloat(*position, 'g', -1, 64)
+	}
+	return key
+}
+
 const (
 	// maxScrapeImageBytes 单张预览图的下载上限，避免上游返回异常大文件把内存打满。
 	maxScrapeImageBytes = 8 << 20
@@ -688,6 +913,14 @@ const (
 	scrapeImageTTL = 10 * time.Minute
 	// maxScrapeImageConcurrency 同时向上游拉取的预览图数量上限。
 	maxScrapeImageConcurrency = 4
+	// scrapeStillCacheSize 剧照地址列表的进程内条目上限（各版本快照分别计数）。
+	scrapeStillCacheSize = 256
+)
+
+// 剧照预览固定 16:9 居中裁切：样张多是横图，主海报的 2/3 会把画面裁得只剩中间一条。
+var (
+	stillRatio    = 16.0 / 9.0
+	stillPosition = 0.5
 )
 
 // movieParam 解析并校验路径里的影片 id。

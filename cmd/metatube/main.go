@@ -204,12 +204,16 @@ func main() {
 		}
 		return
 	case <-sigCtx.Done():
+	case <-app.UpgradeRestart():
+		// Web 自升级：新程序已在 /opt/emby-go/emby-go 原子替换好，复用同一套
+		// 正常关闭流程；以 0 退出，systemd 的 Restart=always 负责拉起新版本。
+		slog.Info("升级已安装：正常关闭，等待 systemd 重启")
 	}
 
 	// D09 已批：readiness 立即失败、停止新调度；HTTP drain 与后台任务取消/join
 	// 共享同一个 15 秒预算；长流不主动撤销，超时后走有诊断的强制退出路径
 	// （不先关 DB 再放任写入）。
-	slog.Info("收到退出信号：开始有界关闭", "budget", shutdownBudget.String())
+	slog.Info("开始有界关闭", "budget", shutdownBudget.String())
 	app.BeginShutdown()
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer cancel()

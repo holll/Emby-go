@@ -289,29 +289,118 @@ webhook:
 ## 备份与恢复（D11）
 
 ```bash
-# 每日一次：SQLite 一致性快照 + 各媒体库 .nfo，保留最近 7 份
+# 每日一次：SQLite 一致性快照 + 各媒体库 .nfo + 规范额外背景图，保留最近 7 份
 go run ./cmd/embybackup -db ./data/emby.db -out /backups/emby -retain 7
 ```
 
-- 备份目录按 UTC 时间戳命名，内含 `db.sqlite` 与 `nfo/lib-<id>/`；只删时间戳命名的旧目录，手工目录不会被清理。
+- 备份目录按 UTC 时间戳命名，内含 `db.sqlite`、`nfo/lib-<id>/` 与 `extra-backdrops/lib-<id>/`，两类文件均保留库内相对路径；只删时间戳命名的旧目录，手工目录不会被清理。
+- CLI 默认同时复制 NFO 和规范 `extrafanart/fanartN.jpg` 普通文件（N 为无前导零的正整数，不跟随额外图目录/文件符号链接）；可独立用 `-nfo=false`、`-extra-backdrops=false` 关闭。只备份自定义数据库、没有 `libraries` 表时需同时关闭这两个开关。额外图由物理目录盘点，不依赖新索引列，因此旧应用数据库也可备份图片；不包含 STRM、视频、原三张封面或其它 JPG。库离线跳过，在线库遍历/复制错误使本次额外图备份失败；数据库与文件不是跨介质联合快照，备份期间应避免修改媒体目录。
 - 输出根目录必须与源数据库分离，并与各媒体库互不包含：不能相同、位于库内或作为库的祖先，即使关闭 NFO 复制也必须满足。已有路径的符号链接也会解析后校验，冲突会在任何备份写入或清理前拒绝。请使用独立备份目录，避免自包含复制或误清理源数据。
 - 身份安全更新会自动执行 schema migration 14：保留现有账户和库授权，为账户建立不复用 ID 与会话凭据代际。升级前请完成备份；旧二进制不能直接打开升级后的数据库。需要回退时必须停服恢复升级前完整数据库备份，不能删除迁移记录或直接降级二进制。有留存引用的历史用户 ID 会纳入序列高水位；旧库中已删除且无任何留存引用的 ID 无法追溯，迁移后的新 ID 则永久不复用。
-- 恢复：停止服务 → 用备份的 `db.sqlite` 覆盖数据库、把 `nfo/lib-<id>/` 覆盖回对应媒体库 → 启动后重新扫描；恢复后按 D05 轮换管理员密码、撤销全部会话与 API 密钥。
+- 恢复：停止全部写入 → 用匹配备份的 `db.sqlite` 覆盖数据库、把 `nfo/lib-<id>/` 和 `extra-backdrops/lib-<id>/` 中的内容按原相对路径放回对应媒体库 → 按下述流程核对原始状态 → 隔离启动并完成凭据处置 → 必要时重新扫描 → 才恢复对外服务。新索引保存绝对路径，迁移媒体根目录时还需调整库路径并重新扫描。恢复为手工操作、没有自动覆盖冲突策略；合并复制不会删除备份中没有的新图片，要求精确回退时须先对账，否则重扫会重新收录。数据库单独恢复不能找回丢失图像，离线库或关闭开关的文件也不在备份中。
+- 原生跨版本回退必须使用**升级前同一停写窗口的匹配集合**：旧二进制及其版本/校验和、配置、SQLite、人工 NFO、需要恢复的额外图。停止应用还不够：外部整理器/编辑器也应停写；在恢复集合中记录库 ID 与根目录映射、复制完成时点以及未纳入的离线库/文件。CLI 不复制配置或原三张封面，若升级会改动这些内容，必须另行保留；不要把在线 DB 快照与随后变化的文件宣称为联合快照。
+- 精确回退时，先停服务并确认没有数据库句柄/媒体写入者，保留当前失败环境以便排查；恢复匹配 SQLite（同时处理停服后的 WAL/SHM，不把新库 sidecar 留给旧库）、配置和对应 NFO/图片，并核对/移走快照以后新增的文件。**先比较原始业务行、授权/播放数据、文件字节及文件清单，再启动并重扫**；不能靠一次重扫掩盖不匹配。换回旧二进制但沿用新版数据库不是回退路径，严禁删 migration ledger 伪造降级。可接受的数据损失窗口为快照完成后至停写恢复前的全部写入，不是零损失；是否接受应由运维在升级前确认。
+- 恢复材料包含密码摘要、API 密钥摘要、可能含源 URL/凭据的 NFO 与配置，**摘要化不等于备份不敏感**。备份工具不加密且目录模式不自动保证私密；预建仅备份账号可访问的父目录（例如 `0700`）、受控传输/离线存放，不置于 Web 根或公开产物，不在日志打印内容。恢复旧 DB 可能复活快照时仍有效的会话/密钥，也可能回退之后的撤销；在隔离维护环境恢复后、重新对外提供服务前，按 D05 轮换管理员密码并撤销全部会话/API 密钥，另行检查配置/源 URL 凭据。恢复到不支持这些管理操作的旧版本时，不能沿用当前版本的安全处置承诺，应继续隔离并先落实该版本的处置流程。
 - 契约：RPO 24h / RTO 1h；Redis 不备份；备份不含管理员密码明文（D03 摘要化后数据库内只有密钥摘要）。
 
-## 部署样例
+维护者可用 `go test ./cmd/embybackup -run '^TestBackupCLIOpenWALSnapshot$' -count=1 -v` 复演[活动WAL快照测试](<cmd/embybackup/wal_test.go>)：合成SQLite源库保持连接及未提交写事务，真实CLI读取已提交但未checkpoint的数据；源库后续提交不会改变快照，单独复制备份DB即可恢复并通过integrity检查。此测试关闭NFO/额外图备份，不代表实际应用负载、跨文件一致性、崩溃/断电或正式制品验收；证据见[台账 §69](<PLAN-STATUS.md#69-n-01-实际备份cli的活动wal快照2026-11-06>)。
 
-`deploy/` 提供可直接改用的样例（单实例、SQLite、Redis 可选）：
+## 原生 Linux 部署样例
 
-- `deploy/Dockerfile`：多阶段构建静态二进制，运行层为 Alpine + `ffmpeg`（提供 `ffprobe`），非 root 运行，`/data` 挂配置与数据库。
-- `deploy/docker-compose.yml`：`mkdir -p deploy/data && cp config.example.yaml deploy/data/config.yaml` 后 `docker compose -f deploy/docker-compose.yml up -d --build`；Redis 用 `--profile redis` 可选启用。
-- `deploy/emby-go.service`：systemd 单元，含 `TimeoutStopSec=30s`（大于进程内 15s 有界关闭）与 `ProtectSystem=strict` 等加固。
+采用原生二进制、root 平铺部署（SQLite，Redis 可选）：程序、SQLite 与图片缓存都在 `/opt/emby-go`，配置为 `/etc/emby-go/config.yaml`，由 systemd 的 [服务模板](<deploy/emby-go.service>) 启动，[首装脚本](<deploy/install.sh>) 负责下载、校验与注册。**不再支持 Docker**，容器构建与 Compose 样例已移除。模板与脚本是需按主机调整的安装样例，不代表已通过真实 systemd、升级回退或所有 Linux 发行版验收；其它平台也不能据此列入支持矩阵。
 
-配置项（含 `setup_code`、`initialize_allow_from`、`trusted_proxies`）见 `config.example.yaml` 与「公网部署」一节。
+### 安装与 Web 自升级
+
+```bash
+sudo ./deploy/install.sh                        # 安装最新 Release
+sudo EMBY_GO_VERSION=v2.2.7 ./deploy/install.sh # 指定 Release 标签
+```
+
+脚本以 root 运行：按架构下载 `emby-go-linux-<arch>` 与 `SHA256SUMS`，校验后把程序装到 `/opt/emby-go/emby-go`；首次写入 `/etc/emby-go/config.yaml`（已有配置不覆盖），注册 `emby-go.service` 并启动。它不保留旧版本、不创建 `releases/` 或 `backups/`、不使用 `current` 软链接，也不迁移 `/var/lib/emby-go` 旧数据。
+
+安装与 Web 自升级都要求目标 Release 附带 `SHA256SUMS` 和同批部署材料（当前 release workflow 会生成）。缺少校验和时脚本或管理端直接报错停止，不会退化成无校验安装；旧发布流程产出的 Release（如仅含二进制的 `v2.2.6`）需先用新 workflow 出包，才能用于首装或页面升级。`EMBY_GO_VERSION` 仍可指向任一包含这些资产的标签。
+
+管理员可在管理页左下角点击版本号检查更新：页面打开时会静默检查一次（服务端缓存 10 分钟），发现新版本在版本号旁显示徽标。确认后服务端重新核对目标版本，下载同平台资产与 `SHA256SUMS`，落到 `/opt/emby-go` 同目录临时文件，校验 SHA256 并实际执行 `-version`；通过后 `chmod 0755` 并 `os.Rename` 原子替换 `/opt/emby-go/emby-go`。随后进程发出重启信号，按正常有界关闭路径以 0 退出，systemd 由 `Restart=always` 拉起新程序；页面轮询升级进度，服务恢复后读取 `/api/version`，只有实际运行的版本与目标一致才显示成功，成功后提供「重新加载页面」。
+
+**没有自动回退**：不保留上一版程序，也没有备份目录；替换前失败时旧程序仍在，替换后若新程序起不来，需管理员按[原生发布与回退门禁](<docs/native-roadmap-design.md#34-原生发布升级与回退>)手工处置。升级接口仅管理员可用，且只接受刚检查到的那个版本，客户端不能指定下载源或安装路径。
+
+维护者可在已运行 systemd 的 Linux 测试主机上，以 root 显式执行 `EMBY_GO_TEST_SYSTEMD=1 go test ./cmd/metatube -run '^TestNativeSystemdSandbox$' -count=1 -v`，复演[临时单元沙箱测试](<cmd/metatube/native_systemd_test.go>)；默认跳过，显式启用而条件不足时失败。测试只创建唯一 transient unit、临时安装/状态/配置目录及数字 UID/GID 进程，不创建账号或改现有服务；停止并确认不活跃后清理自身目录。它验证样例安全选项的本地子集，现已覆盖夹具自建数据/运行目录的权限与状态保留，以及 `Restart=always`/`RestartSec=3s` 下真实主进程 SIGKILL 后的自动重启、新进程健康/身份/沙箱，和正常退出（Web 自升级依赖的路径）后 systemd 自动拉起新进程；另通过HTTP接纳带独立进程组、忽略TERM的已知探测父子夹具，验证 `systemctl stop` 正常退出、后代不再运行及STRM/NFO/Movie未被成功写入。另有[实际SIGTERM请求门回归](<cmd/metatube/native_shutdown_test.go>)使用已鉴权HTTP请求的100-continue把请求停在body读取：发送真实SIGTERM，观察新readiness连接被关闭/拒绝或收到503，再提交剩余body并要求原连接收到503 `server shutting down`；这验证已有连接中的迟到任务不被登记，外部连接失败不冒称HTTP 503。后台探测清理、NFO/Movie不变及17秒测试余量继续检查，详见[台账§74](<PLAN-STATUS.md#74-n-01-实际sigterm的http请求门与对外readiness2026-11-06>)。此为本机模拟负载，不是实际ffprobe解析或任意NAS硬实时关停；不测试既有正式目录迁移、完整安装路径或发行平台矩阵，详见[台账 §61](<PLAN-STATUS.md#61-n-01-systemd活跃探测关停2026-11-05>)。
+
+systemd回归现直接读取上述[部署样例](<deploy/emby-go.service>)的Service段，而非手抄另一份安全/重启策略：在临时夹具中替换四项身份/路径并指定测试启动命令，附加只读绑定和观测命令，保留其余样例策略（含 `Restart=always`）并核对管理器实际属性。无需root的 `go test ./cmd/metatube -run '^TestNativeSystemdServiceTemplate$' -count=1` 检查样例与不支持的重复/续行/命令变更；遇到复杂语法须先适配测试，不静默跳过。此为样例派生的临时执行，不验证Unit/Install依赖、开机启用或正式 root 安装路径，证据见[台账§75](<PLAN-STATUS.md#75-n-01-部署样例驱动的真实systemd回归2026-11-06>)。
+
+同时设置 `EMBY_GO_TEST_SYSTEMD=1 EMBY_GO_TEST_FFPROBE=/usr/bin/ffprobe` 运行上述systemd测试，会在前三个场景之后追加真实探测启动：配置改用裸命令 `ffprobe`，核对服务实际PATH及所选可执行文件，再通过本地HTTP提供半秒MP4，验证实际探测、NFO/mediainfo写入、显式重扫后的索引与browse/PlaybackInfo/精确302。所提供的ffprobe路径必须与部署PATH实际选中者一致，否则失败；没有真实ffprobe开关时，不把原三场景当作真实探测成功证据。样例小片整数秒结果为0，测试以原NFO的7秒陈旧时长验证显式重扫确实更新索引。仍不证明正式账号/安装路径、真实远端媒体或播放器起播；本轮执行状态和限制见[台账§76](<PLAN-STATUS.md#76-n-01-systemd沙箱内真实ffprobe成功探测2026-11-06>)。
+
+第四次启动还会运行[文件读取边界组合](<cmd/metatube/native_systemd_read_boundary_test.go>)：要求fixture实际位于本地ext4，通过UID65534服务的HTTP扫描验证STRM/NFO超限、FIFO/指向FIFO的链接、root所有0600文件的读取失败，以及普通文件链接成功。故障组保留旧Movie/演员/分组基线，不完整扫描禁止删除缺失项，健康组仍可提交；恢复文件后完整扫描才清理缺失项。成功响应携带最终清理结果，失败HTTP500的部分结果从进度接口核对，不要求错误响应暴露底层errno。§77初版执行状态见[台账](<PLAN-STATUS.md#77-n-01-systemd实际身份的文件读取故障组合2026-11-06>)；后续[增量与CD依赖组合](<cmd/metatube/native_systemd_stack_boundary_test.go>)扩展为full/incremental共24例（22故障＋2普通链接正向），加入非空播放/收藏保留、修复前健康组落库和变化title恢复，incremental恢复计数为1 changed/1 unchanged。套件一次真实登录复用token，不修改生产限流；当前执行证据与限制见[台账§80](<PLAN-STATUS.md#80-n-01-增量与cd依赖的实际身份读取组合2026-11-06>)。CD八例仅为四类依赖超限，不覆盖CD完整FIFO/权限矩阵、并发增长/替换、NAS或正式安装。
+
+上述原生fixture现复用[发布配置构建验证](<cmd/metatube/native_release_fixture_test.go>)：本机目标使用 `CGO_ENABLED=0`、`-trimpath`、`-s -w`，子构建忽略开发机Go持久配置、额外编译选项/实验并固定默认微架构级别；实际检查buildinfo、静态ELF/裁剪与 `-version` 后才执行运行场景。它仍注入明确fixture版本而非正式标签/SHA，不是官方发行artifact或其它平台的运行证明，详见[台账 §62](<PLAN-STATUS.md#62-n-01-发布配置原生fixture2026-11-05>)。需要同包复演时可同时提供`EMBY_GO_NATIVE_BINARY=/private/path/emby-go`与`EMBY_GO_NATIVE_SHA256=该文件的64位十六进制摘要`：入口校验摘要后复制同一已读字节，继续执行profile/ELF/精确fixture身份检查；任一项缺失、格式错误或摘要不符即失败，不回退重新构建。三项身份环境全空时仍要求`native-rehearsal (commit fixture, built fixture)`；验证其他候选须另成套提供`EMBY_GO_NATIVE_VERSION`、`EMBY_GO_NATIVE_COMMIT`、`EMBY_GO_NATIVE_BUILD_TIME`，作为CLI整行、重启HTTP三字段和当前升级version的显式预期，任一缺项或不匹配即失败。它们不用于重编默认fixture、不推断或认证来源；当前升级HTTP只比较version，shutdown/systemd仍只在共同入口核对CLI身份。污染构建环境与身份拒绝回归主动隔离全部五项输入并独立编译；显式身份及具名本地候选证据见[台账§78](<PLAN-STATUS.md#78-n-01-显式候选身份与具名本地制品2026-11-06>)；选中该测试时才执行。systemd、正式/本地前版路径等原有开关仍须分别设置；固定候选不把SKIP变成通过，也不把父测试race变成子候选race。私有源码快照和同包实跑证据另见[台账§73](<PLAN-STATUS.md#73-n-01-冻结源码与同包原生候选复验2026-11-06>)。
+
+维护者可用 `go test ./cmd/metatube -run '^TestNativeBinaryRestart$' -count=1 -v` 复演[真实进程重启回归](<cmd/metatube/native_lifecycle_test.go>)：两次启动之间实际SIGTERM退出，核对服务ID/SQLite设置，并经真实HTTP创建active/stopped播放会话；重启沿用原token，六种跨影片上报逐一要求409且选定播放表、序列和缓存版本不变，同片重复停止仍204且不重复计数。root运行时同时覆盖数字UID/GID65534，非root会明确跳过该身份组。仅[元数据种子与播放上报](<cmd/metatube/native_restart_playback_test.go>)，不是播放器成功播放、断电恢复或正式安装证明；同包候选输入沿用上文，执行结果见[台账§82](<PLAN-STATUS.md#82-n-01-真实进程重启后的播放会话绑定2026-11-06>)。
+
+维护者可用 `EMBY_GO_PREVIOUS_BINARY=/path/to/frozen/emby-go-previous go test ./cmd/metatube -run '^TestNativeBinaryUpgradeAndMatchingRestore$' -count=1 -v` 复演[升级与匹配恢复测试](<cmd/metatube/native_upgrade_test.go>)。当前只接受测试中固定版本身份的 `v2.2.6-local-rehearsal` 本地冻结二进制；不是任意旧 Release 或官方产物的兼容证明。未提供路径时跳过不算验收，提供但版本不符或无法执行时失败。演练在临时目录运行旧 schema16→当前18、两次当前版启动及匹配集合恢复；既有 token/API key 均需通过[真实 HTTP 契约](<cmd/metatube/native_upgrade_api_test.go>)验证普通用户身份、库权限、收藏/进度、PlaybackInfo、302及跨库/管理访问拒绝。另原样请求PlaybackInfo返回的相对流URL（不附加鉴权头），验证query凭据能取得精确302、仅去掉api_key后为401；这不是实际媒体下载或播放器成功起播的证明。不会跟随302访问远端，也不提交新登录或播放事件；恢复旧凭据仍有效是演练事实，不是对外重新启用旧凭据的安全建议，恢复后的凭据处置仍须按上文执行。覆盖限制和本机证据见[台账 §64](<PLAN-STATUS.md#64-n-01-升级匹配恢复的实际认证契约2026-11-06>)；返回流URL的认证补齐见[台账 §65](<PLAN-STATUS.md#65-n-01-返回播放url的真实query认证2026-11-06>)。非空成功/失败登录历史、非默认认证代次与API key版本/轮换时间的SQL种子及升级恢复证据另见[台账 §66](<PLAN-STATUS.md#66-n-01-非空登录历史与非默认认证元数据2026-11-06>)；此为历史数据保留检查，不等于真实登录/轮换操作的端到端验收。演练现实际构建并运行embybackup CLI，在省略NFO/额外背景图开关的情况下生成停机旧库快照、两库NFO和两张不同的额外背景图；恢复前破坏一图、删除另一图，再重新读取磁盘CLI产物恢复并逐字节核验。配置、STRM、普通海报仍额外人工保存，不属于该工具输出；磁盘图片非空不代表数据库图片索引非空。这不是在线WAL、崩溃一致性或自动恢复器验收，生产服务接入历史及当前CLI证据分别见[台账 §67](<PLAN-STATUS.md#67-n-01-生产备份产物参与匹配恢复2026-11-06>)、[台账 §68](<PLAN-STATUS.md#68-n-01-实际备份cli与非空背景图匹配恢复2026-11-06>)。
+
+另可在Linux amd64使用 `EMBY_GO_PREVIOUS_RELEASE_BINARY=/path/to/downloaded/emby-go-linux-amd64 go test ./cmd/metatube -run '^TestNativeReleasedBinaryUpgradeAndMatchingRestore$' -count=1 -v` 复演同一升级/匹配恢复流程的[正式前版制品入口](<cmd/metatube/native_upgrade_test.go>)。这里只接受[仓库v2.2.6 Release](https://github.com/holll/Emby-go/releases/tag/v2.2.6)的Linux amd64资产701031564，测试先固定校验SHA256，再核对精确版本；未配置时SKIP不算验收，错误摘要在执行前失败。可用 `gh release download v2.2.6 --repo holll/Emby-go --pattern emby-go-linux-amd64 --dir /path/to/new-empty-directory` 获取原始资产；[GitHub资产元数据](https://api.github.com/repos/holll/Emby-go/releases/assets/701031564)的digest与测试固定摘要相同。此处旧版是实际Release下载制品，但当前版和备份CLI仍为本地源码构建；不是当前正式发布、制品签名或完整平台/schema支持矩阵证明，证据见[台账§70](<PLAN-STATUS.md#70-n-01-正式前版release制品升级与匹配恢复2026-11-06>)。
+
+上述两个前版入口现比较全部旧影片列（连同列名/列序，只排除另行断言的新迁移列），并加入非默认元数据/技术/图片路径种子；恢复前特意更改旧快照未覆盖字段，要求能检测变化且匹配恢复后还原。这仍不是全库schema对象或sequence/ledger保留证明，详见[台账§71](<PLAN-STATUS.md#71-n-01-旧影片全列保留与范围外字段恢复2026-11-06>)。
+
+管理员可先运行[只读安装静态核验工具](<deploy/verify-native-install.sh>)：`sudo sh deploy/verify-native-install.sh EXPECTED_BINARY_SHA256`。摘要须来自已核对的候选材料，不能现场给被验收文件算摘要再当作独立预期。工具按平铺布局检查 `/opt/emby-go/emby-go` 是否为 root:root 0755 且摘要匹配、`/opt/emby-go` 与 `/etc/emby-go` 目录模式、`/etc/emby-go/config.yaml` 是否为 root:root 0600；不执行程序、不读取配置内容、不打开 SQLite、不创建账号或控制服务。可选第二参数为绝对暂存根目录，仅给文件路径加前缀，不是 chroot 或正式布局运行证明。静态 PASS 不代表服务状态、媒体 ACL、schema/恢复、systemd 有效策略或 M1 放行。
+
+核验工具的参数回归不需 root：`go test ./cmd/metatube -run '^TestNativeInstallCheckArguments$'`。Linux/root 下可直接跑隔离布局回归：`go test ./cmd/metatube -run '^TestNativeInstallCheckLayout$' -count=1 -v`；它只操作测试临时目录，覆盖缺二进制、非可执行、错误所有者/模式、错误摘要与正确路径，并断言审计前后夹具字节、模式与所有者不变。非 root 环境自动 skip。
+
+以下为使用 systemd 的 Debian/Ubuntu 类主机安装步骤，供管理员审核后执行。推荐直接运行[首装脚本](<deploy/install.sh>)（需要 root，会下载对应架构资产、用 `SHA256SUMS` 校验、写入配置并注册服务；不保留旧程序、不建 `releases/`/`backups/`、不迁移旧数据、不覆盖已有配置）：
+
+```bash
+sudo ./deploy/install.sh
+sudo EMBY_GO_VERSION=v2.2.7 ./deploy/install.sh   # 指定 Release 标签
+```
+
+从源码构建时手工执行等价步骤：
+
+```bash
+go build -o emby-go ./cmd/metatube
+./emby-go -version
+sudo install -d -m0755 /opt/emby-go
+sudo install -m0755 emby-go /opt/emby-go/emby-go
+sudo install -d -m0755 /etc/emby-go
+if ! sudo test -e /etc/emby-go/config.yaml; then
+  sudo install -m0600 config.example.yaml /etc/emby-go/config.yaml
+fi
+sudo install -m0644 deploy/emby-go.service /etc/systemd/system/emby-go.service
+```
+
+本批发布流程新增 `SHA256SUMS` 生成与校验；实际下载的发行版若附有该文件，须在核对可信来源后用 `sha256sum -c SHA256SUMS` 验证对应产物，旧 Release 不保证提供它。本地流程修改不代表产物已经发布。
+
+启动前编辑 [配置样例](<config.example.yaml>) 对应的私人配置，设置随机 `setup_code`、初始化来源限制及实际端口；配置含秘密，不应公开。数据布局：程序为 `/opt/emby-go/emby-go`，配置为 `/etc/emby-go/config.yaml`；`WorkingDirectory=/opt/emby-go` 让默认相对 SQLite、日志及图片缓存都留在同一目录。服务以 root 运行，这是平铺自升级的明确取舍——升级必须原子替换 `/opt/emby-go/emby-go` 并写 `/opt/emby-go`；`ProtectSystem=strict` 仍把系统其余部分设为只读，`ReadWritePaths=/opt/emby-go /etc/emby-go` 只放行这两个目录。首次启动会回写 `server_id`，所以配置目录整体可写；既有配置也须人工核对这些权限。
+
+**媒体库权限必须显式配置：**单元保留 `ProtectSystem=strict`、`ProtectHome=true`，默认不允许改写媒体库。以 root 运行时读取一般不受 Unix 权限限制，但 `ProtectHome`、挂载命名空间与 NAS 侧授权仍可能阻止访问。要使用 NFO 编辑、探测、刮削或图片保存，还需在存储侧允许 root 写入，并在 `sudo systemctl edit emby-go` 中按真实媒体库根目录追加：
+
+```ini
+[Service]
+ReadWritePaths=/srv/media
+```
+
+上例 `/srv/media` 必须替换为存在的实际路径；`ReadWritePaths` 只解除 systemd 只读限制，**不会授予 Unix/NAS 写权限**。不要递归改属主或授予所有人写权限来代替核对。`/home` 等目录仍被 `ProtectHome` 隐藏，优先把媒体挂载到专用路径，不要直接关闭全部加固。未配置媒体库写权限时只能使用其可读范围，不要期待写入动作成功。
+
+确认初始化网络隔离、配置、目录权限及可选探测依赖后，再由管理员启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now emby-go
+sudo systemctl status emby-go
+```
+
+`TimeoutStopSec=30s` 给进程内 15 秒有界关闭留出宽限，`KillMode=control-group` 为同组子进程提供停止兜底；这些字段不证明失联 NAS 的不可中断 I/O 可按时退出。Web 自升级只替换程序，不改数据库 schema 或配置文件；跨版本仍需按[原生发布与回退门禁](<docs/native-roadmap-design.md#34-原生发布升级与回退>)在升级前保存匹配的数据库、配置与 NFO/图片恢复材料，且不能只换回旧二进制或冒称已完成版本/schema 矩阵验收。公网监听和代理配置仍见上文「公网部署」。
 
 ### 探测媒体信息失败
 
-探测依赖宿主机上的 `ffprobe`（Docker 镜像已内置）。设置页「媒体信息探测」会显示解析结果与失败原因；「运行日志」面板可查看最近 500 条脱敏日志（完整日志在 `log/app-*.log`）。常见原因：未安装 ffmpeg、`ffprobe_path` 配置错误、`.strm` 指向的远端链接无法被服务器访问。
+媒体信息探测是可选功能，需在宿主机单独安装提供 `ffprobe` 的 FFmpeg 软件包；不安装不会阻断浏览和 302 播放。Debian/Ubuntu 可由管理员执行 `sudo apt-get install ffmpeg`，其它发行版按其软件源安装，再运行 `ffprobe -version` 核对可执行性。systemd 样例的 PATH 为 `/usr/local/bin:/usr/bin:/bin`，不会继承交互式 shell 的自定义 PATH；安装在其它位置时，在私人配置中将 `ffprobe_path` 设置为绝对路径，并确认 `emby` 可以执行且未被沙盒隐藏。
+
+设置页「媒体信息探测」会显示解析结果与失败原因；「运行日志」面板可查看最近 500 条脱敏日志（完整日志在 `log/app-*.log`）。常见原因：未安装 ffmpeg、服务用户找不到或无法执行 `ffprobe`、`ffprobe_path` 配置错误、媒体库未授予写权限，或 `.strm` 指向的远端链接无法被服务器访问。交互终端验证不替代实际服务身份和 systemd 沙盒下的验证。
+
+探测采用每次最多 60 秒预算（包含等待进程名额，更短配置保留），批量 worker 默认/上限 2，启动校验与实际探测在同一进程共享 2 个子进程名额；旧高值配置仍可加载，按新有效上限执行。stdout 上限 4MiB、stderr 上限 64KiB，超限报告失败，不把截断结果写进 NFO 或 mediainfo 缓存。Unix 取消/超时/超限会终止同组子进程；其它平台只保证直接子进程。继承管道最多另有 1 秒收尾，不是 OS 不可中断 I/O 或远端服务的硬实时停止保证。详见 [配置样例](<config.example.yaml#L108-L112>) 与 [API 执行边界](<API-CONTRACT.md#410-ffprobe-执行边界n-01-本地已验收子项>)；各目标独立提交，失败不回滚此前其它目标的成功写入。
+
+默认信任媒体库中的 STRM，ffprobe 直接访问源 URL；不会通过下载代理隔离私网、重定向或嵌套资源。只导入可信来源，恶意链接可能使用服务进程的网络权限。探测错误响应与日志会脱敏源 URL 凭据，但合法 302 播放仍保留客户端取源必需的原始地址，不要把错误脱敏当作网络隔离。
+
+维护者可用 `EMBY_GO_TEST_FFPROBE="$(command -v ffprobe)" go test ./internal/server -run '^TestTrustedSTRMProbeFailureKeepsPlaybackAndRedactsResponse$' -count=1 -v` 复演真实探测错误、部分成功脱敏及缺失/失败后仍可浏览与302播放的[本地回归](<internal/server/probe_trusted_strm_test.go>)。使用临时库与本机HTTP媒体fixture，不访问真实媒体库；未指定变量时跳过，显式路径不可用则失败。普通测试门禁另含不依赖安装ffprobe的错误脱敏回归；本地fixture不替代真实客户端、远端媒体协议或服务身份验收，证据见[台账§63](<PLAN-STATUS.md#63-n-01-可信strm探测错误脱敏与播放契约2026-11-0506>)。
 
 ## 开发
 
@@ -326,7 +415,7 @@ node --test internal/server/web*_test.cjs   # 前端 VM 测试
 
 ### 发布（GitHub Actions）
 
-推送形如 `v1.0.0` 的 tag 会自动在多个平台构建二进制并发布到 Release：
+推送形如 `v1.0.0` 的 tag 后，发布工作流先在**同一事件 SHA** 复用完整 CI（Go/覆盖率、race、漏洞与前端），全部成功才构建多平台二进制并上传 Release。检查和构建均显式 checkout `github.sha`，不借用不同提交的历史绿色结果；失败、取消或未通过不会进入发布构建，也不自动等待/重试。构建继续从实际 HEAD 写入版本与提交、执行本机版本输出检查，并生成和验证同批产物的 `SHA256SUMS`。这是自动化门禁，不替代 N-01 支持矩阵与人工发布验收；本地契约测试不代表远端工作流或正式产物已经通过：
 
 ```bash
 git tag v1.0.0
@@ -343,3 +432,13 @@ git push origin v1.0.0
 ## 范围与不做
 
 当前支持管理员与普通用户、按媒体库授权；仅 `http(s)-strm` 直拉播放，不做转码/HLS/直播音乐/通用刮削器插件（内置 MetaTube 适配器不在此列）。权限与图片公开边界见上文「权限边界」说明和 [API 契约](<API-CONTRACT.md#L89-L96>)。
+
+## 本地字幕标记整理
+
+管理员在影片详情展开维护区，打开「字幕标记整理」，先查看本地证据、当前与拟提交标签/归属，再明确确认。不需要 MetaTube 配置，也不会翻译、探测媒体或下载图片；只处理单部已索引影片的现有 STRM/NFO。
+
+- 默认只补缺失，已有标签或字段锁会受保护；需要覆盖时显式选择并重新查看预览。覆盖只撤销程序拥有的标签，不追认或删除人工同名标签。
+- 只按文件名显式 C/U/UC 或同目录同主名的中文外挂字幕推断，不读字幕内容；多 CD 只看当前主片，不聚合其它分段字幕。
+- 依据变化会拒绝旧确认，须重新预览；关闭预览不保存，也不会自动重试写入。网络失败不能证明未保存，应先核对实际状态。
+- 部分成功分别显示 NFO、归属和索引结果。归属失败需要人工核对，**重扫不能恢复归属**；索引失败可重扫。不要直接重新整理来尝试修复部分成功。
+- 旧海报不会重绘，角标可能未同步。前端嵌入二进制，源码新增入口需重新构建、重启并刷新后台；本地实现通过不等于正式发布。接口及边界见[独立入口契约](<API-CONTRACT.md#481-独立本地字幕标记整理入口mt-04>)。

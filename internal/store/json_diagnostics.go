@@ -18,7 +18,7 @@ type JSONCorruptionReport struct {
 	Items []JSONColumnCorruption `json:"items"`
 }
 
-var jsonDiagnosticColumns = []string{"genres", "tags", "studios", "taglines", "additional_parts"}
+var jsonDiagnosticColumns = []string{"genres", "tags", "studios", "taglines", "additional_parts", "extra_backdrops", "auto_marks"}
 
 // CorruptedJSON 扫描元数据 JSON 列，给出可定位的损坏清单（DB-10）。
 //
@@ -28,7 +28,7 @@ func (s *Store) CorruptedJSON(maxItems int) (JSONCorruptionReport, error) {
 	if maxItems <= 0 {
 		maxItems = 20
 	}
-	rows, err := s.db.Query("SELECT id,genres,tags,studios,taglines,additional_parts FROM movies ORDER BY id")
+	rows, err := s.db.Query("SELECT id,genres,tags,studios,taglines,additional_parts,extra_backdrops,auto_marks FROM movies ORDER BY id")
 	if err != nil {
 		return JSONCorruptionReport{}, err
 	}

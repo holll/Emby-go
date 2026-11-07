@@ -12,6 +12,7 @@ import (
 
 	"emby-go/internal/avatar"
 	"emby-go/internal/nfo"
+	"emby-go/internal/scraper"
 	"emby-go/internal/store"
 )
 
@@ -130,6 +131,10 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		lockData = strings.EqualFold(strings.TrimSpace(meta.LockData), "true")
 	}
 
+	// 已保存的 MetaTube 身份（派生自索引里的 provider_id，不读 NFO/磁盘）：
+	// canonical 是官方可复用格式，valid 为假时前端只展示、不回填搜索框。
+	canonicalID, validID := scraper.CanonicalProviderID(movie.ProviderID)
+
 	c.JSON(http.StatusOK, gin.H{
 		"movie":         movie,
 		"library_name":  libraryName,
@@ -140,6 +145,11 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		"modified_at":   modifiedAt(movie.SourcePath),
 		"locked_fields": lockedFields,
 		"lock_data":     lockData,
+		"metatube_id": gin.H{
+			"saved":     movie.ProviderID,
+			"canonical": canonicalID,
+			"valid":     validID,
+		},
 	})
 }
 

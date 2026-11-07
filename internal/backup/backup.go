@@ -22,20 +22,22 @@ import (
 
 // Options 控制一次备份。
 type Options struct {
-	DBPath  string    // 源数据库
-	OutDir  string    // 备份根目录
-	Retain  int       // 保留份数（<=0 表示不清理）
-	Now     time.Time // 备份时间（零值用 time.Now）
-	NFORoot bool      // 是否复制媒体库目录中的 .nfo
+	DBPath         string    // 源数据库
+	OutDir         string    // 备份根目录
+	Retain         int       // 保留份数（<=0 表示不清理）
+	Now            time.Time // 备份时间（零值用 time.Now）
+	NFORoot        bool      // 是否复制媒体库目录中的 .nfo
+	ExtraBackdrops bool      // 是否复制规范 extrafanart/fanartN.jpg 文件
 }
 
 // Result 描述本次备份产物，便于日志与测试断言。
 type Result struct {
-	Dir        string
-	Database   string
-	NFOCount   int
-	Pruned     []string
-	FinishedAt time.Time
+	Dir                string
+	Database           string
+	NFOCount           int
+	ExtraBackdropCount int
+	Pruned             []string
+	FinishedAt         time.Time
 }
 
 // lockFileName 是输出目录上的互斥锁文件：同一 OutDir 同一时刻只允许一路备份。
@@ -193,7 +195,7 @@ func Run(opts Options) (Result, error) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	libs, err := readLibraries(db, opts.NFORoot)
+	libs, err := readLibraries(db, opts.NFORoot || opts.ExtraBackdrops)
 	if err != nil {
 		return Result{}, err
 	}
@@ -251,6 +253,13 @@ func Run(opts Options) (Result, error) {
 			return Result{}, err
 		}
 		result.NFOCount = count
+	}
+	if opts.ExtraBackdrops {
+		count, err := copyExtraBackdrops(libs, filepath.Join(stage, "extra-backdrops"))
+		if err != nil {
+			return Result{}, err
+		}
+		result.ExtraBackdropCount = count
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return Result{}, fmt.Errorf("backup: replace: %w", err)

@@ -14,10 +14,21 @@ func (s *Store) IndexMovie(m Movie, size int64, mtime time.Time, actors []ActorR
 	err := s.writeVersioned(m.LibraryID, func(tx *sql.Tx) error {
 		// writeVersioned already holds the write reservation. Reading the
 		// previous library cannot race another writer's move of this source.
+		var previousID int64
 		var previous sql.NullInt64
-		err := tx.QueryRow("SELECT library_id FROM movies WHERE source_path=?", m.SourcePath).Scan(&previous)
+		var previousStatus string
+		err := tx.QueryRow("SELECT id,library_id,status FROM movies WHERE source_path=?", m.SourcePath).Scan(&previousID, &previous, &previousStatus)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		// Match grouped scans: a missing sidecar must not erase a manual row.
+		// A readable NFO still refreshes metadata normally.
+		if previousStatus == "manual" && previous.Valid && previous.Int64 == m.LibraryID && m.Status != "success" && m.Status != "manual" {
+			id = previousID
+			if _, err := updateManualScanStructureTx(tx, id, ScanGroupMovie{Movie: m, Size: size, Mtime: mtime}); err != nil {
+				return err
+			}
+			return invalidateMovieScanStateTx(tx, m)
 		}
 		if previous.Valid && previous.Int64 != m.LibraryID {
 			if err := bumpLibraryVersionTx(tx, previous.Int64); err != nil {

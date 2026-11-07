@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"emby-go/internal/nfo"
+	"emby-go/internal/regularfile"
 	"emby-go/internal/store"
 )
 
@@ -29,7 +31,7 @@ const (
 
 // scanFingerprintVersion invalidates every baseline when the interpretation of
 // inputs changes: stacking rules, NFO precedence or snapshot fields.
-const scanFingerprintVersion int64 = 3
+const scanFingerprintVersion int64 = 4
 
 var (
 	// ErrScanIncomplete means the inventory could not be proven complete. No
@@ -207,9 +209,16 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 		group := groups[key]
 		inputs, readErr := readGroupInputs(lib, key, group)
 		if readErr != nil {
-			result.Failed++
 			result.Incomplete = true
-			complete = false
+			if errors.Is(readErr, ErrSourceTooLarge) || errors.Is(readErr, nfo.ErrTooLarge) || errors.Is(readErr, regularfile.ErrNotRegular) {
+				// A skipped dependency leaves the entire CD group untouched.
+				// Do not reconcile missing rows from this partial inventory.
+				result.Skipped += len(group)
+				slog.Warn("扫描跳过超限或非普通文件所在分组", "group", key, "error", readErr)
+			} else {
+				result.Failed++
+				complete = false
+			}
 			result.GroupsDone = index + 1
 			report(index+1, key)
 			continue
@@ -218,10 +227,15 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 		if fpErr != nil {
 			return result, fpErr
 		}
-		if !inputs.stillMatches() {
-			result.Failed++
+		if matchErr := inputs.stillMatches(); matchErr != nil {
 			result.Incomplete = true
-			complete = false
+			if errors.Is(matchErr, ErrSourceTooLarge) || errors.Is(matchErr, nfo.ErrTooLarge) || errors.Is(matchErr, regularfile.ErrNotRegular) {
+				result.Skipped += len(group)
+				slog.Warn("扫描跳过超限或非普通文件所在分组", "group", key, "error", matchErr)
+			} else {
+				result.Failed++
+				complete = false
+			}
 			result.GroupsDone = index + 1
 			report(index+1, key)
 			continue
@@ -255,10 +269,15 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 			report(index+1, key)
 			continue
 		}
-		if !inputs.stillMatches() {
-			result.Failed++
+		if matchErr := inputs.stillMatches(); matchErr != nil {
 			result.Incomplete = true
-			complete = false
+			if errors.Is(matchErr, ErrSourceTooLarge) || errors.Is(matchErr, nfo.ErrTooLarge) || errors.Is(matchErr, regularfile.ErrNotRegular) {
+				result.Skipped += len(group)
+				slog.Warn("扫描跳过超限或非普通文件所在分组", "group", key, "error", matchErr)
+			} else {
+				result.Failed++
+				complete = false
+			}
 			result.GroupsDone = index + 1
 			report(index+1, key)
 			continue
@@ -335,6 +354,10 @@ func ScanWithOptions(ctx context.Context, s *store.Store, lib store.Library, opt
 	}
 	if err := health(); err != nil {
 		return fail(err)
+	}
+	if result.Incomplete {
+		// Oversized/non-regular inputs were skipped with warnings, not read failures.
+		return result, nil
 	}
 	finalGroups, err := enumerateGroupsContext(ctx, lib)
 	if err != nil {
@@ -585,7 +608,7 @@ func readNFOFile(path string) (nfoFileInput, error) {
 		if err != nil {
 			return nfoFileInput{}, err
 		}
-		data, err := os.ReadFile(path)
+		data, err := nfo.ReadFile(path)
 		if err != nil {
 			return nfoFileInput{}, err
 		}
@@ -668,7 +691,11 @@ func snapshotImages(dir, sourcePath string) ([]imageSnapshot, error) {
 		}
 		result = append(result, entry)
 	}
-	return result, nil
+	extra, err := extraBackdropSnapshots(dir, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	return append(result, extra...), nil
 }
 
 func (inputs *groupInputs) fingerprint() (string, error) {
@@ -725,38 +752,52 @@ func (inputs *groupInputs) fingerprint() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (inputs *groupInputs) stillMatches() bool {
+// stillMatches preserves bounded-read errors so callers can distinguish an
+// oversized dependency from an ordinary concurrent filesystem change.
+func (inputs *groupInputs) stillMatches() error {
 	for _, member := range inputs.members {
 		current, err := readMemberInput(member.candidate)
-		if err != nil || current.size != member.size || current.mtimeNS != member.mtimeNS || current.digest != member.digest {
-			return false
+		if err != nil {
+			return err
+		}
+		if current.size != member.size || current.mtimeNS != member.mtimeNS || current.digest != member.digest {
+			return ErrScanIncomplete
 		}
 	}
 	for _, file := range inputs.nfos {
-		if !file.present {
-			if _, err := os.Stat(file.path); !errors.Is(err, os.ErrNotExist) {
-				return false
-			}
+		data, err := nfo.ReadFile(file.path)
+		if !file.present && errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		data, err := os.ReadFile(file.path)
 		if err != nil {
-			return false
+			return err
+		}
+		if !file.present {
+			return ErrScanIncomplete
 		}
 		sum := sha256.Sum256(data)
 		if hex.EncodeToString(sum[:]) != file.digest {
-			return false
+			return ErrScanIncomplete
 		}
 	}
 	for _, record := range inputs.records {
 		images, err := snapshotImages(record.movie.OutputDir, record.movie.SourcePath)
 		if err != nil {
-			return false
+			return err
+		}
+		originalCount := 0
+		for _, image := range inputs.images {
+			if image.Source == record.movie.SourcePath {
+				originalCount++
+			}
+		}
+		if len(images) != originalCount {
+			return ErrScanIncomplete
 		}
 		for _, image := range images {
 			found := slices.Contains(inputs.images, image)
 			if !found {
-				return false
+				return ErrScanIncomplete
 			}
 		}
 	}
@@ -765,7 +806,7 @@ func (inputs *groupInputs) stillMatches() bool {
 		target := inputs.members[0].candidate
 		entries, err := os.ReadDir(filepath.Dir(target.path))
 		if err != nil {
-			return false
+			return err
 		}
 		var current []candidate
 		for _, entry := range entries {
@@ -778,12 +819,12 @@ func (inputs *groupInputs) stillMatches() bool {
 				continue
 			}
 			if _, err := entry.Info(); err != nil {
-				return false
+				return err
 			}
 			current = append(current, candidate{path: filepath.Join(filepath.Dir(target.path), entry.Name())})
 		}
 		if len(current) != len(inputs.members) {
-			return false
+			return ErrScanIncomplete
 		}
 		for _, item := range current {
 			found := false
@@ -794,11 +835,11 @@ func (inputs *groupInputs) stillMatches() bool {
 				}
 			}
 			if !found {
-				return false
+				return ErrScanIncomplete
 			}
 		}
 	}
-	return true
+	return nil
 }
 
 func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string]bool) ([]recordPlan, error) {
@@ -865,6 +906,8 @@ func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string
 				record.movie.BackdropPath = image.Path
 			case "landscape":
 				record.movie.LandscapePath = image.Path
+			case "extra_backdrop":
+				record.movie.ExtraBackdrops = append(record.movie.ExtraBackdrops, image.Path)
 			}
 		}
 		setSource(&record.movie, member.content)
@@ -885,7 +928,7 @@ func readMemberInput(item candidate) (memberInput, error) {
 		if err != nil {
 			return memberInput{}, err
 		}
-		data, err := os.ReadFile(item.path)
+		data, err := readSourceFile(item.path)
 		if err != nil {
 			return memberInput{}, err
 		}

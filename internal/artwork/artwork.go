@@ -287,7 +287,7 @@ func Run(ctx context.Context, db *store.Store, req Request, opts Options) (res R
 		if opts.Client == nil {
 			return res, errors.New("MetaTube client required")
 		}
-		data, err = opts.Client.Download(workCtx, opts.Client.ImageURL("primary", req.Provider, req.ProviderID, 90, "", ""), maxImageBytes+1)
+		data, err = opts.Client.Download(workCtx, opts.Client.ImageURL("primary", req.Provider, req.ProviderID, metatube.ImageOptions{Quality: 90}), maxImageBytes+1)
 	case "screenshot":
 		var raw []byte
 		raw, err = readLimited(files, sourceFile, 64<<10)

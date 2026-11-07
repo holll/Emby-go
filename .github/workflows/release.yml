@@ -10,11 +10,20 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    # 本地复用会读取当前事件提交中的 CI，失败/取消/跳过均不进入构建发布。
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -50,6 +59,10 @@ jobs:
           actual="$(./dist/emby-go-linux-amd64 -version)"
           test "${actual}" = "${expected}"
           printf '%s\n' "${actual}"
+          # 校验和与版本输出来自本次同一批产物；不读取旧 dist。
+          (cd dist && sha256sum emby-go-* > SHA256SUMS && sha256sum -c SHA256SUMS)
+          # 部署材料与二进制同批发布：首装脚本、Service 模板和配置样例。
+          cp deploy/install.sh deploy/verify-native-install.sh deploy/emby-go.service config.example.yaml dist/
 
       - name: Upload binaries to release
         uses: softprops/action-gh-release@v2

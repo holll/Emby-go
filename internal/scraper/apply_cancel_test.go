@@ -107,7 +107,7 @@ func TestDownloadImageConcurrentUniqueTemp(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			<-start
-			_, err := s.downloadImage(context.Background(), metatube.MovieInfo{Provider: "p", ID: "1"}, "primary", dest, "", true)
+			_, err := s.downloadImage(context.Background(), metatube.MovieInfo{Provider: "p", ID: "1"}, "primary", dest, "", nil, true)
 			errs <- err
 		})
 	}
@@ -156,7 +156,7 @@ func TestDownloadImageFailureCleansOnlyOwnTemp(t *testing.T) {
 			if err := os.WriteFile(dest+".tmp", sentinel, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.downloadImage(context.Background(), metatube.MovieInfo{Provider: "p", ID: "1"}, "primary", dest, "", true); err == nil {
+			if _, err := s.downloadImage(context.Background(), metatube.MovieInfo{Provider: "p", ID: "1"}, "primary", dest, "", nil, true); err == nil {
 				t.Fatal("expected save failure")
 			}
 			raw, err := os.ReadFile(dest + ".tmp")

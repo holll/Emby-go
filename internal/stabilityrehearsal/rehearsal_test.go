@@ -208,8 +208,8 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 		}
 	}
 	db := rawDB(t, path)
-	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 16 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 16 {
-		t.Fatal("migration ledger is not complete v16")
+	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 18 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 18 {
+		t.Fatal("migration ledger is not complete v18")
 	}
 	if scalar(t, db, "SELECT count(*) FROM users WHERE auth_generation=1") != 3 {
 		t.Fatal("generation backfill")
@@ -219,6 +219,8 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 	}
 	integrity(t, path)
 	s := openStore(t, path)
+	// Only the JSON index is backed up here, not the referenced artwork bytes.
+	mustExec(t, db, `UPDATE movies SET extra_backdrops='["/fixture/extrafanart/fanart2.jpg","/fixture/extrafanart/fanart10.jpg"]', auto_marks='["中文字幕"]' WHERE id=42`)
 	result, err := backup.Run(backup.Options{DBPath: path, OutDir: filepath.Join(t.TempDir(), "backups"), NFORoot: true, Now: time.Unix(1700000000, 0)})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +257,9 @@ func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
 		query string
 		want  int64
 	}{
-		{"SELECT count(*) FROM schema_migrations", 16},
+		{"SELECT count(*) FROM schema_migrations", 18},
+		{"SELECT count(*) FROM movies WHERE id=42 AND auto_marks='[\"中文字幕\"]'", 1},
+		{"SELECT count(*) FROM movies WHERE id=42 AND extra_backdrops='[\"/fixture/extrafanart/fanart2.jpg\",\"/fixture/extrafanart/fanart10.jpg\"]'", 1},
 		{"SELECT count(*) FROM playback_sessions WHERE session_key='shared-session' AND movie_id=42 AND ((user_id=7 AND position_ticks=1234567) OR (user_id=9 AND position_ticks=999))", 2},
 		{"SELECT count(*) FROM playback_events WHERE session_key='shared-session' AND seq=1 AND kind='progress' AND ((user_id=7 AND position_ticks=1234567) OR (user_id=9 AND position_ticks=999))", 2},
 		{"SELECT count(*) FROM libraries WHERE id=11 AND name='retained' AND sort_order=3", 1},

@@ -79,7 +79,7 @@ func TestSnapshotImageReselectionIgnoresDirectoryStatCache(t *testing.T) {
 		if err := os.Chtimes(root, info.ModTime(), info.ModTime()); err != nil {
 			t.Fatal(err)
 		}
-		if inputs.stillMatches() {
+		if err := inputs.stillMatches(); err == nil {
 			t.Fatal("directory cache hid new higher-priority poster")
 		}
 	}

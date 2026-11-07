@@ -152,7 +152,7 @@ func TestBuildFieldsMapsMetaTubeToNFO(t *testing.T) {
 		Series: "系列", Genres: []string{"剧情"}, Score: 8.5, Runtime: 120,
 		ReleaseDate: "2024-03-05", Actors: []string{"甲", " ", "乙"},
 	}
-	fields := buildFields(info, "中文标题", "中文简介", true, versionMark{})
+	fields := buildFields(info, "中文标题", "中文简介", true)
 
 	// <title>/<sorttitle> 一律是「番号 标题」，原文另存 originaltitle。
 	if fields.Title != "ABF-018 中文标题" || fields.SortTitle != "ABF-018 中文标题" {
@@ -247,7 +247,7 @@ func TestBuildFieldsNormalizesNumber(t *testing.T) {
 	}
 	for _, tc := range cases {
 		info := metatube.MovieInfo{ID: "abc", Number: tc.number, Title: "原文标题", Provider: "fanza"}
-		fields := buildFields(info, "中文标题", "", true, versionMark{})
+		fields := buildFields(info, "中文标题", "", true)
 		if fields.Number != tc.want {
 			t.Errorf("buildFields(%q).Number = %q，期望 %q", tc.number, fields.Number, tc.want)
 		}

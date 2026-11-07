@@ -25,7 +25,7 @@ async function browser(t) {
       else if(p.endsWith('/detail')){
         if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
         if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
-        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},files:[]};
+        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:[]};
       }
       else if(p.endsWith('/settings'))data={listen:':18080',cache:'memory',db_path:'/data/emby.db',session_ttl_days:7};
       else if(p.endsWith('/users'))data={users:[{id:1,name:'owner',is_admin:true,library_ids:[1]}]};

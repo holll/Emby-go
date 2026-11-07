@@ -1085,7 +1085,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	}
 
 	imageTags := gin.H{}
-	backdrops := make([]string, 0, 1)
+	backdrops := make([]string, 0, 1+len(m.ExtraBackdrops))
 	if m.PosterPath != "" || m.LandscapePath != "" || m.BackdropPath != "" {
 		// 三个标签一次解析（一次加锁 + 一次取时钟），见 imageTagsFor 的说明。
 		primary, thumb, backdropTag := a.imageTagsFor(m.PosterPath, m.LandscapePath, m.BackdropPath)
@@ -1099,6 +1099,12 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 			backdrops = append(backdrops, backdropTag)
 			imageTags["Backdrop"] = backdropTag
 		}
+	}
+	for _, p := range m.ExtraBackdrops {
+		backdrops = append(backdrops, a.posterTag(p))
+	}
+	if len(backdrops) > 0 {
+		imageTags["Backdrop"] = backdrops[0]
 	}
 	// iPlay Android 对 ImageTags / BackdropImageTags 做无条件解引用：
 	// 二者必须恒为对象/数组（内容可空），缺失即列表页 NPE。

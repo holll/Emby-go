@@ -1,6 +1,10 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +39,39 @@ type scrapeImageState struct {
 	Preview string `json:"preview,omitempty"`
 }
 
+// scrapeStill 一张剧照候选。Index 是服务端对剧照列表归一化后的下标，
+// 客户端只能回传下标，图片地址由服务端重新解析（不开放任意 remoteURL）。
+type scrapeStill struct {
+	Index   int    `json:"index"`
+	Preview string `json:"preview"`
+}
+
+// maxScrapeStills 一次预览最多展示的剧照数：个别来源给几十张，
+// 全塞进弹窗既拖慢首屏也没有挑选价值。
+const maxScrapeStills = 24
+
+// stillURLs 归一化上游剧照地址：去空白、去重、按上限截断。
+// 返回的下标即对外的受限候选标识，inspect 与图片代理必须用同一份口径。
+func stillURLs(info metatube.MovieInfo) []string {
+	seen := make(map[string]struct{}, len(info.PreviewImages))
+	out := make([]string, 0, len(info.PreviewImages))
+	for _, raw := range info.PreviewImages {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			continue
+		}
+		if _, dup := seen[target]; dup {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+		if len(out) == maxScrapeStills {
+			break
+		}
+	}
+	return out
+}
+
 // scrapeInspect 选中候选的详情与 diff。
 type scrapeInspect struct {
 	Provider string  `json:"provider"`
@@ -53,6 +90,8 @@ type scrapeInspect struct {
 	Fields []scrapeFieldDiff `json:"fields"`
 	// Images 会被写入的图片与是否已存在（只补缺失时不覆盖已存在的）。
 	Images []scrapeImageState `json:"images"`
+	// Stills 剧照候选（只读）：下标是服务端解析出的受限标识，本批不写盘。
+	Stills []scrapeStill `json:"stills,omitempty"`
 	// Overwrite 当前默认覆盖策略，供预览面板初始化开关。
 	Overwrite bool `json:"overwrite"`
 }
@@ -74,14 +113,14 @@ var inspectImageTargets = []struct{ kind, name string }{
 }
 
 // buildInspect 组装预览数据：详情字段 + 与现有 NFO 的 diff + 图片落盘状态。
-func (a *App) buildInspect(cfg scraper.Config, movie store.Movie, info metatube.MovieInfo) scrapeInspect {
+func (a *App) buildInspect(cfg scraper.Config, movie store.Movie, info metatube.MovieInfo, position *float64) scrapeInspect {
 	out := scrapeInspect{
 		Provider: info.Provider, ID: info.ID, Number: info.Number,
 		Title: strings.TrimSpace(info.Title), Summary: strings.TrimSpace(info.Summary),
 		Score: info.Score, Release: strings.TrimSpace(info.ReleaseDate), Runtime: info.Runtime,
 		Actors:    nonEmptyList(info.Actors...),
-		Poster:    scrapePreviewURL("primary", info.Provider, info.ID),
-		Backdrop:  scrapePreviewURL("backdrop", info.Provider, info.ID),
+		Poster:    scrapePreviewURL("primary", info.Provider, info.ID, position),
+		Backdrop:  scrapePreviewURL("backdrop", info.Provider, info.ID, nil),
 		Overwrite: cfg.Overwrite,
 	}
 
@@ -121,10 +160,23 @@ func (a *App) buildInspect(cfg scraper.Config, movie store.Movie, info metatube.
 	if dir == "" {
 		dir = filepath.Dir(movie.SourcePath)
 	}
+	urls := stillURLs(info)
+	if len(urls) > 0 {
+		raw, version := encodeStillList(urls)
+		// inspect 与匿名图片代理复用同一份归一化列表；新旧预览可并存，
+		// 不能让后一次详情刷新改变先前预览中 index 的含义。
+		a.scrapeStills.Set(joinCacheKey("scrapestills", info.Provider, info.ID, version), raw, scrapeImageTTL)
+		for index := range urls {
+			out.Stills = append(out.Stills, scrapeStill{
+				Index:   index,
+				Preview: scrapeStillURL(info.Provider, info.ID, index) + "&version=" + version,
+			})
+		}
+	}
 	for _, target := range inspectImageTargets {
 		state := scrapeImageState{
 			Name: target.name, Kind: target.kind,
-			Preview: scrapePreviewURL(target.kind, info.Provider, info.ID),
+			Preview: scrapePreviewURL(target.kind, info.Provider, info.ID, targetPosition(target.kind, position)),
 		}
 		if stat, err := os.Stat(filepath.Join(dir, target.name)); err == nil && stat.Size() > 0 {
 			state.Exists = true
@@ -190,12 +242,38 @@ func positiveFloatText(value float64) string {
 	return strconv.FormatFloat(value, 'f', 1, 64)
 }
 
-// scrapePreviewURL 生成走本服务代理的缩略图地址（不落盘，只转发）。
-func scrapePreviewURL(kind, provider, id string) string {
+// targetPosition 只有主海报会用到裁切位置，宽幅图传了也是空转。
+func targetPosition(kind string, position *float64) *float64 {
+	if kind != "primary" {
+		return nil
+	}
+	return position
+}
+
+// scrapePreviewURL 生成走本服务代理的图片地址（不落盘，只转发）。
+// position 非空时带上 pos，让预览与确认后落盘的主海报是同一个裁切结果。
+func scrapePreviewURL(kind, provider, id string, position *float64) string {
 	if provider == "" || id == "" {
 		return ""
 	}
-	return "/api/admin/scrape/image?kind=" + kind + "&provider=" + provider + "&id=" + id
+	target := "/api/admin/scrape/image?kind=" + url.QueryEscape(kind) + "&provider=" + url.QueryEscape(provider) + "&id=" + url.QueryEscape(id)
+	if position != nil {
+		target += "&pos=" + strconv.FormatFloat(*position, 'g', -1, 64)
+	}
+	return target
+}
+
+// encodeStillList 为同一份有序列表生成缓存内容与版本；JSON 保留 URL 内的分隔字符，
+// 避免不同列表因换行等字符产生相同编码。[]string 的 JSON 编码不会失败。
+func encodeStillList(urls []string) ([]byte, string) {
+	raw, _ := json.Marshal(urls)
+	digest := sha256.Sum256(raw)
+	return raw, hex.EncodeToString(digest[:])
+}
+
+// scrapeStillURL 剧照走同一个图片代理，index 是服务端归一化后的受限候选标识。
+func scrapeStillURL(provider, id string, index int) string {
+	return scrapePreviewURL("still", provider, id, nil) + "&index=" + strconv.Itoa(index)
 }
 
 func nonEmptyList(values ...string) []string {
