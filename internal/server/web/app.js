@@ -3766,19 +3766,16 @@ function identityStorageChanged(event) {
    仅管理员可操作。页面打开时静默检查一次（走后端 10 分钟缓存），有新版本就在
    左下角版本号旁显示徽标；管理员点击版本号才打开弹窗。升级流程不允许指定版本或
    下载源：POST 的 version 必须是刚检查到的那一个，由后端重新核对。 */
-const updateOverlay = document.querySelector('#update-overlay');
-const updateVersionBtn = document.querySelector('#version-btn');
-const updateVersionText = document.querySelector('#version-text');
-const updateBadge = document.querySelector('#version-badge');
 const updateCache = { version: '', current: '', notes: '' };
 let updateBusy = false;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function setUpdateBadge(version) {
-  if (!updateBadge) return;
-  updateBadge.hidden = !version;
-  updateBadge.title = version ? '有新版本 ' + version : '';
+  const badge = document.querySelector('#version-badge');
+  if (!badge) return;
+  badge.hidden = !version;
+  badge.title = version ? '有新版本 ' + version : '';
 }
 
 function showUpdateStatus(text, kind) {
@@ -3816,10 +3813,12 @@ async function refreshUpdate(force) {
     updateCache.version = result.available ? (result.latest || '') : '';
     updateCache.notes = result.notes || '';
     setUpdateBadge(updateCache.version);
-    if (updateOverlay && !updateOverlay.hidden) renderUpdate(result);
+    const overlay = document.querySelector('#update-overlay');
+    if (overlay && !overlay.hidden) renderUpdate(result);
     return result;
   } catch (error) {
-    if (updateOverlay && !updateOverlay.hidden) {
+    const overlay = document.querySelector('#update-overlay');
+    if (overlay && !overlay.hidden) {
       showUpdateStatus('检查更新失败：' + (error.message || '网络错误'), 'error');
       if (summary) summary.textContent = '暂时无法检查更新。';
       const apply = document.querySelector('#update-apply');
@@ -3830,8 +3829,9 @@ async function refreshUpdate(force) {
 }
 
 async function openUpdateDialog() {
-  if (!updateOverlay || !updateOverlay.hidden) return;
-  updateOverlay.hidden = false;
+  const overlay = document.querySelector('#update-overlay');
+  if (!overlay || !overlay.hidden) return;
+  overlay.hidden = false;
   overlayPush('#update-overlay');
   showUpdateStatus('');
   const apply = document.querySelector('#update-apply');
@@ -3845,8 +3845,9 @@ async function openUpdateDialog() {
 }
 
 function closeUpdateDialog() {
-  if (!updateOverlay || updateOverlay.hidden) return;
-  updateOverlay.hidden = true;
+  const overlay = document.querySelector('#update-overlay');
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
   overlayPop('#update-overlay');
 }
 
@@ -3863,7 +3864,8 @@ function updateSucceeded(version) {
   updateCache.current = version;
   updateCache.version = '';
   setUpdateBadge('');
-  if (updateVersionText) updateVersionText.textContent = version;
+  const text = document.querySelector('#version-text');
+  if (text) text.textContent = version;
   document.querySelector('#update-summary').textContent = `已升级到 ${version}。`;
   showUpdateStatus(`已升级到 ${version}。重新加载页面即可使用新版本前端资源。`, 'ok');
   document.querySelector('#update-apply').hidden = true;
@@ -3946,11 +3948,13 @@ async function applyUpdate() {
 }
 
 function initUpgrade() {
-  if (!updateVersionBtn || !updateOverlay) return;
-  updateVersionBtn.addEventListener('click', () => { void openUpdateDialog(); });
+  const overlay = document.querySelector('#update-overlay');
+  const button = document.querySelector('#version-btn');
+  if (!button || !overlay) return;
+  button.addEventListener('click', () => { void openUpdateDialog(); });
   document.querySelector('#update-close').addEventListener('click', closeUpdateDialog);
   document.querySelector('#update-later').addEventListener('click', closeUpdateDialog);
-  updateOverlay.addEventListener('click', event => { if (event.target.id === 'update-overlay') closeUpdateDialog(); });
+  overlay.addEventListener('click', event => { if (event.target.id === 'update-overlay') closeUpdateDialog(); });
   document.querySelector('#update-check').addEventListener('click', () => { void refreshUpdate(true); });
   document.querySelector('#update-apply').addEventListener('click', () => { void applyUpdate(); });
   document.querySelector('#update-reload').addEventListener('click', () => window.location.reload());
@@ -3991,9 +3995,10 @@ async function boot() {
     if (location.hash !== '#settings') location.hash = '#settings';
   }
   // 自升级只对管理员开放：普通用户保持版本号可读，但不再响应点击。
-  if (updateVersionBtn && (!me || !me.is_admin)) {
-    updateVersionBtn.disabled = true;
-    updateVersionBtn.title = '仅管理员可检查更新';
+  const versionBtn = document.querySelector('#version-btn');
+  if (versionBtn && (!me || !me.is_admin)) {
+    versionBtn.disabled = true;
+    versionBtn.title = '仅管理员可检查更新';
   }
   if (me && me.is_admin) initUpgrade();
   // 导航写 hash 并压入历史，配合 popstate 让浏览器前进/后退在页面间往返。
