@@ -37,6 +37,9 @@ async function browser(t) {
         if(window.__testThrow)throw Error('fixture network failure');
         data=window.__testResult||{status:'sent',duration_ms:37,error_code:'',message:'测试通知已发送'};
       }
+      else if(p.endsWith('/webhook/deliveries')){
+        data=options.method==='DELETE'?{cleared:0}:{items:[{id:1,event:'item.updated',item_id:1,target_id:'one',status:'sent',error_code:'',created_at:'2026-10-29T12:00:00Z'}],retention:{max_rows:1000,days:7}};
+      }
       else if(p.endsWith('/webhook/targets')){
         if(options.method==='PUT'){
           const draft=JSON.parse(options.body),previous=__webhooks.targets;
