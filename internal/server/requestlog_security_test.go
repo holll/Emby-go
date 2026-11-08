@@ -46,7 +46,7 @@ func TestDiagnosticRequestCopies(t *testing.T) {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var output bytes.Buffer
 			r := gin.New()
-			r.Use(requestLoggerTo(&output), requestContentLoggerTo(&output), requestRecoveryTo(&output))
+			r.Use(requestLoggerTo(&output), requestRecoveryTo(&output))
 			const body = `{"Password":"canary-body"}`
 			const target = "/api/admin/apikeys/canary-path?token=canary-query&Signature=canary-signature&canary-key=x&Limit=canary-number&Static=canary-bool"
 			r.DELETE("/api/admin/apikeys/:key", func(c *gin.Context) {
@@ -67,7 +67,7 @@ func TestDiagnosticRequestCopies(t *testing.T) {
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 			got := output.String()
-			if w.Code != status || strings.Contains(got, "canary") || !strings.Contains(got, "[API REQUEST]") || !strings.Contains(got, "/api/admin/apikeys/:key") || !strings.Contains(got, "error=true") {
+			if w.Code != status || strings.Contains(got, "canary") || !strings.Contains(got, "[GIN]") || !strings.Contains(got, "/api/admin/apikeys/:key") || !strings.Contains(got, "error=true") {
 				t.Fatalf("status=%d log=%s", w.Code, got)
 			}
 		})
@@ -85,7 +85,7 @@ func (b *diagnosticUnreadBody) Close() error { return nil }
 func TestDiagnosticPanicAndUnreadBody(t *testing.T) {
 	var output bytes.Buffer
 	r := gin.New()
-	r.Use(requestLoggerTo(&output), requestContentLoggerTo(&output), requestRecoveryTo(&output))
+	r.Use(requestLoggerTo(&output), requestRecoveryTo(&output))
 	r.POST("/Users/AuthenticateByName", func(c *gin.Context) { panic("canary-panic") })
 	body := &diagnosticUnreadBody{}
 	req := httptest.NewRequest("POST", "/Users/AuthenticateByName?token=canary-query", body)
@@ -106,7 +106,7 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 	defer db.Close()
 	var output bytes.Buffer
 	r := gin.New()
-	r.Use(requestLoggerTo(&output), requestContentLoggerTo(&output))
+	r.Use(requestLoggerTo(&output))
 	r.NoRoute(a.noRoute)
 	for range 200 {
 		body := &diagnosticUnreadBody{}

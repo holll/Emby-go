@@ -31,7 +31,7 @@ func TestSnapshotGrowthPreservesReadError(t *testing.T) {
 					scanWrite(t, meta, "<movie><title>Original</title></movie>")
 				}
 				lib := store.Library{Path: root}
-				groups, err := enumerateGroups(lib)
+				groups, err := enumerateGroupsContext(context.Background(), lib)
 				if err != nil {
 					t.Fatal(err)
 				}

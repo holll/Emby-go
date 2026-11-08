@@ -405,10 +405,6 @@ func (r *Result) Merge(other Result) {
 	r.IndexedSources = append(r.IndexedSources, other.IndexedSources...)
 }
 
-func enumerateGroups(lib store.Library) (map[string][]candidate, error) {
-	return enumerateGroupsContext(context.Background(), lib)
-}
-
 func enumerateGroupsContext(ctx context.Context, lib store.Library) (map[string][]candidate, error) {
 	groups := make(map[string][]candidate)
 	err := filepath.Walk(lib.Path, func(path string, info os.FileInfo, walkErr error) error {

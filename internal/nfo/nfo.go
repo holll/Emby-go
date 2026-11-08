@@ -358,7 +358,6 @@ func Save(path string, m MovieMeta) error {
 	}
 	return os.WriteFile(path, append([]byte(xml.Header), b...), 0644)
 }
-func FromFields(title string, year int) MovieMeta { return MovieMeta{Title: title, Year: year} }
 func SaveAtomic(path string, m MovieMeta) error {
 	defer lockNFOPath(path)()
 	return saveAtomicLocked(path, m)

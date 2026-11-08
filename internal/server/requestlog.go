@@ -232,15 +232,6 @@ func quietPath(path string) bool {
 	return false
 }
 
-// Debug is metadata-only, including login, initialization, config and unknown
-// routes. Never read even a preview of a body or enumerate arbitrary headers.
-func requestContentLoggerTo(w io.Writer) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		fmt.Fprintf(w, "[API REQUEST] method=%s route=%q query=%q content_length=%d headers=[OMITTED] body=[OMITTED]\n", diagnosticMethod(c.Request.Method), diagnosticRoute(c), redactedRequestQuery(c.Request.URL.RawQuery), c.Request.ContentLength)
-		c.Next()
-	}
-}
-
 // Gin's default recovery dumps the request and panic value. Suppress that dump;
 // retain recovery/broken-connection behavior, but emit no untrusted error text.
 func requestRecoveryTo(w io.Writer) gin.HandlerFunc {

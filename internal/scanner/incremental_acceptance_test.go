@@ -91,7 +91,7 @@ func TestIncrementalNFOSameStatAndLazyDecode(t *testing.T) {
 	if err != nil || movie.Title != "Bravo" {
 		t.Fatalf("movie %+v %v", movie, err)
 	}
-	groups, err := enumerateGroups(lib)
+	groups, err := enumerateGroupsContext(context.Background(), lib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestIncrementalSnapshotStability(t *testing.T) {
 			scanWrite(t, source, "https://media.test/a.mp4")
 			scanWrite(t, filepath.Join(root, "Film-CD2.strm"), "https://media.test/2.mp4")
 			lib := store.Library{Path: root}
-			groups, err := enumerateGroups(lib)
+			groups, err := enumerateGroupsContext(context.Background(), lib)
 			if err != nil {
 				t.Fatal(err)
 			}

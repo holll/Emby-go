@@ -62,7 +62,7 @@ func TestSnapshotImageReselectionIgnoresDirectoryStatCache(t *testing.T) {
 	scanWrite(t, filepath.Join(root, "Film-CD2.strm"), "https://media.test/b.mp4")
 	scanWrite(t, filepath.Join(root, "folder.jpg"), "old-image")
 	lib := store.Library{Path: root}
-	groups, err := enumerateGroups(lib)
+	groups, err := enumerateGroupsContext(context.Background(), lib)
 	if err != nil {
 		t.Fatal(err)
 	}

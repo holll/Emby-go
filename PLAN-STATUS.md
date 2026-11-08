@@ -1841,10 +1841,32 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 - 主机：Debian 12 bookworm（1.6GiB 内存，根盘 ext4），root 直跑 systemd 单元；升级前 `v2.2.6-234a220`。安装前布局：`/opt/emby-go/emby-go`、DB/WAL/log/avatars/image-cache/video-previews 同在 `/opt/emby-go`，配置 `/opt/emby-go/config.yaml`（0666），unit `ExecStart=/opt/emby-go/emby-go`（无 `-c`）、`WorkingDirectory=/opt/emby-go`、`Restart=on-failure`、`disabled`；DB schema 16、影片 11,342、用户 1；NFO 写 `/data/emby/media/AV/...`；nginx 80/443 反代 `127.0.0.1:8097`，同机另有 redis、easytier、smartstrm、nginx-ui 等无关服务。
 - 变更前备份 `/root/prechange-20261107/`：`sqlite3 .backup` 一致性 DB（integrity_check ok、schema16、11342 行）、旧配置、旧 unit、旧二进制 v2.2.6，以及后续的 v2.3.0 二进制、schema20 DB 副本、df、sha256 清单。
-- 安装：GitHub 直连下载反复 `curl (35) Connection reset`（IPv6 路径），改用用户提供的只读镜像 `https://hubproxy.hollc.cn/github.com/<repo>/...`；install.sh 仅替换 `BASE=` 一行，其余未改（因此脚本仍自带 `--proto-redir`、SHA256SUMS 校验与原子安装路径）；下载物 sha256 与 Release SHA256SUMS 中 linux-amd64 行一致（`6fe8a07…`）。按 A 方案把配置复制为 `/etc/emby-go/config.yaml`（0600，内容 sha 与原文件一致），unit 使用发布模板、仅把 `ReadWritePaths` 追加 `/data`（NFO 写入目录）。安装后 `enabled`+`active`，`User=root`、`ExecStart=/opt/emby-go/emby-go -c /etc/emby-go/config.yaml`、`Restart=always`。
+- 安装：GitHub 直连下载反复 `curl (35) Connection reset`（IPv6 路径），改用用户提供的只读镜像 `https://<内部镜像>/github.com/<repo>/...`；install.sh 仅替换 `BASE=` 一行，其余未改（因此脚本仍自带 `--proto-redir`、SHA256SUMS 校验与原子安装路径）；下载物 sha256 与 Release SHA256SUMS 中 linux-amd64 行一致（`6fe8a07…`）。按 A 方案把配置复制为 `/etc/emby-go/config.yaml`（0600，内容 sha 与原文件一致），unit 使用发布模板、仅把 `ReadWritePaths` 追加 `/data`（NFO 写入目录）。安装后 `enabled`+`active`，`User=root`、`ExecStart=/opt/emby-go/emby-go -c /etc/emby-go/config.yaml`、`Restart=always`。
 - 安装后核对：`/api/version`=`v2.3.0-25453a9`；schema 18（v2.3.0 不包含 19/20）；影片 11,342、用户 1；`/healthz` 200；nginx 443 的 `/` 与 `/api/version` 200；未认证 `/api/admin/update` 401；沙箱 mountinfo 中 `/opt/emby-go`、`/etc/emby-go`、`/data` 均 rw；启动日志无 error，ffprobe 就绪、计划任务 3/2。
 - 受控升级演练（使用工作树构建的 v2.3.1-test，含 19/20 迁移）：`CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v2.3.1-test -X main.commit=25453a9 -X main.buildTime=2026-11-07T07:20:00Z"` → scp → 以 `.emby-go.installing` + `mv` 原子替换 → `kill -TERM` 旧 PID。日志显示正常关闭（17:55:14 `Deactivated successfully`）→ systemd `Restart=always` 拉起新 PID（17:55:17 `Started`，17:55:18 `listening version=v2.3.1-test`）；`/api/version`=v2.3.1-test，DB 自动 18→20，影片数不变。这验证了“原子替换 + 正常关闭 + systemd 重启 + 恢复后版本核对”链路，但测试二进制并非 tag v2.3.0（见下一条）。
 - 回滚：v2.3.0 的迁移代码只认识 ≤18，对 19/20 ledger 会报 `unsupported or modified schema migration 19` 并拒绝启动。停服后应用 schema20 回滚脚本：`DROP TABLE task_records, webhook_deliveries`、`DELETE FROM schema_migrations WHERE version>=19`、`PRAGMA wal_checkpoint(TRUNCATE)`；恢复 v2.3.0 二进制并启动。结果 schema 18、影片 11,342、用户 1、`integrity_check` ok、healthz 200、`/api/version`=v2.3.0-25453a9。schema20 DB 副本保留在备份目录。
 - 真实主机运行 `deploy/verify-native-install.sh <installed sha> /`：5 项 OK（二进制 owner/mode、`/opt`、`/etc`、config、SHA256），rc=0；输出保留“static installation checks only / NOT CHECKED…”的口径，不构成 M1 放行。
 - 状态：主机当前运行 `v2.3.0-25453a9`（schema 18），`/opt/emby-go/config.yaml` 留作回滚材料（0600）；N-02～N-05 尚未进入任何 Release；工作树未提交、未发布新版本。临时 SSH 公钥由用户加入 `/root/.ssh/authorized_keys`（尾注 `emby115-rehearsal-2026-11-07`），演练结束后应删除。
 - 剩余：页面自升级（左下角徽标 → 管理员确认 → 下载/SHA256/`-version`/原子替换 → 正常关闭 → systemd 重启 → 恢复后核对版本）需要比 v2.3.0 更新的 Release 才能真机实测；建议以包含 N-02～N-05 的工作树发布 v2.3.1 后在主机上走一遍（需提交/发布授权）。
+
+## 100. 真实主机页面自升级全链路（2026-11-07）
+
+- Release：`v2.3.1`（提交 `f61840a`，含 N-02～N-05 与 schema20）、`v2.3.2`（提交 `2b679c9`，自升级/首装镜像支持）、`v2.3.3`（同一提交 `2b679c9`，仅用于页面升级目标）。三者均为正式 Release，资产含 `SHA256SUMS` 与部署材料。
+- 缺陷与改进：v2.3.0 页面升级在真机失败于 `下载升级包失败：context deadline exceeded`——主机到 GitHub Release 资产约 15 KB/s，20 MB 需约 22 分钟，超出升级 10 分钟预算。因此新增可选镜像 `EMBY_GO_RELEASE_MIRROR`（服务端环境变量）与 `EMBY_GO_MIRROR`（首装脚本），只改写下载地址，`SHA256SUMS`、`-version`、原子替换不变；镜像必须 https。代码见 `internal/upgrade/upgrade.go`、`internal/server/server.go`、`deploy/install.sh`，测试 `TestCheckRejectsNonHTTPSMirror`、`TestRunDownloadsFromMirrorBase`。
+- 真机准备：用镜像下载 `v2.3.2` 并校验 SHA256 后 `install -m 0755` 原子替换；新增 drop-in `/etc/systemd/system/emby-go.service.d/mirror.conf`：`Environment=EMBY_GO_RELEASE_MIRROR=https://<内部镜像>/github.com`，`daemon-reload` + `restart`。安装后 `/api/version`=`v2.3.2-2b679c9`、schema 自动 18→20、影片 11,342 不变。
+- 页面实测（`/tmp/emby115-ui-upgrade.test.cjs`，真实 Chromium，19.3 秒）：打开管理页 → 左下角徽标出现 → 管理员打开弹层 → 目标 `v2.3.3` → 点击更新 → 服务端镜像下载、SHA256 校验、`-version` 通过后原子替换 → 日志 `升级包已原子替换，等待 systemd 重启`、`升级已安装：正常关闭，等待 systemd 重启`、`开始有界关闭 budget=15s`、systemd `Deactivated successfully` → `Started`（19:28:09）→ 新进程 `listening version=v2.3.3-2b679c9`；页面恢复后读取 `/api/version` 显示“已升级到 v2.3.3-2b679c9。重新加载页面即可使用新版本前端资源。”，徽标隐藏、按钮状态正确、无浏览器错误。点击「重新加载页面」后诊断入口出现，证明前端资源随程序更新。
+- 主机核对：`/api/version`=`v2.3.3-2b679c9`、`NRestarts=1`、schema 20、影片 11,342、`integrity_check` ok、`/opt/emby-go` 无残留临时文件。
+- 清理：删除演练用 `access_tokens` 行与 `/root/.emby115-rehearsal-token`，从 `/root/.ssh/authorized_keys` 移除尾注 `emby115-rehearsal-2026-11-07` 的临时公钥并删除本地私钥；清理 `/tmp/emby-go-install`。drop-in 镜像环境变量保留（该网络环境下后续升级需要）。
+- 未做：M1 A–E 正式验收包、具名候选签收、真实媒体/NAS 操作；`/opt/emby-go/config.yaml`（0600）与 `/root/prechange-20261107/` 备份保留供回滚。本记录不改变“不实机迁移数据”的边界。
+
+## 101. 死代码清理（2026-11-08，用户确认三步）
+
+- 范围：本批 `52836dd..HEAD`（5 个提交、197 文件）静态审查；因本机为 2 核/1.8GB 且用户要求限流，未再跑全仓编译式 `deadcode -test`，改用符号引用统计与定向核查。
+- 结论：本批新增代码（U-01、N-02～N-05、镜像支持）未发现未引用函数、未访问结构体字段或孤立常量；`app.js` 函数无孤儿。
+- 清理（用户确认“3 步都做”）：
+  1. `internal/nfo/nfo.go`：删除 `FromFields`（全仓仅定义本身，零引用）。
+  2. `internal/server/requestlog.go`：删除 `requestContentLoggerTo`（生产 wiring 只用 `requestLoggerTo` + `requestRecoveryTo`）；`requestlog_security_test.go`、`requestlog_ids_test.go` 移除该中间件，依赖双行输出的计数 2→1，`[API REQUEST]` 断言改为 `[GIN]`。
+  3. `internal/scanner/incremental.go`：删除 `enumerateGroups` 包装；4 处测试改用 `enumerateGroupsContext(context.Background(), lib)`。
+  4. C-01：删除 `internal/probe/input.go`（72 行）及 `input_test.go`、`input_lifecycle_test.go`；`downloadInput`/`readInput`/`maxInputSize`/`inputHTTPClient` 生产零调用，STRM 直连 ffprobe 路径未动。
+- 保留：`probe.flexNum.UnmarshalJSON`（`encoding/json` 反射调用）、`mountWebhookSettings`（`app.js` 页面入口），均非死代码。
+- 验证：`gofmt -l` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/nfo ./internal/probe`、`go test ./internal/server -run 'TestDiagnostic|TestRequestLog'`、`go test ./internal/scanner -run '<受影响用例>'` 全部 ok；提交前以单核限流复跑全量 `go test ./...`。改动随 `v2.3.4` 提交，不单独发布功能。
