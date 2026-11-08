@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -81,6 +82,10 @@ type Manager struct {
 	restart     chan struct{}
 	restartOnce sync.Once
 
+	// 下载进度只给状态查询读，用原子量避免和状态锁互相等待。
+	downloaded atomic.Int64
+	total      atomic.Int64
+
 	mu        sync.Mutex
 	latest    *release
 	checkedAt time.Time
@@ -93,6 +98,7 @@ type release struct {
 	notes       string
 	publishedAt time.Time
 	asset       string
+	size        int64
 	binaryURL   string
 	sumsURL     string
 }
@@ -109,10 +115,12 @@ type Result struct {
 
 // State 是升级进度；重启后进程从 idle 重新开始。
 type State struct {
-	Phase     string    `json:"phase"`
-	Target    string    `json:"target,omitempty"`
-	Message   string    `json:"message,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Phase           string    `json:"phase"`
+	Target          string    `json:"target,omitempty"`
+	Message         string    `json:"message,omitempty"`
+	DownloadedBytes int64     `json:"downloaded_bytes,omitempty"`
+	TotalBytes      int64     `json:"total_bytes,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // New 构造 Manager。
@@ -143,8 +151,11 @@ func (m *Manager) Restart() <-chan struct{} { return m.restart }
 // State 返回当前升级进度快照。
 func (m *Manager) State() State {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.state
+	state := m.state
+	m.mu.Unlock()
+	state.DownloadedBytes = m.downloaded.Load()
+	state.TotalBytes = m.total.Load()
+	return state
 }
 
 // Check 查询最新 Release。force 为 false 时复用 checkTTL 内的缓存。
@@ -195,6 +206,8 @@ func (m *Manager) Begin(target string) error {
 	if m.latest == nil || m.latest.version != target {
 		return errors.New("目标版本已变化，请重新检查更新")
 	}
+	m.downloaded.Store(0)
+	m.total.Store(m.latest.size)
 	m.state = State{Phase: PhaseDownloading, Target: target, UpdatedAt: time.Now()}
 	return nil
 }
@@ -210,6 +223,8 @@ func (m *Manager) Run(ctx context.Context, target string) {
 		m.fail(target, errors.New("升级目标已失效，请重新检查更新"))
 		return
 	}
+	m.downloaded.Store(0)
+	m.total.Store(rel.size)
 	exe := m.executable
 	if exe == "" {
 		resolved, err := os.Executable()
@@ -315,6 +330,7 @@ func (m *Manager) fetchRelease(ctx context.Context) (*release, error) {
 		Assets      []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
+			Size               int64  `json:"size"`
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
@@ -335,6 +351,7 @@ func (m *Manager) fetchRelease(ctx context.Context) (*release, error) {
 		switch candidate.Name {
 		case asset:
 			rel.binaryURL = candidate.BrowserDownloadURL
+			rel.size = candidate.Size
 			foundBinary = true
 		case checksumsAsset:
 			rel.sumsURL = candidate.BrowserDownloadURL
@@ -380,7 +397,9 @@ func (m *Manager) download(ctx context.Context, rawURL string, dst *os.File) (st
 		return "", fmt.Errorf("下载升级包失败：HTTP %d", resp.StatusCode)
 	}
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(dst, hash), io.LimitReader(resp.Body, maxBinaryBytes+1))
+	// 管理端按已写字节展示进度；总量来自 Release 资产声明的 size。
+	body := io.TeeReader(resp.Body, &countingWriter{done: &m.downloaded})
+	written, err := io.Copy(io.MultiWriter(dst, hash), io.LimitReader(body, maxBinaryBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("下载升级包失败：%w", err)
 	}
@@ -395,6 +414,16 @@ func (m *Manager) download(ctx context.Context, rawURL string, dst *os.File) (st
 		return "", fmt.Errorf("写入升级包失败：%w", err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// countingWriter 累计已写入的字节数，只用于进度展示。
+type countingWriter struct {
+	done *atomic.Int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.done.Add(int64(len(p)))
+	return len(p), nil
 }
 
 func (m *Manager) fetchChecksum(ctx context.Context, rawURL, asset string) (string, error) {

@@ -1872,3 +1872,21 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 验证：`gofmt -l` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/nfo ./internal/probe`、`go test ./internal/server -run 'TestDiagnostic|TestRequestLog'`、`go test ./internal/scanner -run '<受影响用例>'` 全部 ok；提交前以单核限流复跑全量 `go test ./...`（GOMAXPROCS=1 nice，全部包 ok）。改动随 `v2.3.4` 提交，不单独发布功能。
 - 发布：`e902bb5` 打 `v2.3.4` 并推送；release run `42438003369` 首轮 `verify / Race (server-2/4)`、`server-3/4` 因既有 `/admin#items` hash 导航 page-load flake 失败，`--failed` 重跑后成功。Release 共 10 个资产；本机下载 `emby-go-linux-amd64` 用 SHA256SUMS 校验 OK，`-version` = `Emby-go v2.3.4-e902bb5 (commit e902bb5..., built 2026-11-08T02:31:38Z)`；`releases/latest` = v2.3.4。
 - 测试基础设施修复：`internal/server/web_browser_helper.cjs` 的 `navigate()` 现在同时接受 `Page.loadEventFired` 与 `location.href` 到达目标，覆盖同文档 hash 导航（`/admin#items`）不发 load 事件的场景；该 flake 在 v2.3.2/v2.3.3/v2.3.4 各出现一次。回归：`TestScrapeAutoMarksBrowser`、`TestScrapeStillsBrowser`、`TestSubtitleMarksBrowser` 15.6s 通过；`TestAdminUpdateBrowser`、`TestAdminBackupBrowser` 9.8s 通过。
+
+## 102. 独立任务中心页与升级下载进度（2026-11-08，仓库侧完成，未提交）
+
+- 任务中心页：左侧「资料处理 → 任务中心」（`data-page="tasks"`），表格列 ID/类型/状态/开始/结束/结果/错误；类型与状态为客户端筛选，刷新按钮重新读取；存在运行中任务时每 5 秒轮询，`history_error` 显示摘要不可读提示。计划任务页删除原「执行记录」合并块（`#task-log`/`#task-refresh`/`#task-scan` 及观察中的重绘调用），观察逻辑只保留 `/scheduled` 只读轮询与状态提示。
+- 结果摘要：`GET /api/admin/tasks` 的 items 增加 `result`（执行结果 JSON 对象）；`adminTasks` 从 `ResultJSON` 回填内存任务结果，摘要任务直接带结果；`result_json` 不对外暴露。前端 `taskResultText` 只格式化 added/updated/deleted/success/pending/failed/skipped/nfo_count/extra_backdrop_count，未知形状截断展示。
+- 升级进度：`Manager` 以原子计数记录下载字节与资产总大小，`/api/admin/update/status` 在 `downloading` 阶段返回 `downloaded_bytes`/`total_bytes`；弹窗新增进度条（有总大小时显示百分比与 X/Y，无总大小时为 indeterminate；verifying/installing/restarting 显示阶段文案，失败/成功隐藏）。资产大小取自 Release API 的 `size`。
+- 测试：`TestTaskListIncludesResultSummary`（result 摘要且不暴露 result_json）；`TestAdminUpdateBrowser` 桩化 status 返回 25%/75% 下载进度，断言进度条可见、宽度 75%、文案「已下载 75% · 15 MB / 20 MB」、成功后隐藏；新增 `TestAdminTasksBrowser`（`tasks_browser_test.cjs`：导航进入 `#tasks`、表格记录与七列表头、筛选/刷新控件、刷新后仍有行、无浏览器错误）；VM 套件 170 通过。
+- 文档：契约 §4.11 补进度字段、§4.12 补 result 字段；dev-plan N-02 行改为“含独立任务中心页”，U-01 证据补下载进度；本条为施工记录，尚未提交/发布。
+- 门禁：`gofmt -l` 干净；`go build ./...`、`go vet ./...` 通过；`GOMAXPROCS=1 nice -n 19 go test -count=1 ./...` 全部包 ok（server 101.4s、store 49.2s、scanner 15.5s 等）；`go test -race ./internal/upgrade` 与目标 server 用例通过；VM 套件 170、两个真实浏览器回归（update 9.2s、tasks 2.5s）通过。
+
+## 103. 普通用户禁止登录 Web 管理台侧边栏分组（2026-11-08，未提交）
+
+- 行为变更：Web 登录页与 `/admin` 只接受 `Policy.IsAdministrator=true` 的账户。登录成功后若响应 `User.Policy.IsAdministrator=false`，不写 `emby_token`、不跳转，表单内提示“该账户不是管理员，Web 管理界面仅对管理员开放”；已有普通用户 token 访问 `/admin` 时 `boot()` 清除本机凭据并 `location.replace('/')`。`POST /Users/AuthenticateByName` 响应结构不变，普通用户 token 仍可用于 Emby 客户端播放，后端管理端点仍由 `requireAdmin` 返回 403。
+- 侧边栏分组：内容管理（媒体库、媒体墙）、资料处理（刮削、独立翻译）、自动化（计划任务、任务中心）、运维诊断（运行日志、活动记录、接口探针、诊断）、账户与安全（访问安全、设置）；「总览」保持未分组。共 5 组 13 项。
+- 测试：`web_test.cjs` 新增“非管理员登录被拒绝：不存凭据、不跳转、提示仅管理员开放”，成功登录夹具补 `User.Policy.IsAdministrator`；`update_browser_test.cjs` 的非管理员用例改为真实浏览器验证：带 viewer token 打开 `/admin` → 回到 `/`、`.auth-error` 含“仅对管理员开放”、`emby_token` 已清除、无版本按钮、零次 `/api/admin/update` 请求。VM 套件 175 通过；`TestAdminUpdateBrowser` 三个子用例通过（7.95s）。
+- 文档：契约新增 §4.16（登录响应不变、前端单点拒绝、API 仍 403）；README 后台章节注明仅管理员登录。
+- 未提交、未发布；`go build ./...` 仅用于确认嵌入资源可构建。
+- 浏览器回归稳定性：非管理员用例改用 `Page.navigate` 发起导航 + `waitForRedirect` 重试（导航销毁旧执行上下文时 `Runtime.evaluate` 会报 “Inspected target navigated or closed”，不能按页面稳定后再判断），连续 3 次运行通过；与任务中心回归合并运行也通过。

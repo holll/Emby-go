@@ -39,11 +39,11 @@ func fakeAPI(t *testing.T, rel fakeRelease) (*httptest.Server, *atomic.Int64) {
 			return
 		}
 		asset := "emby-go-" + runtime.GOOS + "-" + runtime.GOARCH
-		assets := []map[string]string{
-			{"name": asset, "browser_download_url": srv.URL + "/binary"},
+		assets := []map[string]any{
+			{"name": asset, "browser_download_url": srv.URL + "/binary", "size": len(rel.binary)},
 		}
 		if !rel.omitSums {
-			assets = append(assets, map[string]string{"name": checksumsAsset, "browser_download_url": srv.URL + "/SHA256SUMS"})
+			assets = append(assets, map[string]any{"name": checksumsAsset, "browser_download_url": srv.URL + "/SHA256SUMS"})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name":     rel.tag,
@@ -167,8 +167,12 @@ func TestRunInstallsVerifiedBinaryAndRequestsRestart(t *testing.T) {
 	default:
 		t.Fatal("替换成功后必须发出重启信号")
 	}
-	if state := m.State(); state.Phase != PhaseRestarting || state.Target != "v1.2.3" {
+	state := m.State()
+	if state.Phase != PhaseRestarting || state.Target != "v1.2.3" {
 		t.Fatalf("unexpected state: %+v", state)
+	}
+	if want := int64(len(fakeBinary("v1.2.3"))); state.TotalBytes != want || state.DownloadedBytes != want {
+		t.Fatalf("进度 = %d/%d，期望 %d/%d", state.DownloadedBytes, state.TotalBytes, want, want)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

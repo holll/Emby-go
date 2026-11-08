@@ -18,6 +18,20 @@ async function waitFor(b, expression, label) {
   })()`);
 }
 
+// waitForRedirect 用于「打开 /admin 后立刻被 replace 到 /」的场景：导航会销毁旧执行
+// 上下文，Runtime.evaluate 可能以 "Inspected target navigated or closed" 失败；重试到
+// 新页面稳定为止。
+async function waitForRedirect(b, expression, label) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      if (await b.evaluate(expression)) return;
+    } catch { /* navigation in flight */ }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('Timed out waiting for ' + label + '\n' + await b.evaluate('document.body.innerText').catch(() => ''));
+}
+
 async function click(b, selector) {
   const point = await b.evaluate(`(() => {
     const e = document.querySelector(${JSON.stringify(selector)});
@@ -84,7 +98,12 @@ test('upgrade success is shown only after the restarted service reports the targ
       const raw = typeof input === 'string' ? input : input.url;
       const path = new URL(raw, location.origin).pathname;
       if (path === '/api/admin/update/apply') { window.__upgradeStub.applied += 1; return json(202, { version: ${JSON.stringify(tag)} }); }
-      if (path === '/api/admin/update/status') { window.__upgradeStub.status += 1; return json(200, { phase: window.__upgradeStub.status < 2 ? 'downloading' : 'restarting', target: ${JSON.stringify(tag)} }); }
+      if (path === '/api/admin/update/status') {
+        window.__upgradeStub.status += 1;
+        if (window.__upgradeStub.status === 1) return json(200, { phase: 'downloading', target: ${JSON.stringify(tag)}, downloaded_bytes: 5242880, total_bytes: 20971520 });
+        if (window.__upgradeStub.status === 2) return json(200, { phase: 'downloading', target: ${JSON.stringify(tag)}, downloaded_bytes: 15728640, total_bytes: 20971520 });
+        return json(200, { phase: 'restarting', target: ${JSON.stringify(tag)} });
+      }
       if (path === '/healthz') return new Response('ok', { status: 200 });
       if (path === '/api/version') return json(200, { product: 'Emby-go', version: ${JSON.stringify(installed)} });
       return original(input, init);
@@ -92,7 +111,11 @@ test('upgrade success is shown only after the restarted service reports the targ
   })()`);
 
   await click(b, '#update-apply');
+  await waitFor(b, 'document.querySelector("#update-progress") && !document.querySelector("#update-progress").hidden && /已下载 75%/.test(document.querySelector("#update-progress-label").textContent)', '下载进度推进到 75%');
+  assert.equal(await b.evaluate('document.querySelector("#update-progress-fill").style.width'), '75%');
+  assert.match(await b.evaluate('document.querySelector("#update-progress-label").textContent'), /已下载 75% · 15 MB \/ 20 MB/);
   await waitFor(b, 'document.querySelector("#update-status").classList.contains("is-ok")', '重启后核对版本并显示成功');
+  assert.equal(await b.evaluate('document.querySelector("#update-progress").hidden'), true);
   assert.equal(await b.evaluate('window.__upgradeStub.applied'), 1);
   assert.match(await b.evaluate('document.querySelector("#update-status").textContent'), /已升级到/);
   assert.equal(await b.evaluate('document.querySelector("#version-text").textContent'), installed);
@@ -103,7 +126,7 @@ test('upgrade success is shown only after the restarted service reports the targ
   assert.deepEqual(await b.evaluate('window.__browserErrors'), []);
 });
 
-test('non-admin cannot trigger an update check or open the upgrade dialog', { timeout: 90000 }, async t => {
+test('non-admin is redirected to login and blocked from the admin console', { timeout: 90000 }, async t => {
   const target = process.env.UPDATE_BROWSER_TARGET;
   const viewer = process.env.UPDATE_BROWSER_VIEWER_TOKEN;
   assert.ok(target && viewer, 'Go fixture viewer token required');
@@ -123,12 +146,13 @@ test('non-admin cannot trigger an update check or open the upgrade dialog', { ti
     };
     try { localStorage.setItem('emby_token', ${JSON.stringify(viewer)}); } catch {}
   ` });
-  await b.navigate(target + '/admin');
-  await waitFor(b, 'document.querySelector("#version-btn") && document.querySelector("#version-btn").disabled', '非管理员版本号按钮禁用');
-  await b.evaluate('new Promise(resolve => setTimeout(resolve, 1500))');
+  // /admin 会立刻 replace 到 /，等待 loadEventFired 的 navigate() 可能在跳转中报
+  // “Inspected target navigated or closed”；这里只发起导航，由 waitForRedirect 观察结果。
+  await b.call('Page.navigate', { url: target + '/admin' });
+  await waitForRedirect(b, 'location.pathname === "/" && document.querySelector(".auth-error") && /仅对管理员开放/.test(document.querySelector(".auth-error").textContent)', '非管理员回到登录页并提示仅管理员开放');
+  assert.equal(await b.evaluate('!!document.querySelector("#version-btn")'), false);
+  assert.equal(await b.evaluate('localStorage.getItem("emby_token")'), null);
+  await b.evaluate('new Promise(resolve => setTimeout(resolve, 500))');
   assert.equal(await b.evaluate('window.__updateCalls'), 0);
-  assert.equal(await b.evaluate('document.querySelector("#version-badge").hidden'), true);
-  assert.equal(await b.evaluate('document.querySelector("#update-overlay").hidden'), true);
-  assert.match(await b.evaluate('document.querySelector("#version-btn").title'), /仅管理员/);
   assert.deepEqual(await b.evaluate('window.__browserErrors'), []);
 });

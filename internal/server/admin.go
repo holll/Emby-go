@@ -6,6 +6,7 @@ import (
 	"emby-go/internal/nfo"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,12 +22,13 @@ import (
 )
 
 type task struct {
-	ID        int64  `json:"id"`
-	Type      string `json:"type"`
-	Status    string `json:"status"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at,omitempty"`
-	Error     string `json:"error,omitempty"`
+	ID        int64           `json:"id"`
+	Type      string          `json:"type"`
+	Status    string          `json:"status"`
+	StartedAt string          `json:"started_at"`
+	EndedAt   string          `json:"ended_at,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
 }
 
 func (a *App) adminLibraries(c *gin.Context) {
@@ -936,13 +938,25 @@ func (a *App) adminTasks(c *gin.Context) {
 	for _, item := range items {
 		seen[item.ID] = true
 	}
+	results := make(map[int64]json.RawMessage, len(records))
+	for _, rec := range records {
+		if strings.TrimSpace(rec.ResultJSON) != "" {
+			results[rec.ID] = json.RawMessage(rec.ResultJSON)
+		}
+	}
 	merged := make([]task, 0, len(items)+len(records))
 	merged = append(merged, items...)
+	// 实时任务以内存状态为准，但完成结果只写在持久摘要里，按 id 回填。
+	for i := range merged {
+		if result, ok := results[merged[i].ID]; ok {
+			merged[i].Result = result
+		}
+	}
 	for _, rec := range records {
 		if seen[rec.ID] {
 			continue
 		}
-		merged = append(merged, task{ID: rec.ID, Type: rec.Type, Status: rec.Status, StartedAt: rec.StartedAt, EndedAt: rec.FinishedAt, Error: rec.Error})
+		merged = append(merged, task{ID: rec.ID, Type: rec.Type, Status: rec.Status, StartedAt: rec.StartedAt, EndedAt: rec.FinishedAt, Error: rec.Error, Result: results[rec.ID]})
 	}
 	// 内存与摘要各自按 id 降序；合并后按 id 降序截断。
 	for i := 1; i < len(merged); i++ {

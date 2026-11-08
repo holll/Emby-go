@@ -238,7 +238,7 @@
 - `GET /api/admin/update`：返回最近一次检查结果，进程内缓存 10 分钟；页面打开自动检查走这里。
 - `POST /api/admin/update/check`：强制重新查询，绕过缓存（仍受上游超时约束）。
 - `POST /api/admin/update/apply`：body `{"version":"vX.Y.Z-abcdef0"}`。服务端强制重新检查，`version` 必须等于当前 Release 标签，否则 409；客户端不能指定下载源或安装路径。成功返回 202 `{"version":...}`，后台下载、校验并原子替换 `/opt/emby-go/emby-go`，随后发出正常关闭信号。
-- `GET /api/admin/update/status`：`{"phase":"idle|downloading|verifying|installing|restarting|failed","target":"...","message":"...","updated_at":"..."}`。`failed` 是终态直到下一次 apply；`message` 为失败原因。
+- `GET /api/admin/update/status`：`{"phase":"idle|downloading|verifying|installing|restarting|failed","target":"...","message":"...","updated_at":"...","downloaded_bytes":N,"total_bytes":N}`。`failed` 是终态直到下一次 apply；`message` 为失败原因。`downloaded_bytes`/`total_bytes` 只在 `downloading` 阶段出现，`total_bytes` 来自 Release 资产大小；页面据此显示进度条，缺失时不推算百分比。
 
 检查结果字段 `{"current","latest","available","notes","published_at","checked_at"}`。检查失败（网络、上游 JSON、无匹配资产）返回 502 `{"error":"检查更新失败：..."}`，不会伪装成「已是最新」。Release 必须同时提供 `emby-go-<goos>-<goarch>` 与 `SHA256SUMS`，缺失时检查即失败并在错误里列出缺少的资产，不降级为无校验安装。`available` 只比较 `vX.Y.Z` 三元组，构建后缀 `-commit` 不参与比较：同一 Release 不会重复提示，而无法解析成本地版本（如 `dev`）会按「落后于 Release」提示更新。
 
@@ -251,7 +251,7 @@
 任务摘要持久化在 `task_records`，迁移 19。不是新队列：提交仍复用既有异步扫描执行器，首版不可取消、进程重启不恢复、不补跑；重启时未完成任务只标记中断。
 
 - `POST /api/admin/tasks/scan`：语义不变（202 仅表示已接受）。202 之前先写入摘要行，写入失败直接返回错误，不会出现「已受理但查不到任务」。
-- `GET /api/admin/tasks`：`{"items":[{"id","type","status","started_at","ended_at?","error?"}],"running":bool,"history_error":bool}`。items 是进程内实时任务与最近 100 条持久摘要按 `id` 降序合并，同一 id 以内存状态为准；`history_error=true` 表示摘要读取失败但实时列表仍返回。
+- `GET /api/admin/tasks`：`{"items":[{"id","type","status","started_at","ended_at?","error?","result?"}],"running":bool,"history_error":bool}`。items 是进程内实时任务与最近 100 条持久摘要按 `id` 降序合并，同一 id 以内存状态为准；`result` 是执行结果摘要（扫描/探测/备份各自的 JSON 对象），`result_json` 永不暴露；`history_error=true` 表示摘要读取失败但实时列表仍返回。
 - `GET /api/admin/tasks/{id}`：内存命中返回异步扫描 DTO（`task_id` 等既有字段）；内存已丢失时回落摘要，返回同一 DTO 形状的只读视图（含 `library_id`、`created_at`、`finished_at`、`error`，有结果时含 `result`）。都不存在返回 404。
 - 留存：摘要最多 500 条，超出按 id 淘汰最旧；启动时 `queued`/`running` 标为 `interrupted`（`error` 说明进程重启），任务 id 从摘要最大 id 继续递增，避免重启后 id 重叠。
 - 幂等：`Idempotency-Key` 的窗口与重放行为不变；重放仍返回原任务 id，不新建执行。
@@ -283,6 +283,13 @@
 - 固定范围：SQLite 一致性快照（`VACUUM INTO`）+ 媒体库 NFO + 规范 extrafanart 目录，保留 7 份；不提供网页恢复、任意路径、匿名下载或删除指定备份。
 - 结果元数据：`result{dir,nfo_count,extra_backdrop_count,pruned,finished_at}`，`dir` 为该次备份的时间戳子目录。快照含凭据材料（密码哈希/令牌/API Key）与媒体信息，因此目录由进程以 `0700` 建立、不回显内容、不经 Web 提供下载；取回请用服务器文件工具。
 - 落库复用 `task_records`（`type=backup`），失败原因写入任务摘要；单飞：进程内 atomic 标记 + `internal/backup` 输出目录锁（跨进程）。任务不自动重试，失败后由管理员重新发起。非管理员访问返回 403。
+
+### 4.16 Web 管理界面仅管理员登录
+
+- `/admin` 管理台与 `/` 登录页只接受 `Policy.IsAdministrator=true` 的账户；密码正确的普通用户不会获得管理台入口，登录页提示“该账户不是管理员，Web 管理界面仅对管理员开放”，且不写入 `emby_token`。
+- 已有普通用户 token 直接访问 `/admin` 时，前端清除本机凭据并回到登录页；后端管理端点继续由 `requireAdmin` 返回 403，不依赖前端拦截。
+- `POST /Users/AuthenticateByName` 的响应结构不变（仍返回 Emby 兼容的 `User.Policy`），普通用户 token 仍可用于 Emby 客户端播放；本限制只作用于 Web 管理界面。
+- 登录页与管理台的判定都取同一份 `/Users/Me` 策略，不新增端点、不新增字段。
 
 ## 5. 变更规则（v2）
 

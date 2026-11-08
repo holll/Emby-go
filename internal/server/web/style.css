@@ -1069,6 +1069,14 @@ body.player-open { overflow: hidden; }
 .update-status { margin: 12px 0 0; padding: 10px 12px; border-radius: var(--radius-sm, 6px); background: #152b40; color: #edf4ff; overflow-wrap: anywhere; }
 .update-status.is-error { background: #461d23; color: #ffd9de; }
 .update-status.is-ok { background: #133a22; color: #d8ffe6; }
+.update-progress { margin: 12px 0 0; }
+.update-progress[hidden] { display: none; }
+.update-progress-track { height: 8px; border-radius: var(--radius-sm, 6px); background: var(--line); overflow: hidden; }
+.update-progress-track i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
+.update-progress.is-indeterminate .update-progress-track i { width: 35%; animation: update-progress-slide 1.2s ease-in-out infinite; }
+.update-progress-label { margin: 6px 0 0; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@keyframes update-progress-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+@media (prefers-reduced-motion: reduce) { .update-progress.is-indeterminate .update-progress-track i { animation: none; width: 100%; opacity: .45; } }
 .update-hint { margin: 12px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
 .update-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--line); }
 /* .btn 自带 display:inline-flex，会盖掉 [hidden] 的 UA 样式。 */

@@ -105,3 +105,42 @@ func TestTaskCenterFallsBackToRecordsAfterRestart(t *testing.T) {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
+
+// 任务中心页面要显示执行结果摘要：列表把内存任务的 result 回填，且不暴露原始 result_json。
+func TestTaskListIncludesResultSummary(t *testing.T) {
+	app, ts, token := asyncScanFixture(t)
+	id := app.startTask("scan")
+	if _, _, err := app.registerScanTask(id, "scan", 7, scanner.ScanModeFull, false, "digest", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	app.finishScanTask(id, "succeeded", &scanner.Result{Added: 2, Updated: 1}, nil)
+
+	resp, body := embyRaw(t, ts, http.MethodGet, "/api/admin/tasks", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tasks status %d: %s", resp.StatusCode, body)
+	}
+	var list struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		var gotID int64
+		if err := json.Unmarshal(item["id"], &gotID); err != nil || gotID != id {
+			continue
+		}
+		var result scanner.Result
+		if err := json.Unmarshal(item["result"], &result); err != nil {
+			t.Fatalf("result = %s err=%v", item["result"], err)
+		}
+		if result.Added != 2 || result.Updated != 1 {
+			t.Fatalf("result = %+v", result)
+		}
+		if _, ok := item["result_json"]; ok {
+			t.Fatal("result_json should not be exposed")
+		}
+		return
+	}
+	t.Fatalf("task %d missing from list", id)
+}

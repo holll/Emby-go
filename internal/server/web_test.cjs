@@ -17,7 +17,7 @@ function sandbox(values = {}) {
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
-    stopLogsPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, scanClose: { hidden: true, addEventListener() {} },
+    stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
@@ -119,10 +119,11 @@ function authBootSandbox(kind, outcome) {
         if (outcome === 'network') throw new TypeError('offline');
         return { ok: false, status: outcome };
       }
-      return { ok: true, status: 200 };
+      return { ok: true, status: 200, json: async () => ({ Policy: { IsAdministrator: true } }) };
     },
     pages: { overview() {} }, page: () => { rendered++; }, api: async () => ({}),
     startScanPolling() {}, // auth-only fixture: scan observation is outside this fixture's scope.
+    initUpgrade() {}, stopTasksPolling() {},
     wallMaybeLoadMore() {}, closePlayer() {}, closeScrapePreview() {}, detailOverlay: element
   });
   if (kind === 'admin') vm.runInContext(source.slice(source.indexOf('async function boot()'), source.lastIndexOf('\nboot();')), box);
@@ -243,16 +244,27 @@ test('初始化两次密码不一致时不发请求、保留输入并聚焦密�
 
 test('登录成功保存 token 并跳转管理后台', async () => {
   const env = loginForm({ Username: 'admin', Pw: 'secret123' },
-    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: 'tok-1' }) }));
+    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: 'tok-1', User: { Policy: { IsAdministrator: true } } }) }));
   await env.box.submit({ preventDefault() {}, target: {} }, false);
   assert.deepEqual(env.stored, [['emby_token', 'tok-1']]);
   assert.deepEqual(env.redirects, ['/admin']);
 });
 
+test('非管理员登录被拒绝：不存凭据、不跳转，提示仅管理员开放', async () => {
+  const env = loginForm({ Username: 'viewer', Pw: 'secret123' },
+    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: 'tok-viewer', User: { Policy: { IsAdministrator: false } } }) }));
+  await env.box.submit({ preventDefault() {}, target: {} }, false);
+  assert.deepEqual(env.stored, []);
+  assert.deepEqual(env.redirects, []);
+  assert.match(env.errorNode.textContent, /仅对管理员开放/);
+  assert.equal(env.button.disabled, false);
+  assert.equal(env.calls.length, 1, '不得为拒绝场景额外请求');
+});
+
 test('登录非空token保留原始首尾空白，不擅自规范化凭据', async () => {
   const original = '  tok-1  ';
   const env = loginForm({ Username: 'admin', Pw: 'secret123' },
-    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: original }) }));
+    () => ({ ok: true, status: 200, json: async () => ({ AccessToken: original, User: { Policy: { IsAdministrator: true } } }) }));
   await env.box.submit({ preventDefault() {}, target: {} }, false);
   assert.deepEqual(env.stored, [['emby_token', original]]);
   assert.equal(vm.runInContext('token', env.box), original);
@@ -1569,9 +1581,10 @@ test('多用户管理 UI 契约：用户管理、媒体库授权与活动记录�
   assert.match(source, /id="pw-form"/);
   assert.match(source, /fetch\('\/api\/auth\/password'/);
   assert.match(source, /function renderSelfPassword\(\)/);
-  // 普通用户（Policy.IsAdministrator=false）只保留设置页入口。
+  // 普通用户（Policy.IsAdministrator=false）禁止进入管理页：清凭据回登录页。
   assert.match(source, /if \(me && !me\.is_admin\) \{/);
   assert.match(source, /dto\.Policy && dto\.Policy\.IsAdministrator/);
+  assert.match(source, /if \(me && !me\.is_admin\) \{\n    localStorage\.removeItem\('emby_token'\);/);
 });
 
 test('活动记录是独立侧边栏页面（批次 89）', () => {
@@ -2493,7 +2506,7 @@ test('手动执行禁调度的翻译计划也必须确认范围，保持enabled�
     confirm: text => { confirmations.push(text); return box.accepted; },
     gen: 1, pageGen: 1, scheduledRunHolds: new Map(), scheduledWatchStop: null,
     document: { querySelector: () => ({ textContent: '', isConnected: true }) },
-    setTimeout: () => 1, clearTimeout() {}, renderTaskLog: async () => {},
+    setTimeout: () => 1, clearTimeout() {},
     api: async (url, options) => { calls.push({ url, ...options }); return {}; }, toast: message => messages.push(message) });
   vm.runInContext(section('function translationPayload(', 'function translationWidget('), box);
   vm.runInContext(section('      const holdKey =', "    } else if (role === 'edit')"), box);
@@ -2513,8 +2526,8 @@ function scheduledRunFixture({ failure = 0, observeFailure = false, pending = fa
     Date: { now: () => now }, scheduledRunHolds: new Map(), scheduledWatchStop: null,
     setTimeout(fn, delay) { const id = ++next; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },
     document: { querySelector: selector => selector === '#scheduled-observation' ? status : cell },
-    renderTaskLog: async options => { signals.push(options.signal); if (observeFailure) throw Error('offline'); },
     api: async (url, options = {}) => { calls.push({ url, options });
+      if (url === '/scheduled') { if (options.signal) signals.push(options.signal); if (observeFailure) throw Error('offline'); }
       if (url.endsWith('/run')) { if (pending) await new Promise(resolve => { resolvePost = resolve; }); if (failure) throw Object.assign(Error('rejected'), { status: failure }); return {}; }
       return { items: [{ id: 42, last_status: 'success', last_message: 'latest', last_run_at: '' }] };
     }, runBadge: value => value, esc: String, fmtTime: String, toast: message => messages.push(message) });

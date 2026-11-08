@@ -168,6 +168,7 @@ const META = {
   activity: { title: '活动记录', crumb: 'Archive / Activity' },
   logs: { title: '运行日志', crumb: 'Archive / Logs' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
+  tasks: { title: '任务中心', crumb: 'Archive / Tasks' },
   diagnostics: { title: '诊断', crumb: 'Archive / Diagnostics' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
   translate: { title: '独立翻译', crumb: 'Archive / Translate' },
@@ -1839,34 +1840,89 @@ function renderSelfPassword() {
   });
 }
 
-/* ---------------------------------------------------------------- 任务日志 */
-// 原独立的「任务」页已并入计划任务页下半部分：这里只负责渲染日志区块 + 绑定刷新/立即扫描。
-async function renderTaskLog(options = {}) {
-  const box = document.querySelector('#task-log');
+/* ---------------------------------------------------------------- 任务中心 */
+let tasksPoll = null;
+function stopTasksPolling() { if (tasksPoll) { clearTimeout(tasksPoll); tasksPoll = null; } }
+
+// 任务结果是各执行器自己的 JSON；这里只呈现常见计数，未知形状保留原文摘要。
+function taskResultText(result) {
+  if (!result || typeof result !== 'object') return '—';
+  const parts = [];
+  const add = (key, label) => { if (typeof result[key] === 'number') parts.push(`${label} ${result[key]}`); };
+  add('added', '新增'); add('updated', '更新'); add('deleted', '删除');
+  add('success', '成功'); add('pending', '待处理'); add('failed', '失败'); add('skipped', '跳过');
+  add('nfo_count', 'NFO'); add('extra_backdrop_count', '缩略图');
+  if (parts.length) return parts.join(' · ');
+  const keys = Object.keys(result);
+  if (!keys.length) return '—';
+  const text = JSON.stringify(result);
+  return text.length > 120 ? text.slice(0, 117) + '…' : text;
+}
+
+async function pageTasks() {
   const gen = pageGen;
-  const current = () => gen === pageGen && document.querySelector('#task-log') === box && (!options.isCurrent || options.isCurrent());
-  if (!box) return;
-  let data;
-  try { data = await api('/tasks', options.signal ? { signal: options.signal } : {}); }
-  catch (e) { if (current()) box.innerHTML = `<p role="alert">${esc(e.message)}</p>`; if (options.isCurrent) throw e; return; }
-  if (!current()) return;
-  const running = data.running;
-  const items = data.items || [];
-  const runLabel = s => RUN_STATUS_TEXT[s] || s;
-  box.innerHTML = `
-    ${running ? '<p class="hint" style="color:var(--accent)">有任务正在进行…</p>' : ''}
-    ${items.length ? `
-      <div class="table-wrap"><table>
-        <thead><tr><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>错误</th></tr></thead>
-        <tbody>${items.map(item => `
-          <tr>
-            <td>${esc(TASK_TYPE_TEXT[item.type] || item.type)}</td>
-            <td><span class="badge ${esc(item.status)}">${esc(runLabel(item.status))}</span></td>
-            <td class="mono">${esc(fmtTime(item.started_at))}</td>
-            <td class="mono">${esc(fmtTime(item.ended_at))}</td>
-            <td class="mono">${esc(item.error || '—')}</td>
-          </tr>`).join('')}</tbody>
-      </table></div>` : empty('暂无任务', '点击「立即扫描」开始索引。')}`;
+  stopTasksPolling();
+  let items = [], running = false, historyError = false;
+
+  content.innerHTML = `
+    <section class="panel">
+      <div class="panel-head"><h2>任务记录</h2>
+        <div class="panel-actions">
+          <select id="task-type" aria-label="任务类型"><option value="">全部类型</option>${Object.entries(TASK_TYPE_TEXT).map(([value, text]) => `<option value="${esc(value)}">${esc(text)}</option>`).join('')}</select>
+          <select id="task-status" aria-label="任务状态"><option value="">全部状态</option>${Object.entries(RUN_STATUS_TEXT).map(([value, text]) => `<option value="${esc(value)}">${esc(text)}</option>`).join('')}</select>
+          <button id="task-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
+        </div>
+      </div>
+      <p class="hint">最近 100 条任务摘要，数据库保留 500 条；扫描、探测、备份的提交入口分别在对应页面。</p>
+      <div id="task-table"><p class="hint">加载中…</p></div>
+    </section>`;
+
+  const current = () => gen === pageGen;
+  function render() {
+    const box = document.querySelector('#task-table');
+    if (!box) return;
+    const type = document.querySelector('#task-type')?.value || '';
+    const status = document.querySelector('#task-status')?.value || '';
+    const shown = items.filter(item => (!type || item.type === type) && (!status || item.status === status));
+    box.innerHTML = shown.length
+      ? `<div class="table-wrap"><table>
+          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>结果</th><th>错误</th></tr></thead>
+          <tbody>${shown.map(item => `
+            <tr>
+              <td class="mono">${esc(String(item.id))}</td>
+              <td>${esc(TASK_TYPE_TEXT[item.type] || item.type)}</td>
+              <td><span class="badge ${esc(item.status)}">${esc(RUN_STATUS_TEXT[item.status] || item.status)}</span></td>
+              <td class="mono">${esc(fmtTime(item.started_at))}</td>
+              <td class="mono">${esc(fmtTime(item.ended_at))}</td>
+              <td>${esc(taskResultText(item.result))}</td>
+              <td class="mono">${esc(item.error || '—')}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`
+      : empty('暂无任务', '执行扫描、探测或备份后，这里会出现任务摘要。');
+    if (historyError) box.insertAdjacentHTML('beforeend', '<p class="hint">历史摘要暂时不可读，当前只显示本进程内的任务。</p>');
+  }
+
+  async function load() {
+    try {
+      const data = await api('/tasks');
+      if (!current()) return;
+      items = data.items || [];
+      running = !!data.running;
+      historyError = !!data.history_error;
+      render();
+    } catch (error) {
+      if (!current()) return;
+      const box = document.querySelector('#task-table');
+      if (box) box.innerHTML = `<p role="alert">${esc(error.message || '读取任务失败')}</p>`;
+      return;
+    }
+    if (current() && running) tasksPoll = setTimeout(() => { void load(); }, 5000);
+  }
+
+  document.querySelector('#task-refresh').addEventListener('click', () => { void load(); });
+  document.querySelector('#task-type').addEventListener('change', render);
+  document.querySelector('#task-status').addEventListener('change', render);
+  await load();
 }
 
 /* ---------------------------------------------------------------- 探针 */
@@ -2588,7 +2644,7 @@ const CRON_PRESETS = [
   ['每周一 04:00', '0 4 * * 1'],
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
-const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成' };
+const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成', backup: '固定范围备份' };
 const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', interrupted: '进程重启中断', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
 let scheduledFocus = null;
@@ -2871,15 +2927,7 @@ async function pageScheduled() {
       </form>
     </div></details>
 
-    <section class="panel">
-      <div class="panel-head"><h2>执行记录</h2>
-        <div class="panel-actions">
-          <button id="task-refresh" class="btn btn-sm">刷新</button>
-          <button id="task-scan" class="btn btn-accent btn-sm">${icon('film')}<span>立即扫描</span></button>
-        </div>
-      </div>
-      <p id="scheduled-observation" role="status" aria-live="polite"></p><div id="task-log"><p class="hint">加载中…</p></div>
-    </section>`;
+    <p id="scheduled-observation" role="status" aria-live="polite"></p>`;
 
   const typeEl = document.querySelector('#s-type');
   const cronEl = document.querySelector('#s-cron');
@@ -2971,10 +3019,6 @@ async function pageScheduled() {
     document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledFocus = `[data-role="edit"][data-id="${editing.id}"]`; scheduledEditId = null; refreshPage(pageScheduled, gen); });
   }
   document.querySelector('#sched-refresh').addEventListener('click', pageScheduled);
-  // 任务日志区块（原「任务」页并入这里）：立即扫描用顶部的全局扫描链路，刷新只重绘日志。
-  document.querySelector('#task-scan').addEventListener('click', () => runScan());
-  document.querySelector('#task-refresh').addEventListener('click', renderTaskLog);
-  renderTaskLog();
 
   document.querySelector('#sched-form').addEventListener('submit', async event => {
     event.preventDefault();
@@ -3106,7 +3150,6 @@ async function pageScheduled() {
             if (!current()) return;
             attempts++;
             try {
-              await renderTaskLog({ signal: controller.signal, isCurrent: current });
               if (!current()) return;
               const latest = await api('/scheduled', { signal: controller.signal });
               if (!current()) return;
@@ -3426,6 +3469,7 @@ const pages = {
   scrape: pageScrape,
   translate: pageTranslate,
   scheduled: pageScheduled,
+  tasks: pageTasks,
   diagnostics: pageDiagnostics,
   probe: pageProbe,
   security: pageSecurity
@@ -3445,6 +3489,7 @@ async function page(name) {
   if (typeof closeOverlaysForNavigation === 'function') closeOverlaysForNavigation();
   stopScrapePolling();
   stopLogsPolling();
+  stopTasksPolling();
   if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
   stopProbePolling();
   // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
@@ -3922,6 +3967,41 @@ function showUpdateStatus(text, kind) {
   status.classList.toggle('is-ok', kind === 'ok');
 }
 
+function renderUpdateProgress(state) {
+  const wrap = document.querySelector('#update-progress');
+  if (!wrap) return;
+  const fill = document.querySelector('#update-progress-fill');
+  const label = document.querySelector('#update-progress-label');
+  const phase = state && state.phase;
+  if (!phase || phase === 'idle' || phase === 'failed') {
+    wrap.hidden = true;
+    wrap.classList.remove('is-indeterminate');
+    if (fill) fill.style.width = '';
+    if (label) label.textContent = '';
+    return;
+  }
+  wrap.hidden = false;
+  const total = Number(state.total_bytes) || 0;
+  const done = Number(state.downloaded_bytes) || 0;
+  if (phase === 'downloading') {
+    if (total > 0) {
+      const percent = Math.min(100, Math.round(done / total * 100));
+      wrap.classList.remove('is-indeterminate');
+      fill.style.width = percent + '%';
+      label.textContent = `已下载 ${percent}% · ${fmtSize(done)} / ${fmtSize(total)}`;
+    } else {
+      wrap.classList.add('is-indeterminate');
+      fill.style.width = '';
+      label.textContent = `正在下载升级包… ${fmtSize(done)}`;
+    }
+    return;
+  }
+  const labels = { verifying: '正在校验升级包…', installing: '正在替换程序…', restarting: '正在重启服务…' };
+  wrap.classList.add('is-indeterminate');
+  fill.style.width = '';
+  label.textContent = labels[phase] || '正在升级…';
+}
+
 function renderUpdate(result) {
   document.querySelector('#update-current').textContent = result.current || '未知';
   document.querySelector('#update-latest').textContent = result.latest || '未知';
@@ -3969,6 +4049,7 @@ async function openUpdateDialog() {
   overlay.hidden = false;
   overlayPush('#update-overlay');
   showUpdateStatus('');
+  renderUpdateProgress(null);
   const apply = document.querySelector('#update-apply');
   apply.hidden = true;
   if (updateCache.version) {
@@ -3988,6 +4069,7 @@ function closeUpdateDialog() {
 
 function updateFailed(message) {
   updateBusy = false;
+  renderUpdateProgress(null);
   const apply = document.querySelector('#update-apply');
   if (apply) { apply.hidden = false; apply.disabled = false; }
   document.querySelector('#update-check').disabled = false;
@@ -3996,6 +4078,7 @@ function updateFailed(message) {
 
 function updateSucceeded(version) {
   updateBusy = false;
+  renderUpdateProgress(null);
   updateCache.current = version;
   updateCache.version = '';
   setUpdateBadge('');
@@ -4011,6 +4094,7 @@ function updateSucceeded(version) {
 
 async function waitForRestart(target) {
   showUpdateStatus('程序已替换，服务正在重启，等待恢复…');
+  renderUpdateProgress({ phase: 'restarting' });
   const deadline = Date.now() + 10 * 60 * 1000;
   // 重启窗口内可能短暂读到旧进程的 /api/version；只有服务持续在线
   // 90 秒仍是旧版本才判失败，避免把关停前的正常响应误报成失败。
@@ -4056,6 +4140,7 @@ async function pollUpgrade(target) {
       return;
     }
     if (state.phase === 'failed') { updateFailed(state.message); return; }
+    renderUpdateProgress(state);
     if (state.phase === 'restarting') { await waitForRestart(target); return; }
     showUpdateStatus(labels[state.phase] || '正在升级…');
     await delay(1000);
@@ -4070,6 +4155,7 @@ async function applyUpdate() {
   document.querySelector('#update-apply').disabled = true;
   document.querySelector('#update-check').disabled = true;
   showUpdateStatus('正在下载升级包…');
+  renderUpdateProgress({ phase: 'downloading' });
   try {
     await api('/update/apply', { method: 'POST', body: JSON.stringify({ version: target }) });
   } catch (error) {
@@ -4121,15 +4207,15 @@ async function boot() {
     });
     return;
   }
-  // 当前账户（普通用户只保留「设置」里的改密条目，管理页一律隐藏；观看走 Emby 客户端）。
+  // 普通用户不允许进入 Web 管理页：清凭据回登录页（观看走 Emby 客户端）。
   // 管理员标记直接取 /Users/Me 的 Policy.IsAdministrator，避免额外请求。
   if (me && !me.is_admin) {
-    document.querySelectorAll('.nav-item').forEach(item => {
-      if (item.dataset.page !== 'settings' && typeof item.remove === 'function') item.remove();
-    });
-    if (location.hash !== '#settings') location.hash = '#settings';
+    localStorage.removeItem('emby_token');
+    token = '';
+    window.location.replace('/');
+    return;
   }
-  // 自升级只对管理员开放：普通用户保持版本号可读，但不再响应点击。
+  // 自升级只对管理员开放。
   const versionBtn = document.querySelector('#version-btn');
   if (versionBtn && (!me || !me.is_admin)) {
     versionBtn.disabled = true;

@@ -90,7 +90,8 @@ async function main() {
     await evaluate("document.querySelector('[data-role=\"run\"]').click()");
     await wait("document.querySelector('#scheduled-observation').textContent.includes('请求已接受')");
     assert.match(await evaluate("document.querySelector('#scheduled-observation').textContent"),/不等于执行成功/);
-    await wait("document.querySelector('#task-log').textContent.includes('成功') || document.querySelector('#task-log').textContent.includes('进行中')");
+    await evaluate("page('tasks')");
+    await wait("document.querySelectorAll('#task-table tbody tr').length>0");
     await evaluate("page('overview')");
     await wait("document.querySelector('#overview-dashboard')");
     assert.equal(await evaluate("scheduledWatchStop"),null);

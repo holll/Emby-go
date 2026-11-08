@@ -48,9 +48,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c1 5 4 8 8 10M13 5c-1 5-4 8-8 10M14 21l4-11 4 11M16 17h4"/></svg>
         <span>独立翻译</span>
       </button>
+      </section>
+      <section class="nav-group" aria-label="自动化">
+        <h2 class="nav-group-label">自动化</h2>
       <button class="nav-item" data-page="scheduled">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
         <span>计划任务</span>
+      </button>
+      <button class="nav-item" data-page="tasks">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M4 12h7M4 18h7"/><path d="m15 15 2 2 4-4"/></svg>
+        <span>任务中心</span>
       </button>
       </section>
       <section class="nav-group" aria-label="运维诊断">
@@ -63,10 +70,6 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>
         <span>活动记录</span>
       </button>
-      <button class="nav-item" data-page="security">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
-        <span>访问安全</span>
-      </button>
       <button class="nav-item" data-page="probe">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         <span>接口探针</span>
@@ -76,8 +79,12 @@
         <span>诊断</span>
       </button>
       </section>
-      <section class="nav-group" aria-label="账户与设置">
-        <h2 class="nav-group-label">账户与设置</h2>
+      <section class="nav-group" aria-label="账户与安全">
+        <h2 class="nav-group-label">账户与安全</h2>
+      <button class="nav-item" data-page="security">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span>访问安全</span>
+      </button>
       <button class="nav-item" data-page="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
         <span>设置</span>
@@ -168,6 +175,10 @@
       <p id="update-summary" class="update-summary">正在检查更新…</p>
       <div id="update-notes" class="update-notes" hidden></div>
       <p id="update-status" class="update-status" hidden></p>
+      <div id="update-progress" class="update-progress" hidden>
+        <div class="update-progress-track"><i id="update-progress-fill"></i></div>
+        <p id="update-progress-label" class="update-progress-label"></p>
+      </div>
       <p class="update-hint">升级会下载并校验新程序，成功后服务正常关闭并由 systemd 重启；不保留旧版本，也不支持自动回退。升级期间请勿重复操作。</p>
     </div>
     <div class="update-actions">

@@ -105,6 +105,13 @@ async function submit(event, initializing) {
         typeof result.AccessToken !== 'string' || !result.AccessToken.trim()) {
       throw new Error('登录响应无效，请重试或检查服务状态');
     }
+    // Web 管理界面只对管理员开放；普通用户仍可用同一账户登录 Emby 客户端。
+    if (!result.User || !result.User.Policy || !result.User.Policy.IsAdministrator) {
+      setAuthBusy(false);
+      setAuthError('该账户不是管理员，Web 管理界面仅对管理员开放');
+      document.querySelector('#auth-pw')?.focus();
+      return;
+    }
     token = result.AccessToken;
     localStorage.setItem('emby_token', token);
     window.location.replace('/admin');
@@ -120,7 +127,20 @@ async function bootLogin() {
     try {
       const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': requestToken } });
       if (localStorage.getItem('emby_token') !== requestToken) return;
-      if (response.ok) { window.location.replace('/admin'); return; }
+      if (response.ok) {
+        let dto;
+        try { dto = await response.json(); }
+        catch { throw new Error('authentication unavailable'); }
+        if (localStorage.getItem('emby_token') !== requestToken) return;
+        if (!dto || !dto.Policy || !dto.Policy.IsAdministrator) {
+          localStorage.removeItem('emby_token');
+          token = '';
+          render('login', '该账户不是管理员，Web 管理界面仅对管理员开放');
+          return;
+        }
+        window.location.replace('/admin');
+        return;
+      }
       if (response.status !== 401) throw new Error('authentication unavailable');
       localStorage.removeItem('emby_token');
       token = '';
