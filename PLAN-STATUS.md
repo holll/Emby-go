@@ -1869,4 +1869,5 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
   3. `internal/scanner/incremental.go`：删除 `enumerateGroups` 包装；4 处测试改用 `enumerateGroupsContext(context.Background(), lib)`。
   4. C-01：删除 `internal/probe/input.go`（72 行）及 `input_test.go`、`input_lifecycle_test.go`；`downloadInput`/`readInput`/`maxInputSize`/`inputHTTPClient` 生产零调用，STRM 直连 ffprobe 路径未动。
 - 保留：`probe.flexNum.UnmarshalJSON`（`encoding/json` 反射调用）、`mountWebhookSettings`（`app.js` 页面入口），均非死代码。
-- 验证：`gofmt -l` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/nfo ./internal/probe`、`go test ./internal/server -run 'TestDiagnostic|TestRequestLog'`、`go test ./internal/scanner -run '<受影响用例>'` 全部 ok；提交前以单核限流复跑全量 `go test ./...`。改动随 `v2.3.4` 提交，不单独发布功能。
+- 验证：`gofmt -l` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/nfo ./internal/probe`、`go test ./internal/server -run 'TestDiagnostic|TestRequestLog'`、`go test ./internal/scanner -run '<受影响用例>'` 全部 ok；提交前以单核限流复跑全量 `go test ./...`（GOMAXPROCS=1 nice，全部包 ok）。改动随 `v2.3.4` 提交，不单独发布功能。
+- 发布：`e902bb5` 打 `v2.3.4` 并推送；release run `42438003369` 首轮 `verify / Race (server-2/4)`、`server-3/4` 因既有 `/admin#items` hash 导航 page-load flake 失败，`--failed` 重跑后成功。Release 共 10 个资产；本机下载 `emby-go-linux-amd64` 用 SHA256SUMS 校验 OK，`-version` = `Emby-go v2.3.4-e902bb5 (commit e902bb5..., built 2026-11-08T02:31:38Z)`；`releases/latest` = v2.3.4。
