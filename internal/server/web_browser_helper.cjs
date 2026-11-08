@@ -134,7 +134,9 @@ async function browser(t, executable = chrome) {
     return result.result.value;
   };
   const navigate = async url => {
-    let onMessage, timer;
+    let target = url;
+    try { target = new URL(url).href; } catch {}
+    let onMessage, timer, poll;
     const loaded = new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(diagnostic('Chromium page load timeout: ' + url.slice(0, 200))), 15000);
       onMessage = event => {
@@ -142,6 +144,14 @@ async function browser(t, executable = chrome) {
         if (message.sessionId === sessionId && message.method === 'Page.loadEventFired') resolve();
       };
       ws.addEventListener('message', onMessage);
+      // Same-document hash navigation (e.g. /admin -> /admin#items) emits no
+      // loadEventFired; settle on the URL reaching the target instead.
+      poll = setInterval(async () => {
+        try {
+          const { result } = await call('Runtime.evaluate', { expression: 'location.href', returnByValue: true });
+          if (result && result.value === target) resolve();
+        } catch {}
+      }, 100);
     });
     // Attach a handler immediately, including when navigation itself fails.
     loaded.catch(() => {});
@@ -149,7 +159,7 @@ async function browser(t, executable = chrome) {
       const { errorText } = await call('Page.navigate', { url });
       assert.equal(errorText, undefined, 'Chromium fixture navigation failed: ' + errorText);
       await loaded;
-    } finally { clearTimeout(timer); ws.removeEventListener('message', onMessage); }
+    } finally { clearTimeout(timer); clearInterval(poll); ws.removeEventListener('message', onMessage); }
   };
   return { call, evaluate, navigate, dir };
 }
