@@ -1,0 +1,168 @@
+name: manual-checks
+
+# 专项检查仅手动触发，不作为 Release 的依赖。
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        description: 专项检查类型
+        type: choice
+        required: true
+        default: race
+        options:
+          - race
+          - web
+          - vuln
+          - coverage
+          - all
+
+permissions:
+  contents: read
+
+jobs:
+  # 保留全部 race 测试；server/store 按真实顶层测试清单做互斥、完备的进程分片，
+  # 避免 Gin/slog 全局状态被 t.Parallel 破坏，且不再依赖提高超时上限。
+  race:
+    if: ${{ inputs.check == 'race' || inputs.check == 'all' }}
+    name: Race (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: server-1/4, package: ./internal/server, shard: 0, shards: 4 }
+          - { name: server-2/4, package: ./internal/server, shard: 1, shards: 4 }
+          - { name: server-3/4, package: ./internal/server, shard: 2, shards: 4 }
+          - { name: server-4/4, package: ./internal/server, shard: 3, shards: 4 }
+          - { name: store-1/4, package: ./internal/store, shard: 0, shards: 4 }
+          - { name: store-2/4, package: ./internal/store, shard: 1, shards: 4 }
+          - { name: store-3/4, package: ./internal/store, shard: 2, shards: 4 }
+          - { name: store-4/4, package: ./internal/store, shard: 3, shards: 4 }
+          - { name: outbound, package: ./internal/outbound, shard: 0, shards: 1 }
+          - { name: artwork, package: ./internal/artwork, shard: 0, shards: 1 }
+          - { name: scanner, package: ./internal/scanner, shard: 0, shards: 1 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate exact test shard planner
+        if: matrix.name == 'server-1/4'
+        run: python3 .github/scripts/test_shard_test.py
+
+      - name: Complete race partition
+        run: |
+          set -o pipefail
+          run_args=()
+          if [ "${{ matrix.shards }}" -gt 1 ]; then
+            # -race 同样用于发现阶段，复用随后运行的编译缓存。
+            pattern=$(GOFLAGS="${GOFLAGS:-} -race" python3 .github/scripts/test_shard.py --package "${{ matrix.package }}" --count "${{ matrix.shards }}" --index "${{ matrix.shard }}")
+            run_args=(-run "$pattern")
+          fi
+          go test -race -count=1 -timeout=10m "${run_args[@]}" "${{ matrix.package }}" 2>&1 | tee /tmp/race-test.log
+
+      - name: Race failure details
+        if: failure()
+        run: |
+          if [ -f /tmp/race-test.log ]; then
+            detail=$(awk '/^--- FAIL|^panic:|WARNING: DATA RACE/ { found=1 } found { print; lines++ } lines >= 20 { exit }' /tmp/race-test.log)
+            if [ -z "$detail" ]; then detail='Race test process failed; see the full package log.'; fi
+            detail=${detail//%/%25}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
+            echo "::error::$detail"
+          fi
+
+  vuln:
+    if: ${{ inputs.check == 'vuln' || inputs.check == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # 漏洞门禁要最新的补丁版：go.mod 的 1.27.0 不含之后修复的 stdlib CVE。
+          go-version: '1.27.x'
+          cache: true
+
+      # 依赖漏洞门禁：只允许「未被调用」的模块漏洞，调用链命中即失败。
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  web:
+    if: ${{ inputs.check == 'web' || inputs.check == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Locate required Chromium
+        run: |
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)
+          if [ -z "$chrome" ]; then echo '::error::Chromium is required; browser assertions must not be skipped'; exit 1; fi
+          printf 'CHROME_BIN=%s\n' "$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
+
+      - name: Frontend VM tests
+        run: |
+          set -o pipefail
+          # Avoid competing cold Chromium starts on small runners; all files and assertions still run.
+          node --test --test-concurrency=1 --test-reporter=tap internal/server/web*_test.cjs 2>&1 | tee /tmp/web-test.log
+
+      # 将首个失败断言写进公开 annotations，不再只看到 exit code 1。
+      - name: Frontend failure details
+        if: failure()
+        run: |
+          if [ -f /tmp/web-test.log ]; then
+            detail=$(awk '/^not ok / { found=1 } found { print; lines++ } found && (/^  \.\.\./ || lines >= 60) { exit }' /tmp/web-test.log)
+            if [ -z "$detail" ]; then detail='Frontend tests failed before a TAP assertion; see Frontend VM tests log.'; fi
+            detail=${detail//%/%25}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
+            echo "::error::$detail"
+          fi
+
+  coverage:
+    if: ${{ inputs.check == 'coverage' || inputs.check == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test and coverage gate (≥70%)
+        run: |
+          set -o pipefail
+          go test -count=1 -coverprofile=cover.out ./...
+          total=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          awk -v t="${total}" 'BEGIN { exit !(t+0 >= 70) }'

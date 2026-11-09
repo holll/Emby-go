@@ -1898,3 +1898,12 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 普通模式仍仅记 error 布尔值并省略 panic 详情；debug 敏感头和认证/初始化/改密/密钥/解锁请求体保护保留，但敏感路由 URL 也原样记录。README 与 API 契约明确：debug=false 不能避免 URL 凭据落盘，不能删除或还原历史记录。
 - 回归覆盖原始/回退 URI、未知及敏感路径、转义大小写、重复凭据、非法 query、长 URL、ForceQuery、探针 method/path 去重及不读 body、限额/清理/失败重试、头/body/error/panic 保护。首次定向测试发现两处旧策略断言（探针路径转小写、旧敏感路由标记），已按新政策修正；不是生产运行故障。
 - 验证：定向回归 1.443s，go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server 114.779s、store 60.745s），作业 bash-1dc88c4b90cc42b6 exit0 已收集；日志/探针专项 -race 27.861s 通过，作业 bash-090fd00a269c4e53 exit0 已收集。gofmt 与 git diff --check 通过。浏览器专项 REPORT_BROWSER 及其它需显式环境启用的外部验收未额外启用，不以默认跳过算通过；未提交、未部署、未重启服务或启用 debug。
+
+## 105. 默认工作流收缩为核心 Go 门禁（2026-11-09，未提交）
+
+- 按用户确认方案，默认 CI 从 14 个验证 job 收缩为一个 Go job：gofmt、build、vet、无缓存全仓普通测试；保留失败摘要，不筛选业务测试、不放宽断言、不自动重试。移除默认覆盖率采集/70%门槛、11路 race、web 与漏洞检查。
+- 新增手动 manual-checks 工作流，仅 workflow_dispatch，可选 race/web/vuln/coverage/all。原 race 分片、规划器验证、Node/Chromium、govulncheck 和70%覆盖率检查移到该入口；保留测试代码及脚本，无定时任务，不作为 Release 依赖。
+- Release 文件与产物逻辑不改：仍在同一事件 SHA 复用核心 CI 后构建，核心失败不发布。默认验证14→1，含发布构建15→2；不承诺固定时长。main 推送和 tag 发布各自触发核心验证，不引入跨提交绿色结果复用。
+- v2.3.6 的 store race 失败为 TestScanCancelledWhileWaitingWriterDoesNotDelete/sqlite=true/group=false 报 scan_state_test.go:413: cancel=interrupted (9)，非超时或明确 data race 报告；此轮不修改该业务路径或其测试断言，精简不等于修复该失败。不重写旧标签，旧tag重跑仍用旧工作流。
+- README 已同步默认/手动门禁和安全取舍。首次全仓回归暴露旧发布契约仍要求 race/web/vuln 为默认门禁（CI must keep unconditional race gate），已同步 release_gate_test.go：要求默认仅一个 Go job且四条核心命令无条件执行，专项仅手动触发并按选项选择，同时保留同SHA checkout、失败传播、版本/校验和及发布依赖断言。
+- 最终 actionlint v1.7.7 验证三个工作流通过；发布图专项0.007s、gofmt/build/vet及 go test -count=1 ./... 全部通过（server108.464s、store55.312s、stabilityrehearsal4.690s），作业 bash-6f276855b36244e3 exit0 已收集。git diff --check 通过。手动专项未实际重跑，远端工作流未触发；未提交/推送或修改已有tag。

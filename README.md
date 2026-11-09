@@ -419,11 +419,13 @@ go test ./...
 node --test internal/server/web*_test.cjs   # 前端 VM 测试
 ```
 
-`main` 分支推送与 PR 会跑 [ci.yml](.github/workflows/ci.yml)：build/vet/test、认证与出站关键包的 race，以及前端 VM 测试。发布仍由 `v*` tag 触发。
+`main` 分支推送与 PR 会跑 [核心 CI](<.github/workflows/ci.yml>)，仅一个 Go job：`gofmt`、`go build ./...`、`go vet ./...`、`go test -count=1 ./...`。不筛除普通 Go 测试，不采集覆盖率，不默认运行 race、浏览器或漏洞扫描。发布仍由 `v*` tag 触发。
+
+[手动专项检查](<.github/workflows/manual-checks.yml>) 仅接受 `workflow_dispatch`：在 Actions 选择 `manual-checks` 与目标分支，按需选 `race`、`web`、`vuln`、`coverage` 或 `all`。race 保留原有完整分片及规划器验证；web 运行既有 Node/Chromium 测试；vuln 使用 govulncheck；coverage 保留全仓覆盖率 ≥70% 检查。专项失败仍报告失败，但不作为 Release 依赖；未执行不能算通过，不设定时运行。
 
 ### 发布（GitHub Actions）
 
-推送形如 `v1.0.0` 的 tag 后，发布工作流先在**同一事件 SHA** 复用完整 CI（Go/覆盖率、race、漏洞与前端），全部成功才构建多平台二进制并上传 Release。检查和构建均显式 checkout `github.sha`，不借用不同提交的历史绿色结果；失败、取消或未通过不会进入发布构建，也不自动等待/重试。构建继续从实际 HEAD 写入版本与提交、执行本机版本输出检查，并生成和验证同批产物的 `SHA256SUMS`。这是自动化门禁，不替代 N-01 支持矩阵与人工发布验收；本地契约测试不代表远端工作流或正式产物已经通过：
+推送形如 `v1.0.0` 的 tag 后，发布工作流先在**同一事件 SHA** 复用核心 Go CI（格式/build/vet/全仓普通测试），成功才构建多平台二进制并上传 Release；race、覆盖率、漏洞与前端专项不再阻塞发布。检查和构建均显式 checkout `github.sha`，不借用不同提交的历史绿色结果；失败、取消或未通过不会进入发布构建，也不自动等待/重试。构建继续从实际 HEAD 写入版本与提交、执行本机版本输出检查，并生成和验证同批产物的 `SHA256SUMS`。这是自动化门禁，不替代 N-01 支持矩阵与人工发布验收；本地契约测试不代表远端工作流或正式产物已经通过：
 
 ```bash
 git tag v1.0.0

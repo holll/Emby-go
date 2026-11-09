@@ -33,7 +33,7 @@ func TestReleaseRequiresSameCommitCI(t *testing.T) {
 		Jobs map[string]job `yaml:"jobs"`
 	}
 	workflows := make(map[string]workflow)
-	for _, name := range []string{"ci", "release"} {
+	for _, name := range []string{"ci", "release", "manual-checks"} {
 		data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name+".yml"))
 		if err != nil {
 			t.Fatal(err)
@@ -56,10 +56,34 @@ func TestReleaseRequiresSameCommitCI(t *testing.T) {
 	if build.Needs != "verify" || build.If != "" {
 		t.Fatalf("release must depend on successful CI without always()/override: %+v", build)
 	}
-	for _, name := range []string{"go", "race", "vuln", "web"} {
-		j, ok := ci.Jobs[name]
-		if !ok || j.If != "" {
-			t.Fatalf("CI must keep unconditional %s gate", name)
+	core, ok := ci.Jobs["go"]
+	if !ok || len(ci.Jobs) != 1 || core.If != "" {
+		t.Fatal("CI must contain only one unconditional core Go gate")
+	}
+	for _, command := range []string{"test -z \"$(gofmt -l .)\"", "go build ./...", "go vet ./...", "go test -count=1 ./... 2>&1 | tee /tmp/test.log"} {
+		found := false
+		for _, s := range core.Steps {
+			for _, line := range strings.Split(s.Run, "\n") {
+				if strings.TrimSpace(line) == command && s.If == "" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("core CI missing unconditional command %q", command)
+		}
+	}
+	manual := workflows["manual-checks"]
+	if _, ok := manual.On["workflow_dispatch"]; !ok || len(manual.On) != 1 {
+		t.Fatal("specialist checks must only run through workflow_dispatch")
+	}
+	if len(manual.Jobs) != 4 {
+		t.Fatal("manual checks must retain race, web, vuln and coverage")
+	}
+	for _, name := range []string{"race", "web", "vuln", "coverage"} {
+		j, ok := manual.Jobs[name]
+		if !ok || j.If != "${{ inputs.check == '"+name+"' || inputs.check == 'all' }}" {
+			t.Errorf("manual %s job must follow the selected check", name)
 		}
 	}
 	for workflowName, w := range workflows {
