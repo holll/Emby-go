@@ -8,6 +8,7 @@
   /* —— 基础层（Apple TV Design System）—— */
   --black: #000000;
   --surface: rgba(255, 255, 255, 0.06);
+  --surface-2: rgba(255, 255, 255, 0.04);
   --surface-hover: rgba(255, 255, 255, 0.10);
   --surface-active: rgba(255, 255, 255, 0.14);
   --glass: rgba(30, 30, 30, 0.72);
@@ -234,13 +235,13 @@ a { color: var(--info); }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
 .btn-accent {
-  background: #1768b5;
+  background: var(--accent);
   border-color: transparent;
   color: #fff;
   font-weight: 700;
   box-shadow: 0 8px 22px var(--blue-glow);
 }
-.btn-accent:hover { background: #1b62a4; box-shadow: 0 10px 28px var(--blue-glow); }
+.btn-accent:hover { background: var(--accent-strong); box-shadow: 0 10px 28px var(--blue-glow); }
 .btn-danger { color: var(--danger); border-color: rgba(255, 69, 58, 0.35); background: transparent; }
 .btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
 .btn-sm { padding: 6px 10px; font-size: 12px; border-radius: var(--radius-xs); }
@@ -348,7 +349,7 @@ a { color: var(--info); }
 }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
 .badge.success   { color: var(--ok);      background: var(--ok-soft);      border-color: rgba(48, 209, 88, 0.28); }
-.badge.pending   { color: var(--warn);    background: var(--accent-soft);   border-color: rgba(255, 159, 10, 0.30); }
+.badge.pending   { color: var(--warn);    background: var(--warn-soft, rgba(255, 159, 10, 0.15));   border-color: rgba(255, 159, 10, 0.30); }
 .badge.needs_attention, .badge.failed { color: var(--danger); background: var(--danger-soft); border-color: rgba(255, 69, 58, 0.30); }
 .badge.manual    { color: var(--info);    background: var(--info-soft);    border-color: rgba(100, 210, 255, 0.30); }
 .badge.skipped   { color: var(--dim);     background: rgba(255, 255, 255, 0.04); border-color: var(--line-strong); }
@@ -552,33 +553,14 @@ textarea { min-height: 84px; resize: vertical; line-height: 1.6; }
   appearance: auto;
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-xs);
   color: var(--text);
   font: inherit;
   padding: 6px 8px;
 }
 
 .scan-progress-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
-.scan-mode-select {
-  appearance: auto;
-  background: var(--surface-2);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  color: var(--text);
-  font: inherit;
-  padding: 6px 8px;
-}
-
 .scan-progress-head strong { font-weight: 600; }
-.scan-mode-select {
-  appearance: auto;
-  background: var(--surface-2);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  color: var(--text);
-  font: inherit;
-  padding: 6px 8px;
-}
 
 .scan-progress-head span { color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
 .scan-progress-bar { height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }

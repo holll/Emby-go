@@ -61,8 +61,8 @@ jobs:
           printf '%s\n' "${actual}"
           # 校验和与版本输出来自本次同一批产物；不读取旧 dist。
           (cd dist && sha256sum emby-go-* > SHA256SUMS && sha256sum -c SHA256SUMS)
-          # 部署材料与二进制同批发布：首装脚本、Service 模板和配置样例。
-          cp deploy/install.sh deploy/verify-native-install.sh deploy/emby-go.service config.example.yaml dist/
+          # Release 只发布二进制和 SHA256SUMS；deploy/*、config.example.yaml
+          # 留在仓库中，不再同批打包。
 
       - name: Upload binaries to release
         uses: softprops/action-gh-release@v2

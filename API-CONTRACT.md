@@ -21,7 +21,7 @@
 | 管理 API 密钥 | 等价管理员全权（D02，已具名接受风险） |
 
 - 图片端点（`/Items/:id/Images/*`、刮削图片代理）保持匿名，以兼容浏览器 `<img>` 与客户端图片缓存。
-- 流与转发端点（`/videos/:id/stream`、`/Videos/:id/proxy`）必须鉴权：短时签名或 token 由服务端生成。
+- 流端点（`/Videos/:id/stream`）必须鉴权：302 直拉真实地址，未鉴权可凭据外泄。
 
 ## 3. 错误信封
 
@@ -81,8 +81,8 @@
 | 播放信息 | `GET|POST /Items/:id/PlaybackInfo` | 单 `MediaSources`，`DirectPlay/DirectStream=true`、`Transcoding=false` |
 | 播放上报 | `POST /Sessions/Playing`、`/Progress`、`/Stopped` | 204；计数由会话+序号保证幂等 |
 | 续播 | `GET /Users/:uid/Items/Resume` | `UserData.PlaybackPositionTicks` 有效 |
-| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回更新后的 `UserData`；评分用查询参数 `Likes=true|false`；`UserData.Likes` 为 bool，未评分时该字段不出现 |
-| 流/转发 | `GET /videos/:id/stream`、`GET /Videos/:id/proxy` | 302 或转发；失败 502 `UPSTREAM_UNAVAILABLE` |
+| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回 200 及更新后的 `UserData`；评分用查询参数 `Likes=true|false`；`UserData.Likes` 为 bool，未评分时该字段不出现 |
+| 流 | `GET /Videos/:id/stream`（含 `.ext`） | 302 直拉真实地址；失败 404 `NOT_FOUND` / 415 `UNSUPPORTED_MEDIA_TYPE` |
 
 自批次 91 起，影片/列表项在 `Collection` 非空时输出 `CollectionIds: ["boxset:<base64url(name)>"]`（Emby 客户端据此渲染“所属合集”）。
 
@@ -91,7 +91,40 @@
 - 根上下文（省略 `ParentId` 或为 `0`）返回当前用户可见的媒体库文件夹，与 `/Users/:uid/Views` 共用 DTO：保持外部 `Id`、`Type=CollectionFolder`、`IsFolder=true`、`CollectionType` 和用户数据；有可见且达到合集最低影片数的合集时包含 `Id=boxsets` 的合集媒体库视图。不改成 `Type=Folder`，不暴露磁盘路径。
 - 现有目录模型为扁平媒体库视图，不索引物理子目录；`Recursive=true/false` 均返回上述视图。指定某个媒体库、合集或其它非根 `ParentId` 时返回空列表，不回退为全库查询。
 - 响应为 `{Items:[],TotalRecordCount,StartIndex}`；`Items` 恒为数组，计数为筛选后、分页前总数。沿用列表的 `StartIndex` / `Limit` 归一化规则；按名称排序（`SortBy=SortName` / `Name`），`SortOrder=Descending` 反序。支持大小写不敏感的 `SearchTerm`、精确外部 `Ids`（逗号分隔或重复参数）；`ExcludeItemTypes=Folder` 或 `CollectionFolder` 排除这些视图。
+- `Filters` 的逗号分隔项含 `IsFavorite`（大小写不敏感）时按文件夹自身 `UserData.IsFavorite` 筛选后再分页。当前媒体库及合集入口没有收藏存储、DTO 均为未收藏，因此结果为空数组、总数为 0；不以库内影片的收藏状态替代文件夹收藏。
 - 混合 `Folder,Movie` / `Folder,BoxSet` / `Folder,Genre` 等查询保持现有影片、合集或实体分支优先，不增加混合类型并集。单独不支持的类型（如 `Series` / `Episode`）仍为空列表。认证、用户路径校验和媒体库授权不变，根路径与 `/emby` 前缀等价。
+
+合集视图的递归影片查询：`ParentId=boxsets&Recursive=true` 且 `IncludeItemTypes` 包含 `Movie` 或 `Video`、不含 `BoxSet` 时，返回当前用户可见媒体库中 `Collection` 非空的影片，每片一次，不把 BoxSet 伪装成 Movie。沿用影片的筛选（含收藏/未播放）、排序、分页、`Fields` 和用户数据；单片合集成员也包括在内，合集展示最低影片数只约束 BoxSet 列表，不约束此成员查询。省略/关闭 `Recursive` 时纯 Movie 查询仍为空；省略类型或包含 `BoxSet` 时保留原合集列表行为，不增加混合类型并集。纯不支持类型（如 `Series`）不回退为 Movie。上述规则适用于两种列表路径及 `/emby` 前缀。
+
+列表参数兼容边界（批次 107）：
+
+- 影片列表（含合集成员）支持逗号分隔的多键 `SortBy`，依次用于同值时的次级排序；单个 `SortOrder=Descending` 应用于所有请求键，最后恒以影片 `id ASC` 稳定分页。`SortName` 使用非空 `sortname`，为空回退 `title`；`DateCreated` 使用 `created_at`，不以自增 ID 近似时间。扁平 Movie 没有子内容新增时间，`DateLastContentAdded` 明确按 `created_at` 处理。`Year` / `ProductionYear`、`Date`、`CommunityRating` 保留对应年/首映日期/评分排序；未知键仅按标题排序，绝不插入原始 SQL。合集、Folder、流派/标签/制片商/演员实体列表仍只按名称排序，但支持 `SortOrder=Descending`，且先排序再分页；实体缓存区分排序方向。
+- `Items` 影片列表及 `Resume` 共用可选 `Fields`：`MediaSources`、`DateCreated`（同时含 `DateModified`）、`Path`、`Size`、顶层 `MediaStreams`、`PrimaryImageAspectRatio`（有海报时）。`Size` 来自 NFO 探测数据，无来源不伪造；`Size` / `MediaStreams` 可独立请求，无需同时请求 `MediaSources`。`MediaSources` 仍附带已知的 `Bitrate/Container/Size`。不请求可选字段时不新增它们；影片详情既有的默认字段不受影响。列表缓存包含完整 Fields 身份，流地址凭据只在发送当前会话响应时附加，不进入共享 DTO 缓存。
+- 条目列表/详情（含 `Resume`、Views、Folder、合集及实体列表）支持 `EnableImageTypes` 与 `ImageTypeLimit` 的 JSON 图片元数据筛选。`EnableImageTypes` 为大小写不敏感的逗号列表，未给或空值保留全部类型；只保留所选类型的 `ImageTags`，不选 `Backdrop` 时背景图数组为空。`ImageTypeLimit` 缺省不限制，非负整数按每种类型限制数量（单值标签至多一张，背景图按原索引顺序截断），0 清空图片标签/背景数组；空值、负数、非法数字或溢出返回 400。背景首图标签与数组首项保持一致。筛选仅作用于解码后的响应副本，不污染共享缓存、不改变图片字节端点或重新编号图片。
+
+查询用户、父级与实体搜索（批次 108）：
+
+- `GET /Items`、`GET /Genres`、`GET /Shows/NextUp`、`GET /Items/Counts` 的可选 `UserId` 省略时使用当前认证用户；给出时必须为其本人数字 ID，不再硬编码为 1。其它用户或非法 ID 返回 404；管理员也不通过这些查询参数代查其它用户，媒体库授权与个人数据隔离不变。
+- `Items`、`Genres`、`Users/:uid/Items/Latest` 共用父级范围解析：省略/`0` 表示根，正数媒体库外部 ID（兼容旧内部 ID）表示指定库，`boxsets` 表示所有非空合集成员，`boxset:<base64url(name)>`（兼容旧明文 ID）表示具体合集。未知字符串、负数、外部 ID 恰为基数（映射为内部 0）及空合集 ID 不得退回全库，而是返回空结果。
+- `Latest` 在授权和父级范围内按原有入库 ID 倒序取页，合集范围在 SQL 分页前生效，包含单片合集成员，不受 BoxSet 展示阈值影响。成功响应恒为裸数组（包括未知父级、无授权库及无匹配成员时的 `[]`），不改成 `Items` 包装。既有可选 Fields/图片参数行为保留。
+- 流派/标签/制片商/演员实体列表（含 `/Genres`）支持首尾去空白、大小写不敏感的 `SearchTerm` 名称包含匹配：先限定可见库及父级，再过滤、排序、分页和计数。缓存包含规范化搜索词、排序方向及既有用户/授权/父级/分页维度，不让不同搜索结果串缓存。
+- 新媒体类型能力尚未扩展；未实现参数不能视为完整 Emby 语义承诺。
+- `GET /Items/Counts` 的 `ItemCount` 按当前可见已索引 Movie 与可展示 BoxSet 之和统计，不把未支持的虚构类型计数混入；可见库和用户隔离与 `MovieCount` / `BoxSetCount` 口径一致。
+
+续播父级范围（批次 109）：
+
+- `GET /Users/:uid/Items/Resume`（含 `/emby`）采用上述相同的 `ParentId` 解析规则。根、省略与 `0` 保留原有全可见库行为；指定库、具体合集或 `boxsets` 时在 SQL 计数/分页前限定范围，并与当前用户的可见库相交；未知/非法父级、未授权库及无匹配内容均返回空 QueryResult，保持请求的 `StartIndex`，不退回全库。
+- 仍仅包含本人有正播放进度且未隐藏的可见已索引影片；不混入其它用户的进度。合集成员不受 BoxSet 展示阈值限制。保持原有 `title,id` 排序、`Fields`/图片参数、用户数据及包装响应形状，`TotalRecordCount` 为父级和授权筛选后、分页前总数。
+
+影片精确 ID 与类型排除（批次 110）：
+
+- `GET /Items`、`GET /Users/:uid/Items` 的影片分支支持 `Ids`：逗号分隔或重复参数均可，空白、重复及非法值不阻止合法正数匹配；显式出现但无合法 ID 时返回空结果，省略时不增加该过滤。过滤在计数和分页前与父级、可见库、状态及既有影片条件相交；响应顺序继续遵循现有排序与分页。
+- 影片分支支持大小写不敏感的 `ExcludeItemTypes=Movie` 或 `Video` 排除存储的影片。BoxSet、Folder 和实体分支的既有类型排除行为不变，不把未支持类型伪装为影片。
+
+影片搜索的 FTS 与实体索引（批次 114）：
+
+- `SearchTerm` 在长度 ≥3 时使用 FTS5 trigram 索引（`movies_fts`，列 `title/original_title/number`）做子串短语匹配；短于 3 个符（0–2）回落到 `LIKE '%t%'`，保持既有短词行为。引号按 FTS 短语转义，查询不注入 SQL。`movies` 的插入/标题/原标题/番号更新/删除由触发器保持 FTS 同步；迁移 22 回填已有数据，`validateSchema` 跳过 FTS 影子表的自带索引以免误报漂移。
+- `genres/tags/studios` 过滤改走既有规范化表 `movie_features` 的 `EXISTS (kind=?, value=?)` 等值匹配（`idx_movie_features_lookup`），不再对 `movies` 的 JSON 文本做 `LIKE '%"value"%'`。多值逗号/竖线 OR 语义与既有 `splitTerms` 一致；未知类型仍走原 JSON 兜底。
 
 管理端点（`/api/admin/*`）是后台契约，供本仓库 Web 前端与脚本使用；清单见 `internal/server/server.go` 的 `routes()`，不在 Emby 兼容承诺内。
 
@@ -135,13 +168,13 @@
 
 ### 4.4 全量与增量扫描
 
-- `POST /api/admin/tasks/scan?library_id=1&mode=incremental` 继续返回 202 与任务 ID；202 仅表示已接受。省略 `mode` 兼容为 `full`，只接受 `full` / `incremental`。省略或 `library_id=0` 表示全部库，非法或负数 ID 返回 400。旧同步扫描入口使用相同模式解析与执行流程；`reindex` 保持强制全量。
+- `POST /api/admin/tasks/scan?library_id=1&mode=incremental` 继续返回 202 与任务 ID；202 仅表示已接受。省略 `mode` 兼容为 `incremental`（11000+ 库默认增量，仍完整枚举），只接受 `full` / `incremental`。省略或 `library_id=0` 表示全部库，非法或负数 ID 返回 400。旧同步扫描入口使用相同模式解析与执行流程；`reindex` 保持强制全量。
 - `Idempotency-Key` 在参数合法化后处理：摘要包含操作、库、模式和影响执行的选项。同 key 同摘要返回原任务；同 key 异摘要返回 `409 IDEMPOTENCY_CONFLICT`，包括并发注册时的锁内检查。重放不绕过非法参数检查。
 - 手动扫描可显式提供 `allow_empty_removal=true|false|1|0`；其他值返回 400。已有索引的库突然枚举为空时默认阻止清理，只有明确确认才可继续。确认不绕过读取、取消、库配置、根目录或根标识健康检查。
 - 可选高级参数 `root_marker_path` / `root_marker_sha256` 必须成对提供：前者为库根下的相对文件路径，后者为预期内容的 64 位十六进制 SHA-256。标识文件只读且不自动创建；必须在解析符号链接后仍位于库根内，内容最多 64 KiB。缺失、越界、不匹配或扫描中变化使清单不完整，禁止清理。未配置标识时，根目录身份和空库检查不能识别所有远程挂载部分掉线。
 - 任务失败仍保留已提交组的部分 `result`。结果附加 `mode`、`groups_total/groups_done`、`unchanged_groups`、`added/updated/deleted`、`index_changed`、`incomplete`、`cleanup_performed`、`unreadable_nfo` 等字段；`cleanup_performed=true` 表示完成清理检查，不代表必有删除。后续失败不撤销已提交组；有业务提交仍使缓存失效，无变化扫描不推进内容版本。
 - `unreadable_nfo` 统计「NFO 文件存在但解析失败」的条目数（非 `.strm` 读失败）。这类条目**不是**删除指令：已索引的行保留原元数据、演员与可见状态，只跟随文件刷新文件派生列，失败原因写入该影片的 `last_scrape_error`（前缀 `[NFO 不可读]`）；从未索引过的源仍按 pending 入库并带同样原因。NFO 修好后下一次扫描自动恢复并清除该备注。
-- 应用内 `scan` 计划支持 `params.mode` 及上述成对根标识参数；旧计划缺省为 full。未知参数与 ETag 条件修改继续保留；计划中的 `allow_empty_removal` 不隐式授权空库删除。前端不创建或启用额外计划；任务记录仍为进程内数据，重启后不恢复运行任务。
+- 应用内 `scan` 计划支持 `params.mode` 及上述成对根标识参数；旧计划缺省为 incremental（11000+ 库默认增量）。未知参数与 ETag 条件修改继续保留；计划中的 `allow_empty_removal` 不隐式授权空库删除。前端不创建或启用额外计划；任务记录仍为进程内数据，重启后不恢复运行任务。
 
 ### 4.5 MetaTube 手动识别（刮削预览）
 

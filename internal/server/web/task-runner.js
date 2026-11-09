@@ -2,8 +2,7 @@
 (function (global) {
   'use strict';
   // 未确认的提交跨面板挂载保留：重开面板只能核对状态，绝不重发 POST。
-  const submissions = new Map(), completedTasks = new Set();
-  const identityKey = (instance, taskID) => JSON.stringify([instance, taskID]);
+  const submissions = new Map();
 
   // spec: apiRequest, movieKey, runPath, cancelPath, statusPath(instance, taskID), statusBase,
   //       current(), onState(msg), onError(msg), onChange(snapshot), describe(status, observingOther),
@@ -86,8 +85,8 @@
         if (status.error) error('任务报告错误，请检查服务配置或源文件后重试。');
         if (status.running) { schedule(1200); return; }
         acceptedTaskID = null; cancelling = false; changed();
-        if (!observingOther && targetVerified && !completedTasks.has(spec.scope + '|' + identityKey(instance, taskID)) && spec.completed(status) && current()) {
-          completedTasks.add(spec.scope + '|' + identityKey(instance, taskID)); spec.onComplete(status);
+        if (!observingOther && targetVerified && spec.completed(status) && current()) {
+          spec.onComplete(status);
         }
         observingOther = false;
         if (uncertain && current()) recover();

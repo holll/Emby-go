@@ -11,7 +11,7 @@ import (
 // 让测试里的期望值只表达"分页语义"，不掺参数位置噪声。
 func searchPage(t *testing.T, s *Store, libraryID int64, term, genre, sortBy string, limit, offset int) ([]Movie, int) {
 	t.Helper()
-	out, total, err := s.search(1, libraryID, nil, term, "", "", genre, "", "", "", "", "", false, false, sortBy, false, limit, offset)
+	out, total, err := s.search(1, libraryID, nil, term, "", "", genre, "", "", "", "", "", false, false, sortBy, false, limit, offset, "")
 	if err != nil {
 		t.Fatalf("search(term=%q genre=%q limit=%d offset=%d): %v", term, genre, limit, offset, err)
 	}
@@ -157,18 +157,17 @@ func TestSearchEntityFilterTextStable(t *testing.T) {
 		}
 	}
 	// 顺序必须稳定为 genres → tags → studios（不是任意固定顺序，而是这一种）。
-	if !strings.HasPrefix(wantText, "(genres LIKE") || !strings.Contains(wantText, " AND (tags LIKE") {
+	// 迁移 22 起走 movie_features 倒排等值（kind,value），不再是 JSON LIKE。
+	if !strings.HasPrefix(wantText, "(EXISTS") || !strings.Contains(wantText, "movie_features") || !strings.Contains(wantText, " AND (EXISTS") {
 		t.Fatalf("unexpected filter order: %q", wantText)
 	}
 }
 
-// TestSortColumnMatchesLegacyAllowedMap 固定 SortBy → 排序列的映射，
-// 防止把 allowed map 换成 switch 时悄悄改了某个取值。
-func TestSortColumnMatchesLegacyAllowedMap(t *testing.T) {
-	// 期望值抄自改造前的 allowed map 字面量。
+// TestSortColumnMapping 固定兼容排序键的白名单映射及未知值回退。
+func TestSortColumnMapping(t *testing.T) {
 	want := map[string]string{
-		"title": "title", "year": "year", "date": "premiered", "sortname": "title",
-		"datecreated": "id", "random": "title", "communityrating": "rating",
+		"title": "title", "year": "year", "date": "premiered", "sortname": "COALESCE(NULLIF(sortname,''),title)",
+		"datecreated": "created_at", "datelastcontentadded": "created_at", "productionyear": "year", "random": "title", "communityrating": "rating",
 		// 大小写不敏感 + 未知值回退 title
 		"TITLE": "title", "Year": "year", "": "title", "nonsense": "title",
 	}

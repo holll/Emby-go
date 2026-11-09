@@ -84,6 +84,8 @@ func BenchmarkSearchTitleLIKE(b *testing.B) {
 }
 
 func BenchmarkSearchGenreJSONLIKE(b *testing.B) {
+	// Kept name for history; migration22 routes genre through movie_features
+	// equality (see searchEntityFilters). Benchmark measures that path now.
 	s := searchBenchFixture(b)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

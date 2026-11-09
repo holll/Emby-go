@@ -52,7 +52,7 @@ func quietPath(path string) bool {
 		return true
 	case strings.Contains(p, "/images/"), strings.Contains(p, "/scrape/image"):
 		return true
-	case strings.Contains(p, "/videos/") && (strings.Contains(p, "/stream") || strings.Contains(p, "/proxy")):
+	case strings.Contains(p, "/videos/") && strings.Contains(p, "/stream"):
 		return true
 	case strings.HasPrefix(p, "/audio/"), p == "/audio":
 		return true

@@ -46,7 +46,6 @@ func TestAPIContractCriticalRoutesRegistered(t *testing.T) {
 		"DELETE /Users/:uid/FavoriteItems/:id",
 		"POST /Users/:uid/Items/:id/Rating",
 		"GET /videos/:id/stream",
-		"GET /Videos/:id/proxy",
 		// /emby 前缀必须同样可用
 		"POST /emby/Users/AuthenticateByName",
 		"GET /emby/Users/:uid/Views",

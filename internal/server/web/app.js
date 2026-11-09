@@ -399,11 +399,11 @@ function wallCard(item, ud) {
         ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
         ${typeof me !== 'undefined' && me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${item.id}" aria-label="选择翻译：${esc(label)}">选择</label>` : ''}
         <div class="wall-actions">
-          <button class="icon-btn" data-probe="${item.id}" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
-          <button class="icon-btn" data-reread="${item.id}" title="重读 .strm 与 NFO">${icon('refresh')}</button>
-          <button class="icon-btn danger" data-delete="${item.id}" title="删除索引（启用 Webhook 时可能联动删除远端目录）">${icon('trash')}</button>
+          <button class="icon-btn" data-probe="${item.id}" aria-label="探测媒体信息（ffprobe，写回 NFO）" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
+          <button class="icon-btn" data-reread="${item.id}" aria-label="重读 .strm 与 NFO" title="重读 .strm 与 NFO">${icon('refresh')}</button>
+          <button class="icon-btn danger" data-delete="${item.id}" aria-label="删除索引（启用 Webhook 时可能联动删除远端目录）" title="删除索引（启用 Webhook 时可能联动删除远端目录）">${icon('trash')}</button>
         </div>
-        ${playable ? `<button class="wall-play" data-quickplay="${item.id}" title="直接播放">${icon('play')}</button>` : ''}
+        ${playable ? `<button class="wall-play" data-quickplay="${item.id}" aria-label="直接播放" title="直接播放">${icon('play')}</button>` : ''}
       </div>
       <div class="wall-meta">
         <button type="button" class="wall-title" data-open="${item.id}" title="${esc(title || '—')}">${esc(label)}</button>
@@ -481,7 +481,7 @@ async function pageItems() {
       </div>
       ${libraries.length ? `<div class="filters">${libFilter}</div>` : ''}
       ${entity ? `<div class="filters"><span class="filter-chip">${esc(entity[1])}：${esc(entity[2])}
-        <button class="chip-x" id="entity-clear" title="清除该筛选" aria-label="清除筛选">✕</button></span></div>` : ''}
+        <button class="chip-x" id="entity-clear" title="清除该筛选" aria-label="清除筛选"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></span></div>` : ''}
       <div class="filters wall-toolbar">
         <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
@@ -1089,7 +1089,7 @@ async function openDetail(item) {
   const gen = pageGen;
   const session = ++detailGen;
   const isCurrent = () => gen === pageGen && session === detailGen;
-  const shell = body => `<div class="detail-toolbar"><button id="detail-close" class="icon-btn" aria-label="关闭详情 (Esc)">✕</button></div><p class="overlay-feedback" hidden></p><div id="detail-content">${body}</div>`;
+  const shell = body => `<div class="detail-toolbar"><button id="detail-close" class="icon-btn" aria-label="关闭详情 (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><p class="overlay-feedback" hidden></p><div id="detail-content">${body}</div>`;
   detailDrawer.innerHTML = shell('<div class="detail-body" role="status">加载中…</div>');
   document.querySelector('#detail-close').addEventListener('click', closeDetail);
   detailOverlay.hidden = false;
@@ -1410,7 +1410,7 @@ function closePlayer() {
 
 // streamURL 构造播放地址。播放器是 <video>/artplayer，浏览器不会给它带
 // X-Emby-Token 这类自定义头，只能把凭据放进 query —— 后端 authOK 支持
-// ?api_key=（与 Emby 客户端一致）。stream/proxy 两个端点都要求鉴权。
+// ?api_key=（与 Emby 客户端一致）。stream 端点要求鉴权，302 直拉真实地址。
 function streamURL(id, kind) {
   return '/Videos/' + id + '/' + kind + '?api_key=' + encodeURIComponent(token || '');
 }
@@ -1427,7 +1427,6 @@ function openPlayer(item) {
   stage.innerHTML = '';
   const container = String(item.source_container || item.SourceContainer || '').toLowerCase();
   const type = container === 'webm' ? 'webm' : 'mp4';
-  let usedProxy = false;
   artInstance = new Artplayer({
     container: stage,
     url: streamURL(item.id, 'stream'),
@@ -1460,14 +1459,9 @@ function openPlayer(item) {
       isCurrent: () => artInstance === instance && token === identity && localStorage.getItem('emby_token') === identity
     });
   }
-  // 直链 302 在 HTTPS 页面可能被混合内容/跨域拦截；失败时回退服务端代理端点。
+  // 直链 302 在 HTTPS 页面可能被混合内容/跨域拦截；失败时提示（302 三边不变）。
   artInstance.on('error', () => {
-    if (usedProxy) { toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error'); return; }
-    usedProxy = true;
-    artInstance.url = streamURL(item.id, 'proxy');
-    // 回退发生在 error 回调里（非用户手势），移动端需静音才允许自动播放。
-    artInstance.muted = true;
-    artInstance.play().catch(() => { /* 用户可手动点播放 */ });
+    toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error');
   });
 }
 
@@ -1534,6 +1528,20 @@ function mountSettingsCategories(root) {
   };
   buttons.forEach(button => button.addEventListener('click', () => select(button.dataset.settingsCategory)));
   select(settingsCategory);
+}
+function bindPasswordForm() {
+  document.querySelector('#pw-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token }, body: JSON.stringify({ current_password: document.querySelector('#pw-current').value, new_password: document.querySelector('#pw-new').value }) }).then(async response => {
+        if (response.status === 401) { localStorage.removeItem('emby_token'); window.location.replace('/'); throw new Error('登录已失效'); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || '修改失败'); }
+      });
+      toast('密码已修改，请重新登录', 'ok');
+      localStorage.removeItem('emby_token');
+      setTimeout(() => window.location.replace('/'), 800);
+    } catch (e) { toast(e.message, 'error'); }
+  });
 }
 async function pageSettings() {
   const gen = pageGen;
@@ -1799,17 +1807,7 @@ async function pageSettings() {
     try { await api('/users/' + button.dataset.userDel, { method: 'DELETE' }); toast('用户已删除'); refreshPage(pageSettings, gen); }
     catch (e) { toast(e.message, 'error'); }
   }));
-  document.querySelector('#pw-form')?.addEventListener('submit', async event => {
-    event.preventDefault();
-    try {
-      const response = await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token }, body: JSON.stringify({ current_password: document.querySelector('#pw-current').value, new_password: document.querySelector('#pw-new').value }) });
-      const body = response.status === 204 ? {} : await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || '修改失败');
-      toast('密码已修改，请重新登录', 'ok');
-      localStorage.removeItem('emby_token');
-      setTimeout(() => window.location.replace('/'), 800);
-    } catch (e) { toast(e.message, 'error'); }
-  });
+  bindPasswordForm();
 }
 
 // renderSelfPassword 是普通用户的设置页：没有服务配置/密钥/用户管理，只有改密。
@@ -1827,17 +1825,7 @@ function renderSelfPassword() {
         <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
       </form>
     </section>`;
-  document.querySelector('#pw-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    try {
-      const response = await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token }, body: JSON.stringify({ current_password: document.querySelector('#pw-current').value, new_password: document.querySelector('#pw-new').value }) });
-      const body = response.status === 204 ? {} : await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || '修改失败');
-      toast('密码已修改，请重新登录', 'ok');
-      localStorage.removeItem('emby_token');
-      setTimeout(() => window.location.replace('/'), 800);
-    } catch (e) { toast(e.message, 'error'); }
-  });
+  bindPasswordForm();
 }
 
 /* ---------------------------------------------------------------- 任务中心 */

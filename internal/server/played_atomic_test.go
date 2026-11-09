@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ CREATE TRIGGER fail_played_api AFTER UPDATE ON userdata BEGIN INSERT INTO played
 				}
 				for i := 1; i <= 2; i++ {
 					w = userSettingRequest(h, route, "fixture-admin-delete")
-					if w.Code != 204 || w.Body.Len() != 0 {
+					if w.Code != 200 {
 						t.Fatalf("success=%d body=%s", w.Code, w.Body.String())
 					}
 					expected := beforeData
@@ -65,6 +66,10 @@ CREATE TRIGGER fail_played_api AFTER UPDATE ON userdata BEGIN INSERT INTO played
 					got, err := f.a.db.DataUser(1, f.victim)
 					if err != nil || got != expected {
 						t.Fatalf("data=%+v expected=%+v err=%v", got, expected, err)
+					}
+					var body map[string]any
+					if json.Unmarshal(w.Body.Bytes(), &body) != nil || body["ItemId"] != fmt.Sprint(f.victim) || body["Played"] != (method == "POST") {
+						t.Fatalf("response=%s", w.Body.String())
 					}
 					var g, lib, old int
 					if _, err := fmt.Sscan(version, &old); err != nil {

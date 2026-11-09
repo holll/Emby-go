@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -14,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -282,13 +280,13 @@ func TestCoreAPI(t *testing.T) {
 		t.Fatalf("player asset: status=%d type=%q", vendorResp.StatusCode, vendorResp.Header.Get("Content-Type"))
 	}
 	vendorResp.Body.Close()
-	// 网页播放器代理端点已注册（不存在的影片返回 404，而非路由缺失的 404 页面）。
+	// /proxy 端点已删除：统一走 302 stream。不存在的影片返回 404 路由缺失（NOT_FOUND）。
 	proxyReq, _ := http.NewRequest("GET", ts.URL+"/Videos/999999/proxy", nil)
 	proxyReq.Header.Set("X-Emby-Token", token)
 	proxyResp, _ := http.DefaultClient.Do(proxyReq)
 	proxyResp.Body.Close()
 	if proxyResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("proxy route: %d", proxyResp.StatusCode)
+		t.Fatalf("proxy route should be 404: %d", proxyResp.StatusCode)
 	}
 	filterReq, _ := http.NewRequest("GET", ts.URL+"/Users/1/Items?Years=2025&Genres=Drama&StartIndex=-10", nil)
 	filterReq.Header.Set("X-Emby-Token", token)
@@ -394,7 +392,7 @@ func TestCoreAPI(t *testing.T) {
 	playedReq.Header.Set("X-Emby-Token", token)
 	playedResp, _ := http.DefaultClient.Do(playedReq)
 	playedResp.Body.Close()
-	if playedResp.StatusCode != http.StatusNoContent {
+	if playedResp.StatusCode != http.StatusOK {
 		t.Fatalf("mark played: %d", playedResp.StatusCode)
 	}
 	probeReq, _ := http.NewRequest("POST", ts.URL+"/Users/1/GroupingOptions", strings.NewReader(`{"probe":true}`))
@@ -972,11 +970,10 @@ func TestAPIKeysAndScanProgress(t *testing.T) {
 	}
 }
 
-// 网页播放器代理：透传 Range（拖动进度），返回 206 + Content-Range。
-func TestProxyStreamRange(t *testing.T) {
-	body := []byte("0123456789")
+// 播放只走 302 stream 直拉：服务端零带宽，不再提供 Range 透传代理。
+func TestStreamDirectRedirect(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeContent(w, r, "media.mp4", time.Time{}, bytes.NewReader(body))
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
@@ -1007,55 +1004,52 @@ func TestProxyStreamRange(t *testing.T) {
 	}
 	_, auth := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)
 	token, _ := auth["AccessToken"].(string)
-	authed := func(method, path string) (*http.Response, []byte) {
+	noFollow := func(method, path, tokenVal string) *http.Response {
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		req, _ := http.NewRequest(method, ts.URL+path, nil)
-		req.Header.Set("X-Emby-Token", token)
-		resp, e := http.DefaultClient.Do(req)
+		if tokenVal != "" {
+			req.Header.Set("X-Emby-Token", tokenVal)
+		}
+		resp, e := client.Do(req)
 		if e != nil {
 			t.Fatal(e)
 		}
-		data, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return resp, data
+		return resp
 	}
-	if resp, _ := authed("POST", "/api/admin/libraries?x=1"); resp.StatusCode == http.StatusOK { // 无 body 的 POST 不应成功建库
-		t.Fatal("library without body should fail")
-	}
-	libReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/libraries", strings.NewReader(`{"Name":"t","Path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`))
+
+	libReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/libraries", strings.NewReader(`{"Name":"t","Path":"`+strings.ReplaceAll(root, `\`, `\`)+`"}`))
 	libReq.Header.Set("X-Emby-Token", token)
 	libReq.Header.Set("Content-Type", "application/json")
 	if resp, e := http.DefaultClient.Do(libReq); e != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("add library: %v", e)
 	}
-	if resp, _ := authed("POST", "/api/admin/scan"); resp.StatusCode != http.StatusOK {
-		t.Fatalf("scan: %d", resp.StatusCode)
+	scanReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/scan", nil)
+	scanReq.Header.Set("X-Emby-Token", token)
+	if resp, e := http.DefaultClient.Do(scanReq); e != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("scan: %v", e)
 	}
 
-	// proxy/stream 与其余 Emby 端点一样要求鉴权（会回传上游直链或代拉全量字节）。
-	req, _ := http.NewRequest("GET", ts.URL+"/Videos/1/proxy", nil)
-	req.Header.Set("Range", "bytes=2-5")
-	req.Header.Set("X-Emby-Token", token)
-	resp, e := http.DefaultClient.Do(req)
-	if e != nil {
-		t.Fatal(e)
-	}
-	data, _ := io.ReadAll(resp.Body)
+	// /Videos/1/stream 302 直拉上游
+	resp := noFollow("GET", "/Videos/1/stream", token)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusPartialContent || string(data) != "2345" || resp.Header.Get("Content-Range") == "" {
-		t.Fatalf("range proxy: status=%d body=%q range=%q", resp.StatusCode, data, resp.Header.Get("Content-Range"))
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != upstream.URL+"/media.mp4" {
+		t.Fatalf("stream 302: status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
 	}
-
-	// 无 Range 时返回完整内容。
-	resp, data = authed("GET", "/Videos/1/proxy")
-	if resp.StatusCode != http.StatusOK || string(data) != string(body) {
-		t.Fatalf("full proxy: status=%d body=%q", resp.StatusCode, data)
+	// HEAD 也 302
+	resp = noFollow("HEAD", "/Videos/1/stream", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != upstream.URL+"/media.mp4" {
+		t.Fatalf("stream HEAD: status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	// /proxy 已删除，返回路由缺失 404
+	resp = noFollow("GET", "/Videos/1/proxy", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("proxy should be 404: status=%d", resp.StatusCode)
 	}
 
 	// 匿名访问必须被拒：直链凭据不能外泄给未授权者。
-	if anon, _ := http.Get(ts.URL + "/Videos/1/proxy"); anon.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("proxy 未鉴权放行: status=%d", anon.StatusCode)
-	}
-	if anon, _ := http.Get(ts.URL + "/Videos/1/stream"); anon.StatusCode != http.StatusUnauthorized {
+	if anon := noFollow("GET", "/Videos/1/stream", ""); anon.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("stream 未鉴权放行: status=%d", anon.StatusCode)
 	}
 }

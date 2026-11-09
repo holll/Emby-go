@@ -96,7 +96,7 @@ func TestNullMetadataWideProjections(t *testing.T) {
 					return m, e
 				},
 				"latest":        func() ([]Movie, error) { return s.Latest(lib, 10, 0) },
-				"latestVisible": func() ([]Movie, error) { return s.LatestVisible(0, []int64{lib}, 10, 0) },
+				"latestVisible": func() ([]Movie, error) { return s.LatestVisible(0, []int64{lib}, "", 10, 0) },
 				"resumed": func() ([]Movie, error) {
 					m, n, e := s.Resumed(1, 10, 0)
 					if e == nil && n != 1 {
@@ -104,7 +104,7 @@ func TestNullMetadataWideProjections(t *testing.T) {
 					}
 					return m, e
 				},
-				"resumedVisible": func() ([]Movie, error) { m, _, e := s.ResumedVisible(1, []int64{lib}, 10, 0); return m, e },
+				"resumedVisible": func() ([]Movie, error) { m, _, e := s.ResumedVisible(1, 0, []int64{lib}, "", 10, 0); return m, e },
 				"scrape":         func() ([]Movie, error) { return s.MoviesForScrape(lib, false, 0) },
 				"scrapeBatch":    func() ([]Movie, error) { return s.MoviesForScrapeBatch(lib, false, 0, 10) },
 				"actor":          func() ([]Movie, error) { return s.MoviesByActor("Actor") },

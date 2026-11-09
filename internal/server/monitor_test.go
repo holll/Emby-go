@@ -78,7 +78,7 @@ func TestMonitorMiddlewareRecoveryAndFilters(t *testing.T) {
 			r.GET("/api/failure", func(c *gin.Context) { panic("do not retain secret") })
 			r.GET("/api/missing", func(c *gin.Context) { c.AbortWithStatusJSON(404, gin.H{"error": "missing"}) })
 			r.GET("/api/denied", func(c *gin.Context) { c.AbortWithStatusJSON(403, gin.H{"error": "denied"}) })
-			excluded := []string{"/api/admin/dashboard", "/api/admin/metrics", "/api/admin/status", "/api/admin/tasks", "/api/admin/tasks/:id", "/api/admin/scan/progress", "/api/health", "/healthz", "/System/Ping", "/Sessions/Playing/Ping", "/web/dashboard.js", "/favicon.ico", "/Items/:id/Images/:kind", "/emby/items/:id/images/:kind", "/Videos/:id/stream", "/emby/videos/:id/proxy.:ext", "/api/admin/scrape/image", "/api/admin/libraries/:id/cover"}
+			excluded := []string{"/api/admin/dashboard", "/api/admin/metrics", "/api/admin/status", "/api/admin/tasks", "/api/admin/tasks/:id", "/api/admin/scan/progress", "/api/health", "/healthz", "/System/Ping", "/Sessions/Playing/Ping", "/web/dashboard.js", "/favicon.ico", "/Items/:id/Images/:kind", "/emby/items/:id/images/:kind", "/Videos/:id/stream", "/api/admin/scrape/image", "/api/admin/libraries/:id/cover"}
 			for _, path := range excluded {
 				r.GET(path, func(c *gin.Context) { c.JSON(200, gin.H{}) })
 			}

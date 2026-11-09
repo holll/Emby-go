@@ -102,7 +102,6 @@ func TestQuietPath(t *testing.T) {
 		{"/emby/Items/abc/Images/Primary/0", true},
 		{"/Videos/abc/stream", true},
 		{"/Videos/abc/stream.mkv", true},
-		{"/emby/videos/abc/proxy", true},
 		{"/audio/abc/stream", true},
 
 		// 需要保留记录的接口

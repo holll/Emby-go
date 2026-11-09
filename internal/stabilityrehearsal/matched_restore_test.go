@@ -123,8 +123,8 @@ func TestSchema20MatchedSnapshotRestore(t *testing.T) {
 		}
 		db = rawDB(t, path)
 		mustExec(t, db, `UPDATE movies SET tags='["manual-keep","中文字幕"]',extra_backdrops=?,last_scrape_error='retained-warning' WHERE id=42`, string(backdropJSON))
-		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 20 {
-			t.Fatal("snapshot is not schema20")
+		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 22 {
+			t.Fatal("snapshot is not schema22")
 		}
 		before = readBusiness(t, db)
 		if err := db.Close(); err != nil {

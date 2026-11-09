@@ -1182,17 +1182,17 @@ func (s *Store) SearchFiltered(userID, libraryID int64, term, years, genre strin
 
 // SearchFilteredVisible 与 SearchFiltered 相同，并按用户可见媒体库集合过滤（nil=不限制）。
 func (s *Store) SearchFilteredVisible(userID, libraryID int64, visible []int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, visible, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset)
+	return s.search(userID, libraryID, visible, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset, "")
 }
 
 // SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
 // 非空串限定为某个具体合集，空串表示不限合集。
 func (s *Store) SearchScoped(userID, libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, nil, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+	return s.search(userID, libraryID, nil, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset, "")
 }
 
 func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(1, libraryID, nil, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset)
+	return s.search(1, libraryID, nil, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset, "")
 }
 
 // AdminQuery 管理端列表（媒体墙）的查询条件。
@@ -1219,8 +1219,8 @@ type AdminQuery struct {
 
 // SearchScopedVisible 与 SearchScoped 相同，但额外限制用户可见媒体库集合
 // （nil=不限制；空切片=无可见库，返回空结果）。用于非管理员的多用户可见性。
-func (s *Store) SearchScopedVisible(userID, libraryID int64, visible []int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, visible, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset)
+func (s *Store) SearchScopedVisible(userID, libraryID int64, visible []int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string) ([]Movie, int, error) {
+	return s.search(userID, libraryID, visible, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset, ids)
 }
 
 // SearchAdmin 供管理端列表使用。
@@ -1230,7 +1230,7 @@ func (s *Store) SearchAdmin(q AdminQuery) ([]Movie, int, error) {
 		userID = 1
 	}
 	return s.search(userID, q.LibraryID, nil, q.Term, q.Status, "", q.Genre, q.Tag, q.Studio, q.Person, q.Collection, q.Protocol,
-		false, false, q.SortBy, q.Desc, q.Limit, q.Offset)
+		false, false, q.SortBy, q.Desc, q.Limit, q.Offset, "")
 }
 
 // MoviesForProbe 返回媒体信息探测的候选影片，只挑有 NFO 的条目：
@@ -1285,22 +1285,25 @@ func (s *Store) MoviesForProbe(libraryID int64, status string, limit int) ([]Mov
 // 且白名单本身是编译期常量，没有"运行期按值查表"的必要。
 func sortColumn(sortBy string) string {
 	switch strings.ToLower(sortBy) {
-	case "year":
+	case "year", "productionyear":
 		return "year"
 	case "date":
 		return "premiered"
-	case "datecreated":
-		return "id"
+	case "sortname":
+		return "COALESCE(NULLIF(sortname,''),title)"
+	case "datecreated", "datelastcontentadded":
+		// Movie 是扁平叶子项，没有子内容新增时间；两个键均对应入库创建时间。
+		return "created_at"
 	case "communityrating":
 		return "rating"
 	default:
-		// title / sortname / random / 未知值 都按 title（与旧 allowed map 的取值一致）。
+		// title / random / 未知值按 title，SQL 只使用此白名单生成的表达式。
 		return "title"
 	}
 }
 
 // searchEntityFilters 把 genres/tags/studios 三个实体过滤条件按**固定顺序**
-// （genres → tags → studios）追加到 where，并返回扩充后的 args。
+// （genre → tag → studio）追加到 where，并返回扩充后的 args。
 //
 // P2-4：这里原本是 map[string]string 字面量 + range 拼 WHERE，两个问题：
 //  1. map 迭代顺序随机 ⇒ 同一组参数会拼出不同的 SQL 文本，SQLite 每次都当新语句
@@ -1309,13 +1312,17 @@ func sortColumn(sortBy string) string {
 //
 // 改成固定顺序的数组（栈上，不逃逸）后，同一组参数拼出的文本逐字节恒定。
 // 单独抽成函数是为了让这条性质能被测试直接断言（TestSearchEntityFilterTextStable）。
+//
+// 迁移 22 起走倒排表 movie_features 的索引等值（kind,value）而非 JSON LIKE：
+// 语义与整词匹配一致（值已在 refreshFeaturesTx 解析为整词），且能命中
+// idx_movie_features_lookup(kind,value,movie_id)，避免全表扫。
 func searchEntityFilters(where []string, args []any, genre, tags, studios string) ([]string, []any) {
-	for _, filter := range [...]struct{ field, value string }{
-		{"genres", genre},
-		{"tags", tags},
-		{"studios", studios},
+	for _, filter := range [...]struct{ kind, value string }{
+		{FeatureGenre, genre},
+		{FeatureTag, tags},
+		{FeatureStudio, studios},
 	} {
-		field, value := filter.field, filter.value
+		kind, value := filter.kind, filter.value
 		if value == "" {
 			continue
 		}
@@ -1325,15 +1332,15 @@ func searchEntityFilters(where []string, args []any, genre, tags, studios string
 		}
 		clauses := make([]string, 0, len(terms))
 		for _, t := range terms {
-			clauses = append(clauses, field+" LIKE ? ESCAPE '\\'")
-			args = append(args, "%\""+escapeLike(strings.ReplaceAll(t, `"`, ""))+"\"%")
+			clauses = append(clauses, "EXISTS (SELECT 1 FROM movie_features mf WHERE mf.movie_id=movies.id AND mf.kind=? AND mf.value=?)")
+			args = append(args, kind, strings.TrimSpace(t))
 		}
 		where = append(where, "("+strings.Join(clauses, " OR ")+")")
 	}
 	return where, args
 }
 
-func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
+func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string) ([]Movie, int, error) {
 	where := []string{}
 	args := []any{}
 	switch status {
@@ -1351,6 +1358,24 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 	default:
 		where = append(where, "status=?")
 		args = append(args, status)
+	}
+	if ids != "" {
+		idArgs := []any{}
+		for token := range strings.SplitSeq(ids, ",") {
+			if id, err := strconv.ParseInt(strings.TrimSpace(token), 10, 64); err == nil && id > 0 {
+				idArgs = append(idArgs, id)
+			}
+		}
+		if len(idArgs) == 0 {
+			where = append(where, "1=0")
+		} else {
+			ph := make([]string, len(idArgs))
+			for i := range ph {
+				ph[i] = "?"
+			}
+			where = append(where, "id IN ("+strings.Join(ph, ",")+")")
+			args = append(args, idArgs...)
+		}
 	}
 	if libraryID > 0 {
 		where = append(where, "library_id=?")
@@ -1378,22 +1403,31 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 		args = append(args, protocol)
 	}
 	if term != "" {
-		where = append(where, "(title LIKE ? ESCAPE '\\' OR original_title LIKE ? ESCAPE '\\' OR number LIKE ? ESCAPE '\\')")
-		q := "%" + escapeLike(term) + "%"
-		args = append(args, q, q, q)
+		// trigram FTS 要求查询至少 3 rune；更短的词（中文 2 字、单字符、拉丁
+		// 2 字符）无法成 trigram，继续走 LIKE 子串回退，语义不变。
+		if len([]rune(term)) >= 3 {
+			where = append(where, "id IN (SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?)")
+			args = append(args, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+		} else {
+			where = append(where, "(title LIKE ? ESCAPE '\\' OR original_title LIKE ? ESCAPE '\\' OR number LIKE ? ESCAPE '\\')")
+			q := "%" + escapeLike(term) + "%"
+			args = append(args, q, q, q)
+		}
 	}
 	if years != "" {
 		parts := strings.Split(years, ",")
 		placeholders := make([]string, 0, len(parts))
 		for _, part := range parts {
 			part = strings.TrimSpace(part)
-			if part != "" {
+			if year, err := strconv.Atoi(part); err == nil {
 				placeholders = append(placeholders, "?")
-				args = append(args, part)
+				args = append(args, year)
 			}
 		}
 		if len(placeholders) > 0 {
-			where = append(where, "CAST(year AS TEXT) IN ("+strings.Join(placeholders, ",")+")")
+			where = append(where, "year IN ("+strings.Join(placeholders, ",")+")")
+		} else {
+			where = append(where, "1=0")
 		}
 	}
 	where, args = searchEntityFilters(where, args, genre, tags, studios)
@@ -1426,11 +1460,20 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 	if cond != "" {
 		clause = " WHERE " + cond
 	}
-	column := sortColumn(sortBy)
 	direction := "ASC"
 	if desc {
 		direction = "DESC"
 	}
+	var order []string
+	for key := range strings.SplitSeq(sortBy, ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			order = append(order, sortColumn(key)+" "+direction)
+		}
+	}
+	if len(order) == 0 {
+		order = append(order, "title "+direction)
+	}
+	order = append(order, "id ASC")
 	// P1-2（评估后不改，保留两次查询）：原本的想法是把 COUNT(*) 合并进数据查询，
 	// 例如 SELECT movieCols, COUNT(*) OVER () ... LIMIT ?。实测**反而慢 6~7 倍**
 	// （同一夹具、同机相邻窗口，见 BenchmarkSearchPage100WindowPrealloc 与
@@ -1449,7 +1492,7 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 		return nil, 0, err
 	}
 	args = append(args, limit, offset)
-	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies"+clause+" ORDER BY "+column+" "+direction+",id LIMIT ? OFFSET ?", args...)
+	rows, err := s.db.Query("SELECT "+movieCols+" FROM movies"+clause+" ORDER BY "+strings.Join(order, ",")+" LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1676,11 +1719,11 @@ func (s *Store) Actors(movieID int64) ([]ActorRef, error) {
 
 // Latest 返回库内最近入库的可见影片（按入库倒序）。
 func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
-	return s.LatestVisible(libraryID, nil, limit, offset)
+	return s.LatestVisible(libraryID, nil, "", limit, offset)
 }
 
-// LatestVisible 与 Latest 相同，并按用户可见媒体库集合过滤（nil=不限制）。
-func (s *Store) LatestVisible(libraryID int64, visible []int64, limit, offset int) ([]Movie, error) {
+// LatestVisible 按可见库与合集范围过滤后，再取最近入库页（visible=nil 不限库）。
+func (s *Store) LatestVisible(libraryID int64, visible []int64, collection string, limit, offset int) ([]Movie, error) {
 	query := "SELECT " + movieCols + " FROM movies WHERE status IN ('success','manual')"
 	args := []any{}
 	if libraryID > 0 {
@@ -1697,6 +1740,12 @@ func (s *Store) LatestVisible(libraryID int64, visible []int64, limit, offset in
 			}
 			query += " AND library_id IN (" + strings.Join(ph, ",") + ")"
 		}
+	}
+	if collection == "*" {
+		query += " AND collection<>''"
+	} else if collection != "" {
+		query += " AND collection=?"
+		args = append(args, collection)
 	}
 	query += " ORDER BY id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -1723,17 +1772,27 @@ func (s *Store) LatestVisible(libraryID int64, visible []int64, limit, offset in
 // Resumed 返回有播放进度且未隐藏续播的可见影片（按标题排序，与列表口径一致），
 // 供「继续观看」直接分页，避免全量载入后在内存里过滤。
 func (s *Store) Resumed(userID int64, limit, offset int) ([]Movie, int, error) {
-	return s.ResumedVisible(userID, nil, limit, offset)
+	return s.ResumedVisible(userID, 0, nil, "", limit, offset)
 }
 
-// ResumedVisible 与 Resumed 相同，并按用户可见媒体库集合过滤（nil=不限制）。
-func (s *Store) ResumedVisible(userID int64, visible []int64, limit, offset int) ([]Movie, int, error) {
+// ResumedVisible 在计数和分页前限定父级及可见库（visible=nil 不限库）。
+func (s *Store) ResumedVisible(userID, libraryID int64, visible []int64, collection string, limit, offset int) ([]Movie, int, error) {
 	if userID <= 0 {
 		userID = 1
 	}
 	cond := ` FROM movies JOIN userdata u ON u.movie_id=movies.id
 		WHERE u.user_id=? AND movies.status IN ('success','manual') AND u.position_ticks>0 AND COALESCE(u.hide_from_resume,0)=0`
 	args := []any{userID}
+	if libraryID > 0 {
+		cond += " AND movies.library_id=?"
+		args = append(args, libraryID)
+	}
+	if collection == "*" {
+		cond += " AND movies.collection<>''"
+	} else if collection != "" {
+		cond += " AND movies.collection=?"
+		args = append(args, collection)
+	}
 	if visible != nil {
 		if len(visible) == 0 {
 			cond += " AND 1=0"

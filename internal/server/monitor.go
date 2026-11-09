@@ -140,7 +140,7 @@ func monitorControlPlane(c *gin.Context) bool {
 	if strings.HasPrefix(path, "/emby/") {
 		path = strings.TrimPrefix(path, "/emby")
 	}
-	if strings.Contains(path, "/images/") || strings.Contains(path, "/stream") || strings.Contains(path, "/proxy") || path == "/api/admin/scrape/image" || strings.HasSuffix(path, "/cover") {
+	if strings.Contains(path, "/images/") || strings.Contains(path, "/stream") || path == "/api/admin/scrape/image" || strings.HasSuffix(path, "/cover") {
 		return false
 	}
 	switch path {

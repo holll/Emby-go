@@ -205,7 +205,7 @@ func TestScanStrictParametersBeforeReplay(t *testing.T) {
 			t.Fatalf("invalid sync %s => %d %s", query, w.Code, w.Body.String())
 		}
 	}
-	if resp, task := submitScan(t, ts, token, "?mode=FULL&library_id=0&allow_empty_removal=false", "strict-key"); resp.StatusCode != 202 || task.TaskID != first.TaskID {
+	if resp, task := submitScan(t, ts, token, "?mode=INCREMENTAL&library_id=0&allow_empty_removal=false", "strict-key"); resp.StatusCode != 202 || task.TaskID != first.TaskID {
 		t.Fatalf("canonical replay %d %+v", resp.StatusCode, task)
 	}
 	if resp, _ := submitScan(t, ts, token, "?allow_empty_removal=true", "strict-key"); resp.StatusCode != 409 {
@@ -431,10 +431,10 @@ func TestScheduledScanStrictRoundTripAndFullCompatibility(t *testing.T) {
 	if err := app.runScheduledScan(scheduler.Task{Type: "scan", Params: params}); err != nil {
 		t.Fatal(err)
 	}
-	if app.scanStatus.Mode != "full" {
-		t.Fatalf("legacy mode %s", app.scanStatus.Mode)
+	if app.scanStatus.Mode != "incremental" {
+		t.Fatalf("legacy default mode %s", app.scanStatus.Mode)
 	}
-	if err := app.runScheduledScan(scheduler.Task{Type: "reindex", Params: map[string]any{"mode": "incremental", "library_id": 999999}}); err != nil {
+	if err := app.runScheduledScan(scheduler.Task{Type: "reindex", Params: map[string]any{"mode": "full", "library_id": 999999}}); err != nil {
 		t.Fatal(err)
 	}
 	if app.scanStatus.Mode != "full" || app.scanStatus.Unchanged != 0 {

@@ -891,7 +891,7 @@ func (a *App) embyRoutes() []embyRoute {
 
 // noStore 给动态响应加禁止缓存头。Emby 客户端会缓存「无 Cache-Control」的 JSON，
 // PlaybackInfo / Items 这类响应一旦被缓存，媒体源与播放进度就不再刷新；
-// 视频流的 302 与代理字节流同理，必须禁止客户端与中间层缓存。
+// 视频流的 302 同理，必须禁止客户端与中间层缓存。
 func noStore(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 }
@@ -916,23 +916,10 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 		}
 	}
 	a.registerStreamRoutes(g)
-	a.registerProxyRoutes(g)
-}
-
-// registerProxyRoutes 网页播放器代理端点（透传 Range），同样注册大小写与可选扩展名。
-// 与其余 Emby 端点一致挂 requireAuth：这两个端点会把上游直链（常带时效签名）
-// 直接回给调用方，或由服务端代拉全量字节流，不能匿名开放。
-func (a *App) registerProxyRoutes(g *gin.RouterGroup) {
-	for _, base := range []string{"/Videos/:id/proxy", "/videos/:id/proxy"} {
-		g.GET(base, noStore, a.requireAuth, a.proxyStream)
-		g.HEAD(base, noStore, a.requireAuth, a.proxyStream)
-		g.GET(base+".:ext", noStore, a.requireAuth, a.proxyStream)
-		g.HEAD(base+".:ext", noStore, a.requireAuth, a.proxyStream)
-	}
 }
 
 // registerStreamRoutes 同时注册 /Videos 与 /videos 大小写，吞掉可选扩展名。
-// 鉴权同 registerProxyRoutes：302 的 Location 就是上游直链，匿名可访问等于凭据外泄。
+// 鉴权：302 的 Location 就是上游直链，匿名可访问等于凭据外泄。
 func (a *App) registerStreamRoutes(g *gin.RouterGroup) {
 	for _, base := range []string{"/Videos/:id/stream", "/videos/:id/stream"} {
 		g.GET(base, noStore, a.requireAuth, a.stream)

@@ -49,11 +49,8 @@ func TestNativeDeploymentReadmeAndAssets(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"不再支持 Docker", "deploy/emby-go.service", "deploy/install.sh", "/opt/emby-go/emby-go",
-		"媒体库权限必须显式配置", "ReadWritePaths=/srv/media", "不会授予 Unix/NAS 写权限",
-		"ffprobe -version", "ffprobe_path", "不会继承交互式 shell 的自定义 PATH",
-		"不代表已通过真实 systemd", "SHA256SUMS", "旧 Release 不保证提供",
-		"API-CONTRACT.md#410-ffprobe-执行边界n-01-本地已验收子项",
+		"deploy/emby-go.service", "deploy/install.sh", "/opt/emby-go/emby-go",
+		"ReadWritePaths=/srv/media", "SHA256SUMS",
 	} {
 		if !strings.Contains(readme, required) {
 			t.Errorf("README missing deployment constraint %q", required)

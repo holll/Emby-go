@@ -166,24 +166,24 @@ func parseBoxsetID(raw string) (string, bool) {
 	return encoded, true // 兼容旧明文 id
 }
 
-// parseParentScope 把 ParentId 参数解析为 (媒体库id, 合集作用域)。
+// parseParentScope 在请求边界解析 ParentId，最后一项标记范围是否有效。
 // collection：""=不限；"*"=任意合集成员（合集媒体库上下文）；其它=具体合集名。
-func parseParentScope(parent string) (int64, string) {
+func parseParentScope(parent string) (int64, string, bool) {
 	parent = strings.TrimSpace(parent)
 	if parent == "" || parent == "0" {
-		return 0, ""
+		return 0, "", true
 	}
 	if id, err := strconv.ParseInt(parent, 10, 64); err == nil {
 		internal, _ := parseLibraryExternal(id)
-		return internal, ""
+		return internal, "", internal > 0
 	}
 	if parent == boxsetViewID {
-		return 0, "*"
+		return 0, "*", true
 	}
-	if name, ok := parseBoxsetID(parent); ok {
-		return 0, name
+	if name, ok := parseBoxsetID(parent); ok && name != "" {
+		return 0, name, true
 	}
-	return 0, ""
+	return 0, "", false
 }
 
 // artRatio 依图像文件基础名估算主视觉纵横比：宽图(16:9) vs 海报(2:3)。
@@ -595,6 +595,9 @@ func (a *App) boxsetItemFrom(name string, stat store.CollectionStat) gin.H {
 }
 
 func (a *App) counts(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
 	libs, _, ok := a.viewerLibraries(c)
 	if !ok {
 		itemDataUnavailable(c)
@@ -613,22 +616,30 @@ func (a *App) counts(c *gin.Context) {
 		"MovieCount": total, "SeriesCount": 0, "EpisodeCount": 0, "GameCount": 0,
 		"ArtistCount": 0, "ProgramCount": 0, "GameSystemCount": 0, "TrailerCount": 0,
 		"SongCount": 0, "AlbumCount": 0, "MusicVideoCount": 0, "BoxSetCount": len(collections),
-		"BookCount": 0, "ItemCount": 0,
+		"BookCount": 0, "ItemCount": total + len(collections),
 	})
 }
 
 // genres 处理 GET /Genres（库内流派实体列表，可按媒体库/合集范围过滤）。
 func (a *App) genres(c *gin.Context) {
-	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		apiError(c, http.StatusNotFound, "user not found")
+	if !a.validQueryUser(c) {
 		return
 	}
-	libraryID, collection := parseParentScope(c.Query("ParentId"))
+	libraryID, collection, ok := parseParentScope(c.Query("ParentId"))
+	if !ok {
+		a.emptyItems(c)
+		return
+	}
 	a.entityBrowse(c, "Genre", libraryID, collection)
 }
 
 func (a *App) resume(c *gin.Context) {
 	if !a.validUser(c) {
+		return
+	}
+	libraryID, collection, valid := parseParentScope(c.Query("ParentId"))
+	if !valid {
+		a.emptyItems(c)
 		return
 	}
 	start, _ := strconv.Atoi(c.DefaultQuery("StartIndex", "0"))
@@ -644,26 +655,17 @@ func (a *App) resume(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
-	movies, total, err := a.db.ResumedVisible(a.currentUserID(c), libs, limit, start)
+	movies, total, err := a.db.ResumedVisible(a.currentUserID(c), libraryID, libs, collection, limit, start)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
 	}
-	dataMap, actorMap, ok := a.itemAssociations(c, movieIDs(movies))
-	if !ok {
-		return
-	}
-	items := make([]gin.H, 0, len(movies))
-	for _, movie := range movies {
-		items = append(items, a.embyItemActors(movie, dataMap[movie.ID], actorMap[movie.ID], true))
-	}
-	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": total, "StartIndex": start})
+	a.respondItems(c, movies, total, start, "")
 }
 
 // nextUp 无剧集库，恒为空结果（Emby 客户端主屏会调用）。
 func (a *App) nextUp(c *gin.Context) {
-	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		apiError(c, http.StatusNotFound, "user not found")
+	if !a.validQueryUser(c) {
 		return
 	}
 	a.emptyItems(c)
@@ -713,7 +715,7 @@ func (a *App) similar(c *gin.Context) {
 	grantKey := libraryScopeCacheKey(visible, admin)
 	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
 	if b, ok := a.cachedBody(simKey); ok {
-		c.Data(200, "application/json", b)
+		respondMediaJSON(c, b)
 		return
 	}
 	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列），
@@ -817,7 +819,7 @@ func (a *App) similar(c *gin.Context) {
 	}
 	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
 	a.cachePut(simKey, body, 20*time.Second)
-	c.Data(http.StatusOK, "application/json", body)
+	respondMediaJSON(c, body)
 }
 
 // similarPoolSize 候选池大小：最终只要 limit 条，但年份/番号前缀这类加分只在候选内部
@@ -937,7 +939,7 @@ func (a *App) views(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(200, gin.H{"Items": out, "TotalRecordCount": len(out)})
+	respondItemJSON(c, gin.H{"Items": out, "TotalRecordCount": len(out)})
 }
 
 // libraryFolders 为 Views 和 Folder 查询提供相同的媒体库 DTO 与可见性。
@@ -1142,8 +1144,7 @@ func normalizeDate(raw string) string {
 }
 
 func (a *App) rootItems(c *gin.Context) {
-	if userID := c.Query("UserId"); userID != "" && userID != "1" {
-		apiError(c, http.StatusNotFound, "user not found")
+	if !a.validQueryUser(c) {
 		return
 	}
 	a.itemsQuery(c)
@@ -1173,7 +1174,11 @@ func (a *App) latest(c *gin.Context) {
 		return
 	}
 	// ParentId 可能是媒体库外部 id（libraryIDBase+内部 id）或旧内部 id，统一换算。
-	libraryID, _ := parseParentScope(c.Query("ParentId"))
+	libraryID, collection, valid := parseParentScope(c.Query("ParentId"))
+	if !valid {
+		respondItemJSON(c, []gin.H{})
+		return
+	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("Limit", "20"))
 	if limit < 1 || limit > 100 {
 		limit = 20
@@ -1184,10 +1189,10 @@ func (a *App) latest(c *gin.Context) {
 		return
 	}
 	if libraryID > 0 && !a.canViewLibrary(c, libraryID) {
-		a.emptyItems(c)
+		respondItemJSON(c, []gin.H{})
 		return
 	}
-	movies, err := a.db.LatestVisible(libraryID, libs, limit, 0)
+	movies, err := a.db.LatestVisible(libraryID, libs, collection, limit, 0)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -1204,7 +1209,7 @@ func (a *App) latest(c *gin.Context) {
 		a.applyItemFields(item, m, fields, c)
 		out = append(out, item)
 	}
-	c.JSON(http.StatusOK, out)
+	respondItemJSON(c, out)
 }
 
 // suggestions 首页推荐：复用最近入库，返回 QueryResult 形态。
@@ -1221,7 +1226,7 @@ func (a *App) suggestions(c *gin.Context) {
 		itemDataUnavailable(c)
 		return
 	}
-	movies, err := a.db.LatestVisible(0, visible, limit, 0)
+	movies, err := a.db.LatestVisible(0, visible, "", limit, 0)
 	if err != nil {
 		itemDataUnavailable(c)
 		return
@@ -1234,7 +1239,7 @@ func (a *App) suggestions(c *gin.Context) {
 	for _, m := range movies {
 		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
+	respondItemJSON(c, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
 }
 
 // movieQueryOptions contains only the filters shared by movie-list scopes.
@@ -1245,21 +1250,42 @@ type movieQueryOptions struct {
 	genre, tags, studios, person string
 	unplayed, favorite           bool
 	term, years                  string
+	ids                          string
+	excludeMovie                 bool
 }
 
 func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
 	filters := strings.ToLower(c.Query("Filters"))
+	sortBy := strings.Join(splitQueryTypes(c.Query("SortBy")), ",")
+	if sortBy == "" {
+		sortBy = "SortName"
+	}
+	exclude := splitQueryTypes(c.Query("ExcludeItemTypes"))
+	containsFold := func(values []string, want string) bool {
+		return slices.ContainsFunc(values, func(v string) bool { return strings.EqualFold(v, want) })
+	}
+	// Movie/Video are aliases for the same stored movie result in this
+	// service, so excluding either name excludes that result.
+	movieExcluded := containsFold(exclude, "Movie") || containsFold(exclude, "Video")
+	ids := strings.Join(c.QueryArray("Ids"), ",")
+	if _, present := c.GetQueryArray("Ids"); present && ids == "" {
+		// An explicitly present but empty Ids parameter is a filter for no
+		// items, unlike omitting Ids entirely.
+		ids = "invalid"
+	}
 	return movieQueryOptions{
-		sortBy:   firstSortKey(c.DefaultQuery("SortBy", "SortName")),
-		desc:     strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending"),
-		genre:    joinEntityNames(c, "Genres", "Genre", "GenreIds"),
-		tags:     joinEntityNames(c, "Tags", "Tag", "TagIds"),
-		studios:  joinEntityNames(c, "Studios", "Studio", "StudioIds"),
-		person:   joinEntityNames(c, "Person", "Person", "PersonIds"),
-		unplayed: strings.Contains(filters, "isunplayed"),
-		favorite: strings.Contains(filters, "isfavorite"),
-		term:     c.Query("SearchTerm"),
-		years:    c.Query("Years"),
+		sortBy:       sortBy,
+		desc:         strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending"),
+		genre:        joinEntityNames(c, "Genres", "Genre", "GenreIds"),
+		tags:         joinEntityNames(c, "Tags", "Tag", "TagIds"),
+		studios:      joinEntityNames(c, "Studios", "Studio", "StudioIds"),
+		person:       joinEntityNames(c, "Person", "Person", "PersonIds"),
+		unplayed:     strings.Contains(filters, "isunplayed"),
+		favorite:     strings.Contains(filters, "isfavorite"),
+		term:         c.Query("SearchTerm"),
+		years:        c.Query("Years"),
+		ids:          ids,
+		excludeMovie: movieExcluded,
 	}
 }
 
@@ -1268,10 +1294,10 @@ func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
 // 不支持的类型（如 Series/Episode）返回空结果而非错把影片当该类型返回。
 func (a *App) itemsQuery(c *gin.Context) {
 	parentRaw := strings.TrimSpace(c.Query("ParentId"))
-	lib, collection := parseParentScope(parentRaw)
+	lib, collection, valid := parseParentScope(parentRaw)
 	isBoxsetView := parentRaw == boxsetViewID
 	// Unknown parents must not turn a scoped child query into a global list.
-	if lib < 0 || (parentRaw != "" && parentRaw != "0" && lib == 0 && collection == "") {
+	if !valid {
 		a.emptyItems(c)
 		return
 	}
@@ -1331,8 +1357,17 @@ func (a *App) itemsQuery(c *gin.Context) {
 		ids := splitQueryTypes(strings.Join(c.QueryArray("Ids"), ","))
 		_, hasIDs := c.GetQueryArray("Ids")
 		term := strings.ToLower(c.Query("SearchTerm"))
+		favoriteOnly := false
+		for _, filter := range splitQueryTypes(c.Query("Filters")) {
+			if strings.EqualFold(filter, "IsFavorite") {
+				favoriteOnly = true
+			}
+		}
 		out := make([]gin.H, 0, len(folders))
 		for _, folder := range folders {
+			if favoriteOnly && !folder["UserData"].(gin.H)["IsFavorite"].(bool) {
+				continue
+			}
 			if slices.Contains(exclude, "Folder") || slices.Contains(exclude, "CollectionFolder") {
 				continue
 			}
@@ -1355,7 +1390,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		total := len(out)
 		from := min(start, total)
 		out = out[from:min(from+limit, total)]
-		c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start})
+		respondItemJSON(c, gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start})
 		return
 	}
 
@@ -1369,7 +1404,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 
 	// 合集媒体库（boxset view）或某个合集内部：以实体之外均按盒集/成员处理。
 	if isBoxsetView || (collection != "" && collection != "*") {
-		if isBoxsetView {
+		if isBoxsetView && !(movieWanted && !boxsetWanted && strings.EqualFold(c.Query("Recursive"), "true")) {
 			if len(include) > 0 && !boxsetWanted {
 				a.emptyItems(c)
 				return
@@ -1381,9 +1416,13 @@ func (a *App) itemsQuery(c *gin.Context) {
 			a.emptyItems(c)
 			return
 		}
-		// 打开某个合集：列出其成员影片。
+		// 具体合集列出成员；合集视图递归查询使用 "*" 列出所有已归集影片。
 		options := parseMovieQueryOptions(c)
-		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start)
+		if options.excludeMovie {
+			a.emptyItems(c)
+			return
+		}
+		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids)
 		if e != nil {
 			itemDataUnavailable(c)
 			return
@@ -1414,6 +1453,10 @@ func (a *App) itemsQuery(c *gin.Context) {
 	}
 
 	options := parseMovieQueryOptions(c)
+	if options.excludeMovie {
+		a.emptyItems(c)
+		return
+	}
 
 	// Fields 决定响应体内容，须纳入缓存键，否则不同 Fields 的请求会互相串缓存。
 	fields := requestedFields(c)
@@ -1426,12 +1469,12 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 		grantKey = strings.Join(parts, ",")
 	}
-	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cachedBody("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return
 	}
-	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start)
+	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids)
 	if e != nil {
 		itemDataUnavailable(c)
 		return
@@ -1446,11 +1489,14 @@ type itemFields struct {
 	mediaSources bool
 	dateCreated  bool
 	path         bool
+	size         bool
+	mediaStreams bool
+	imageRatio   bool
 }
 
 // key 返回可用于缓存键的稳定标识。
 func (f itemFields) key() string {
-	mark := make([]string, 0, 3)
+	mark := make([]string, 0, 6)
 	if f.mediaSources {
 		mark = append(mark, "src")
 	}
@@ -1459,6 +1505,15 @@ func (f itemFields) key() string {
 	}
 	if f.path {
 		mark = append(mark, "path")
+	}
+	if f.size {
+		mark = append(mark, "size")
+	}
+	if f.mediaStreams {
+		mark = append(mark, "streams")
+	}
+	if f.imageRatio {
+		mark = append(mark, "ratio")
 	}
 	return strings.Join(mark, "+")
 }
@@ -1478,6 +1533,9 @@ func requestedFields(c *gin.Context) itemFields {
 		mediaSources: has("mediasources"),
 		dateCreated:  has("datecreated"),
 		path:         has("path"),
+		size:         has("size"),
+		mediaStreams: has("mediastreams"),
+		imageRatio:   has("primaryimageaspectratio"),
 	}
 }
 
@@ -1492,12 +1550,25 @@ func (a *App) applyItemFields(item gin.H, m store.Movie, fields itemFields, c *g
 		item["DateCreated"] = embyTime(m.CreatedAt)
 		item["DateModified"] = embyTime(m.UpdatedAt)
 	}
+	if fields.imageRatio && m.PosterPath != "" {
+		item["PrimaryImageAspectRatio"] = a.cachedCoverRatio(m.PosterPath)
+	}
+	if !fields.mediaSources && !fields.mediaStreams && !fields.size {
+		return
+	}
+	source := a.mediaSource(m, c)
+	if fields.mediaStreams {
+		item["MediaStreams"] = source["MediaStreams"]
+	}
+	if fields.size {
+		if size, ok := source["Size"]; ok {
+			item["Size"] = size
+		}
+	}
 	if !fields.mediaSources {
 		return
 	}
-	sources := []gin.H{a.mediaSource(m, c)}
-	item["MediaSources"] = sources
-	source := sources[0]
+	item["MediaSources"] = []gin.H{source}
 	for _, name := range []string{"Bitrate", "Container", "Size"} {
 		if value, ok := source[name]; ok {
 			item[name] = value
@@ -1603,7 +1674,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 		a.emptyItems(c)
 		return
 	}
-	lib, _ := parseParentScope(c.Query("ParentId"))
+	lib, _, _ := parseParentScope(c.Query("ParentId"))
 	stats, ok := a.collectionStats(c, lib)
 	if !ok {
 		return
@@ -1678,6 +1749,9 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 		}
 	}
 	sort.Strings(names)
+	if strings.EqualFold(c.Query("SortOrder"), "Descending") {
+		slices.Reverse(names)
+	}
 	if start > len(names) {
 		start = len(names)
 	}
@@ -1686,7 +1760,7 @@ func (a *App) boxsetListResponse(c *gin.Context, start, limit int, term string) 
 	for _, name := range names[start:end] {
 		items = append(items, a.boxsetItemFrom(name, stats[name]))
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
+	respondItemJSON(c, gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
 }
 
 func splitQueryTypes(v string) []string {
@@ -1697,16 +1771,6 @@ func splitQueryTypes(v string) []string {
 		}
 	}
 	return out
-}
-
-// firstSortKey 取 SortBy 逗号列表的首项作主排序键。
-func firstSortKey(v string) string {
-	for part := range strings.SplitSeq(v, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			return part
-		}
-	}
-	return "SortName"
 }
 
 // joinEntityNames 合并「名字参数」与「实体 Id 参数」为逗号分隔的实体名，
@@ -1728,7 +1792,7 @@ func (a *App) emptyItems(c *gin.Context) {
 	if start < 0 {
 		start = 0
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": []gin.H{}, "TotalRecordCount": 0, "StartIndex": start})
+	respondItemJSON(c, gin.H{"Items": []gin.H{}, "TotalRecordCount": 0, "StartIndex": start})
 }
 
 // entityId 把实体（Genre/Tag/Studio/Person）映射成 URL 安全的稳定字符串 Id。
@@ -1754,11 +1818,13 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	}
 	// Bind the query and cache to one grant snapshot. Scope aggregation before
 	// sorting/pagination; filtering a page afterwards would leak counts and gaps.
-	cacheKey := "entities:scope-v1:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
+	term := strings.ToLower(strings.TrimSpace(c.Query("SearchTerm")))
+	desc := strings.EqualFold(c.Query("SortOrder"), "Descending")
+	cacheKey := "entities:scope-v2:" + a.db.Version("g:version") + ":" + strings.ToLower(kind) + ":" +
 		strconv.FormatInt(a.currentUserID(c), 10) + ":" + libraryScopeCacheKey(visible, admin) + ":" +
-		strconv.FormatInt(libraryID, 10) + ":" + collection + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(limit)
+		strconv.FormatInt(libraryID, 10) + ":" + strconv.Quote(collection) + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(limit) + ":" + strconv.FormatBool(desc) + ":" + strconv.Quote(term)
 	if b, ok := a.cachedBody(cacheKey); ok {
-		c.Data(http.StatusOK, "application/json", b)
+		respondMediaJSON(c, b)
 		return
 	}
 	names, err := a.db.EntityNamesVisible(kind, libraryID, visible, collection)
@@ -1766,7 +1832,19 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 		itemDataUnavailable(c)
 		return
 	}
+	if term != "" {
+		filtered := names[:0]
+		for _, name := range names {
+			if strings.Contains(strings.ToLower(name), term) {
+				filtered = append(filtered, name)
+			}
+		}
+		names = filtered
+	}
 	sort.Strings(names)
+	if desc {
+		slices.Reverse(names)
+	}
 	if start > len(names) {
 		start = len(names)
 	}
@@ -1789,7 +1867,7 @@ func (a *App) entityBrowse(c *gin.Context, kind string, libraryID int64, collect
 	}
 	body, _ := json.Marshal(gin.H{"Items": items, "TotalRecordCount": len(names), "StartIndex": start})
 	a.cachePut(cacheKey, body, 30*time.Second)
-	c.Data(http.StatusOK, "application/json", body)
+	respondMediaJSON(c, body)
 }
 
 // itemCollections returns only the movie's own collection. Keep this endpoint
@@ -1819,7 +1897,7 @@ func (a *App) itemCollections(c *gin.Context) {
 			items = append(items, a.boxsetItemFrom(m.Collection, stat))
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
+	respondItemJSON(c, gin.H{"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
 }
 
 func (a *App) item(c *gin.Context) {
@@ -1833,7 +1911,7 @@ func (a *App) item(c *gin.Context) {
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, a.boxsetFolderDTO(collections))
+		respondItemJSON(c, a.boxsetFolderDTO(collections))
 		return
 	}
 	id, err := strconv.ParseInt(rawID, 10, 64)
@@ -1841,7 +1919,7 @@ func (a *App) item(c *gin.Context) {
 		// 多分段影片的 AdditionalPart（part-<movieID>-<part>）。
 		if movieID, part, ok := parseVirtualPartID(rawID); ok {
 			if m, e := a.db.Movie(movieID); e == nil && m.IsVisible() && a.canViewMovie(c, m) && part-2 < len(m.AdditionalParts) {
-				c.JSON(http.StatusOK, a.partItem(m, part-2))
+				respondItemJSON(c, a.partItem(m, part-2))
 				return
 			}
 			apiError(c, 404, "not found")
@@ -1854,7 +1932,7 @@ func (a *App) item(c *gin.Context) {
 				return
 			}
 			if stat, exists := stats[name]; exists {
-				c.JSON(http.StatusOK, a.boxsetItemFrom(name, stat))
+				respondItemJSON(c, a.boxsetItemFrom(name, stat))
 				return
 			}
 			apiError(c, http.StatusNotFound, "not found")
@@ -1877,7 +1955,7 @@ func (a *App) item(c *gin.Context) {
 			if poster != "" {
 				item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
 			}
-			c.JSON(http.StatusOK, item)
+			respondItemJSON(c, item)
 			return
 		}
 		apiError(c, 404, "not found")
@@ -1890,7 +1968,7 @@ func (a *App) item(c *gin.Context) {
 			apiError(c, http.StatusNotFound, "not found")
 			return
 		}
-		c.JSON(http.StatusOK, a.collectionFolderDTO(c, lib))
+		respondItemJSON(c, a.collectionFolderDTO(c, lib))
 		return
 	}
 	// 先做可见性校验，再走缓存：避免未授权账户命中管理员写下的详情缓存。

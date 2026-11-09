@@ -78,7 +78,7 @@ func TestReadYourWritesAfterMutations(t *testing.T) {
 	read(detailPath)
 
 	version = f.a.db.Version("g:version")
-	if w := call(http.MethodPost, fmt.Sprintf("/Users/1/PlayedItems/%d", id), ""); w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+	if w := call(http.MethodPost, fmt.Sprintf("/Users/1/PlayedItems/%d", id), ""); w.Code != http.StatusOK {
 		t.Fatalf("played status=%d body=%s", w.Code, w.Body.String())
 	}
 	bumped(version, "played")

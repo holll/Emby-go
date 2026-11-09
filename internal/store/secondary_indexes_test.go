@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestSecondaryIndexesPresent 锁定批次 80 的三个索引，避免迁移回退时静默丢失。
+// TestSecondaryIndexesPresent 锁定批次 80 的三个索引与迁移 21 的五个排序索引，避免迁移回退时静默丢失。
 func TestSecondaryIndexesPresent(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "indexes.db"))
 	if err != nil {
@@ -18,6 +18,11 @@ func TestSecondaryIndexesPresent(t *testing.T) {
 		"idx_movie_actors_actor_movie",
 		"idx_movies_visible_title",
 		"idx_movies_visible_library_title",
+		"idx_movies_visible_year",
+		"idx_movies_visible_premiered",
+		"idx_movies_visible_created_at",
+		"idx_movies_visible_rating",
+		"idx_movies_visible_sortname",
 	} {
 		var sql string
 		if err := s.db.QueryRow("SELECT sql FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&sql); err != nil {
@@ -80,6 +85,31 @@ func TestSecondaryIndexQueryPlans(t *testing.T) {
 			name:      "演员起步的头像候选连接",
 			index:     "idx_movie_actors_actor_movie",
 			statement: "EXPLAIN QUERY PLAN SELECT DISTINCT a.name FROM actors a JOIN movie_actors ma ON ma.actor_name=a.name JOIN movies m ON m.id=ma.movie_id WHERE COALESCE(a.avatar_url,'')='' AND m.status IN ('success','manual') ORDER BY a.name",
+		},
+		{
+			name:      "全局按年份去临时排序",
+			index:     "idx_movies_visible_year",
+			statement: "EXPLAIN QUERY PLAN SELECT id FROM movies WHERE status IN ('success','manual') ORDER BY year DESC, id LIMIT 100 OFFSET 2000",
+		},
+		{
+			name:      "全局按上映日期去临时排序",
+			index:     "idx_movies_visible_premiered",
+			statement: "EXPLAIN QUERY PLAN SELECT id FROM movies WHERE status IN ('success','manual') ORDER BY premiered ASC, id LIMIT 100 OFFSET 2000",
+		},
+		{
+			name:      "全局按入库时间去临时排序",
+			index:     "idx_movies_visible_created_at",
+			statement: "EXPLAIN QUERY PLAN SELECT id FROM movies WHERE status IN ('success','manual') ORDER BY created_at DESC, id LIMIT 100 OFFSET 2000",
+		},
+		{
+			name:      "全局按评分去临时排序",
+			index:     "idx_movies_visible_rating",
+			statement: "EXPLAIN QUERY PLAN SELECT id FROM movies WHERE status IN ('success','manual') ORDER BY rating DESC, id LIMIT 100 OFFSET 2000",
+		},
+		{
+			name:      "全局按排序名去临时排序",
+			index:     "idx_movies_visible_sortname",
+			statement: "EXPLAIN QUERY PLAN SELECT id FROM movies WHERE status IN ('success','manual') ORDER BY COALESCE(NULLIF(sortname,''),title) ASC, id LIMIT 100 OFFSET 2000",
 		},
 	}
 	for _, tc := range plans {

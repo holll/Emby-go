@@ -129,9 +129,6 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 	}
 	for _, w := range writes(publicID) {
 		want := 200
-		if strings.Contains(w.path, "/PlayedItems/") {
-			want = 204
-		}
 		assertStatus(w.method, w.path, want)
 	}
 	// Revoke after successful requests have warmed response and metadata caches.

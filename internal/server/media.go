@@ -25,7 +25,6 @@ import (
 	"emby-go/internal/imagecache"
 	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
-	"emby-go/internal/outbound"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
 )
@@ -692,14 +691,53 @@ func authenticatedStreamURL(rawURL, token string) string {
 	return u.String()
 }
 
+// filterItemImages 只处理解码后的响应副本，不修改共享 DTO 或重排图片索引。
+func filterItemImages(item map[string]any, imageTypes []string, limit int) {
+	tags, _ := item["ImageTags"].(map[string]any)
+	for kind := range tags {
+		if limit == 0 || (len(imageTypes) > 0 && !slices.Contains(imageTypes, strings.ToLower(kind))) {
+			delete(tags, kind)
+		}
+	}
+	if backdrops, ok := item["BackdropImageTags"].([]any); ok {
+		if len(imageTypes) > 0 && !slices.Contains(imageTypes, "backdrop") {
+			backdrops = backdrops[:0]
+		} else if limit >= 0 && len(backdrops) > limit {
+			backdrops = backdrops[:limit]
+		}
+		item["BackdropImageTags"] = backdrops
+		if len(backdrops) == 0 {
+			delete(tags, "Backdrop")
+		} else {
+			tags["Backdrop"] = backdrops[0]
+		}
+	}
+}
+
+// respondItemJSON 为未缓存的条目 DTO 复用同一响应过滤边界。
+func respondItemJSON(c *gin.Context, payload any) {
+	body, _ := json.Marshal(payload)
+	respondMediaJSON(c, body)
+}
+
 // respondMediaJSON 的输入是共享缓存中的无凭据 DTO；只在发给当前会话时补凭据。
-// 不把 token 写回缓存，否则详情及 Fields=MediaSources 列表会泄露其它会话的凭据。
+// 图片筛选及 token 都只修改响应副本，不写回缓存。
 func respondMediaJSON(c *gin.Context, body []byte) {
-	if !bytes.Contains(body, []byte(`"MediaSources"`)) {
+	imageTypes := splitQueryTypes(strings.ToLower(c.Query("EnableImageTypes")))
+	imageLimit := -1
+	if values, present := c.Request.URL.Query()["ImageTypeLimit"]; present {
+		limit, err := strconv.Atoi(values[0])
+		if err != nil || limit < 0 {
+			apiError(c, http.StatusBadRequest, "invalid ImageTypeLimit")
+			return
+		}
+		imageLimit = limit
+	}
+	if len(imageTypes) == 0 && imageLimit < 0 && !bytes.Contains(body, []byte(`"MediaSources"`)) {
 		c.Data(http.StatusOK, "application/json", body)
 		return
 	}
-	var payload gin.H
+	var payload any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
@@ -708,6 +746,9 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 	}
 	token := requestToken(c)
 	attach := func(item map[string]any) {
+		if len(imageTypes) > 0 || imageLimit >= 0 {
+			filterItemImages(item, imageTypes, imageLimit)
+		}
 		sources, _ := item["MediaSources"].([]any)
 		for _, entry := range sources {
 			source, ok := entry.(map[string]any)
@@ -724,8 +765,14 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 			}
 		}
 	}
-	attach(payload)
-	items, _ := payload["Items"].([]any)
+	var items []any
+	switch root := payload.(type) {
+	case map[string]any:
+		attach(root)
+		items, _ = root["Items"].([]any)
+	case []any:
+		items = root
+	}
 	for _, entry := range items {
 		if item, ok := entry.(map[string]any); ok {
 			attach(item)
@@ -1250,90 +1297,6 @@ func (a *App) stream(c *gin.Context) {
 	http.Redirect(c.Writer, c.Request, raw, http.StatusFound)
 }
 
-// streamClient 供网页播放器代理播放使用：不设总超时（长连接），由请求 context 控制取消。
-// 播放地址来自用户配置的 strm，局域网/回环是正常用法，因此允许私网；
-// 链路本地（含云元数据）、组播等地址仍由 internal/outbound 拒绝。
-var streamClient = outbound.NewClient(outbound.Options{
-	AllowPrivate:          true,
-	Timeout:               0,
-	MaxConnsPerHost:       32,
-	ResponseHeaderTimeout: 30 * time.Second,
-})
-
-// proxyStream 为内置网页播放器代理真实媒体地址：透传 Range/状态码/关键响应头。
-// 解决 HTTPS 后台 + HTTP 源站的混合内容、跨域/防盗链导致的播放失败。
-// Emby 客户端仍走 /stream 的 302 直拉（服务端零带宽），此端点只服务网页播放器。
-func (a *App) proxyStream(c *gin.Context) {
-	movie, sourcePath, _, ok := a.resolvePlaybackTarget(c.Param("id"))
-	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) {
-		apiError(c, http.StatusNotFound, "not found")
-		return
-	}
-	raw, err := scanner.ReadSource(sourcePath)
-	if err != nil {
-		apiError(c, http.StatusNotFound, "source not found")
-		return
-	}
-	if !scanner.ValidHTTP(raw) {
-		apiError(c, http.StatusUnsupportedMediaType, "unsupported source")
-		return
-	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, raw, nil)
-	if err != nil {
-		// 不回显上游地址：错误里可能带凭据或内网主机名。
-		c.JSON(http.StatusBadGateway, gin.H{"error": "playback source unavailable", "code": "UPSTREAM_UNAVAILABLE"})
-		return
-	}
-	if rng := c.GetHeader("Range"); rng != "" {
-		req.Header.Set("Range", rng)
-	}
-	// 必须禁用压缩：否则 transport 自动解压会让 Content-Length/Content-Range 失真、拖动失效。
-	req.Header.Set("Accept-Encoding", "identity")
-	if ua := c.GetHeader("User-Agent"); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	resp, err := streamClient.Do(req)
-	if err != nil {
-		slog.Debug("proxy stream upstream failed", "movie_id", movie.ID)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "playback source unavailable", "code": "UPSTREAM_UNAVAILABLE"})
-		return
-	}
-	defer resp.Body.Close()
-	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"} {
-		if value := resp.Header.Get(header); value != "" {
-			c.Header(header, value)
-		}
-	}
-	if c.Writer.Header().Get("Accept-Ranges") == "" {
-		c.Header("Accept-Ranges", "bytes")
-	}
-	if c.Writer.Header().Get("Content-Type") == "" {
-		c.Header("Content-Type", containerMIME(movie.SourceContainer))
-	}
-	c.Status(resp.StatusCode)
-	if c.Request.Method == http.MethodHead {
-		return
-	}
-	_, _ = io.Copy(c.Writer, resp.Body)
-}
-
-// containerMIME 给代理播放一个兜底 Content-Type（源站未给时用）。
-func containerMIME(container string) string {
-	switch strings.ToLower(container) {
-	case "mp4", "m4v":
-		return "video/mp4"
-	case "webm":
-		return "video/webm"
-	case "mkv":
-		return "video/x-matroska"
-	case "mov":
-		return "video/quicktime"
-	case "ts":
-		return "video/mp2t"
-	}
-	return "application/octet-stream"
-}
-
 func (a *App) playing(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -1426,7 +1389,8 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 		apiError(c, http.StatusNotFound, "not found")
 		return
 	}
-	if err := a.db.SetIndexedPlayedForUser(a.currentUserID(c), id, played); err != nil {
+	data, err := a.db.SetIndexedPlayedDataForUser(a.currentUserID(c), id, played)
+	if err != nil {
 		userDataWriteError(c, err)
 		return
 	}
@@ -1434,8 +1398,8 @@ func (a *App) setPlayed(c *gin.Context, played bool) {
 	if played {
 		name = "item.markplayed"
 	}
-	a.notifyMovieDataWebhook(c, name, movie, map[string]any{"Played": played})
-	c.Status(http.StatusNoContent)
+	a.notifyMovieDataWebhook(c, name, movie, userDataDTO(data))
+	c.JSON(http.StatusOK, a.userDataJSON(id, data))
 }
 
 func (a *App) played(c *gin.Context) { a.setPlayed(c, true) }

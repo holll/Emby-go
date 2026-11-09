@@ -323,11 +323,14 @@ func (a *App) adminScanProgress(c *gin.Context) {
 	c.JSON(200, status)
 }
 
-// parseScanMode normalizes the public mode query/parameter. Missing means full
-// for backward compatibility; anything else outside the allowlist is rejected.
+// parseScanMode normalizes the public mode query/parameter. Missing defaults to
+// incremental for 10k+ libraries: fingerprint-skipped groups avoid the full
+// rewrite of movie_features/FTS. Explicit "full" remains available.
 func parseScanMode(raw string) (scanner.ScanMode, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "full":
+	case "":
+		return scanner.ScanModeIncremental, true
+	case "full":
 		return scanner.ScanModeFull, true
 	case "incremental":
 		return scanner.ScanModeIncremental, true

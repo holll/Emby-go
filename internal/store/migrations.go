@@ -206,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20, applyMigration21, applyMigration22,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -322,8 +322,13 @@ func validateIndexes(reference, db schemaDB) error {
 // indexSignatures 把每个索引归一化为 table/unique/partial/列/排序/部分谓词。
 // PRAGMA 拿不到部分索引的 WHERE 谓词，因此从 sqlite_master.sql 里截取并
 // 做去引号、去空白、小写的保守归一化。
+//
+// FTS5 的影子表（movies_fts_config/_data/_idx/_docsize）自带
+// sqlite_autoindex_* 唯一索引；它们随虚拟表一起在参考库与磁盘库中
+// 必然存在，跳过以免把实现细节误报为漂移（表本身已在 schemaTables
+// 中按名比对）。
 func indexSignatures(db schemaDB) (map[string]string, error) {
-	rows, err := db.Query("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+	rows, err := db.Query("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts_%'")
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +355,7 @@ func indexSignatures(db schemaDB) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		keys, err := indexKeyColumns(db, name)
+		keys, err := indexKeyColumns(db, name, index.sqlText)
 		if err != nil {
 			return nil, err
 		}
@@ -387,7 +392,8 @@ func lookupIndexFlags(db schemaDB, table, name string) (unique, partial int, err
 	return 0, 0, fmt.Errorf("schema drift: index %s not listed on table %s", name, table)
 }
 
-func indexKeyColumns(db schemaDB, name string) ([]string, error) {
+func indexKeyColumns(db schemaDB, name, indexSQL string) ([]string, error) {
+	_ = indexSQL
 	rows, err := db.Query("PRAGMA index_xinfo(" + quoteIdentifier(name) + ")")
 	if err != nil {
 		return nil, err
@@ -403,12 +409,33 @@ func indexKeyColumns(db schemaDB, name string) ([]string, error) {
 		if key == 0 {
 			continue
 		}
-		if cid == -2 || !column.Valid {
+		if cid == -2 {
+			// Expression indexes exist for the whitelisted SortName fallback.
+			// Include the normalized definition so equivalent rewrites still
+			// validate against the reference schema built from this migration.
+			keys = append(keys, "expr/"+normalizeIndexSQL(indexSQL))
+		} else if !column.Valid {
 			return nil, fmt.Errorf("schema drift: expression index %s is not supported", name)
+		} else {
+			keys = append(keys, fmt.Sprintf("%s/%d/%s", column.String, desc, collation.String))
 		}
-		keys = append(keys, fmt.Sprintf("%s/%d/%s", column.String, desc, collation.String))
 	}
 	return keys, rows.Err()
+}
+
+// normalizeIndexSQL 与 normalizePredicate 一样做小写、去引号、去全部空白，
+// 仅用于把表达式索引定义归一化，避免等价重写被误报为 schema drift。
+func normalizeIndexSQL(text string) string {
+	text = strings.ToLower(text)
+	text = strings.ReplaceAll(text, `"`, "")
+	var b strings.Builder
+	for _, r := range text {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // normalizePredicate 只用于部分索引谓词：小写、去引号、去全部空白。
@@ -539,6 +566,15 @@ func uniqueConstraints(db schemaDB, table string) ([]string, error) {
 	var result []string
 	for name, flags := range indexes {
 		if flags.unique == 0 {
+			continue
+		}
+		// FTS5 shadow tables (movies_fts_config) carry autoindex entries
+		// that are implementation details of the virtual table; the
+		// reference build creates them identically, so comparing their
+		// signatures via indexSignature (which rejects the autoindex
+		// name mismatch path) adds no signal. Skip _fts_ tables here;
+		// their existence is already covered by the table comparison.
+		if strings.HasSuffix(table, "_fts_config") || strings.HasSuffix(table, "_fts_data") || strings.HasSuffix(table, "_fts_idx") || strings.HasSuffix(table, "_fts_docsize") {
 			continue
 		}
 		signature, err := indexSignature(db, name)
@@ -1176,6 +1212,16 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case visibleSortIndexMigrationVersion:
+			if checksum != migration21Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
+		case searchFtsMigrationVersion:
+			if checksum != migration22Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1287,6 +1333,16 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[visibleSortIndexMigrationVersion] {
+		if err := applyMigration21(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[searchFtsMigrationVersion] {
+		if err := applyMigration22(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1389,6 +1445,16 @@ func (s *Store) migrate() error {
 	if !applied[webhookDeliveriesMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", webhookDeliveriesMigrationVersion, migration20Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", webhookDeliveriesMigrationVersion, err)
+		}
+	}
+	if !applied[visibleSortIndexMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", visibleSortIndexMigrationVersion, migration21Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", visibleSortIndexMigrationVersion, err)
+		}
+	}
+	if !applied[searchFtsMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", searchFtsMigrationVersion, migration22Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", searchFtsMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

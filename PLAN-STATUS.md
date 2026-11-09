@@ -1907,3 +1907,93 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - v2.3.6 的 store race 失败为 TestScanCancelledWhileWaitingWriterDoesNotDelete/sqlite=true/group=false 报 scan_state_test.go:413: cancel=interrupted (9)，非超时或明确 data race 报告；此轮不修改该业务路径或其测试断言，精简不等于修复该失败。不重写旧标签，旧tag重跑仍用旧工作流。
 - README 已同步默认/手动门禁和安全取舍。首次全仓回归暴露旧发布契约仍要求 race/web/vuln 为默认门禁（CI must keep unconditional race gate），已同步 release_gate_test.go：要求默认仅一个 Go job且四条核心命令无条件执行，专项仅手动触发并按选项选择，同时保留同SHA checkout、失败传播、版本/校验和及发布依赖断言。
 - 最终 actionlint v1.7.7 验证三个工作流通过；发布图专项0.007s、gofmt/build/vet及 go test -count=1 ./... 全部通过（server108.464s、store55.312s、stabilityrehearsal4.690s），作业 bash-6f276855b36244e3 exit0 已收集。git diff --check 通过。手动专项未实际重跑，远端工作流未触发；未提交/推送或修改已有tag。
+
+## 106. 合集递归影片与 Folder 收藏筛选兼容（2026-11-09，未提交）
+
+- `ParentId=boxsets&Recursive=true` 且请求 Movie/Video、不含 BoxSet 时，复用现有 `collection="*"` 的可见范围影片查询及 DTO 输出，返回已归集影片而非空列表，包含单片合集成员，支持原有影片筛选、排序、分页、用户数据及 Fields。不增加缓存或新存储方法；省略/关闭 Recursive、显式 BoxSet 及不支持类型的旧行为保留。
+- 纯 Folder 查询按逗号分隔、大小写不敏感的 IsFavorite 筛选项读取文件夹自身 UserData.IsFavorite，再排序分页。当前文件夹 DTO 均为未收藏且没有收藏存储，结果应为空数组/总数0，不能因库内有收藏影片就返回该库。未扩展文件夹收藏写入能力或物理目录模型。
+- 新增 items_compat_test.go 两个集成回归：覆盖两前缀/两列表入口、成员去重/无合集排除/单片合集、排序分页/收藏/Fields、显式 BoxSet 优先、非递归、受限库/零授权/跨用户/收藏隔离；Folder 收藏组合 Filters 和分页计数及普通 Folder 不变。API-CONTRACT 已同步。
+- 聚焦新增回归通过（0.902s），已有 Folder/合集专项通过（0.635s）；gofmt、go build ./...、go vet ./...、go test ./... -count=1 全部通过（server109.652s、store55.100s、stabilityrehearsal5.049s），作业 bash-1abbab8a17bc4035 exit0 已收集；git diff --check 通过。未额外启用浏览器/外部依赖专项。未提交/推送、未改tag、未部署或重启。
+
+## 107. 列表排序、Resume Fields 与图片参数兼容（2026-11-09，未提交）
+
+- 影片列表保留全部逗号分隔 SortBy 键，store 使用固定 SQL 白名单依次排序，最后 id ASC 保持分页稳定；SortName 使用非空 sortname（空值回退 title），DateCreated 使用 created_at，扁平 Movie 的 DateLastContentAdded 明确同样使用 created_at 而非伪造子项时间。支持 ProductionYear 别名；未知键继续标题回退，不拼接原始输入。合集及实体名称列表支持倒序后分页，实体缓存新增排序方向维度。
+- Resume 复用 respondItems，恢复 MediaSources/DateCreated/Path 等 Fields；Items、Resume、Latest 可独立请求 Size（有 NFO 探测值才输出）、顶层 MediaStreams、海报 PrimaryImageAspectRatio，不再要求必须请求 MediaSources。可选字段扩充完整缓存身份；会话流凭据仍只在发送响应时附加。
+- 图片参数统一在条目 JSON 响应边界生效：EnableImageTypes 类型白名单筛选、ImageTypeLimit 非负整数/0清空/非法400，背景图按原顺序截断并同步首图标签。不修改缓存原始 DTO，不新增图片参数缓存分桶。对象/Items 包装和 Latest 裸数组形状保留；Views、Folder、BoxSet/实体、详情、Similar 缓存命中走相同过滤；图片字节端点不变。
+- 新增 store/sort_compat_test.go 及 server/list_parameters_test.go，更新旧排序参数/映射断言；覆盖真实 SortName/时间、多键并列/分页、未知键 SQL 安全回退，Resume/Latest Fields 和未请求字段不泄漏，图片类型/数量/非法值/缓存隔离，合集/实体倒序和相反方向缓存命中。API-CONTRACT 已同步精确能力边界。
+- 首轮聚焦通过（store0.093s、server0.939s）；扩充 Latest/实体覆盖后的聚焦通过（store0.101s、server0.950s），gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server109.842s、store55.839s、stabilityrehearsal4.575s），作业 bash-6dd4eb3f17dd45a5 exit0 已收集。未额外启用 race、浏览器或需外部依赖的专项。未提交/推送、未修改tag、未部署或重启。
+
+## 108. 查询用户、父级范围与实体搜索兼容（2026-11-09，未提交）
+
+- 优先修复已复现的浏览链路问题，不扩展新媒体模型。根 Items、Genres、NextUp 的可选 UserId 不再硬编码 1，统一在入口解析并匹配当前认证用户；省略沿用本人，非法/其它用户返回404，管理员不据此代查。未放宽现有授权或个人数据边界。
+- parseParentScope 显式返回有效性，统一 Items/Genres/Latest 的父级边界；未知、负数、外部库基数零映射、空合集 ID 不再回退全库。Latest 将具体合集/任意非空合集范围传入 SQL，在分页前过滤且保留原入库 ID 倒序；无效或未授权父级也输出裸空数组，不再混用 QueryResult 包装。既有 Fields 与图片筛选保留。
+- Genre/Tag/Studio/Person 实体列表支持大小写不敏感的名称包含搜索，先过滤再排序/分页/计数。实体缓存区分规范化搜索词、解析后的排序方向、用户授权和父级范围；字符串维度使用带转义编码，避免搜索请求共用错误的结果身份。
+- 新增 server/query_scope_compat_test.go：先复现红灯，再验证非1用户本人查询与跨用户拒绝、未知父级不放大、Latest 合集成员/单片成员/私有库隔离及空数组形状，实体搜索多个词/零结果/分页计数及暖缓存隔离；覆盖根路径和 /emby 前缀。null_metadata_test.go 只同步 LatestVisible 新签名，未削弱已有断言。API-CONTRACT 已同步。
+- 聚焦回归通过（server0.278s），gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server110.627s、store56.564s、stabilityrehearsal4.702s），作业 bash-20e577a01ad34f31 exit0 已收集。未额外启用 race、浏览器或外部专项；本轮播放/个人状态专项审计未取得完整报告，不计作已覆盖。
+- 后续兼容缺口：Movie 通用 Ids/ExcludeItemTypes 过滤、Resume ParentId 范围仍未实现，需继续按真实调用补回归与查询设计；不将当前结果表述为完整 Emby 全接口兼容。此前本地改动及无关 __pycache__ 保留。未提交/推送、未改tag、未部署或重启。
+
+## 109. Resume ParentId 续播范围兼容（2026-11-09，未提交）
+
+- 将已建立的 ParentId 解析复用于 `Items/Resume`。指定媒体库、具体合集或 `boxsets` 时，范围参数直接进入 SQL，在计数和分页前过滤并与当前用户可见库相交；根范围保持原行为，未知、非法、未授权或无匹配父级返回保留 StartIndex 的空 QueryResult，不回退全库。
+- 新增 `server/resume_scope_test.go`，复现原先忽略 ParentId 导致的计数错误，验证双前缀、双列表入口、本人与跨用户、可见/零授权/私有库、具体合集、单片合集、全合集、空页、未知父级、Fields 和本人进度隔离；隐藏、无进度及他人进度均不出现。`null_metadata_test.go` 仅同步 `ResumedVisible` 新签名。
+- 聚焦及核心验证通过：resume_scope 0.199s；gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server110.649s、store55.644s、stabilityrehearsal5.073s），作业 bash-2df0cc4695ea4403 exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 110. Movie Ids 与 ExcludeItemTypes 通用过滤兼容（2026-11-09，未提交）
+
+- 将 `Ids` 和影片类型排除接入既有 `movieQueryOptions` 与内部 `search(ids string)`，复用现有 SQL 的计数/数据查询；未新增缓存、查询路径或实体 ID 搜索能力。SQL 仅使用解析后的正数占位符，显式空或无合法 ID 时以不可匹配条件返回空集，与省略 `Ids` 的不限行为区分。
+- 统一本项目的 Movie/Video 储存别名：任一名称出现在大小写不敏感的 `ExcludeItemTypes` 时，影片分支返回现有空 QueryResult；BoxSet、Folder 与实体分支的既有类型处理保持不变，不伪装未支持类型。
+- 新增 `server/movie_ids_test.go`，先复现普通影片分支忽略参数导致的结果放大，再验证重复/逗号/空白与非法值、显式空值、分页前过滤、父级交集、媒体库授权、管理员可见性、零授权、跨用户拒绝和 BoxSet ID 不误判为影片。同步调整 `search_count_merge_test.go` 与 `sort_compat_test.go` 的内部 `search`/`SearchScopedVisible` 调用签名；API-CONTRACT 已同步批次 110，旧的媒体类型保留声明不再错误声称 Movie 通用过滤未实现。
+- 聚焦回归通过（server0.160s、surrounding server1.478s、store0.094s）。核心验证：gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server109.706s、store55.762s、stabilityrehearsal4.729s），作业 bash-7b56e413e28047ab exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 111. Counts 用户校验与 ItemCount 汇总兼容（2026-11-09，未提交）
+
+- `GET /Items/Counts` 纳入既有查询用户边界：可选 `UserId` 省略时使用当前认证用户，给出时必须为本人数字 ID；其它用户、未知或非法 ID 返回 404，管理员也不通过该参数代查。媒体库授权继续由当前用户决定，不扩大查询范围。
+- 参考实现确认 `ItemCount` 为分类计数之和；本项目当前仅支持 Movie 与可展示 BoxSet，因此设为当前可见已索引 Movie 数加当前可见可展示 BoxSet 数，不虚构 Series、Episode 等未实现类型。其它既有零计数及响应形状不变。
+- `server/query_scope_compat_test.go` 先复现非 1 用户本人请求被误 404、跨用户应拒绝，修复后验证双前缀/本人/跨用户/未知/非法 ID，并断言可见 Movie=4、BoxSet=1、`ItemCount=5`；未新增查询方法、缓存或存储接口。API-CONTRACT 已同步。
+- 聚焦回归通过（server0.163s）。核心验证：gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server110.365s、store56.274s、stabilityrehearsal4.584s），作业 bash-15592e9058c6465c exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 113. 前端全面审查与 DB 排序索引（2026-11-09，未提交）
+
+- DB：`internal/store/store.go` 年份过滤从 `CAST(year AS TEXT) IN ('2001')` 改为整数绑定 `year IN (?)`，SQLite 可用 `idx_movies_visible_year`；非法年份值过滤为空而非逐行转换。新增迁移 21 `internal/store/migration_sort_indexes.go`，为可见列表排序新增部分索引 `year/premiered/created_at/rating/COALESCE(NULLIF(sortname,''),title)`（均为 `(排序表达式,id) WHERE status IN ('success','manual')` 加 `ANALYZE`），与既有 `idx_movies_visible_title` 配合覆盖 Web 墙四种排序与 `SortName/Date` 兼容键。迁移 21 已接入校验、应用与记录三处；`indexKeyColumns` 允许表达式索引并把归一化定义纳入签名。`migrations_test.go` 的未来版本探针从 21 抬至 22；`secondary_indexes_test.go` 扩展索引存在与 EXPLAIN 计划断言；新增 `sort_indexes_migration_test.go` 覆盖迁移补建与年份整数过滤/排序/非法值。
+- 前端：`internal/server/web/app.js` 墙操作四按钮补 `aria-label`（与 `title` 一致，`icon()` 仍 `aria-hidden`）；密码修改两处重复 `fetch('/api/auth/password')` 收敛为单一 `bindPasswordForm()`；`internal/server/web/task-runner.js` 移除未驱逐的 `completedTasks` 集合，任务 ID 不复用故 `onComplete` 可直接触发不累积。
+- 结论：空表/小库视图已满足；`LIKE '%t%'`、JSON `LIKE '%"value"%'` 建索引无命中，属需 FTS/规范化表的增量变更，本轮不做。聚焦 `go test ./internal/store -run 'TestSecondary|TestVisibleSort|TestSearchYear|TestMigrationLedger|TestSchemaDrift' -count=1` 通过（0.813s），`go vet` 与 `gofmt` 通过，`node --test internal/server/web_test.cjs` 162/162 通过。迁移 21 抬高账本上限后，`stabilityrehearsal` 与 `server/diagnostics` 中硬编码的 v20 断言及 `migrations_test.go` 的删列漂移夹具（表达式索引依赖 title）已同步至 v21 并先行补删 `idx_movies_visible_sortname`。核心验证：`go build ./...`、`go vet ./...` 及 `go test ./... -count=1` 全部通过（server112.339s、store58.145s、stabilityrehearsal4.700s）。未提交/推送、未改 tag、未部署或重启。
+
+## 112. PlayedItems 返回用户数据兼容（2026-11-09，未提交）
+
+- `POST|DELETE /Users/:uid/PlayedItems/:id` 改为返回 200 更新后 `UserData`，与 Favorite/Rating/HideFromResume 一致；`POST /Sessions/Playing*` 仍保持既有 204 播放状态上报契约。
+- 存储层 `SetIndexedPlayedDataForUser` 复用 `writeIndexedUserData` 在同一事务内读取快照，原 `SetIndexedPlayedForUser` 保留供其他调用方；标已播/未播不改播放计数、位置或播放日期，鉴权也不变。
+- `server/played_atomic_test.go` 先复现 POST/DELETE 成功204，改为断言 200 与 `ItemId`/`Played` 内容；原子失败、版本、进度字段和鉴权回归保持。聚焦回归通过（server1.425s）。核心验证：gofmt、git diff --check、go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server110.579s、store56.004s、stabilityrehearsal4.714s），作业 bash-c6902467c91d44b7 exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 114. 影片搜索 FTS 与实体索引（2026-11-09，未提交）
+
+- 迁移 22 `internal/store/migration_fts.go`（账本版本 22）：新增 FTS5 trigram 虚拟表 `movies_fts(title, original_title, number, tokenize='trigram')`，加 `movies_fts_insert/update/delete` 触发器（`DELETE FROM movies_fts WHERE rowid=old.id` + 插入）保持 `movies` 写入同步，末尾回填已有行；校验/应用/记录三处已接入。`validateSchema` 的 `indexSignatures` 排除 `name NOT LIKE '%_fts_%'`、`uniqueConstraints` 跳过 `_fts_config/_data/_idx/_docsize` 影子表，避免 FTS 自带 `sqlite_autoindex_movies_fts_config_1` 误报漂移。
+- 搜索改写 `store.go search()`：`SearchTerm` 长度 ≥3 走 FTS `MATCH '"escaped"'` 短语（双引号转义为 `""`），短于 3 个符回落 `LIKE '%t%' ESCAPE`；`searchEntityFilters` 的 `genres/tags/studios` 改走 `EXISTS (SELECT 1 FROM movie_features WHERE movie_id=movies.id AND kind=? AND value=?)` 等值匹配（复用 `idx_movie_features_lookup`），多值仍由 `splitTerms` 按 `,|` 切分 OR，未知类型保留 JSON 兜底。
+- 回归 `store/fts_search_test.go`：覆盖迁移回填、trigram 子串（`ello`）、短语（`lo Wo`）、引号转义、短词 LIKE 回落（`ab`/`AB` 大小写不敏感）、genre/tag/studio 经 `movie_features`、更新/删除触发器同步、删账本重开迁移补建并继续同步；`search_bench_test.go` 注释已更新。账本上限抬至 22 后，`server/diagnostics_test.go` 的 `SchemaVersion!=22` 与 `stabilityrehearsal`（capacity/disk_full/failure/interrupt/matched_restore/rehearsal）硬编码 v21 断言已同步。API-CONTRACT 已同步批次 114。
+- 聚焦 `go test ./internal/store -run 'TestFts|TestSearch|TestMigration|TestSecondary|TestVisibleSort' -count=1` 通过（5.384s）；基准 20x：`BenchmarkSearchTitleLIKE` 4.86ms/op、`GenreJSONLIKE` 4.31ms/op、`PersonLIKE` 6.35ms/op（5000 行量级，FTS 未见数量级变化，主要收益为/避免全表 JSON 匹配，人物仍为 `LIKE`）。核心验证：gofmt、go vet ./... 及 `go test ./... -count=1` 全部通过（server114.526s、store59.640s、stabilityrehearsal5.260s），作业 bash-dbbe902826b64141 exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 115 302-only 播放：删除 Range 透传代理（2026-11-09）
+
+- 用户确认 11000 部影片全部走 302 到网盘真实链接后，删除与 302 无关的播放代码：后端 `/Videos/:id/proxy`（含 `.ext`、GET/HEAD、大小写）路由与 `proxyStream`/`streamClient`/`containerMIME`，前端 ArtPlayer 失败自动回退到 proxy 的分支（`usedProxy`），请求日志/monitor 中 proxy 静默规则，API 契约/开发计划/用户指南中的 proxy 描述。
+- 现在所有播放统一走 `/Videos/:id/stream` 302 直拉，服务端零带宽；HTTPS 后台 + HTTP 源站的浏览器混合内容限制不再有服务端兜底，失败直接提示，符合用户“按推荐顺序先修”决策。
+- 测试：原 `TestProxyStreamRange` 改写为 `TestStreamDirectRedirect`（302 Location 精确上游、HEAD 302、proxy 404、未鉴权 401），monitor/requestlog 的 proxy 例外同步删除，API 路由注册表删除 `GET /Videos/:id/proxy`。
+- 通用 502 `UPSTREAM_UNAVAILABLE` 映射保留（其他管理面端点仍可使用）。全量 `gofmt/build/vet/go test ./...` 待最终结果汇总。
+
+## 116 扫描默认改为增量（11000+ 库，2026-11-09，未提交）
+
+- `parseScanMode`（`admin.go`）缺省 `""` 从 `full` 改为 `incremental`，显式 `full`/`incremental` 行为不变；`scheduledScanParams`（`scheduled.go`）缺省同样改为 incremental，而 `runScheduledScan` 的 reindex 初始 `Type` 仍为 `full`（reindex 字段由 `reindex_task` 保持强制全量）。
+- 收益：万级库定时/手动扫描默认走指纹跳过路径，未变化组不解析 NFO、不改业务行、不推进版本；需要全量重建仍可显式指定 `mode=full`。
+- 回归：`incremental_scan_test.go` 中 `TestScheduledScanStrictRoundTripAndFullCompatibility` 旧缺省 full 预期改为 incremental；`TestScanStrictParametersBeforeReplay` 的规范重放从 `?mode=FULL` 改为 `?mode=INCREMENTAL` 以匹配新缺省摘要。授权快照复用实验因 `TestObjectScopeHelpersFailClosed` 的 stale-admin 期望而回退（仍每次回查 DB），保持正确性边界。
+- 全量 `gofmt/build/vet/go test ./...` 通过（server114.502s、scanner18.919s、store60.317s、stabilityrehearsal4.476s），作业 bash-dcedfa257e484e0d exit0 已收集。未额外启用 race、浏览器或外部专项。未提交/推送、未改 tag、未部署或重启。
+
+## 117 README 改为用户手册（2026-11-09，未提交）
+
+- 将 `README.md` 从开发者技术文档重写为面向终端用户的说明书：只保留安装、建库、扫描、播放、客户端接入、后台操作、配置、安全部署与备份等用户需要了解的内容；删除台账编号、migration/checksum、原生回归测试、发布门禁、FFmpeg 探测细节等开发者细节（保留必要约束如 Docker 不支持、目录权限、写权限不自动授予、升级无回退、SHA256SUMS 要求）。
+- 同步 `internal/stabilityrehearsal/native_deploy_test.go` 的 README 约束断言，仅保留仍在手册中的关键约束（`deploy/emby-go.service`、`deploy/install.sh`、`ReadWritePaths=/srv/media`、`SHA256SUMS`），删除已移除的手册文案断言；不改业务代码。
+- 全量 `gofmt/build/vet/go test ./...` 通过，`TestNativeDeploymentReadmeAndAssets` 通过。未提交/推送、未改 tag、未部署或重启。
+
+## 118 Release 不再同批部署材料（2026-11-09，未提交）
+
+- `.github/workflows/release.yml` 删除 `cp deploy/install.sh deploy/verify-native-install.sh deploy/emby-go.service config.example.yaml dist/`，Release 只发布二进制与 `SHA256SUMS`；`deploy/*`、脚本和 config 样例保留在仓库中，不再随包。
+- 同步 `release_pipeline_test.go`：去掉同批打包断言，改为确保 workflow 不含部署材料打包；保留二进制/SHA256SUMS/`-version`/`files: dist/*` 断言及 install.sh 失败关闭守卫。
+- `README.md`、`API-CONTRACT.md`、`deploy/install.sh` 已同步为仓库内部署材料 + Release 只含二进制的描述；旧 Release 兼容性按用户要求不做区分，新 tag 直接按新格式发布。
+- 全量 `gofmt/build/vet/go test ./...` 通过。未提交/推送、未改已发布 tag、未部署或重启。

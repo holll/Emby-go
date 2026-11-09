@@ -508,3 +508,17 @@ func (a *App) validUser(c *gin.Context) bool {
 	_, ok := a.userByIDParam(c)
 	return ok
 }
+
+// validQueryUser keeps optional UserId scoped to the authenticated user.
+func (a *App) validQueryUser(c *gin.Context) bool {
+	raw := c.Query("UserId")
+	if raw == "" {
+		return true
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id != a.currentUserID(c) {
+		apiError(c, http.StatusNotFound, "user not found")
+		return false
+	}
+	return true
+}

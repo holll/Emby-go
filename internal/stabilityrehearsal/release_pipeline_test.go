@@ -8,8 +8,9 @@ import (
 )
 
 // 发布流水线的静态契约。真实故障：旧 workflow 只上传二进制，没有 SHA256SUMS，
-// 导致 install.sh 与页面升级在“最新 Release”上必然失败。这里钉住同批打包、
-// 校验和生成与 install.sh 的失败关闭，避免再次静默产出不可安装的 Release。
+// 导致 install.sh 与页面升级在“最新 Release”上必然失败。这里钉住二进制+
+// SHA256SUMS 同批、校验和生成与 install.sh 的失败关闭。deploy/* 与
+// config.example.yaml 留在仓库中，不再随 Release 发布。
 // 它不证明任何一次真实构建、上传或安装成功。
 func TestReleasePipelinePublishesDeployables(t *testing.T) {
 	root := filepath.Join("..", "..")
@@ -25,12 +26,14 @@ func TestReleasePipelinePublishesDeployables(t *testing.T) {
 		"./dist/emby-go-linux-amd64 -version",
 		"sha256sum emby-go-* > SHA256SUMS",
 		"sha256sum -c SHA256SUMS",
-		"cp deploy/install.sh deploy/verify-native-install.sh deploy/emby-go.service config.example.yaml dist/",
 		"files: dist/*",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("release workflow missing %q", required)
 		}
+	}
+	if strings.Contains(workflow, "cp deploy/install.sh") || strings.Contains(workflow, "config.example.yaml dist/") {
+		t.Error("release workflow must not package deploy scripts or config sample")
 	}
 
 	// 每个 curl 都必须限制协议与重定向，不能有一条落回明文。

@@ -290,10 +290,10 @@ func scheduledScanMarker(raw map[string]any) (scanRootMarker, error) {
 	return normalizeScanMarker(path, digest, pathPresent, digestPresent)
 }
 
-// scheduledScanParams preserves missing-mode legacy full behavior while refusing
+// scheduledScanParams preserves missing-mode incremental default while refusing
 // explicit malformed mode or library scope (including non-string modes).
 func scheduledScanParams(raw map[string]any) (int64, scanner.ScanMode, error) {
-	mode := scanner.ScanModeFull
+	mode := scanner.ScanModeIncremental
 	if value, present := raw["mode"]; present {
 		text, ok := value.(string)
 		if !ok {
