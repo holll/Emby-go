@@ -86,6 +86,13 @@
 
 自批次 91 起，影片/列表项在 `Collection` 非空时输出 `CollectionIds: ["boxset:<base64url(name)>"]`（Emby 客户端据此渲染“所属合集”）。
 
+`GET /Users/:uid/Items` 与 `GET /Items` 的纯文件夹查询（`IncludeItemTypes=Folder`）：
+
+- 根上下文（省略 `ParentId` 或为 `0`）返回当前用户可见的媒体库文件夹，与 `/Users/:uid/Views` 共用 DTO：保持外部 `Id`、`Type=CollectionFolder`、`IsFolder=true`、`CollectionType` 和用户数据；有可见且达到合集最低影片数的合集时包含 `Id=boxsets` 的合集媒体库视图。不改成 `Type=Folder`，不暴露磁盘路径。
+- 现有目录模型为扁平媒体库视图，不索引物理子目录；`Recursive=true/false` 均返回上述视图。指定某个媒体库、合集或其它非根 `ParentId` 时返回空列表，不回退为全库查询。
+- 响应为 `{Items:[],TotalRecordCount,StartIndex}`；`Items` 恒为数组，计数为筛选后、分页前总数。沿用列表的 `StartIndex` / `Limit` 归一化规则；按名称排序（`SortBy=SortName` / `Name`），`SortOrder=Descending` 反序。支持大小写不敏感的 `SearchTerm`、精确外部 `Ids`（逗号分隔或重复参数）；`ExcludeItemTypes=Folder` 或 `CollectionFolder` 排除这些视图。
+- 混合 `Folder,Movie` / `Folder,BoxSet` / `Folder,Genre` 等查询保持现有影片、合集或实体分支优先，不增加混合类型并集。单独不支持的类型（如 `Series` / `Episode`）仍为空列表。认证、用户路径校验和媒体库授权不变，根路径与 `/emby` 前缀等价。
+
 管理端点（`/api/admin/*`）是后台契约，供本仓库 Web 前端与脚本使用；清单见 `internal/server/server.go` 的 `routes()`，不在 Emby 兼容承诺内。
 
 ### 4.1 多用户管理面（批次 86 起）
@@ -119,6 +126,12 @@
 | `POST /api/admin/apikeys/:key/rotate` | `:key` 为稳定 ID `ak_<32hex>`；必须 `If-Match: "ak-<stable_id>-<version>"`（缺失 428、格式非法 400、过期/并发 412）；body `{current_password,reason}`；成功 200 一次返回新明文 `key`（`Cache-Control: no-store`），旧 key 立即失效；`401`/`403`/`404`/`429`/`503` 分类见实现。 |
 | `GET/PUT /api/admin/image-cache/settings`、`POST /api/admin/image-cache/trim` | 缩略图变体目录（`image_cache`）的运行期容量上限：`GET` 返回 `{dir,enabled,max_bytes,used_bytes,files,max_allowed_bytes,config_etag}`（`max_bytes=0` 表示不限制，`used_bytes`/`files` 为变体目录快照，不含临时文件）。`PUT` body `{max_bytes}`（0–64 GiB），必须 `If-Match: "ic1-<max_bytes>"`（缺 428、过期 412 `IMAGE_CACHE_SETTINGS_CHANGED`）；保存立即生效并按新上限清理，配置禁用时返回 `409 IMAGE_CACHE_DISABLED`。`trim` 立即清理过期/超限变体，返回 `{removed,freed_bytes,files,used_bytes,config_etag}`。变体是纯派生数据，清理不影响任何接口语义。 |
 | `GET/PUT /api/admin/webhook/targets` | v2 多目标整集合：`GET` 返回 `version:2`、`targets[{id,name,enabled,url_configured,events,format,timeout_seconds,allow_private}]`、`config_etag`、`multi_target`，永不回显 URL。`PUT` 必须 `If-Match`（缺 428、过期 412）；body `{targets:[...],confirm_delete,confirm_empty_targets}`，按目标 ID 合并秘密（空白 URL 保留、`clear_url` 清除），新目标由服务端生成 `wh_<16hex>` ID；最多 10 个目标、整体 ≤64 KiB；清空需显式确认。v2 形成后旧 `PUT /api/admin/webhook/settings` 返回 `409 WEBHOOK_MULTI_TARGET_CONFIG`，旧 `GET` 标 `multi_target:true`。 |
+
+#### 请求 URL 日志与未知接口探针（2026-11-09）
+
+- 普通与 debug 请求日志均记录原始 `RequestURI`（构造请求缺省时回退 `URL.RequestURI()`），包括未知路径、敏感路由、全部 query、重复值和原始转义；不再将路径替换为模板或将 query 脱敏。日志字符串仍采用可逆引号转义。普通模式继续高频成功请求降噪，不新增头/body/error 内容，panic 详情仍省略；debug 的敏感头遮盖与敏感路由请求体保护保持不变，审计日志政策不变。
+- 未匹配路由继续返回 `404 NOT_FOUND`、`Cache-Control: no-store`。非 `/api/` 且非扫描器的探针保存 `URL.EscapedPath()` 与 `RawQuery` 原文；`GET /api/admin/probe` 要求管理员、返回最近 100 条。去重键为 method + 转义路径（区分大小写及转义拼写，不含 query），请求体不读取，`body="[OMITTED]"`。既有 128 个去重槽、6 小时去重窗口、突发 60/每秒 1 次及 1000 条历史上限不变；并非每次请求都保证留存。
+- **安全取舍：即使 debug 关闭，URL 内 api_key/token 等凭据仍可能落入 request 日志和探针数据库。** 此项仅取消入站请求 URL 脱敏，不改变 app 日志视图、上游错误脱敏、鉴权或响应内容。不恢复历史已遮盖的 URL；关闭 debug 不删除旧记录，也不恢复 URL 脱敏。
 
 ### 4.4 全量与增量扫描
 

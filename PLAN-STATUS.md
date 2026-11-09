@@ -1890,3 +1890,11 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 文档：契约新增 §4.16（登录响应不变、前端单点拒绝、API 仍 403）；README 后台章节注明仅管理员登录。
 - 未提交、未发布；`go build ./...` 仅用于确认嵌入资源可构建。
 - 浏览器回归稳定性：非管理员用例改用 `Page.navigate` 发起导航 + `waitForRedirect` 重试（导航销毁旧执行上下文时 `Runtime.evaluate` 会报 “Inspected target navigated or closed”，不能按页面稳定后再判断），连续 3 次运行通过；与任务中心回归合并运行也通过。
+
+## 104. 入站请求 URL 取消脱敏（2026-11-09，未提交）
+
+- 用户明确选择保留完整路径及全部查询参数（含 api_key/token），范围为普通/debug 请求日志与未知接口探针；不增加头或请求体采集。普通/debug 统一优先使用原始 RequestURI，缺省回退 URL.RequestURI()，保留转义拼写、参数顺序、重复值及尾部空问号；日志引号转义可逆，不再生成 URL 脱敏模板。
+- 未匹配路由探针保存 URL.EscapedPath() 与 RawQuery，按 method + 转义路径去重，query 不参与 key；body 仍不读取、保存 [OMITTED]。扫描器与 /api/ 排除、128 槽/6 小时、突发60/每秒1次和1000条历史预算、清理代次及写入失败重试契约保持。删除无调用的路径/query 脱敏实现，不修改鉴权、HTTP 错误、app 日志脱敏、审计路径或上游错误保护。
+- 普通模式仍仅记 error 布尔值并省略 panic 详情；debug 敏感头和认证/初始化/改密/密钥/解锁请求体保护保留，但敏感路由 URL 也原样记录。README 与 API 契约明确：debug=false 不能避免 URL 凭据落盘，不能删除或还原历史记录。
+- 回归覆盖原始/回退 URI、未知及敏感路径、转义大小写、重复凭据、非法 query、长 URL、ForceQuery、探针 method/path 去重及不读 body、限额/清理/失败重试、头/body/error/panic 保护。首次定向测试发现两处旧策略断言（探针路径转小写、旧敏感路由标记），已按新政策修正；不是生产运行故障。
+- 验证：定向回归 1.443s，go build ./...、go vet ./... 及 go test ./... -count=1 全部通过（server 114.779s、store 60.745s），作业 bash-1dc88c4b90cc42b6 exit0 已收集；日志/探针专项 -race 27.861s 通过，作业 bash-090fd00a269c4e53 exit0 已收集。gofmt 与 git diff --check 通过。浏览器专项 REPORT_BROWSER 及其它需显式环境启用的外部验收未额外启用，不以默认跳过算通过；未提交、未部署、未重启服务或启用 debug。

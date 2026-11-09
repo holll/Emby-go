@@ -20,26 +20,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestDiagnosticQueryAllowlist(t *testing.T) {
-	for _, query := range []string{
-		"Password=canary-password&Signature=canary-signature", "canary-key=anything", "Limit=canary-number&Static=canary-bool",
-		"Limit=10&Limit=canary-duplicate", "searchTerm=canary-search", "token=canary&bad=%ZZ", "x=" + strings.Repeat("canary", 1000),
-	} {
-		got := redactedRequestQuery(query)
-		if strings.Contains(got, "canary") || !strings.Contains(got, "REDACTED") {
-			t.Fatalf("query leaked: %s", got)
-		}
-	}
-	if got := redactedRequestQuery("Limit=10&Static=true&MediaSourceId=1"); got != "Limit=10&MediaSourceId=1&Static=true" {
-		t.Fatalf("allowed scalar lost: %s", got)
-	}
-	for _, path := range []string{"/api/admin/apikeys/canary", "/API/ADMIN/APIKEYS/canary?Password=canary"} {
-		if got := unmatchedDiagnosticPath(path); strings.Contains(got, "canary") {
-			t.Fatalf("key path leaked: %s", got)
-		}
-	}
-}
-
 func TestDiagnosticRequestCopies(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 	for _, status := range []int{200, 401, 500} {
@@ -67,8 +47,13 @@ func TestDiagnosticRequestCopies(t *testing.T) {
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 			got := output.String()
-			if w.Code != status || strings.Contains(got, "canary") || !strings.Contains(got, "[GIN]") || !strings.Contains(got, "/api/admin/apikeys/:key") || !strings.Contains(got, "error=true") {
+			if w.Code != status || !strings.Contains(got, fmt.Sprintf("%q", target)) || !strings.Contains(got, "[GIN]") || !strings.Contains(got, "error=true") {
 				t.Fatalf("status=%d log=%s", w.Code, got)
+			}
+			for _, secret := range []string{"canary-body", "canary-auth", "canary-cookie", "canary-header", "canary-error"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("non-URL value leaked: %s", secret)
+				}
 			}
 		})
 	}
@@ -92,7 +77,7 @@ func TestDiagnosticPanicAndUnreadBody(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer canary-header")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if body.reads != 0 || w.Code != 500 || strings.Contains(output.String(), "canary") || !strings.Contains(output.String(), "[PANIC]") {
+	if body.reads != 0 || w.Code != 500 || !strings.Contains(output.String(), "/Users/AuthenticateByName?token=canary-query") || strings.Contains(output.String(), "canary-panic") || strings.Contains(output.String(), "canary-header") || strings.Contains(output.String(), "canary-body-read-error") || !strings.Contains(output.String(), "[PANIC]") {
 		t.Fatalf("reads=%d status=%d log=%s", body.reads, w.Code, output.String())
 	}
 }
@@ -129,14 +114,14 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 		n++
-		if method != "POST" || path != safeDiagnosticProbePath("/Users/canary-path/Unimplemented") || body != "[OMITTED]" || strings.Contains(query, "canary") || !strings.Contains(query, "Limit=10") {
-			t.Fatalf("persisted unsafe metadata %q %q %q %q", method, path, query, body)
+		if method != "POST" || path != "/Users/canary-path/Unimplemented" || body != "[OMITTED]" || query != "token=canary-query&canary-key=x&Limit=10" {
+			t.Fatalf("persisted metadata differs %q %q %q %q", method, path, query, body)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || len(a.probeSeen) != 1 || strings.Contains(output.String(), "canary") {
+	if n != 1 || len(a.probeSeen) != 1 || !strings.Contains(output.String(), "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10") || strings.Contains(output.String(), "canary-body-read-error") {
 		t.Fatalf("rows=%d seen=%d log contains canary=%t", n, len(a.probeSeen), strings.Contains(output.String(), "canary"))
 	}
 	// Even pre-filled legacy or synthetic keys cannot grow an already full map.

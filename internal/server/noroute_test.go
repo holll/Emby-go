@@ -64,8 +64,8 @@ func TestIsScannerProbe(t *testing.T) {
 	}
 }
 
-// Public scanner traffic is excluded. Unimplemented endpoints now retain only
-// fixed resource families, never raw paths that might themselves be secrets.
+// Public scanner traffic is excluded; other unimplemented endpoints retain
+// their original paths, including case.
 func TestNoRouteSkipsScannerProbes(t *testing.T) {
 	a, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "test.db")}, cache.NewMemory(64))
 	if err != nil {
@@ -114,7 +114,7 @@ func TestNoRouteSkipsScannerProbes(t *testing.T) {
 			t.Errorf("扫描器路径 %s 不应写入 api_probe", path)
 		}
 	}
-	if len(probes) != 2 || !recorded["/branding/configuration"] || !recorded["/persons"] {
-		t.Fatalf("expected safe static endpoint structures, got %v", probes)
+	if len(probes) != 2 || !recorded["/Branding/Configuration"] || !recorded["/Persons"] {
+		t.Fatalf("expected original endpoint paths, got %v", probes)
 	}
 }

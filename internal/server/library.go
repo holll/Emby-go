@@ -928,15 +928,24 @@ func (a *App) views(c *gin.Context) {
 	if !a.validUser(c) {
 		return
 	}
-	libs, e := a.db.Libraries()
-	if e != nil {
-		itemDataUnavailable(c)
-		return
-	}
 	visible, admin, ok := a.viewerLibraries(c)
 	if !ok {
 		itemDataUnavailable(c)
 		return
+	}
+	out, ok := a.libraryFolders(c, visible, admin)
+	if !ok {
+		return
+	}
+	c.JSON(200, gin.H{"Items": out, "TotalRecordCount": len(out)})
+}
+
+// libraryFolders 为 Views 和 Folder 查询提供相同的媒体库 DTO 与可见性。
+func (a *App) libraryFolders(c *gin.Context, visible []int64, admin bool) ([]gin.H, bool) {
+	libs, e := a.db.Libraries()
+	if e != nil {
+		itemDataUnavailable(c)
+		return nil, false
 	}
 	granted := map[int64]bool{}
 	for _, id := range visible {
@@ -952,12 +961,12 @@ func (a *App) views(c *gin.Context) {
 	// 有合集（NFO <set>）时追加「合集」媒体库视图（CollectionType=boxsets）。
 	collections, ok := a.collectionStats(c, 0)
 	if !ok {
-		return
+		return nil, false
 	}
 	if len(collections) > 0 {
 		out = append(out, a.boxsetFolderDTO(collections))
 	}
-	c.JSON(200, gin.H{"Items": out, "TotalRecordCount": len(out)})
+	return out, true
 }
 
 // nameObjects 把字符串名列表映射成 Emby 惯用的 {Name, Id} 实体对象。
@@ -1305,6 +1314,49 @@ func (a *App) itemsQuery(c *gin.Context) {
 			virtual = append(virtual, t)
 			unsupportedOnly = false
 		}
+	}
+
+	// Folder 是现有媒体库视图的查询入口，不把影片或磁盘路径伪装为文件夹。
+	// 混合查询沿用原有 Movie / BoxSet / 实体优先级。
+	if slices.Contains(include, "Folder") && !movieWanted && !boxsetWanted && len(virtual) == 0 {
+		if parentRaw != "" && parentRaw != "0" {
+			a.emptyItems(c)
+			return
+		}
+		folders, ok := a.libraryFolders(c, visible, admin)
+		if !ok {
+			return
+		}
+		exclude := splitQueryTypes(c.Query("ExcludeItemTypes"))
+		ids := splitQueryTypes(strings.Join(c.QueryArray("Ids"), ","))
+		_, hasIDs := c.GetQueryArray("Ids")
+		term := strings.ToLower(c.Query("SearchTerm"))
+		out := make([]gin.H, 0, len(folders))
+		for _, folder := range folders {
+			if slices.Contains(exclude, "Folder") || slices.Contains(exclude, "CollectionFolder") {
+				continue
+			}
+			if hasIDs && !slices.Contains(ids, folder["Id"].(string)) {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(folder["Name"].(string)), term) {
+				continue
+			}
+			out = append(out, folder)
+		}
+		desc := strings.EqualFold(c.Query("SortOrder"), "Descending")
+		slices.SortStableFunc(out, func(x, y gin.H) int {
+			order := strings.Compare(strings.ToLower(x["Name"].(string)), strings.ToLower(y["Name"].(string)))
+			if desc {
+				return -order
+			}
+			return order
+		})
+		total := len(out)
+		from := min(start, total)
+		out = out[from:min(from+limit, total)]
+		c.JSON(http.StatusOK, gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start})
+		return
 	}
 
 	// 实体（Genre/Tag/Studio/Person）浏览：仅在客户端「只要实体」时处理。

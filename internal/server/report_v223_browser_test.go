@@ -106,14 +106,18 @@ with sync_playwright() as p:
             sizes=visible_controls_size(page,'#audit-filter input,#audit-filter select,#audit-filter button');assert sizes and all(v>=44 for v in sizes),sizes
         audit_geometry=page.evaluate('({inner:innerWidth,scroll:document.documentElement.scrollWidth})')
         assert audit_geometry['inner']<=width+1 and audit_geometry['scroll']<=width,audit_geometry
-        # (6) 未知接口在探针页显示脱敏真实路径与实际结果，不再出现 [UNMATCHED]。
-        unknown=page.request.get(base+'/Users/7/UnknownSecretFeature42');assert unknown.status==404
+        # (6) 未知接口在探针页显示原始路径/query 与实际结果，不再出现脱敏占位。
+        unknown_path='/Users/7/UnknownSecretFeature42'
+        unknown_query='z=last&token=probe-token&api_key=probe-key&a=first'
+        unknown=page.request.get(base+unknown_path+'?'+unknown_query);assert unknown.status==404
         page.evaluate('location.hash="probe"');page.wait_for_timeout(400)
         probe_text=page.locator('main').inner_text()
         assert '404 未实现' in probe_text,probe_text
         assert '[UNMATCHED]' not in probe_text
-        assert '[redacted:' in probe_text,probe_text
-        assert 'UnknownSecretFeature42' not in probe_text
+        assert '[redacted:' not in probe_text,probe_text
+        assert unknown_path in probe_text,probe_text
+        probe=page.request.get(base+'/api/admin/probe',headers={'X-Emby-Token':token}).json()
+        assert any(row['path']==unknown_path and row['query']==unknown_query and row['body']=='[OMITTED]' for row in probe['items']),probe
         # (7) 运维诊断侧栏中的 IP/CIDR 黑名单：真实持久化、实时计数、拒绝误封自己。
         page.evaluate('location.hash="security"')
         net=page.locator('[data-security="network"]');expect(net).to_be_visible()

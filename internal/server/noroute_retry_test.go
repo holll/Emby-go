@@ -84,8 +84,8 @@ func TestNoRouteRetriesFailedPersistence(t *testing.T) {
 			if err := db.QueryRow("SELECT method,path,query,body_preview FROM api_probe").Scan(&method, &path, &query, &body); err != nil {
 				t.Fatal(err)
 			}
-			if method != "POST" || path != safeDiagnosticProbePath("/Users/canary-retry") || body != "[OMITTED]" || strings.Contains(query, "canary") {
-				t.Fatalf("unsafe row %q %q %q %q", method, path, query, body)
+			if method != "POST" || path != "/Users/canary-retry" || body != "[OMITTED]" || query != "token=canary-query" {
+				t.Fatalf("unexpected row %q %q %q %q", method, path, query, body)
 			}
 		})
 	}

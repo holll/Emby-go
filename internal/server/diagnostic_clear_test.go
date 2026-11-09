@@ -228,7 +228,7 @@ func TestDiagnosticClearWaitsForInFlightInsert(t *testing.T) {
 	// The SQL callback proves that the writer is already inside persistence.
 	// Its reservation must be visible, and probeMu must not be held across SQL.
 	a.probeMu.Lock()
-	_, reserved := a.probeSeen["POST "+safeDiagnosticProbePath("/Users/canary-in-flight")]
+	_, reserved := a.probeSeen["POST /Users/canary-in-flight"]
 	epoch := a.probeEpoch
 	a.probeMu.Unlock()
 	if !reserved {
@@ -284,7 +284,7 @@ func TestDiagnosticClearWaitsForInFlightInsert(t *testing.T) {
 func TestDiagnosticClearRejectsQueuedOldGeneration(t *testing.T) {
 	a, db := diagnosticClearFixture(t)
 	const method = "POST"
-	path := safeDiagnosticProbePath("/Users/canary-new-duplicate")
+	path := "/Users/canary-new-duplicate"
 	key := method + " " + path
 	// Reproduce NoRoute's real reservation protocol, pausing before persistence
 	// rather than trying to control the scheduler between mutex acquisitions.

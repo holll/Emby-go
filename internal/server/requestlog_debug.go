@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// rawSensitivePath 判断当前请求是否属于即使 debug 开启也不得原样落盘的
-// 敏感路由（认证、改密/初始化、加解限流、API 密钥创建/删除/轮转）。
+// rawSensitivePath 判断当前请求是否属于即使 debug 开启也不得读取和记录请求体的
+// 敏感路由（认证、改密/初始化、加解限流、API 密钥创建/删除/轮转）；URL 仍原样记录。
 // 注意这里看的是真实路径；/emby 前缀只是 Emby 兼容别名。
 func rawSensitivePath(path string) bool {
 	p := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(path, "/emby"), "/"))
@@ -24,18 +24,9 @@ func rawSensitivePath(path string) bool {
 	return strings.HasPrefix(p, "/api/admin/apikeys/") || strings.HasPrefix(p, "/api/admin/users/")
 }
 
-// diagnosticURI 隐藏敏感路由整体与所有查询串。查询串里可能带 api_key/
-// token（历史上也有把密钥放 URL 的兼容入口），不能进原始日志。
+// diagnosticURI 与普通请求日志一样保留原始 URL；头和请求体另行保护。
 func diagnosticURI(c *gin.Context) string {
-	if rawSensitivePath(c.Request.URL.Path) {
-		return "[sensitive route]"
-	}
-	u := *c.Request.URL
-	if u.RawQuery != "" || u.ForceQuery {
-		u.RawQuery = "redacted"
-		u.ForceQuery = false
-	}
-	return u.RequestURI()
+	return requestURI(c.Request)
 }
 
 func sensitiveHeader(name string) bool {
@@ -80,19 +71,8 @@ func requestDiagnostics(raw bool, requestLog, appLog io.Writer, preflight ...gin
 // in-memory administration log panel or the persistent unknown-route probe.
 func rawRequestLoggerTo(w io.Writer) gin.HandlerFunc {
 	return gin.LoggerWithConfig(gin.LoggerConfig{Output: w, Formatter: func(p gin.LogFormatterParams) string {
-		uri := p.Request.RequestURI
-		if uri == "" && p.Request.URL != nil {
-			uri = p.Request.URL.RequestURI()
-		}
-		if p.Request != nil {
-			if rawSensitivePath(p.Request.URL.Path) {
-				uri = "[sensitive route]"
-			} else if p.Request.URL.RawQuery != "" {
-				uri = p.Request.URL.Path + "?redacted"
-			}
-		}
 		return fmt.Sprintf("[GIN DEBUG RAW] %s | %3d | %13v | %15s | %-7s %q error=%q\n",
-			p.TimeStamp.Format("2006/01/02 - 15:04:05"), p.StatusCode, p.Latency, p.ClientIP, p.Method, uri, p.ErrorMessage)
+			p.TimeStamp.Format("2006/01/02 - 15:04:05"), p.StatusCode, p.Latency, p.ClientIP, p.Method, requestURI(p.Request), p.ErrorMessage)
 	}})
 }
 

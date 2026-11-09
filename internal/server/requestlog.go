@@ -1,212 +1,40 @@
 package server
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Diagnostics contain route templates with validated uid/id parameters and an
-// explicit scalar query allowlist. Other parameters (notably API keys), headers,
-// bodies and arbitrary errors are never log payloads.
+// Request URLs are deliberately logged verbatim, including query credentials.
+// Headers, bodies and arbitrary errors are not added to the ordinary log.
 func requestLoggerTo(w io.Writer) gin.HandlerFunc {
-	logger := gin.LoggerWithConfig(gin.LoggerConfig{Output: w, Skip: skipRequestLog, Formatter: requestLogFormatter})
-	return func(c *gin.Context) {
-		c.Set("safe_request_route", diagnosticRoute(c))
-		logger(c)
-	}
+	return gin.LoggerWithConfig(gin.LoggerConfig{Output: w, Skip: skipRequestLog, Formatter: requestLogFormatter})
 }
+
 func requestLogFormatter(p gin.LogFormatterParams) string {
-	route, ok := p.Keys["safe_request_route"].(string)
-	if !ok {
-		route = unmatchedDiagnosticPath(p.Request.URL.Path)
-	}
-	path := route
-	if query := redactedRequestQuery(p.Request.URL.RawQuery); query != "" {
-		path += "?" + query
-	}
 	return fmt.Sprintf("[GIN] %s | %3d | %13v | %15s | %-7s %q error=%t\n",
-		p.TimeStamp.Format("2006/01/02 - 15:04:05"), p.StatusCode, p.Latency, p.ClientIP, diagnosticMethod(p.Method), path, p.ErrorMessage != "")
+		p.TimeStamp.Format("2006/01/02 - 15:04:05"), p.StatusCode, p.Latency, p.ClientIP, diagnosticMethod(p.Method), requestURI(p.Request), p.ErrorMessage != "")
 }
+
+// Prefer the original request target so escaped paths, query order and an empty
+// trailing query remain intact. Constructed requests may only have a URL.
+func requestURI(r *http.Request) string {
+	if r.RequestURI != "" {
+		return r.RequestURI
+	}
+	return r.URL.RequestURI()
+}
+
 func diagnosticMethod(method string) string {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
 		return method
 	}
 	return "[OTHER]"
-}
-func diagnosticRoute(c *gin.Context) string {
-	if path := c.FullPath(); path != "" {
-		parts := strings.Split(path, "/")
-		for i, part := range parts {
-			switch part {
-			case ":uid":
-				if value := c.Param("uid"); diagnosticIDNumber(value) {
-					parts[i] = value
-				}
-			case ":id":
-				if value := c.Param("id"); diagnosticItemID(value) {
-					parts[i] = value
-				}
-			}
-		}
-		return strings.Join(parts, "/")
-	}
-	return unmatchedDiagnosticPath(c.Request.URL.Path)
-}
-
-// Match the application's identifier shapes, not arbitrary path text. Limits
-// bound log growth, and keeping unknown formats templated avoids logging pasted
-// secrets or legacy free-form names. This never rewrites the actual request.
-func diagnosticIDNumber(value string) bool {
-	if len(value) == 0 || len(value) > 19 {
-		return false
-	}
-	for _, c := range value {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	_, err := strconv.ParseUint(value, 10, 63)
-	return err == nil
-}
-
-func diagnosticItemID(value string) bool {
-	if diagnosticIDNumber(value) || value == "boxsets" {
-		return true
-	}
-	if strings.HasPrefix(value, "part-") {
-		parts := strings.Split(value, "-")
-		return len(parts) == 3 && diagnosticIDNumber(parts[1]) && diagnosticIDNumber(parts[2])
-	}
-	prefix, encoded, ok := strings.Cut(value, ":")
-	if !ok || encoded == "" || len(encoded) > 512 {
-		return false
-	}
-	switch prefix {
-	case "boxset", "genre", "tag", "studio", "person":
-		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-		return err == nil && base64.RawURLEncoding.EncodeToString(decoded) == encoded
-	}
-	return false
-}
-
-func diagnosticItemIDs(value string) bool {
-	if value == "" || len(value) > 2048 {
-		return false
-	}
-	ids := strings.Split(value, ",")
-	if len(ids) > 32 {
-		return false
-	}
-	for _, id := range ids {
-		if !diagnosticItemID(id) {
-			return false
-		}
-	}
-	return true
-}
-
-func diagnosticItemTypes(value string) bool {
-	if value == "" || len(value) > 128 {
-		return false
-	}
-	for kind := range strings.SplitSeq(value, ",") {
-		switch kind {
-		case "Movie", "BoxSet", "CollectionFolder", "Folder", "Series", "Season", "Episode":
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// Unknown path segments may themselves be credentials. Retain only a fixed
-// resource family, not an attacker-controlled endpoint, ID or filename.
-func unmatchedDiagnosticPath(path string) string {
-	parts := strings.Split(strings.TrimPrefix(strings.ToLower(path), "/"), "/")
-	if len(parts) > 0 && parts[0] == "emby" {
-		parts = parts[1:]
-	}
-	if len(parts) > 0 {
-		switch parts[0] {
-		case "users", "items", "videos", "sessions", "system", "persons", "audio":
-			return "/" + parts[0] + "/[UNMATCHED]"
-		}
-	}
-	return "/[UNMATCHED]"
-}
-
-// Only edits a diagnostic copy. The live query, path, headers and body are untouched.
-func redactedRequestQuery(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	if len(raw) > 4096 {
-		return "[REDACTED]"
-	}
-	values, err := url.ParseQuery(raw)
-	if err != nil {
-		return "[REDACTED]"
-	}
-	safe := url.Values{}
-	for key, entries := range values {
-		name := strings.ToLower(key)
-		switch name {
-		case "api_key", "apikey", "x-emby-token", "x-mediabrowser-token", "token", "access_token":
-			safe.Set(name, "[REDACTED]")
-		case "static", "recursive", "isplayed", "isfavorite":
-			value := "[REDACTED]"
-			if len(entries) == 1 && (entries[0] == "true" || entries[0] == "false") {
-				value = entries[0]
-			}
-			safe.Set(key, value)
-		case "userid", "itemid", "parentid", "mediasourceid":
-			value := "[REDACTED]"
-			if len(entries) == 1 && ((name == "userid" && diagnosticIDNumber(entries[0])) || (name != "userid" && diagnosticItemID(entries[0]))) {
-				value = entries[0]
-			}
-			safe.Set(key, value)
-		case "ids":
-			value := "[REDACTED]"
-			if len(entries) == 1 && diagnosticItemIDs(entries[0]) {
-				value = entries[0]
-			}
-			safe.Set(key, value)
-		case "includeitemtypes", "excludeitemtypes":
-			value := "[REDACTED]"
-			if len(entries) == 1 && diagnosticItemTypes(entries[0]) {
-				value = entries[0]
-			}
-			safe.Set(key, value)
-		case "limit", "startindex", "maxwidth", "maxheight", "width", "height", "quality":
-			value := "[REDACTED]"
-			if len(entries) == 1 && diagnosticNumber(entries[0]) {
-				value = entries[0]
-			}
-			safe.Set(key, value)
-		default:
-			safe.Set("_redacted", "[REDACTED]")
-		}
-	}
-	return safe.Encode()
-}
-func diagnosticNumber(value string) bool {
-	if len(value) == 0 || len(value) > 12 {
-		return false
-	}
-	for _, c := range value {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // Skip only successful high-frequency resources; errors and APIs remain observable.

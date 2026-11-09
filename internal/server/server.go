@@ -1005,13 +1005,13 @@ func (a *App) noRoute(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	path := c.Request.URL.Path
 	if !strings.HasPrefix(path, "/api/") && !isScannerProbe(path) {
-		// Unknown endpoint segments/query keys/body can contain arbitrary secrets.
-		// Keep verified static segments/decimal IDs; hash unknown segments. Never read a body.
-		method, safePath := diagnosticMethod(c.Request.Method), safeDiagnosticProbePath(path)
-		key := method + " " + safePath
+		// Keep the URL verbatim, including query credentials, for endpoint diagnostics.
+		// Query values do not affect endpoint deduplication. Never read a body.
+		method, probePath := diagnosticMethod(c.Request.Method), c.Request.URL.EscapedPath()
+		key := method + " " + probePath
 		write, epoch := a.observeProbe(key, a.probeClock())
 		if write {
-			a.persistDiagnosticProbe(method, safePath, redactedRequestQuery(c.Request.URL.RawQuery), epoch)
+			a.persistDiagnosticProbe(method, probePath, c.Request.URL.RawQuery, epoch)
 		}
 	}
 	c.JSON(404, gin.H{"error": "not found", "code": "NOT_FOUND"})
