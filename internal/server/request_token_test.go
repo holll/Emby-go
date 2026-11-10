@@ -77,7 +77,7 @@ func TestEmbyAuthorizationTokenFirstUsesAuthoritativeStore(t *testing.T) {
 	}
 	router := authorityRouter(a)
 	request := func(token string) int {
-		req := httptest.NewRequest(http.MethodGet, "/private", nil)
+		req := httptest.NewRequest(http.MethodGet, "/Items/auth-test", nil)
 		req.Header.Set("Authorization", `MediaBrowser Token="`+token+`", Client="fixture"`)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)

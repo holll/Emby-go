@@ -124,6 +124,9 @@ func TestDeleteWebhookOnlyAfterCommit(t *testing.T) {
 			default:
 				t.Fatal("missing delivered event")
 			}
+			if items, err := f.a.db.ListWebhookDeliveries(10); err != nil || len(items) != 1 || items[0].Event != "item.deleted" || items[0].ItemID != fmt.Sprint(f.victim) {
+				t.Fatalf("item.deleted delivery history missing: %+v %v", items, err)
+			}
 			if calls.Load() != 1 || received.Event != "item.deleted" || received.Item.Path != original.SourcePath || received.Item.Name != original.Title || received.Item.Id != fmt.Sprint(f.victim) || received.Item.Type != "Movie" || received.Server.Id != f.a.serverID || received.Timestamp.IsZero() {
 				t.Fatalf("event mismatch: %+v calls=%d", received, calls.Load())
 			}

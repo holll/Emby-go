@@ -85,6 +85,11 @@ func (a *App) authOK(c *gin.Context) (store.User, bool, error) {
 		return store.User{}, false, err
 	}
 	session := valid
+	if session {
+		c.Set(credentialKindKey, credentialSession)
+	} else {
+		c.Set(credentialKindKey, credentialAPIKey)
+	}
 	if !valid {
 		userID, valid, err = a.db.APIKeyUser(token)
 		if err != nil || !valid {
@@ -115,11 +120,54 @@ func (a *App) requireAuth(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "AUTH_INVALID"})
 		return
 	}
+	if kind, _ := c.Get(credentialKindKey); kind == credentialAPIKey && !apiKeyScopeAllows(c.Request.URL.Path) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "API 密钥仅可用于 Emby 兼容接口", "code": "API_KEY_SCOPE"})
+		return
+	}
 	c.Set(currentUserKey, u)
 	c.Next()
 }
 
 const currentUserKey = "currentUser"
+
+// 凭据类型：登录会话可访问 Web 管理面，API 密钥只能调 Emby 兼容接口。
+const credentialKindKey = "credentialKind"
+const (
+	credentialSession = "session"
+	credentialAPIKey  = "apikey"
+)
+
+// apiKeyScopeAllows 判断 API 密钥可用的路径：只放行 Emby 兼容接口（含 /emby 前缀与
+// 根路径注册的兼容路由），拒绝全部 /api/*、/healthz 与 Web 管理台。
+func apiKeyScopeAllows(path string) bool {
+	path = strings.TrimPrefix(strings.ToLower(path), "/emby/")
+	path = strings.TrimPrefix(path, "/")
+	segment, _, _ := strings.Cut(path, "/")
+	switch segment {
+	case "items", "users", "videos", "audio", "images", "system", "sessions",
+		"branding", "displaypreferences", "search", "genres", "persons", "studios",
+		"library", "collections", "playlists", "artists", "shows", "episode", "mediasegments":
+		return true
+	}
+	return false
+}
+
+// enforceAPIKeyScope also covers public handlers, which do not run requireAuth.
+// Only API keys are rejected here: anonymous requests and session credentials
+// retain each handler's existing semantics, including during a store outage.
+func (a *App) enforceAPIKeyScope(c *gin.Context) {
+	if c.FullPath() != "" && !apiKeyScopeAllows(c.Request.URL.Path) {
+		if token := requestToken(c); token != "" {
+			_, valid, err := a.db.APIKeyUser(token)
+			if err == nil && valid {
+				c.Header("Cache-Control", "no-store")
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "API 密钥仅可用于 Emby 兼容接口", "code": "API_KEY_SCOPE"})
+				return
+			}
+		}
+	}
+	c.Next()
+}
 
 // currentUser 返回 requireAuth 解析出的账户；无鉴权上下文时 ok=false。
 func currentUser(c *gin.Context) (store.User, bool) {

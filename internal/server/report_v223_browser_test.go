@@ -116,8 +116,6 @@ with sync_playwright() as p:
         assert '[UNMATCHED]' not in probe_text
         assert '[redacted:' not in probe_text,probe_text
         assert unknown_path in probe_text,probe_text
-        probe=page.request.get(base+'/api/admin/probe',headers={'X-Emby-Token':token}).json()
-        assert any(row['path']==unknown_path and row['query']==unknown_query and row['body']=='[OMITTED]' for row in probe['items']),probe
         # (7) 运维诊断侧栏中的 IP/CIDR 黑名单：真实持久化、实时计数、拒绝误封自己。
         page.evaluate('location.hash="security"')
         net=page.locator('[data-security="network"]');expect(net).to_be_visible()

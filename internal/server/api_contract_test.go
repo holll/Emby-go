@@ -57,8 +57,6 @@ func TestAPIContractCriticalRoutesRegistered(t *testing.T) {
 		"GET /api/admin/settings",
 		"GET /api/admin/dashboard",
 		"GET /api/admin/diagnostics",
-		"GET /api/admin/backup",
-		"POST /api/admin/backup/run",
 		"GET /api/admin/update",
 		"POST /api/admin/update/check",
 		"POST /api/admin/update/apply",

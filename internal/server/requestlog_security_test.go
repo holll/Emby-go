@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -82,18 +81,13 @@ func TestDiagnosticPanicAndUnreadBody(t *testing.T) {
 	}
 }
 
-func TestDiagnosticNoRoutePersistence(t *testing.T) {
-	a, _, path := authorityApp(t)
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+func TestNoRouteLogsFullURIWithoutPersistence(t *testing.T) {
+	a, _, _ := authorityApp(t)
 	var output bytes.Buffer
 	r := gin.New()
 	r.Use(requestLoggerTo(&output))
 	r.NoRoute(a.noRoute)
-	for range 200 {
+	for range 20 {
 		body := &diagnosticUnreadBody{}
 		req := httptest.NewRequest("POST", "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10", body)
 		w := httptest.NewRecorder()
@@ -102,36 +96,12 @@ func TestDiagnosticNoRoutePersistence(t *testing.T) {
 			t.Fatalf("404 status=%d reads=%d", w.Code, body.reads)
 		}
 	}
-	rows, err := db.Query("SELECT method,path,query,body_preview FROM api_probe")
-	if err != nil {
-		t.Fatal(err)
+	logged := output.String()
+	if !strings.Contains(logged, "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10") {
+		t.Fatalf("log misses original URI: %s", logged)
 	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var method, path, query, body string
-		if err := rows.Scan(&method, &path, &query, &body); err != nil {
-			t.Fatal(err)
-		}
-		n++
-		if method != "POST" || path != "/Users/canary-path/Unimplemented" || body != "[OMITTED]" || query != "token=canary-query&canary-key=x&Limit=10" {
-			t.Fatalf("persisted metadata differs %q %q %q %q", method, path, query, body)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 || len(a.probeSeen) != 1 || !strings.Contains(output.String(), "/Users/canary-path/Unimplemented?token=canary-query&canary-key=x&Limit=10") || strings.Contains(output.String(), "canary-body-read-error") {
-		t.Fatalf("rows=%d seen=%d log contains canary=%t", n, len(a.probeSeen), strings.Contains(output.String(), "canary"))
-	}
-	// Even pre-filled legacy or synthetic keys cannot grow an already full map.
-	for i := 0; len(a.probeSeen) < 128; i++ {
-		a.probeSeen[fmt.Sprint(i)] = probeSeenEntry{seenAt: time.Now()}
-	}
-	req := httptest.NewRequest("GET", "/System/AnotherUnimplemented", nil)
-	r.ServeHTTP(httptest.NewRecorder(), req)
-	if len(a.probeSeen) != 128 {
-		t.Fatalf("map exceeded cap: %d", len(a.probeSeen))
+	if strings.Contains(logged, "canary-body-read-error") {
+		t.Fatalf("body was read: %s", logged)
 	}
 }
 

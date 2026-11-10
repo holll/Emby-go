@@ -1639,6 +1639,9 @@ func (a *App) respondItemsWithFields(c *gin.Context, ms []store.Movie, total, st
 		// b 交给缓存后只读使用，因此可以让缓存直接持有这块内存（P2-5）。
 		a.cachePut("items:"+cacheKey, b, 15*time.Second)
 	}
+	// 列表刚返回的这批海报是墙页马上要拉的图：后台先把 360 档位生成好，
+	// 浏览器随后请求时直接命中磁盘缓存（只是优化，队列满/失败都静默跳过）。
+	a.prewarmThumbnails(ms)
 	respondMediaJSON(c, b)
 }
 

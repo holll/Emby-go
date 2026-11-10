@@ -352,70 +352,18 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 	if got := nativeUpgradeSnapshot(t, dbPath); !reflect.DeepEqual(got, baseline) {
 		t.Fatalf("seeded old API verification changed business/auth/history rows:\nwant=%v\ngot=%v", baseline, got)
 	}
-	// Run the actual backup CLI against the stopped old-schema DB. Leaving
-	// artwork flags absent verifies the CLI defaults, not just backup.Options.
-	// Config, STRM and ordinary posters are supplemental manual materials.
-	sourceDB, err := os.ReadFile(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backupBinary := filepath.Join(root, "embybackup")
-	if out, err := exec.Command("go", "build", "-o", backupBinary, "../embybackup").CombinedOutput(); err != nil {
-		t.Fatalf("build backup CLI: %v\n%s", err, out)
-	}
-	backupRoot := filepath.Join(root, "backups")
-	out, err := exec.Command(backupBinary, "--db", dbPath, "--out", backupRoot, "--retain", "1").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "NFO 2 个，额外背景图 2 个") || strings.Contains(string(out), "已清理旧备份:") {
-		t.Fatalf("backup CLI: %v\n%s", err, out)
-	}
-	entries, err := os.ReadDir(backupRoot)
-	if err != nil || len(entries) != 1 || !entries[0].IsDir() {
-		t.Fatalf("backup CLI output entries=%v error=%v", entries, err)
-	}
-	savedDir := filepath.Join(backupRoot, entries[0].Name())
-	savedDatabase := filepath.Join(savedDir, "db.sqlite")
-	if got, err := os.ReadFile(dbPath); err != nil || !bytes.Equal(got, sourceDB) {
-		t.Fatalf("backup changed source DB bytes: %v", err)
-	}
-	if got := nativeUpgradeSnapshot(t, savedDatabase); !reflect.DeepEqual(got, baseline) {
-		t.Fatalf("backup business/auth/history rows=%v want=%v", got, baseline)
-	}
-	db, err = sql.Open("sqlite", "file:"+savedDatabase+"?mode=ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&schema); err != nil || schema != 16 {
-		t.Fatalf("backup must preserve old schema: version=%d error=%v", schema, err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	backupFiles := map[string]string{
-		dbPath:                               savedDatabase,
-		nfoPath:                              filepath.Join(savedDir, "nfo", "lib-1", "ABC-123.nfo"),
-		filepath.Join(private, "hidden.nfo"): filepath.Join(savedDir, "nfo", "lib-2", "hidden.nfo"),
-		backdropPath:                         filepath.Join(savedDir, "extra-backdrops", "lib-1", "extrafanart", "fanart2.jpg"),
-		privateBackdropPath:                  filepath.Join(savedDir, "extra-backdrops", "lib-2", "extrafanart", "fanart1.jpg"),
-	}
+	// Preserve the stopped old database and matching files directly in the fixture.
+	// This tests binary/schema rollback, not a removed archive command.
 	bundle := make(map[string][]byte, len(assets)+2)
 	for path, data := range assets {
 		bundle[path] = data
 	}
-	bundle[configPath], err = os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for path, artifact := range backupFiles {
-		data, err := os.ReadFile(artifact)
+	for _, path := range []string{dbPath, configPath} {
+		bundle[path], err = os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if path != dbPath && !bytes.Equal(data, assets[path]) {
-			t.Fatalf("backup asset differs from source: %s", artifact)
-		}
-		bundle[path] = data
 	}
-	t.Logf("actual backup CLI: schema=%d NFO=2 extra-backdrops=2; config/STRM/poster are supplemental, NOT official artifact or online-WAL evidence", schema)
 	for run := range 2 {
 		if id := nativeUpgradeStartStop(t, current, root, configPath, base, currentFixture.Version, verifyAPI); id != serverID {
 			t.Fatalf("server identity changed after upgrade/restart %d: %q -> %q", run, serverID, id)
@@ -429,7 +377,7 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 		t.Fatal(err)
 	}
 	var extras, marks string
-	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&schema); err != nil || schema != 20 {
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&schema); err != nil || schema != 22 {
 		t.Fatalf("upgraded schema=%d error=%v", schema, err)
 	}
 	if err := db.QueryRow("SELECT extra_backdrops,auto_marks FROM movies WHERE id=1").Scan(&extras, &marks); err != nil || extras != "[]" || marks != "[]" {
@@ -460,12 +408,12 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 	}
 	// These legacy columns were absent from the old ten-column snapshot.
 	// Prove they are now observed, and that matching restore discards these
-	// deliberate post-backup writes rather than just accepting the old binary.
+	// deliberate post-snapshot writes rather than just accepting the old binary.
 	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("UPDATE movies SET original_title='Post-backup change',runtime_seconds=999 WHERE id=1"); err != nil {
+	if _, err := db.Exec("UPDATE movies SET original_title='Post-snapshot change',runtime_seconds=999 WHERE id=1"); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -473,15 +421,15 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 		t.Fatal(err)
 	}
 	if reflect.DeepEqual(nativeUpgradeSnapshot(t, dbPath), baseline) {
-		t.Fatal("snapshot missed post-backup legacy movie mutations")
+		t.Fatal("snapshot missed post-snapshot legacy movie mutations")
 	}
-	// Simulate post-backup file/config writes as well.
+	// Simulate post-snapshot file/config writes as well.
 	extraPath := filepath.Join(media, "extrafanart", "fanart99.jpg")
 	if err := os.WriteFile(extraPath, poster.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{source, nfoPath, posterPath, configPath, backdropPath} {
-		if err := os.WriteFile(path, []byte("post-backup mutation"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte("post-snapshot mutation"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -495,12 +443,6 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 		}
 	}
 	for path, data := range bundle {
-		if artifact, ok := backupFiles[path]; ok {
-			data, err = os.ReadFile(artifact)
-			if err != nil || !bytes.Equal(data, bundle[path]) {
-				t.Fatalf("backup artifact changed before restore: %s: %v", artifact, err)
-			}
-		}
 		if err := os.WriteFile(path, data, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -510,7 +452,7 @@ func nativeBinaryUpgradeAndMatchingRestore(t *testing.T, previous, oldVersion, o
 		}
 	}
 	if _, err := os.Stat(extraPath); !os.IsNotExist(err) {
-		t.Fatalf("post-backup resource remains: %v", err)
+		t.Fatalf("post-snapshot resource remains: %v", err)
 	}
 	if got := nativeUpgradeSnapshot(t, dbPath); !reflect.DeepEqual(got, baseline) {
 		t.Fatalf("restored business state=%v want=%v", got, baseline)

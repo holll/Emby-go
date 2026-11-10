@@ -242,12 +242,14 @@ func TestStabilityLiveHTTPWorkflow(t *testing.T) {
 	keyID := key["id"].(string)
 	oldKey := key["key"].(string)
 	etag := fmt.Sprintf(`"ak-%s-1"`, strings.TrimPrefix(keyID, "ak_"))
-	rotated := request("POST", "/api/admin/apikeys/"+keyID+"/rotate", admin, map[string]any{"current_password": password, "reason": "stability integration"}, 200, map[string]string{"If-Match": etag})
+	rotated := request("POST", "/api/admin/apikeys/"+keyID+"/rotate", admin, map[string]any{"reason": "stability integration"}, 200, map[string]string{"If-Match": etag})
 	request("GET", "/api/admin/libraries", oldKey, nil, 401)
 	newKey := rotated["key"].(string)
-	request("GET", "/api/admin/libraries", newKey, nil, 200)
+	// 2026-11-10 起 API 密钥只放行 Emby 兼容接口，管理面必须用交互会话。
+	request("GET", "/Items?Limit=1", newKey, nil, 200)
+	request("GET", "/api/admin/libraries", newKey, nil, http.StatusForbidden)
 	request("POST", "/api/auth/logout", admin, nil, http.StatusNoContent)
 	request("GET", "/api/admin/libraries", admin, nil, 401)
-	request("GET", "/api/admin/libraries", newKey, nil, 200)
+	request("GET", "/Items?Limit=1", newKey, nil, 200)
 	t.Log("real HTTP: initialize/login → scan → grant/revoke/cache → playback/stop idempotency → incremental → failed/retried translation → key rotation/logout")
 }

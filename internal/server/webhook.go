@@ -216,5 +216,6 @@ func (a *App) notifyMovieDeleted(c *gin.Context, movie store.Movie) {
 	started := time.Now()
 	result := sender.Send(a.rootCtx, event)
 	c.Header("X-Webhook-Status", result.Status)
+	a.recordWebhookDeliveries(event, result)
 	logWebhookDelivery(event, result, time.Since(started))
 }

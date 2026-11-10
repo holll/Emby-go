@@ -165,15 +165,12 @@ const META = {
   libraries: { title: '媒体库', crumb: 'Archive / Libraries' },
   items: { title: '媒体墙', crumb: 'Archive / Wall' },
   settings: { title: '设置', crumb: 'Archive / Settings' },
-  activity: { title: '活动记录', crumb: 'Archive / Activity' },
+  firewall: { title: '防火墙', crumb: 'Archive / Firewall' },
   logs: { title: '运行日志', crumb: 'Archive / Logs' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   tasks: { title: '任务中心', crumb: 'Archive / Tasks' },
-  diagnostics: { title: '诊断', crumb: 'Archive / Diagnostics' },
   scrape: { title: '刮削', crumb: 'Archive / Scrape' },
-  translate: { title: '独立翻译', crumb: 'Archive / Translate' },
-  probe: { title: '接口探针', crumb: 'Archive / Probe' },
-  security: { title: '访问安全', crumb: 'Archive / Security' }
+  translate: { title: '独立翻译', crumb: 'Archive / Translate' }
 };
 
 function setMeta(name) {
@@ -210,6 +207,9 @@ async function pageOverview() {
     apiRequest: api,
     isCurrent: () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity
   });
+  const statusHost = document.createElement('div');
+  content.appendChild(statusHost);
+  await renderServiceStatus(statusHost, gen, identity);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
@@ -226,44 +226,41 @@ async function pageLibraries() {
   const total = data.total ?? items.length;
   content.innerHTML = `
     <section class="panel">
-      <div class="panel-head"><h2>媒体库</h2><span class="hint" style="margin:0">共 ${esc(total)} 个 · 顺序即 Emby 客户端里的库顺序</span></div>
-      ${items.length ? `
-        <div class="table-wrap library-table"><table>
-          <thead><tr>
-            <th style="width:88px">顺序</th>
-            <th>媒体库</th>
-            <th>路径</th>
-            <th class="lib-id">ID</th>
-            <th style="text-align:right">操作</th>
-          </tr></thead>
-          <tbody>${items.map((item, index) => `<tr>
-            <td class="library-order-cell"><div class="lib-order">
-              <button class="icon-btn" data-lib-move="up" data-lib="${esc(item.Id)}" title="上移"${index === 0 ? ' disabled' : ''}>${icon('arrow-up')}</button>
-              <button class="icon-btn" data-lib-move="down" data-lib="${esc(item.Id)}" title="下移"${index === items.length - 1 ? ' disabled' : ''}>${icon('arrow-down')}</button>
-            </div></td>
-            <td class="library-name-cell"><div class="lib-cell">
-              ${item.cover
-                ? `<img class="lib-cover" loading="lazy" src="${esc(item.cover)}?maxWidth=120" alt="">`
-                : `<span class="lib-cover-fallback">${icon('film')}</span>`}
-              <div>
-                <strong class="title">${esc(item.Name)}</strong>
-                <span class="sub"><span class="lib-count">${esc(item.count ?? 0)}<small>部影片</small></span></span>
-              </div>
-            </div></td>
-            <td class="mono library-path-cell"><span class="lib-path">${esc(item.Path)}</span></td>
-            <td class="num lib-id">${esc(item.Id)}</td>
-            <td class="library-actions-cell"><div class="row-actions library-actions">
-              <button class="btn btn-sm" data-lib-cover="${esc(item.Id)}" title="上传封面图片">${icon('image')}<span>封面</span></button>
-              ${item.cover ? `<button class="btn btn-sm" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}<span>移除封面</span></button>` : ''}
-              ${me?.is_admin ? `<button type="button" class="btn btn-sm library-sprite-open" data-lib-sprites="${esc(item.Id)}" aria-haspopup="dialog" aria-controls="library-sprite-settings">预览设置</button>` : ''}
-              <button class="btn btn-sm" data-lib-scan="${esc(item.Id)}" title="仅扫描该媒体库">${icon('refresh')}<span>扫描</span></button>
-              <button class="btn btn-sm btn-danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}<span>删除索引</span></button>
-            </div></td>
-          </tr>`).join('')}</tbody>
-        </table></div>` : empty('还没有媒体库', '先在下方登记一个存放 .strm 的目录。')}
+      <div class="panel-head library-toolbar">
+        <div>
+          <h2>媒体库</h2>
+          <span class="hint" style="margin:0">共 ${esc(total)} 个 · 顺序即 Emby 客户端里的库顺序</span>
+        </div>
+        <button type="button" class="btn btn-accent" data-lib-add>${icon('plus')}<span>添加媒体库</span></button>
+      </div>
+      ${items.length ? `<div class="library-grid">${items.map((item, index) => `<article class="library-card">
+        <div class="library-cover">${item.cover
+          ? `<img loading="lazy" width="480" height="270" src="${esc(item.cover)}?maxWidth=480" alt="">`
+          : `<span class="library-cover-fallback">${icon('film')}</span>`}</div>
+        <div class="library-card-body">
+          <h3 class="library-title">${esc(item.Name)}</h3>
+          <p class="library-meta"><span class="library-count">${esc(item.count ?? 0)} 部影片</span><span class="library-id mono">ID ${esc(item.Id)}</span></p>
+          <p class="library-path mono" title="${esc(item.Path)}">${esc(item.Path)}</p>
+        </div>
+        <div class="library-card-actions">
+          <div class="lib-order">
+            <button class="icon-btn" data-lib-move="up" data-lib="${esc(item.Id)}" title="上移" aria-label="上移「${esc(item.Name)}」"${index === 0 ? ' disabled' : ''}>${icon('arrow-up')}</button>
+            <button class="icon-btn" data-lib-move="down" data-lib="${esc(item.Id)}" title="下移" aria-label="下移「${esc(item.Name)}」"${index === items.length - 1 ? ' disabled' : ''}>${icon('arrow-down')}</button>
+          </div>
+          <div class="library-actions">
+            <button class="btn btn-sm" data-lib-cover="${esc(item.Id)}" title="上传封面图片">${icon('image')}<span>封面</span></button>
+            ${item.cover ? `<button class="btn btn-sm" data-lib-cover-clear="${esc(item.Id)}" title="移除封面（回退自动封面）">${icon('x')}<span>移除封面</span></button>` : ''}
+            ${me?.is_admin ? `<button type="button" class="btn btn-sm library-sprite-open" data-lib-sprites="${esc(item.Id)}" aria-haspopup="dialog" aria-controls="library-sprite-settings">预览设置</button>` : ''}
+            <button class="btn btn-sm" data-lib-scan="${esc(item.Id)}" title="仅扫描该媒体库">${icon('refresh')}<span>扫描</span></button>
+          </div>
+          <div class="library-actions library-danger">
+            <button class="btn btn-sm btn-danger" data-lib-delete="${esc(item.Id)}" title="删除媒体库索引（不删文件）">${icon('trash')}<span>删除索引</span></button>
+          </div>
+        </div>
+      </article>`).join('')}</div>` : empty('还没有媒体库', '先在下方登记一个存放 .strm 的目录。')}
       <dialog id="library-sprite-settings" class="library-sprite-dialog" aria-label="媒体库视频预览设置"><div class="library-sprite-dialog-head"><h2>视频预览设置</h2><button type="button" class="btn" data-library-sprite-close aria-label="关闭视频预览设置">关闭</button></div><div data-library-sprite-body></div></dialog>
     </section>
-    <section class="panel">
+    <section class="panel" id="library-add-panel">
       <h2>添加媒体库</h2>
       <form id="library-form" class="field-grid">
         <div class="field"><label for="lib-name">名称</label><input id="lib-name" name="Name" placeholder="如 AV / FC2" required></div>
@@ -298,6 +295,11 @@ async function pageLibraries() {
     spriteSettings.showModal();
     closeButton.focus({ preventScroll: true });
   }));
+  document.querySelector('[data-lib-add]')?.addEventListener('click', () => {
+    const panel = document.querySelector('#library-add-panel');
+    panel?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    document.querySelector('#lib-name')?.focus({ preventScroll: true });
+  });
   document.querySelector('#library-form').addEventListener('submit', async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target));
@@ -1466,54 +1468,161 @@ function openPlayer(item) {
 }
 
 /* ---------------------------------------------------------------- 设置 */
-// 活动记录页 = 登录/播放审计（只读，管理员可见；保留 90 天且最多 5 万条）。
-let activityFilters = { ip: '', result: 'all' }, activityRender = 0;
-async function pageActivity() {
-  const gen = pageGen, identity = token, render = ++activityRender;
-  const current = () => gen === pageGen && render === activityRender && identity === token && localStorage.getItem('emby_token') === identity;
+// 防火墙页 = IP 黑名单 + 登录记录 + 播放记录（只读审计，管理员可见）。
+// 黑名单块仍由 security.js 的 mountIPBlocklist 渲染，登录/播放两块在这里分页与合并。
+const FIREWALL_PAGE_SIZE = 20;
+let firewallFilters = { ip: '', result: 'all' };
+let firewallLoginPage = 0, firewallPlayPage = 0;
+let firewallRender = 0;
+
+const playbackKindText = kind => ({ playing: '播放中', progress: '进度', stopped: '停止' }[kind] || kind || '—');
+// position_ticks 是 Emby 的 100 纳秒刻度，10,000,000 ticks = 1 秒。没有总时长就不算百分比。
+const ticksToClock = ticks => {
+  const seconds = Math.floor(Math.max(0, Number(ticks) || 0) / 10000000);
+  if (!seconds) return '—';
+  const pad = value => String(value).padStart(2, '0');
+  return `${pad(Math.floor(seconds / 3600))}:${pad(Math.floor(seconds / 60) % 60)}:${pad(seconds % 60)}`;
+};
+function firewallPager(id, page, total, label) {
+  const pages = Math.max(1, Math.ceil(total / FIREWALL_PAGE_SIZE));
+  return `<div class="pager" data-pager="${id}"><button type="button" class="btn btn-sm" data-page-step="-1"${page <= 0 ? ' disabled' : ''}>上一页</button><span class="hint" style="margin:0">第 ${page + 1} / ${pages} 页 · 共 ${total} 条${label || ''}</span><button type="button" class="btn btn-sm" data-page-step="1"${page + 1 >= pages ? ' disabled' : ''}>下一页</button></div>`;
+}
+
+async function pageFirewall() {
+  const gen = pageGen, identity = token, render = ++firewallRender;
+  const current = () => gen === pageGen && render === firewallRender && identity === token && localStorage.getItem('emby_token') === identity;
+  stopSecurity();
   if (!me || !me.is_admin) {
-    content.innerHTML = `<section class="panel">${empty('仅管理员可用', '活动记录只对管理员开放。')}</section>`;
+    content.innerHTML = `<section class="panel">${empty('仅管理员可用', '防火墙只对管理员开放。')}</section>`;
     return;
   }
-  const query = new URLSearchParams({ limit: '50', result: activityFilters.result });
-  if (activityFilters.ip) query.set('ip', activityFilters.ip);
-  const [logins, plays] = await Promise.all([
-    api('/login-events?' + query.toString()), api('/playback-events?limit=50')
-  ]);
-  if (!current()) return;
   content.innerHTML = `
-    <section class="panel" aria-labelledby="audit-title">
-      <div class="panel-head"><h2 id="audit-title">活动记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="audit-refresh" class="btn btn-sm">刷新</button></div>
-      <h3 style="margin:12px 0 6px">登录记录</h3>
-      <form id="audit-filter" class="field-grid audit-filter"><div class="field"><label for="audit-ip">来源 IP（精确匹配）</label><input id="audit-ip" type="text" inputmode="text" autocomplete="off" placeholder="IPv4 或 IPv6；留空为全部" value="${esc(activityFilters.ip)}"></div><div class="field"><label for="audit-result">登录结果</label><select id="audit-result">${[['all','全部结果'],['success','成功'],['failed','失败']].map(([value,text]) => `<option value="${value}"${activityFilters.result === value ? ' selected' : ''}>${text}</option>`).join('')}</select></div><div class="form-foot"><button class="btn" type="submit">应用筛选</button><button class="btn" id="audit-reset" type="button">清除筛选</button></div></form>
-      <p class="hint">仅筛选登录记录，由服务器精确匹配 IP；显示最新最多 50 条。播放记录不受此筛选影响。</p><p id="audit-error" role="alert" hidden></p>
-      ${(logins.events || []).length ? `<div class="table-wrap audit-table"><table>
-        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th></tr></thead>
-        <tbody>${logins.events.map(e => `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.name || '—')}</td><td data-label="来源 IP" class="mono">${esc(e.ip || '—')}</td><td data-label="结果">${e.success ? '成功' : '失败'}</td></tr>`).join('')}</tbody>
-      </table></div>` : empty('暂无登录记录', '登录成功与失败都会记录。')}
-      <h3 style="margin:18px 0 6px">播放记录</h3>
-      ${(plays.events || []).length ? `<div class="table-wrap audit-table"><table>
-        <thead><tr><th>时间</th><th>账户</th><th>影片</th><th>事件</th><th>位置</th></tr></thead>
-        <tbody>${plays.events.map(e => `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.user_name || '—')}</td><td data-label="影片">${esc(e.movie_title || '#' + e.movie_id)}</td><td data-label="事件">${esc(e.kind)}</td><td data-label="位置" class="mono">${esc(String(e.position_ticks))}</td></tr>`).join('')}</tbody>
-      </table></div>` : empty('暂无播放记录', '播放/进度/停止事件会记录在这里。')}
+    <div id="firewall-blocklist"></div>
+    <section class="panel" aria-labelledby="firewall-login-title">
+      <div class="panel-head"><h2 id="firewall-login-title">登录记录</h2><span class="hint" style="margin:0">只读 · 保留 90 天且最多 5 万条</span><button id="firewall-login-refresh" class="btn btn-sm" type="button">${icon('refresh')} 刷新</button></div>
+      <form id="firewall-login-filter" class="field-grid audit-filter">
+        <div class="field"><label for="firewall-login-ip">来源 IP（精确匹配）</label><input id="firewall-login-ip" type="text" inputmode="text" autocomplete="off" placeholder="IPv4 或 IPv6；留空为全部" value="${esc(firewallFilters.ip)}"></div>
+        <div class="field"><label for="firewall-login-result">登录结果</label><select id="firewall-login-result">${[['all', '全部结果'], ['success', '成功'], ['failed', '失败']].map(([value, text]) => `<option value="${value}"${firewallFilters.result === value ? ' selected' : ''}>${text}</option>`).join('')}</select></div>
+        <div class="form-foot"><button class="btn" type="submit">应用筛选</button><button class="btn" id="firewall-login-reset" type="button">清除筛选</button></div>
+      </form>
+      <p class="hint">IP 为精确匹配，不支持模糊查询或 CIDR；筛选与翻页同时生效，每页 ${FIREWALL_PAGE_SIZE} 条。</p>
+      <p id="firewall-login-error" role="alert" hidden></p>
+      <div id="firewall-login-body"></div>
+    </section>
+    <section class="panel" aria-labelledby="firewall-play-title">
+      <div class="panel-head"><h2 id="firewall-play-title">播放记录</h2><span class="hint" style="margin:0">同一用户同一影片合并为一行 · 保留 90 天</span><button id="firewall-play-refresh" class="btn btn-sm" type="button">${icon('refresh')} 刷新</button></div>
+      <div id="firewall-play-body"></div>
     </section>`;
-  document.querySelector('#audit-refresh')?.addEventListener('click', () => refreshPage(pageActivity, gen));
-  const form = document.querySelector('#audit-filter');
+  firewallStop = window.mountIPBlocklist(content.querySelector('#firewall-blocklist'), { apiRequest: api, isCurrent: current });
+
+  const loginBody = content.querySelector('#firewall-login-body'), playBody = content.querySelector('#firewall-play-body');
+  const loginError = content.querySelector('#firewall-login-error');
+
+  let loginSeq = 0, playSeq = 0;
+  const renderLogins = async () => {
+    const seq = ++loginSeq, page = firewallLoginPage;
+    const query = new URLSearchParams({ start: String(page * FIREWALL_PAGE_SIZE), limit: String(FIREWALL_PAGE_SIZE), result: firewallFilters.result });
+    if (firewallFilters.ip) query.set('ip', firewallFilters.ip);
+    let data, blocklist;
+    try { [data, blocklist] = await Promise.all([api('/login-events?' + query.toString()), api('/security/ip-blocklist')]); }
+    catch (error) { if (current() && seq === loginSeq) throw error; return; }
+    if (!current() || seq !== loginSeq) return;
+    const blocked = new Set((blocklist.items || []).map(item => item.network));
+    const events = data.events || [], total = Number(data.total) || 0;
+    if (page > 0 && !events.length) { firewallLoginPage = 0; return renderLogins(); }
+    loginBody.innerHTML = `${events.length ? `<div class="table-wrap audit-table"><table>
+        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th><th>操作</th></tr></thead>
+        <tbody>${events.map(e => {
+          const ip = String(e.ip || '').trim(), isBlocked = ip && blocked.has(ip);
+          return `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.name || '—')}</td><td data-label="来源 IP" class="mono">${esc(ip || '—')}</td><td data-label="结果">${e.success ? '成功' : '失败'}</td><td data-label="操作">${ip ? `<button type="button" class="btn btn-sm" data-block-ip="${esc(ip)}"${isBlocked ? ' disabled aria-disabled="true"' : ''}>${isBlocked ? '已拉黑' : '拉黑'}</button>` : '—'}</td></tr>`;
+        }).join('')}</tbody>
+      </table></div>${firewallPager('login', page, total, '')}` : empty('暂无登录记录', '登录成功与失败都会记录。')}`;
+  };
+
+  const renderPlays = async () => {
+    const seq = ++playSeq, page = firewallPlayPage;
+    let data;
+    try { data = await api(`/playback-events?start=${page * FIREWALL_PAGE_SIZE}&limit=${FIREWALL_PAGE_SIZE}`); }
+    catch (error) { if (current() && seq === playSeq) throw error; return; }
+    if (!current() || seq !== playSeq) return;
+    const items = data.items || [], total = Number(data.total) || 0;
+    if (page > 0 && !items.length) { firewallPlayPage = 0; return renderPlays(); }
+    playBody.innerHTML = `${items.length ? `<div class="table-wrap audit-table"><table>
+        <thead><tr><th>影片</th><th>账户</th><th>累计次数</th><th>最近播放</th><th>最近进度</th><th>最近事件</th></tr></thead>
+        <tbody>${items.map(e => `<tr><td data-label="影片">${esc(e.movie_title || '#' + e.movie_id)}</td><td data-label="账户">${esc(e.user_name || '已删除用户')}</td><td data-label="累计次数" class="mono">${esc(e.play_count)}</td><td data-label="最近播放" class="mono">${esc(e.last_at || '—')}</td><td data-label="最近进度" class="mono">${esc(ticksToClock(e.position_ticks))}</td><td data-label="最近事件">${esc(playbackKindText(e.last_kind))}</td></tr>`).join('')}</tbody>
+      </table></div>${firewallPager('play', page, total, '（合并后）')}` : empty('暂无播放记录', '播放/进度/停止事件会合并记录在这里。')}`;
+  };
+
+  const load = async () => {
+    loginError.hidden = true;
+    try { await Promise.all([renderLogins(), renderPlays()]); }
+    catch (error) {
+      if (!current()) return;
+      loginError.hidden = false;
+      loginError.textContent = error.status === 400 ? '请输入有效的 IPv4 或 IPv6 地址；不支持模糊匹配或 CIDR。' : `读取失败：${error.message || '请重试'}`;
+    }
+  };
+  await load();
+
+  const form = content.querySelector('#firewall-login-filter');
   const apply = async reset => {
     if (!current()) return;
     const controls = [...form.querySelectorAll('button')];
-    activityFilters = reset ? { ip: '', result: 'all' } : { ip: document.querySelector('#audit-ip').value.trim(), result: document.querySelector('#audit-result').value };
-    controls.forEach(node => { node.disabled = true; });
-    try { await pageActivity(); if (gen === pageGen) document.querySelector('#audit-ip')?.focus({ preventScroll: true }); }
-    catch (error) {
-      if (gen !== pageGen || identity !== token || localStorage.getItem('emby_token') !== identity || !form.isConnected) return;
-      const warning = document.querySelector('#audit-error'); warning.hidden = false;
-      warning.textContent = error.status === 400 ? '请输入有效的 IPv4 或 IPv6 地址；不支持模糊匹配或 CIDR。' : '筛选读取失败，当前列表未更新，请重试。';
-      controls.forEach(node => { node.disabled = false; });
+    firewallFilters = reset ? { ip: '', result: 'all' } : { ip: content.querySelector('#firewall-login-ip').value.trim(), result: content.querySelector('#firewall-login-result').value };
+    if (reset) {
+      content.querySelector('#firewall-login-ip').value = '';
+      content.querySelector('#firewall-login-result').value = 'all';
     }
+    firewallLoginPage = 0;
+    controls.forEach(node => { node.disabled = true; });
+    try { await load(); if (gen === pageGen) content.querySelector('#firewall-login-ip')?.focus({ preventScroll: true }); }
+    catch (error) {
+      if (!current()) return;
+      loginError.hidden = false;
+      loginError.textContent = error.status === 400 ? '请输入有效的 IPv4 或 IPv6 地址；不支持模糊匹配或 CIDR。' : '筛选读取失败，当前列表未更新，请重试。';
+    } finally { controls.forEach(node => { node.disabled = false; }); }
   };
   form.addEventListener('submit', event => { event.preventDefault(); void apply(false); });
-  document.querySelector('#audit-reset').addEventListener('click', () => { void apply(true); });
+  content.querySelector('#firewall-login-reset').addEventListener('click', () => { void apply(true); });
+  content.querySelector('#firewall-login-refresh').addEventListener('click', () => { void load(); });
+  content.querySelector('#firewall-play-refresh').addEventListener('click', async () => { if (current()) { try { await renderPlays(); } catch (error) { toast(error.message || '读取失败', 'error'); } } });
+
+  loginBody.addEventListener('click', async event => {
+    const button = event.target.closest('button[data-block-ip]');
+    if (button) {
+      if (!current() || button.disabled) return;
+      const ip = button.dataset.blockIp;
+      button.disabled = true;
+      try {
+        await api('/security/ip-blocklist', { method: 'POST', body: JSON.stringify({ network: ip }) });
+        if (!current()) return;
+        toast(`${ip} 已加入黑名单`, 'ok');
+        if (firewallStop) { firewallStop(); firewallStop = null; }
+        if (current()) firewallStop = window.mountIPBlocklist(content.querySelector('#firewall-blocklist'), { apiRequest: api, isCurrent: current });
+        await renderLogins();
+      } catch (error) {
+        if (!current()) return;
+        button.disabled = false;
+        toast(error.status === 409 ? '该地址与已有黑名单规则冲突，请检查规则表。' : `拉黑失败：${error.message || '请重试'}`, 'error');
+      }
+      return;
+    }
+    const step = event.target.closest('[data-pager="login"] [data-page-step]');
+    if (step && !step.disabled) {
+      const next = firewallLoginPage + Number(step.dataset.pageStep);
+      if (next < 0) return;
+      firewallLoginPage = next;
+      try { await renderLogins(); } catch (error) { if (current()) toast(error.message || '读取失败', 'error'); }
+    }
+  });
+  playBody.addEventListener('click', async event => {
+    const step = event.target.closest('[data-pager="play"] [data-page-step]');
+    if (!step || step.disabled) return;
+    const next = firewallPlayPage + Number(step.dataset.pageStep);
+    if (next < 0 || !current()) return;
+    firewallPlayPage = next;
+    try { await renderPlays(); } catch (error) { if (current()) toast(error.message || '读取失败', 'error'); }
+  });
 }
 
 // 设置页 = 只读服务设置 + API 密钥管理（原独立的「API 密钥」页已并入这里）。
@@ -1549,21 +1658,13 @@ async function pageSettings() {
     renderSelfPassword();
     return;
   }
-  const [s, keyData, recovery, users, libs] = await Promise.all([
-    api('/settings'), api('/apikeys'), api('/recovery'), api('/users'), api('/libraries')
+  const [keyData, recovery, users, libs] = await Promise.all([
+    api('/apikeys'), api('/recovery'), api('/users'), api('/libraries')
   ]);
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
-  const fields = [
-    ['监听地址', s.listen],
-    ['数据库', s.db_path],
-    ['缓存后端', s.cache + (s.redis_addr ? ` · ${s.redis_addr}/${s.redis_db}` : '')],
-    ['Redis 在线', s.redis_online ? '是' : '否'],
-    ['登录会话有效期', s.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : '永不过期'],
-    ['媒体信息探测', s.ffprobe_error ? `不可用：${s.ffprobe_error}` : (s.ffprobe_path ? `就绪：${s.ffprobe_path}` : '未检测（需要 ffprobe）')]
-  ];
   const keys = keyData.items || [];
   content.innerHTML = `
-    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['cache', '图片缓存'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')], ['service', '服务信息']].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
+    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['cache', '图片缓存'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')]].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
     <div class="settings-category" data-settings-panel="account">
     <section class="panel">
       <div class="panel-head"><h2>登录会话</h2></div>
@@ -1586,66 +1687,69 @@ async function pageSettings() {
     <section class="panel" aria-labelledby="users-title">
       <div class="panel-head"><h2 id="users-title">用户管理</h2><span class="hint" style="margin:0">共 ${esc(String((users.users || []).length))} 个账户 · 媒体库默认无授权</span></div>
       <div class="table-wrap"><table class="user-table">
-        <thead><tr><th>账户</th><th>角色</th><th>最后登录</th><th>媒体库授权</th><th style="text-align:right">操作</th></tr></thead>
+        <thead><tr><th>账户</th><th>角色</th><th>最后登录</th><th>媒体库授权</th><th class="user-actions-head">操作</th></tr></thead>
         <tbody>${(users.users || []).map(u => `<tr data-user-row="${u.id}">
-          <td data-label="账户"><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? ' <span class="badge">owner</span>' : ''}</td>
-          <td data-label="角色">${u.is_admin ? '管理员' : '普通用户'}</td>
-          <td data-label="最后登录" class="mono">${esc(u.last_login_at || '—')}</td>
-          <td data-label="媒体库授权"><div class="chip-row">${(libs.items || []).map(l => `<label class="check"><input type="checkbox" data-user-lib="${u.id}" value="${l.Id}"${(u.library_ids || []).includes(l.Id) ? ' checked' : ''}> ${esc(l.Name)}</label>`).join('') || '—'}</div></td>
-          <td data-label="操作"><div class="row-actions">
+          <td data-label="账户"><span class="user-identity"><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? '<span class="badge">owner</span>' : ''}</span></td>
+          <td data-label="角色"><span class="role-tag${u.is_admin ? ' is-admin' : ''}">${u.is_admin ? '管理员' : '普通用户'}</span></td>
+          <td data-label="最后登录" class="mono" title="${esc(u.last_login_at || '')}">${esc(fmtTime(u.last_login_at))}</td>
+          <td data-label="媒体库授权"><div class="check-grid">${(libs.items || []).map(l => `<label class="check"><input type="checkbox" data-user-lib="${u.id}" value="${l.Id}"${(u.library_ids || []).includes(l.Id) ? ' checked' : ''}> <span>${esc(l.Name)}</span></label>`).join('') || '—'}</div></td>
+          <td data-label="操作" class="user-actions-cell"><div class="row-actions">
             <button class="btn btn-sm" data-user-save="${u.id}">保存授权</button>
             <button class="btn btn-sm" data-user-reset="${u.id}" data-user-name="${esc(u.name)}">重置密码</button>
-            <button class="icon-btn danger" data-user-del="${u.id}" title="删除用户"${u.id === 1 ? ' disabled' : ''}>${icon('trash')}</button>
+            <button class="icon-btn danger" data-user-del="${u.id}" title="删除用户" aria-label="删除用户「${esc(u.name)}」"${u.id === 1 ? ' disabled' : ''}>${icon('trash')}</button>
           </div></td>
         </tr>`).join('')}</tbody>
       </table></div>
-      <form id="user-create-form" class="field-grid" style="margin-top:18px">
-        <div class="field"><label for="user-name">新用户名</label><input id="user-name" name="name" minlength="3" required placeholder="至少 3 个字符"></div>
-        <div class="field"><label for="user-pass">初始密码</label><input id="user-pass" name="password" type="password" minlength="9" required placeholder="至少 9 个字符"></div>
-        <div class="field"><label class="check"><input id="user-admin" name="is_admin" type="checkbox"> 管理员</label></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建用户</span></button></div>
-      </form>
-      <p class="hint">普通用户默认看不到任何媒体库；在行内勾选后点「保存授权」。删除用户会保留其播放与登录历史。</p>
+      <p class="hint user-hint">普通用户默认看不到任何媒体库；在行内勾选后点「保存授权」。删除用户会保留其播放与登录历史。</p>
+      <div class="user-create">
+        <h3 class="settings-subtitle">创建用户</h3>
+        <form id="user-create-form" class="field-grid">
+          <div class="field"><label for="user-name">新用户名</label><input id="user-name" name="name" minlength="3" required placeholder="至少 3 个字符"></div>
+          <div class="field"><label for="user-pass">初始密码</label><input id="user-pass" name="password" type="password" minlength="9" required placeholder="至少 9 个字符"></div>
+          <div class="field field-check"><label class="check"><input id="user-admin" name="is_admin" type="checkbox"> <span>管理员</span></label></div>
+          <div class="form-foot"><button class="btn btn-accent">${icon('plus')}<span>创建用户</span></button></div>
+        </form>
+      </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head"><h2>管理员 API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 全权凭据，可调用全部管理与 Emby 接口</span></div>
-      <p class="warning-block" role="note">D02 已确认：当前单用户版本中 API 密钥等同管理员权限，泄露即等于交出管理面；请仅发给可信脚本。未来多用户版本中，非管理员用户不得创建或管理 API 密钥。</p>
+    <section class="panel apikey-panel" aria-labelledby="apikey-title">
+      <div class="panel-head"><h2 id="apikey-title">Emby API 密钥</h2><span class="hint" style="margin:0">共 ${esc(keyData.total ?? keys.length)} 个 · 仅用于 Emby 兼容接口，不能访问管理面</span></div>
       ${createdAPIKey ? `<div class="warning-block" role="note">新密钥只显示这一次，请立即复制并妥善保存：
         <code id="created-key" class="mono">${esc(createdAPIKey)}</code>
         <div class="row-actions" style="margin-top:8px">
           <button class="btn btn-sm" data-copy-created="${esc(createdAPIKey)}">复制新密钥</button>
           <button class="btn btn-sm" id="dismiss-created-key">我已保存</button>
         </div></div>` : ''}
+      <h3 class="apikey-subtitle">已有密钥</h3>
       ${keys.length ? `
-        <div class="table-wrap"><table>
+        <div class="table-wrap apikey-table"><table>
           <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>版本</th><th>最近轮转</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${keys.map(item => `<tr>
-            <td><strong class="title">${esc(item.name || '—')}</strong></td>
-            <td class="mono">${esc(item.key_prefix || '—')}…</td>
-            <td class="mono">${esc(item.created_at || '—')}</td>
-            <td class="mono">v${esc(item.version || 1)}</td>
-            <td class="mono">${esc(item.rotated_at || '—')}</td>
-            <td><div class="row-actions">
-              <button class="icon-btn" data-key-rotate="${esc(item.id)}" data-version="${esc(item.version || 1)}" data-name="${esc(item.name || '')}" title="重设/轮转密钥">${icon('refresh')}</button>
-              <button class="icon-btn danger" data-key-delete="${esc(item.id)}" title="删除密钥">${icon('trash')}</button>
+            <td data-label="名称"><strong class="title">${esc(item.name || '—')}</strong></td>
+            <td data-label="密钥" class="mono">${esc(item.key_prefix || '—')}…</td>
+            <td data-label="创建时间" class="mono">${esc(item.created_at || '—')}</td>
+            <td data-label="版本" class="mono">v${esc(item.version || 1)}</td>
+            <td data-label="最近轮转" class="mono">${esc(item.rotated_at || '—')}</td>
+            <td data-label="操作"><div class="row-actions apikey-actions">
+              <button class="btn btn-sm" data-key-rotate="${esc(item.id)}" data-version="${esc(item.version || 1)}" data-name="${esc(item.name || '')}" title="重设/轮转密钥">${icon('refresh')}<span>轮转</span></button>
+              <button class="btn btn-sm danger" data-key-delete="${esc(item.id)}" title="删除密钥">${icon('trash')}<span>删除</span></button>
             </div></td>
           </tr>`).join('')}</tbody>
-        </table></div>` : empty('还没有管理员 API 密钥', '在下方创建后即可用 X-Emby-Token 调用全部接口。')}
-      <form id="key-rotate-form" class="field-grid" style="margin-top:18px" hidden>
-        <p class="warning-block" style="grid-column:1/-1" role="note">轮转 <strong id="key-rotate-name">该密钥</strong> 会让所有使用旧密钥的脚本/客户端立即断开；旧密钥不可找回，只能重新轮转。需要当前密码再认证。</p>
-        <div class="field"><label for="key-rotate-password">当前密码</label><input id="key-rotate-password" type="password" required autocomplete="current-password"></div>
+        </table></div>` : empty('还没有 Emby API 密钥', '在下方创建后即可用 X-Emby-Token 调用 Emby 兼容接口（如 /Users、/Items）。')}
+      <form id="key-rotate-form" class="apikey-rotate" hidden>
+        <h3 class="apikey-subtitle">轮转 <strong id="key-rotate-name">该密钥</strong></h3>
         <div class="field"><label for="key-rotate-reason">原因</label><input id="key-rotate-reason" type="text" maxlength="200" placeholder="如 forgotten / 泄露处置" required></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0">
-          <button class="btn btn-accent" type="submit">确认轮转（旧密钥立即失效）</button>
+        <div class="form-foot">
+          <button class="btn btn-accent" id="key-rotate-submit" type="submit">确认轮转（旧密钥立即失效）</button>
           <button class="btn btn-sm" id="key-rotate-cancel" type="button">取消</button>
         </div>
       </form>
-      <form id="apikey-form" class="field-grid" style="margin-top:18px">
-        <div class="field"><label for="key-name">新建管理员密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>创建</span></button></div>
+      <h3 class="apikey-subtitle">新建密钥</h3>
+      <form id="apikey-form" class="field-grid">
+        <div class="field"><label for="key-name">密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
+        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent" id="apikey-submit" type="submit">${icon('plus')}<span>创建</span></button></div>
       </form>
-      <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥即管理员凭据，请勿外泄；删除前先确认使用方。</p>
+      <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥只对 Emby 兼容接口有效，不能用于管理 API；请勿外泄，删除前先确认使用方。</p>
     </section>
     </div>
 
@@ -1683,14 +1787,6 @@ async function pageSettings() {
     </section>
     </div>
 
-    <div class="settings-category" data-settings-panel="service" hidden>
-    <section class="panel">
-      <div class="panel-head"><h2>服务设置</h2></div>
-      <div class="table-wrap"><table>
-        <tbody>${fields.map(([k, v]) => `<tr><th style="width:160px">${esc(k)}</th><td class="mono">${esc(v ?? '—')}</td></tr>`).join('')}</tbody>
-      </table></div>
-      <p class="hint">上述启动配置修改后需重启服务；通知、日志期限与图片缓存分类中的设置保存即时生效。浏览海报墙请通过 Emby 客户端连接本服务（System/Info/Public 的 ServerId 用于标识实例）。</p>
-    </section>
     </div>`;
   mountSettingsCategories(content);
   const logHost = document.querySelector('#log-settings');
@@ -1701,8 +1797,13 @@ async function pageSettings() {
   void mountImageCacheSettings(imageCacheHost, api, () => gen === pageGen && imageCacheHost.isConnected);
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
+    const submit = document.querySelector('#apikey-submit');
+    if (submit.disabled) return;
     const name = String(new FormData(event.target).get('name') || '').trim();
     const requestIdentity = token;
+    const label = submit.innerHTML;
+    submit.disabled = true;
+    submit.textContent = '创建中…';
     try {
       const created = await api('/apikeys', { method: 'POST', body: JSON.stringify({ name }) });
       if (gen !== pageGen || localStorage.getItem('emby_token') !== requestIdentity) return;
@@ -1711,7 +1812,13 @@ async function pageSettings() {
       toast('密钥已创建');
       refreshPage(pageSettings, gen);
     }
-    catch (e) { toast(e.message, 'error'); }
+    catch (e) {
+      if (gen === pageGen && localStorage.getItem('emby_token') === requestIdentity) {
+        toast(e.message, 'error');
+        submit.disabled = false;
+        submit.innerHTML = label;
+      }
+    }
   });
   const logoutAll = document.querySelector('#logout-all');
   if (logoutAll) logoutAll.addEventListener('click', async () => {
@@ -1736,31 +1843,36 @@ async function pageSettings() {
     catch { toast('复制失败，请手动选择', 'error'); }
   }));
   const rotateForm = document.querySelector('#key-rotate-form');
-  const rotatePassword = document.querySelector('#key-rotate-password');
+  const rotateReason = document.querySelector('#key-rotate-reason');
+  const rotateSubmit = document.querySelector('#key-rotate-submit');
+  const rotateCancel = document.querySelector('#key-rotate-cancel');
   let rotateTarget = null;
   document.querySelectorAll('[data-key-rotate]').forEach(button => button.addEventListener('click', () => {
+    if (rotateSubmit.disabled) return;
     rotateTarget = { id: button.dataset.keyRotate, version: Number(button.dataset.version) || 1 };
     document.querySelector('#key-rotate-name').textContent = button.dataset.name || '该密钥';
     rotateForm.hidden = false;
-    rotatePassword.value = '';
-    rotatePassword.focus();
+    rotateReason.value = '';
+    rotateReason.focus();
   }));
-  document.querySelector('#key-rotate-cancel').addEventListener('click', () => {
+  rotateCancel.addEventListener('click', () => {
+    if (rotateSubmit.disabled) return;
     rotateTarget = null;
     rotateForm.hidden = true;
-    rotatePassword.value = '';
+    rotateReason.value = '';
   });
   rotateForm.addEventListener('submit', async event => {
     event.preventDefault();
-    if (!rotateTarget) return;
+    if (!rotateTarget || rotateSubmit.disabled) return;
     const stable = String(rotateTarget.id).replace(/^ak_/, '');
     const ifMatch = `"ak-${stable}-${rotateTarget.version}"`;
-    const body = JSON.stringify({
-      current_password: rotatePassword.value,
-      reason: String(document.querySelector('#key-rotate-reason').value || '').trim()
-    });
+    const body = JSON.stringify({ reason: String(rotateReason.value || '').trim() });
     const requestIdentity = token;
     const requestGen = gen;
+    rotateSubmit.disabled = true;
+    rotateCancel.disabled = true;
+    rotateReason.disabled = true;
+    rotateSubmit.textContent = '轮转中…';
     try {
       const rotated = await api('/apikeys/' + encodeURIComponent(rotateTarget.id) + '/rotate', {
         method: 'POST', body, headers: { 'If-Match': ifMatch }
@@ -1770,12 +1882,17 @@ async function pageSettings() {
       toast('密钥已轮转，旧密钥已立即失效', 'ok');
       refreshPage(pageSettings, gen);
     } catch (e) {
+      if (requestGen !== pageGen || localStorage.getItem('emby_token') !== requestIdentity) return;
       if (e.code === 'API_KEY_VERSION_STALE') {
         toast('密钥版本已变化，已刷新列表；请确认后重新操作', 'error');
         refreshPage(pageSettings, gen);
         return;
       }
       toast(e.message, 'error');
+      rotateSubmit.disabled = false;
+      rotateCancel.disabled = false;
+      rotateReason.disabled = false;
+      rotateSubmit.textContent = '确认轮转（旧密钥立即失效）';
     }
   });
   document.querySelectorAll('[data-key-delete]').forEach(button => button.addEventListener('click', async () => {
@@ -1861,7 +1978,7 @@ async function pageTasks() {
           <button id="task-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
         </div>
       </div>
-      <p class="hint">最近 100 条任务摘要，数据库保留 500 条；扫描、探测、备份的提交入口分别在对应页面。</p>
+      <p class="hint">最近 100 条任务摘要，数据库保留 500 条；扫描、探测的提交入口分别在对应页面。</p>
       <div id="task-table"><p class="hint">加载中…</p></div>
     </section>`;
 
@@ -1878,7 +1995,7 @@ async function pageTasks() {
           <tbody>${shown.map(item => `
             <tr>
               <td class="mono">${esc(String(item.id))}</td>
-              <td>${esc(TASK_TYPE_TEXT[item.type] || item.type)}</td>
+              <td>${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}</td>
               <td><span class="badge ${esc(item.status)}">${esc(RUN_STATUS_TEXT[item.status] || item.status)}</span></td>
               <td class="mono">${esc(fmtTime(item.started_at))}</td>
               <td class="mono">${esc(fmtTime(item.ended_at))}</td>
@@ -1886,7 +2003,7 @@ async function pageTasks() {
               <td class="mono">${esc(item.error || '—')}</td>
             </tr>`).join('')}</tbody>
         </table></div>`
-      : empty('暂无任务', '执行扫描、探测或备份后，这里会出现任务摘要。');
+      : empty('暂无任务', '执行扫描或探测后，这里会出现任务摘要。');
     if (historyError) box.insertAdjacentHTML('beforeend', '<p class="hint">历史摘要暂时不可读，当前只显示本进程内的任务。</p>');
   }
 
@@ -1911,33 +2028,6 @@ async function pageTasks() {
   document.querySelector('#task-type').addEventListener('change', render);
   document.querySelector('#task-status').addEventListener('change', render);
   await load();
-}
-
-/* ---------------------------------------------------------------- 探针 */
-// 探针只在 noRoute 里落库，因此服务对这些请求的实际结果恒为 404 NOT_FOUND。
-// 不再显示 [UNMATCHED] 占位；路径已由后端脱敏，响应体从不记录。
-const PROBE_RESULT = '404 未实现';
-async function pageProbe() {
-  const gen = pageGen;
-  const data = await api('/probe');
-  if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
-  const items = data.items || [];
-  content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>未知接口探针</h2>
-        <div class="panel-actions"><button id="clear-probes" class="btn btn-sm">清空记录</button></div>
-      </div>
-      <p class="hint">记录客户端发来但本服务未注册的 Emby 请求，用于补齐端点。敏感路径片段已脱敏，查询参数与请求体不记录。上限 1000 条。</p>
-      ${items.length ? `
-        <div class="table-wrap"><table>
-          <thead><tr><th>方法</th><th>路径</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody>${items.map(item => `<tr><td><span class="protocol">${esc(item.method)}</span></td><td class="mono">${esc(item.path)}</td><td><span class="badge" title="服务实际返回 404 NOT_FOUND；响应体不记录">${PROBE_RESULT}</span></td><td class="mono">${esc(item.created_at)}</td></tr>`).join('')}</tbody>
-        </table></div>` : empty('暂无探针记录', '当客户端请求了未注册的 Emby 接口后会显示在这里。')}
-    </section>`;
-  document.querySelector('#clear-probes').addEventListener('click', async () => {
-    try { await api('/probe', { method: 'DELETE' }); toast('探针记录已清空'); refreshPage(pageProbe, gen); }
-    catch (e) { toast(e.message, 'error'); }
-  });
 }
 
 /* ---------------------------------------------------------------- 刮削 */
@@ -2632,7 +2722,7 @@ const CRON_PRESETS = [
   ['每周一 04:00', '0 4 * * 1'],
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
-const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成', backup: '固定范围备份' };
+const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成' };
 const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', interrupted: '进程重启中断', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
 let scheduledFocus = null;
@@ -2685,136 +2775,65 @@ function scheduledFormParams(kind, editing, stored, visible) {
 }
 
 
-/* ---------------------------------------------------------------- 诊断 */
-function lastBackupText(last) {
-  if (!last) return '尚未备份';
-  const result = last.result || {};
-  const when = fmtTime(last.finished_at || last.started_at);
-  const detail = last.error
-    ? ` · <span class="sub">${esc(last.error)}</span>`
-    : ` · NFO ${esc(result.nfo_count || 0)} · 缩略图 ${esc(result.extra_backdrop_count || 0)}`;
-  return `${runBadge(last.status)} · ${esc(when)}${detail}`;
-}
-
-async function pageDiagnostics() {
-  const gen = pageGen;
-  const load = async () => {
-    const [data, backup] = await Promise.all([api('/diagnostics'), api('/backup')]);
-    if (gen !== pageGen) return;
-    const app = data.app || {}, store = data.store || {}, runtime = data.runtime || {};
-    const probe = runtime.probe || {}, scrape = runtime.scrape || {};
-    const cache = data.image_cache || {}, hook = data.webhook || {}, ff = data.ffprobe || {};
-    const movies = store.movies || {}, schedTasks = store.scheduled_tasks || {};
-    const schedules = data.scheduler || [];
-    const running = value => value ? '<strong>运行中</strong>' : '空闲';
-    const probeText = probe.running
-      ? `${esc(probe.done || 0)} / ${esc(probe.total || 0)}，失败 ${esc(probe.failed || 0)}`
-      : '空闲';
-    const scrapeText = scrape.running
-      ? `${esc(scrape.kind || '')} ${esc(scrape.done || 0)} / ${esc(scrape.total || 0)}，失败 ${esc(scrape.failed || 0)}`
-      : '空闲';
-    content.innerHTML = `
-      <section class="panel">
-        <div class="panel-head"><h2>诊断证据</h2>
-          <div class="panel-actions">
-            <span class="hint" style="margin:0">生成于 ${esc(fmtTime(data.generated_at))}</span>
-            <button id="diag-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
-          </div>
+/* ---------------------------------------------------------------- 服务状态 */
+// 总览页唯一的状态面板：合并运行证据、数据量与启动配置，只读聚合。
+async function renderServiceStatus(host, gen, identity) {
+  let data, service;
+  try {
+    [data, service] = await Promise.all([api('/diagnostics'), api('/settings')]);
+  } catch (error) {
+    if (gen === pageGen) host.innerHTML = `<section class="panel" role="alert"><h2>服务状态读取失败</h2><p>${esc(error.message || String(error))}</p></section>`;
+    return;
+  }
+  if (gen !== pageGen || token !== identity) return;
+  const app = data.app || {}, store = data.store || {}, runtime = data.runtime || {};
+  const probe = runtime.probe || {}, scrape = runtime.scrape || {};
+  const cache = data.image_cache || {}, hook = data.webhook || {}, ff = data.ffprobe || {};
+  const movies = store.movies || {}, schedTasks = store.scheduled_tasks || {};
+  const running = value => value ? '<strong>运行中</strong>' : '空闲';
+  const probeText = probe.running
+    ? `${esc(probe.done || 0)} / ${esc(probe.total || 0)}，失败 ${esc(probe.failed || 0)}`
+    : '空闲';
+  const scrapeText = scrape.running
+    ? `${esc(scrape.kind || '')} ${esc(scrape.done || 0)} / ${esc(scrape.total || 0)}，失败 ${esc(scrape.failed || 0)}`
+    : '空闲';
+  const rows = [
+    ['程序版本', `<span class="mono">${esc(app.version || '')} <span class="sub">${esc(app.commit || '')}</span></span>`],
+    ['构建时间', `<span class="mono">${esc(app.build_time || '')}</span>`],
+    ['启动时间 / 已运行', `${esc(fmtTime(app.started_at))} · ${esc(fmtDuration(app.uptime_seconds || 0))}`],
+    ['运行环境', `<span class="mono">${esc(app.go_version || '')} · ${esc(app.os || '')}/${esc(app.arch || '')}</span>`],
+    ['监听地址', `<span class="mono">${esc(service.listen || '—')}</span>`],
+    ['数据库', `<span class="mono">${esc(store.path || service.db_path || '')} · ${esc(fmtSize(store.size_bytes || 0))} · schema ${esc(store.schema_version ?? '')}</span>`],
+    ['缓存后端', `${esc(service.cache || '—')}${service.redis_addr ? ` · <span class="mono">${esc(service.redis_addr)}/${esc(service.redis_db)}</span>` : ''} · Redis ${service.redis_online ? '在线' : '离线'}`],
+    ['登录会话有效期', service.session_ttl_days > 0 ? `${esc(service.session_ttl_days)} 天（使用中自动续期）` : '永不过期'],
+    ['调试模式', service.debug ? '开启（请求日志含原始 URL）' : '关闭'],
+    ['ffprobe', `<span class="mono">${esc(ff.path || '未配置')}${ff.error ? ` <span class="sub">${esc(ff.error)}</span>` : ''}</span>`],
+    ['影片', `可播放 ${esc(movies.success || 0)} · 待探测 ${esc(movies.pending || 0)} · 手动 ${esc(movies.manual || 0)}`],
+    ['媒体库 / 任务摘要', `${esc(store.libraries ?? 0)} 个库 · ${esc(store.task_records || 0)} 条任务摘要（最多保留 500 条）`],
+    ['计划任务', `${esc(schedTasks.enabled || 0)} 启用 / ${esc(schedTasks.total || 0)} 总数`],
+    ['扫描', running(runtime.scan_running)],
+    ['媒体探测', probeText],
+    ['刮削', scrapeText],
+    ['Webhook', `${esc(hook.enabled_targets || 0)} 启用 / ${esc(hook.targets || 0)} 个目标${hook.multi_target ? ' · 多目标配置' : ' · 旧单目标兼容'}`],
+    ['缩略图磁盘缓存', cache.enabled ? `${esc(cache.files || 0)} 个文件 · ${esc(fmtSize(cache.bytes || 0))} / 上限 ${esc(fmtSize(cache.max_bytes || 0))}` : '未启用'],
+    ['特征回填', service.features_backfill ? `${esc(service.features_backfill.done || 0)} / ${esc(service.features_backfill.total || 0)}` : '无需回填']
+  ];
+  host.innerHTML = `
+    <section class="panel" aria-labelledby="service-status-title">
+      <div class="panel-head"><h2 id="service-status-title">服务状态</h2>
+        <div class="panel-actions">
+          <span class="hint" style="margin:0">生成于 ${esc(fmtTime(data.generated_at))}</span>
+          <button id="service-status-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
         </div>
-        <p class="hint">只读聚合；不会现场执行 ffprobe，也不向外部服务发请求。运行中的动作请在原入口操作。</p>
-        <div class="table-wrap"><table>
-          <thead><tr><th style="width:220px">版本与运行</th><th>值</th></tr></thead>
-          <tbody>
-            <tr><td>程序版本</td><td class="mono">${esc(app.version || '')} <span class="sub">${esc(app.commit || '')}</span></td></tr>
-            <tr><td>构建时间</td><td class="mono">${esc(app.build_time || '')}</td></tr>
-            <tr><td>启动时间 / 已运行</td><td>${esc(fmtTime(app.started_at))} · ${esc(fmtDuration(app.uptime_seconds || 0))}</td></tr>
-            <tr><td>运行环境</td><td class="mono">${esc(app.go_version || '')} · ${esc(app.os || '')}/${esc(app.arch || '')}</td></tr>
-            <tr><td>ffprobe</td><td class="mono">${esc(ff.path || '未配置')}${ff.error ? ` <span class="sub">${esc(ff.error)}</span>` : ''}</td></tr>
-          </tbody>
-        </table></div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>数据与任务</h2></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th style="width:220px">对象</th><th>当前值</th></tr></thead>
-          <tbody>
-            <tr><td>数据库</td><td class="mono">${esc(store.path || '')} · ${esc(fmtSize(store.size_bytes || 0))} · schema ${esc(store.schema_version ?? '')}</td></tr>
-            <tr><td>影片</td><td>可播放 ${esc(movies.success || 0)} · 待探测 ${esc(movies.pending || 0)} · 手动 ${esc(movies.manual || 0)}</td></tr>
-            <tr><td>媒体库 / 任务摘要</td><td>${esc(store.libraries ?? 0)} 个库 · ${esc(store.task_records || 0)} 条任务摘要（最多保留 500 条）</td></tr>
-            <tr><td>计划任务</td><td>${esc(schedTasks.enabled || 0)} 启用 / ${esc(schedTasks.total || 0)} 总数</td></tr>
-            <tr><td>扫描</td><td>${running(runtime.scan_running)}</td></tr>
-            <tr><td>媒体探测</td><td>${probeText}</td></tr>
-            <tr><td>刮削</td><td>${scrapeText}</td></tr>
-            <tr><td>Webhook</td><td>${esc(hook.enabled_targets || 0)} 启用 / ${esc(hook.targets || 0)} 个目标${hook.multi_target ? ' · 多目标配置' : ' · 旧单目标兼容'}</td></tr>
-            <tr><td>缩略图磁盘缓存</td><td>${cache.enabled ? `${esc(cache.files || 0)} 个文件 · ${esc(fmtSize(cache.bytes || 0))} / 上限 ${esc(fmtSize(cache.max_bytes || 0))}` : '未启用'}</td></tr>
-          </tbody>
-        </table></div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>备份</h2>
-          <div class="panel-actions">
-            <span class="hint" style="margin:0">保留 ${esc(backup.retention ?? 7)} 份</span>
-            <button id="diag-backup-run" class="btn btn-sm"${backup.running ? ' disabled' : ''}>${icon('archive')}<span>${backup.running ? '备份中…' : '立即备份'}</span></button>
-          </div>
-        </div>
-        <p class="hint">固定备份数据库快照、NFO 与 extrafanart 到 <span class="mono">${esc(backup.dir || '')}</span>。快照含凭据材料，不提供网页下载或恢复，请用服务器文件工具取回。</p>
-        <p style="margin:0">最近一次：${lastBackupText(backup.last)}</p>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>计划任务调度</h2><span class="hint" style="margin:0">cron 按服务器本地时区</span></div>
-        ${schedules.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>任务</th><th>cron</th><th>下次执行</th><th>上次结果</th></tr></thead>
-          <tbody>${schedules.map(task => `<tr>
-            <td><strong>${esc(task.name || ('#' + task.id))}</strong><span class="sub">${esc(task.type || '')}${task.enabled ? '' : ' · 已停用'}</span></td>
-            <td class="mono">${esc(task.cron || '')}</td>
-            <td>${task.next_run ? esc(fmtTime(task.next_run)) : '—'}</td>
-            <td>${task.last_status ? `${esc(task.last_status)}${task.last_message ? ` · <span class="sub">${esc(task.last_message)}</span>` : ''}` : '尚未执行'}</td>
-          </tr>`).join('')}</tbody>
-        </table></div>` : '<p class="hint">还没有计划任务。</p>'}
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>相关入口</h2></div>
-        <p class="hint">诊断只聚合证据，修复仍由原有入口执行。</p>
-        <div class="preset-row">
-          <button class="btn btn-sm" data-diag-page="scheduled">${icon('film')}<span>计划任务</span></button>
-          <button class="btn btn-sm" data-diag-page="probe">${icon('probe')}<span>接口探针</span></button>
-          <button class="btn btn-sm" data-diag-page="logs">${icon('archive')}<span>运行日志</span></button>
-          <button class="btn btn-sm" data-diag-page="settings">${icon('edit')}<span>设置</span></button>
-        </div>
-      </section>`;
-    const runBackup = document.querySelector('#diag-backup-run');
-    if (runBackup) runBackup.addEventListener('click', async () => {
-      runBackup.disabled = true;
-      try {
-        const started = await api('/backup/run', { method: 'POST' });
-        for (let i = 0; i < 120; i += 1) {
-          await delay(1000);
-          if (gen !== pageGen) return;
-          const state = await api('/backup');
-          if (state.running) continue;
-          const last = state.last;
-          if (last && last.task_id === started.task_id) {
-            if (last.status === 'success') toast('备份完成');
-            else toast('备份失败：' + (last.error || last.status), 'error');
-            break;
-          }
-        }
-      } catch (error) {
-        if (gen === pageGen) toast(error.message || String(error), 'error');
-      }
-      if (gen === pageGen) await load().catch(() => {});
-    });
-    const refresh = document.querySelector('#diag-refresh');
-    if (refresh) refresh.addEventListener('click', () => load().catch(error => { if (gen === pageGen) toast(error.message || String(error), 'error'); }));
-    content.querySelectorAll('[data-diag-page]').forEach(btn => {
-      btn.addEventListener('click', () => page(btn.dataset.diagPage));
-    });
-  };
-  await load();
+      </div>
+      <p class="hint">只读聚合运行证据与启动配置；不会现场执行 ffprobe，也不向外部服务发请求。计划任务、日志与修改入口仍在其各自页面。</p>
+      <div class="table-wrap"><table>
+        <tbody>${rows.map(([k, v]) => `<tr><th scope="row" style="width:220px">${esc(k)}</th><td>${v}</td></tr>`).join('')}</tbody>
+      </table></div>
+    </section>`;
+  host.querySelector('#service-status-refresh').addEventListener('click', () => {
+    renderServiceStatus(host, gen, identity).catch(error => { if (gen === pageGen) toast(error.message || String(error), 'error'); });
+  });
 }
 
 async function pageScheduled() {
@@ -2848,12 +2867,12 @@ async function pageScheduled() {
           <thead><tr><th>名称</th><th>类型</th><th>表达式</th><th>下次执行</th><th>上次结果</th><th>启用</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${items.map(item => `<tr>
             <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
-            <td data-label="类型"><span class="protocol">${esc(TASK_TYPE_TEXT[item.type] || item.type)}</span></td>
+            <td data-label="类型"><span class="protocol">${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}</span></td>
             <td data-label="表达式" class="mono">${esc(item.cron)}</td>
             <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
             <td data-label="上次结果" data-scheduled-result="${esc(item.id)}">${runBadge(item.last_status)}
               <small class="hint" style="margin:2px 0 0;display:block">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
-            <td data-label="启用"><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"${item.enabled ? ' checked' : ''}><i></i></label></td>
+            <td data-label="启用"><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}"${item.enabled ? ' checked' : ''}><i></i></label></td>
             <td data-label="操作"><div class="row-actions">
               <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="立即执行一次">${icon('play')}<span>执行</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>
@@ -3437,14 +3456,8 @@ async function pageLogs() {
   await initial();
 }
 
-let securityStop = null;
-function stopSecurity() { if (securityStop) { securityStop(); securityStop = null; } }
-function pageSecurity() {
-  stopSecurity();
-  if (!me || !me.is_admin) { content.innerHTML = `<section class="panel">${empty('仅管理员可用', '访问安全管理仅对管理员开放。')}</section>`; return; }
-  const gen = pageGen, identity = token;
-  securityStop = window.mountIPBlocklist(content, { apiRequest: api, isCurrent: () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity });
-}
+let firewallStop = null;
+function stopSecurity() { if (firewallStop) { firewallStop(); firewallStop = null; } }
 
 /* ---------------------------------------------------------------- 路由 */
 const pages = {
@@ -3452,15 +3465,12 @@ const pages = {
   libraries: pageLibraries,
   items: pageItems,
   settings: pageSettings,
-  activity: pageActivity,
+  firewall: pageFirewall,
   logs: pageLogs,
   scrape: pageScrape,
   translate: pageTranslate,
   scheduled: pageScheduled,
-  tasks: pageTasks,
-  diagnostics: pageDiagnostics,
-  probe: pageProbe,
-  security: pageSecurity
+  tasks: pageTasks
 };
 
 // pageGen 是本轮导航的代号。页面函数在 await 之后拿它比对：快速连点导航时，
@@ -3469,7 +3479,8 @@ let pageGen = 0;
 
 async function page(name) {
   // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
-  createdAPIKey = null; // 导航销毁仅在创建页暂存的管理员密钥原文。
+  if (name === 'activity') name = 'firewall'; // 旧书签/历史记录仍指向防火墙页
+  createdAPIKey = null; // 导航销毁仅在创建页暂存的 Emby API 密钥原文。
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
   stopLibrarySprites();
@@ -3560,8 +3571,6 @@ function setProbeButton(busy) {
   const btn = document.querySelector('#probe-media');
   if (!btn) return;
   btn.disabled = busy;
-  const mode = document.querySelector('#scan-mode');
-  if (mode) mode.disabled = busy;
   const span = btn.querySelector('span');
   if (span) span.textContent = busy ? '探测中…' : '探测媒体信息';
 }
@@ -3662,6 +3671,7 @@ const scanDetail = document.querySelector('#scan-progress-detail');
 const scanClose = document.querySelector('#scan-progress-close');
 let scanTimer = null;
 let scanSubmitting = false;
+var scanBlocked = false; // 全局扫描按钮移除后，仍用同一状态阻止并发/状态未知时的行内提交。
 let scanObservation = 0;
 // R2：首读历史终态不是通知；运行身份用 instance_id+run_id 识别，
 // 不比较秒级时间戳，也不在重启后把重新编号的 task_id 当同一轮运行。
@@ -3752,14 +3762,8 @@ function stopScanPolling() {
   scanObservation++;
 }
 
-function setScanButton(busy, label) {
-  const btn = document.querySelector('#scan');
-  if (!btn) return;
-  btn.disabled = busy;
-  const mode = document.querySelector('#scan-mode');
-  if (mode) mode.disabled = busy;
-  const span = btn.querySelector('span');
-  if (span) span.textContent = label || (busy ? '扫描中…' : '开始扫描');
+function setScanBusy(busy) {
+  scanBlocked = !!busy;
 }
 
 function scanProgressUnavailable(delay) {
@@ -3769,12 +3773,12 @@ function scanProgressUnavailable(delay) {
   scanDetail.textContent = delay === null
     ? '进度读取受限，任务状态未确认。请检查登录或权限后刷新页面。'
     : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
-  setScanButton(true, '确认扫描状态…');
+  setScanBusy(true);
 }
 
 function startScanPolling() {
   stopScanPolling();
-  setScanButton(true, '确认扫描状态…');
+  setScanBusy(true);
   scanTimer = startProgressPolling('/scan/progress', p => {
     if (p.running && scanWallRefresh?.accepted && Number(p.task_id) === scanWallRefresh.taskId) scanWallRefresh.sawRunning = true;
     if (!p.running && scanSubmitting) {
@@ -3784,7 +3788,7 @@ function startScanPolling() {
       scanTitle.textContent = '扫描请求进行中';
       scanDetail.setAttribute('role', 'status');
       scanDetail.textContent = '扫描请求仍在等待响应，当前任务状态尚未确认。';
-      setScanButton(true, '等待扫描响应…');
+      setScanBusy(true);
       return;
     }
     if (scanFirstRead && !p.running && !scanWallRefresh) {
@@ -3792,7 +3796,7 @@ function startScanPolling() {
       scanFirstRead = false;
       scanPanel.hidden = true;
       scanClose.hidden = true;
-      setScanButton(false);
+      setScanBusy(false);
       stopScanPolling();
       return;
     }
@@ -3801,20 +3805,20 @@ function startScanPolling() {
     if (p.running) {
       if (runKey) scanObservedRuns.add(runKey);
       renderScanProgress(p);
-      setScanButton(true);
+      setScanBusy(true);
       return;
     }
     if (runKey && scanNotifiedRuns.has(runKey)) {
       // 同一轮终态只通知一次；换页/回到首页不重复弹窗。
       scanPanel.hidden = true;
       scanClose.hidden = true;
-      setScanButton(false);
+      setScanBusy(false);
       stopScanPolling();
       return;
     }
     if (runKey) scanNotifiedRuns.add(runKey);
     renderScanProgress(p);
-    setScanButton(false);
+    setScanBusy(false);
     if (!p.running) {
       const pending = scanWallRefresh;
       scanWallRefresh = null;
@@ -3840,7 +3844,7 @@ function startScanPolling() {
 
 async function runScan(libraryId) {
   // 行内入口也必须服从全局状态：提交在途、状态未知或已确认运行均不可再次POST。
-  if (scanSubmitting || document.querySelector('#scan')?.disabled || localStorage.getItem('emby_token') !== token) return;
+  if (scanSubmitting || scanBlocked || localStorage.getItem('emby_token') !== token) return;
   const gen = pageGen, requestGen = wallGen;
   const pending = { gen, wall: requestGen, identity: token, accepted: false, taskId: null, sawRunning: false };
   scanWallRefresh = pending;
@@ -3853,14 +3857,14 @@ async function runScan(libraryId) {
   startScanPolling();
   try {
     // 异步入口：202 只代表任务已排队，进度与计数由 /scan/progress 观察器呈现。
-    const mode = document.querySelector('#scan-mode')?.value === 'full' ? 'full' : 'incremental';
-    const url = libraryId ? `/tasks/scan?library_id=${encodeURIComponent(libraryId)}&mode=${mode}` : `/tasks/scan?mode=${mode}`;
+    // 全局模式下拉已移除：行内入口固定增量，全量重建改走计划任务/接口显式参数。
+    const url = `/tasks/scan?library_id=${encodeURIComponent(libraryId ?? '')}&mode=incremental`.replace('library_id=&', '');
     const accepted = await api(url, { method: 'POST' });
     if (scanWallRefresh !== pending || pending.identity !== token || localStorage.getItem('emby_token') !== pending.identity) return;
     pending.accepted = true;
     pending.taskId = Number.isSafeInteger(accepted?.task_id) && accepted.task_id > 0 ? accepted.task_id : null;
     completed = true;
-    toast('扫描任务已启动，进度见上方面板');
+    toast('扫描任务已启动，进度见页面顶部面板');
   } catch (e) {
     toast(e.message, 'error');
     denied = e.status === 401 || e.status === 403;
@@ -4217,17 +4221,16 @@ async function boot() {
   }));
   // 前进/后退时按 URL（hash + query）重渲染当前页，筛选条件随 URL 一并恢复。
   window.addEventListener('popstate', () => {
-    const name = location.hash.replace('#', '');
+    const hash = location.hash.replace('#', ''), name = hash === 'activity' ? 'firewall' : hash;
     page(pages[name] ? name : 'overview');
   });
   document.querySelector('#logout').addEventListener('click', event => { void logoutCurrentSession(event.currentTarget); });
-  document.querySelector('#scan').addEventListener('click', () => runScan());
   scanClose.addEventListener('click', () => {
     cancelScanHide();
     stopScanPolling();
     scanPanel.hidden = true;
     scanClose.hidden = true;
-    setScanButton(false);
+    setScanBusy(false);
   });
   window.addEventListener('scroll', wallMaybeLoadMore, { passive: true });
   document.querySelector('#player-close').addEventListener('click', closePlayer);
@@ -4256,7 +4259,7 @@ async function boot() {
   // 全局扫描观察不阻塞初始页面；首读也经过同一超时/恢复链路。
   startScanPolling();
   // 媒体墙渲染后由同一探测观察器恢复，boot不再裸读探测进度。
-  const initial = location.hash.replace('#', '');
+  const hash = location.hash.replace('#', ''), initial = hash === 'activity' ? 'firewall' : hash;
   page(pages[initial] ? initial : 'overview');
 }
 window.addEventListener('storage', event => identityStorageChanged(event));

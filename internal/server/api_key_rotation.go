@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -38,8 +37,8 @@ func parseAPIKeyIfMatch(value string) (stable string, version int64, err error) 
 	return stable, n, nil
 }
 
-// adminRotateAPIKey 原子轮转单把密钥：交互会话 + 当前密码再认证 + If-Match
-// 版本前置条件，同一事务替换摘要并递增版本。旧 key 在提交后立即失效。
+// adminRotateAPIKey 原子轮转单把密钥：交互会话 + If-Match 版本前置条件，
+// 同一事务替换摘要并递增版本。旧 key 在提交后立即失效。不需要再次输入密码。
 func (a *App) adminRotateAPIKey(c *gin.Context) {
 	admin, ok := a.requireInteractiveSession(c)
 	if !ok {
@@ -60,8 +59,7 @@ func (a *App) adminRotateAPIKey(c *gin.Context) {
 		return
 	}
 	var req struct {
-		CurrentPassword string `json:"current_password"`
-		Reason          string `json:"reason"`
+		Reason string `json:"reason"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		if credentialBindTooLarge(c, err) {
@@ -75,46 +73,11 @@ func (a *App) adminRotateAPIKey(c *gin.Context) {
 		apiError(c, http.StatusBadRequest, "必须填写轮转原因（最多 200 字）")
 		return
 	}
-	if req.CurrentPassword == "" || len(req.CurrentPassword) > 72 {
-		apiError(c, http.StatusBadRequest, "需要当前密码再认证")
+	proof, ok := currentUser(c)
+	if !ok || proof.ID != admin.ID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "需要交互登录会话", "code": "AUTH_SESSION_REQUIRED"})
 		return
 	}
-	ticket, ok := a.beginCredentialAttempt(c)
-	if !ok {
-		return
-	}
-	ip := c.ClientIP()
-	outcome := authOutcomeInterrupted
-	defer func() { a.authGuard.Finish(ticket, outcome) }()
-	if retry := a.authGuard.AttachAccount(ticket, admin.Name); retry > 0 {
-		authRateLimitedRetry(c, retry)
-		return
-	}
-	authenticated, valid, authErr, attempted := a.verifyPassword(c, admin.Name, req.CurrentPassword)
-	if !attempted {
-		authRateLimitedRetry(c, time.Second)
-		return
-	}
-	if authErr != nil {
-		outcome = authOutcomeStorageFailure
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-			"error": "authentication unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
-		})
-		return
-	}
-	if !valid {
-		outcome = authOutcomeInvalidPassword
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "当前密码不正确", "code": "AUTH_REVERIFY_FAILED"})
-		return
-	}
-	if authenticated.ID != admin.ID {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "账户凭据已变更，请重新登录", "code": "AUTH_INVALID"})
-		return
-	}
-	// 再认证成功本身是凭据提交；清账号/组合失败历史，不清来源喷洒历史。
-	a.authGuard.OnCredentialCommitSuccess(ip, admin.Name)
-	outcome = authOutcomePasswordVerified
-
 	pathStable, pathErr := a.db.ResolveAPIKeyStableID(c.Param("key"))
 	if pathErr != nil || pathStable != stable {
 		c.AbortWithStatusJSON(http.StatusPreconditionFailed, gin.H{
@@ -122,8 +85,7 @@ func (a *App) adminRotateAPIKey(c *gin.Context) {
 		})
 		return
 	}
-	proof, _ := currentUser(c)
-	rotated, err := a.db.RotateAPIKeyForRequest(authenticated, proof, stable, expectedVersion)
+	rotated, err := a.db.RotateAPIKeyForRequest(proof, proof, stable, expectedVersion)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrAPIKeyNotFound):

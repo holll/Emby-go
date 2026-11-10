@@ -64,8 +64,6 @@ type App struct {
 	taskMu     sync.Mutex
 	tasks      []task
 	nextTaskID int64
-	// N-05：备份单飞标记；只防同一进程内的重复点击，跨进程互斥由 backup 包的目录锁负责。
-	backupRunning atomic.Bool
 
 	// 登录/初始化失败限流：进程内固定窗口，按 TCP 对端 IP 与账号计数。
 	authGuard *authGuard
@@ -78,11 +76,10 @@ type App struct {
 	nfos  map[string]nfoCacheEntry
 
 	// 图片链路的进程内缓存：imgMeta 存「影片 id → 图片路径」「演员名 → 头像路径」
-	// 这类每次请求都要的元信息（原本每张图一次 DB 查询，单连接下会串行排队）；
-	// imgThumb 存按请求尺寸生成的缩略图字节。都只在本进程内有意义，
-	// 走 Redis 每张图一次 RTT 不划算，故用本地 LRU。
-	imgMeta  *cache.Memory
-	imgThumb *cache.Memory
+	// 这类每次请求都要的元信息（原本每张图一次 DB 查询，单连接下会串行排队）。
+	// 缩略图变体只走磁盘缓存：内存 LRU 只留最近几百条，重启即失效，在小内存
+	// 机器上性价比低，故关闭。
+	imgMeta *cache.Memory
 	// thumbSem 限制同时解码 + 缩放 + 编码的数量：纯 CPU 活，一次海报墙
 	// 几百张不加限制会把 CPU 打满、拖慢其它请求。
 	thumbSem chan struct{}
@@ -96,6 +93,10 @@ type App struct {
 	thumbFlights map[string]*thumbFlight
 	// thumbGenerate 是生成变体的实际实现，抽成字段以便测试统计调用次数。
 	thumbGenerate func(path string, width, height, quality int) ([]byte, error)
+	// prewarmQueue 是异步图片变体预热队列（见 prewarmThumbnails）：列表响应后
+	// 把当前页海报档位排进来，worker 按有限并发生成并落盘，用户随后请求
+	// 同一档位时直接命中磁盘缓存。有界队列，满了丢弃。
+	prewarmQueue chan prewarmJob
 	// imageCacheMu 串行化「读取/保存容量上限」与快照，避免设置页并发保存互相覆盖；
 	// imageCacheMaxBytes 是当前生效的上限（0 表示不限制），设置页修改后立即生效。
 	imageCacheMu       sync.Mutex
@@ -106,6 +107,8 @@ type App struct {
 	// scrapeStills 缓存 (provider,id) → 剧照地址列表（换行分隔），
 	// 供图片代理按受限下标取图时免去重复解析上游元数据。
 	scrapeStills *cache.Memory
+	// scrapeThumbs 缓存刮削预览图字节（JPEG 原样转发），TTL 10 分钟。
+	scrapeThumbs *cache.Memory
 
 	// 扫描进度：POST /scan 执行期间由进度回调写入，GET /scan/progress 轮询读取。
 	// instanceID 每次启动随机生成，runID 只在本实例内递增；前端用二者区分
@@ -132,16 +135,6 @@ type App struct {
 	rootCancel        context.CancelFunc
 	startupWG         sync.WaitGroup // join startup DB readers before closing the store
 
-	// 未实现端点的探测记录去重：客户端启动期会反复请求同一路径，
-	// 只需记下「哪些端点被调用过」，避免每个 404 都写一次库。
-	probeMu        sync.Mutex
-	probeSeen      map[string]probeSeenEntry
-	probeEpoch     uint64
-	probeNow       func() time.Time // 测试可注入时钟；生产为 time.Now
-	probeTokens    float64          // 诊断写库令牌（burst 上限见 probeWriteBurst）
-	probeRefillAt  time.Time
-	probePersistMu sync.Mutex // serialize diagnostic commits and successful clears
-
 	ipBlocks         ipBlockState
 	monitor          *requestMonitor
 	dashboardSummary dashboardSummaryCache
@@ -151,6 +144,9 @@ type App struct {
 	closeOnce        sync.Once      // Close 幂等
 	workerGate       workerGate     // 「登记 worker」与「等待 worker 收齐」的互斥门，见 beginWorker
 	workerWG         sync.WaitGroup // 探测/刮削/立即执行计划等后台 worker，退出时有界 join
+	// prewarmWG 在构造时登记常驻图片预热 worker；与其他后台工作一同在
+	// WaitBackground 的退出预算内等待，rootCtx 取消后不再消费新任务。
+	prewarmWG sync.WaitGroup
 	// 周期性统计信息维护（ANALYZE）。analyzeStats 可替换以便测试观察调用。
 	maintenanceOnce sync.Once
 	analyzeStats    func() error
@@ -398,13 +394,13 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		webhookTargets: targetSpecs, webhookMulti: multiTarget, cacheBackend: cacheBackend, cacheOnline: cacheOnline,
 		logRetentionDays: retentionDays, applyLogRetention: logging.SetRetentionDays,
 		tags: make(map[string]tagEntry), nfos: make(map[string]nfoCacheEntry),
-		probeSeen: make(map[string]probeSeenEntry), probeNow: time.Now,
-		startAt:     time.Now(),
-		probeTokens: probeWriteBurst, probeRefillAt: time.Now(),
-		imgMeta: cache.NewMemory(imageMetaCacheSize), imgThumb: cache.NewMemory(imageThumbCacheSize),
+		startAt:  time.Now(),
+		imgMeta:  cache.NewMemory(imageMetaCacheSize),
 		thumbSem: make(chan struct{}, maxThumbConcurrency), scrapeSem: make(chan struct{}, maxScrapeImageConcurrency),
 		scrapeStills: cache.NewMemory(scrapeStillCacheSize),
+		scrapeThumbs: cache.NewMemory(scrapeThumbCacheSize),
 		thumbFlights: make(map[string]*thumbFlight), thumbGenerate: imageutil.Thumbnail,
+		prewarmQueue: make(chan prewarmJob, prewarmQueueSize),
 		instanceID:   newInstanceID(),
 		authGuard:    newAuthGuard(authGuardConfig{IPRequestRate: cfg.Security.Auth.IPRequestRate, IPRequestBurst: cfg.Security.Auth.IPRequestBurst, GlobalRequestRate: cfg.Security.Auth.GlobalRequestRate, GlobalRequestBurst: cfg.Security.Auth.GlobalRequestBurst, BcryptConcurrency: cfg.Security.Auth.BcryptConcurrency, CredentialBodyBytes: int64(cfg.Security.Auth.CredentialBodyBytes), MaxKeys: cfg.Security.Auth.MaxKeys, AccountCooldownMaxSeconds: cfg.Security.Auth.AccountCooldownMaxSeconds}),
 		scanTasks:    make(map[int64]*asyncScanTask),
@@ -413,6 +409,15 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	a.ipBlocks.publish(blockRules)
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
+	// 图片变体预热 worker：常驻到 rootCtx 取消（BeginShutdown 末步）。
+	// 构造时先登记再启动，由 joinBackground 在调用方的关闭预算内收尾。
+	a.prewarmWG.Add(prewarmWorkers)
+	for range prewarmWorkers {
+		go func() {
+			defer a.prewarmWG.Done()
+			a.runPrewarmWorker()
+		}()
+	}
 	a.updater = upgrade.New(upgrade.Options{CurrentVersion: BuildVersion, MirrorBase: os.Getenv("EMBY_GO_RELEASE_MIRROR")})
 	// N-02：上次进程遗留的未完成任务不具备继续执行的条件，只标记中断；
 	// 任务 id 从摘要序列继续，避免重启后新旧 id 重叠。
@@ -511,6 +516,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	a.monitor = newRequestMonitor(a.startAt)
 	middlewares := append([]gin.HandlerFunc{a.monitor.middleware(), securityHeaders()}, requestDiagnostics(cfg.Debug, logging.RequestWriter(), logging.AppWriter(), a.blocklistedIP())...)
 	r.Use(middlewares...)
+	r.Use(a.enforceAPIKeyScope)
 	a.router = r
 	a.routes()
 
@@ -579,8 +585,9 @@ func (a *App) BeginShutdown() {
 	})
 }
 
-// WaitBackground 在 ctx 预算内等待启动自检、探测/刮削/立即执行 worker 与
-// 调度器在跑任务结束。必须先在调用方触发 BeginShutdown，避免等待后又登记新工作。
+// WaitBackground 在 ctx 预算内等待启动自检、探测/刮削/立即执行 worker、
+// 图片预热及调度器在跑任务结束。调用方必须先触发 BeginShutdown，
+// 取消常驻 worker 并停止接纳新工作。
 func (a *App) WaitBackground(ctx context.Context) error {
 	return a.joinBackground(ctx)
 }
@@ -598,6 +605,7 @@ func (a *App) joinBackground(ctx context.Context) error {
 	go func() {
 		a.workerWG.Wait()
 		a.startupWG.Wait()
+		a.prewarmWG.Wait()
 		if schedDone != nil {
 			<-schedDone.Done()
 		}
@@ -721,8 +729,6 @@ func (a *App) routes() {
 	admin.GET("/items", a.adminItems)
 	admin.GET("/items/:id/detail", a.adminItemDetail)
 	admin.DELETE("/items/:id", a.adminDelete)
-	admin.GET("/probe", a.adminProbe)
-	admin.DELETE("/probe", a.adminClearProbes)
 	admin.GET("/users", a.adminListUsers)
 	admin.POST("/users", a.adminCreateUser)
 	admin.PUT("/users/:id", a.adminUpdateUser)
@@ -739,8 +745,6 @@ func (a *App) routes() {
 	admin.GET("/audit-events", a.adminAuditEvents)
 	admin.GET("/status", a.adminStatus)
 	admin.GET("/diagnostics", a.adminDiagnostics)
-	admin.GET("/backup", a.adminBackupStatus)
-	admin.POST("/backup/run", a.adminBackupRun)
 	admin.GET("/webhook/deliveries", a.adminWebhookDeliveries)
 	admin.DELETE("/webhook/deliveries", a.adminClearWebhookDeliveries)
 	admin.GET("/metrics", a.adminMetrics)
@@ -929,143 +933,8 @@ func (a *App) registerStreamRoutes(g *gin.RouterGroup) {
 	}
 }
 
-// scannerPathHints 自动化扫描器常用的路径片段。公网上的 .svn/.git、备份包、
-// 配置文件探测会以极高频率命中 NoRoute；不拦下来会把 api_probe 的 1000 条
-// 上限刷满，真正需要补的客户端端点反而在列表里看不见。
-var scannerPathHints = []string{
-	"wp-admin", "wp-login", "wp-content", "wp-includes", "wordpress",
-	"phpmyadmin", "phpinfo", "xmlrpc", "cgi-bin", "vendor/phpunit", "webshell",
-}
-
-// isScannerProbe 判断 NoRoute 命中的路径是否明显来自自动化扫描器。
-//
-// 判据只取「Emby 兼容客户端绝不会发」的形状，宁可漏拦也不误伤真实端点：
-//   - 路径任一段以 '.' 开头（长度 > 1）：隐藏文件/目录，如 /.svn/entries、
-//     /old/.svn/entries、/.git-credentials、/.env；
-//   - 末段含 '.'：带扩展名的文件探测，如 /secrets.yml、/emby-115-cf.7z、
-//     /web.config、/database.yaml；
-//   - 命中常见扫描词。
-//
-// Emby API 的路径都是无扩展名的驼峰段（/Users/1/Views、/Branding/Configuration、
-// /Persons），三条判据都不会命中；而 /Videos/:id/stream.mp4 这类带扩展名的
-// 是已注册路由，根本不走 NoRoute。
-func isScannerProbe(path string) bool {
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return false
-	}
-	segments := strings.Split(trimmed, "/")
-	if strings.Contains(segments[len(segments)-1], ".") {
-		return true
-	}
-	for _, seg := range segments {
-		if len(seg) > 1 && seg[0] == '.' {
-			return true
-		}
-	}
-	lower := strings.ToLower(trimmed)
-	for _, hint := range scannerPathHints {
-		if strings.Contains(lower, hint) {
-			return true
-		}
-	}
-	return false
-}
-
-// 诊断去重与写库预算参数（BE-08）：128 条内存上限、6 小时去重窗口、
-// 令牌桶 60 次突发 + 平均每秒 1 次落库，避免唯一路径洪水把写放大成
-// 每秒数百次 SQLite 事务。
-const (
-	probeSeenLimit      = 128
-	probeSeenTTL        = 6 * time.Hour
-	probeWriteBurst     = 60.0
-	probeWritePerSecond = 1.0
-)
-
-type probeSeenEntry struct {
-	seenAt time.Time
-}
-
 func (a *App) noRoute(c *gin.Context) {
-	// 客户端会探测式地反复请求未实现端点；404 一旦被浏览器/中间层缓存，
-	// 后续补上实现客户端也拿不到——明确禁止缓存。
+	// 404 一旦被浏览器/中间层缓存，后续补上实现客户端也拿不到——明确禁止缓存。
 	c.Header("Cache-Control", "no-store")
-	path := c.Request.URL.Path
-	if !strings.HasPrefix(path, "/api/") && !isScannerProbe(path) {
-		// Keep the URL verbatim, including query credentials, for endpoint diagnostics.
-		// Query values do not affect endpoint deduplication. Never read a body.
-		method, probePath := diagnosticMethod(c.Request.Method), c.Request.URL.EscapedPath()
-		key := method + " " + probePath
-		write, epoch := a.observeProbe(key, a.probeClock())
-		if write {
-			a.persistDiagnosticProbe(method, probePath, c.Request.URL.RawQuery, epoch)
-		}
-	}
 	c.JSON(404, gin.H{"error": "not found", "code": "NOT_FOUND"})
-}
-
-func (a *App) probeClock() time.Time {
-	if a.probeNow != nil {
-		return a.probeNow()
-	}
-	return time.Now()
-}
-
-// observeProbe 在 probeMu 内完成去重、TTL 过期、容量淘汰与写库预算扣减。
-// 返回是否应落库，以及预约时的 epoch（clear 提交后 epoch 变化则放弃写入）。
-// 预算耗尽时不占位：后续请求会在令牌恢复后重试，避免把端点永久标记为已见。
-func (a *App) observeProbe(key string, now time.Time) (bool, uint64) {
-	a.probeMu.Lock()
-	defer a.probeMu.Unlock()
-	if entry, ok := a.probeSeen[key]; ok {
-		if now.Sub(entry.seenAt) < probeSeenTTL {
-			return false, a.probeEpoch
-		}
-		delete(a.probeSeen, key)
-	}
-	if len(a.probeSeen) >= probeSeenLimit {
-		a.evictProbeSeenLocked(now)
-	}
-	if !a.takeProbeWriteTokenLocked(now) {
-		return false, a.probeEpoch
-	}
-	a.probeSeen[key] = probeSeenEntry{seenAt: now}
-	return true, a.probeEpoch
-}
-
-// evictProbeSeenLocked 先清过期项，仍满则淘汰最久未出现的键（LRU）。
-// 旧实现容量满后把所有新端点都当已见，导致新端点永远进不了诊断列表。
-func (a *App) evictProbeSeenLocked(now time.Time) {
-	var oldestKey string
-	var oldest time.Time
-	for key, entry := range a.probeSeen {
-		if now.Sub(entry.seenAt) >= probeSeenTTL {
-			delete(a.probeSeen, key)
-			continue
-		}
-		if oldestKey == "" || entry.seenAt.Before(oldest) {
-			oldestKey, oldest = key, entry.seenAt
-		}
-	}
-	if len(a.probeSeen) >= probeSeenLimit && oldestKey != "" {
-		delete(a.probeSeen, oldestKey)
-	}
-}
-
-func (a *App) takeProbeWriteTokenLocked(now time.Time) bool {
-	if a.probeRefillAt.IsZero() {
-		a.probeTokens, a.probeRefillAt = probeWriteBurst, now
-	}
-	if elapsed := now.Sub(a.probeRefillAt); elapsed > 0 {
-		a.probeTokens += elapsed.Seconds() * probeWritePerSecond
-		if a.probeTokens > probeWriteBurst {
-			a.probeTokens = probeWriteBurst
-		}
-		a.probeRefillAt = now
-	}
-	if a.probeTokens < 1 {
-		return false
-	}
-	a.probeTokens--
-	return true
 }

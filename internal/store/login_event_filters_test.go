@@ -21,13 +21,13 @@ func TestLoginEventsFiltersBeforeLimit(t *testing.T) {
 	failed := false
 	success := true
 	for _, tc := range []struct {
-		user        int64
-		ip          string
-		result      *bool
-		limit, want int
-	}{{0, "", nil, 200, 5}, {1, "", nil, 200, 4}, {0, "203.0.113.1", &failed, 1, 1}, {1, "203.0.113.1", &failed, 1, 1}, {0, "2001:db8::1", &success, 1, 1}, {0, "203.0.113.1' OR 1=1 --", nil, 1, 0}, {0, "192.0.2.44", nil, 1, 0}} {
-		events, err := s.LoginEventsFiltered(tc.user, tc.limit, tc.ip, tc.result)
-		if err != nil || events == nil || len(events) != tc.want {
+		user               int64
+		ip                 string
+		result             *bool
+		limit, want, total int
+	}{{0, "", nil, 200, 5, 5}, {1, "", nil, 200, 4, 4}, {0, "203.0.113.1", &failed, 1, 1, 2}, {1, "203.0.113.1", &failed, 1, 1, 1}, {0, "2001:db8::1", &success, 1, 1, 1}, {0, "203.0.113.1' OR 1=1 --", nil, 1, 0, 0}, {0, "192.0.2.44", nil, 1, 0, 0}} {
+		events, matched, err := s.LoginEventsFiltered(tc.user, 0, tc.limit, tc.ip, tc.result)
+		if err != nil || events == nil || len(events) != tc.want || matched != tc.total {
 			t.Fatalf("case %+v => %+v %v", tc, events, err)
 		}
 		for _, event := range events {

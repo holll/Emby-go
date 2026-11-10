@@ -15,7 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"emby-go/internal/cache"
 	"emby-go/internal/imagecache"
 )
 
@@ -23,7 +22,7 @@ import (
 // thumbGenerate 由用例注入。不走 newApp，是为了让这些用例只有一个关注点。
 func newThumbTestApp() *App {
 	return &App{
-		imgThumb:     cache.NewMemory(8),
+
 		imgDisk:      imagecache.Disabled(),
 		thumbSem:     make(chan struct{}, maxThumbConcurrency),
 		thumbFlights: make(map[string]*thumbFlight),

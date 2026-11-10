@@ -779,7 +779,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		c.Header("Cache-Control", "public, max-age=300, must-revalidate")
 		c.Data(http.StatusOK, "image/jpeg", raw)
 	}
-	if raw, ok := a.imgThumb.Get(cacheKey); ok {
+	if raw, ok := a.scrapeThumbs.Get(cacheKey); ok {
 		serveThumb(raw)
 		return
 	}
@@ -793,7 +793,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		c.Status(http.StatusServiceUnavailable)
 		return
 	}
-	if raw, ok := a.imgThumb.Get(cacheKey); ok { // 取得名额前可能已被别的请求填上
+	if raw, ok := a.scrapeThumbs.Get(cacheKey); ok { // 取得名额前可能已被别的请求填上
 		serveThumb(raw)
 		return
 	}
@@ -824,7 +824,7 @@ func (a *App) adminScrapeImage(c *gin.Context) {
 		return
 	}
 	if len(data) <= scrapeImageCacheMax {
-		a.imgThumb.Set(cacheKey, data, scrapeImageTTL)
+		a.scrapeThumbs.Set(cacheKey, data, scrapeImageTTL)
 	}
 	// 上游给的是 JPEG；原样转发，浏览器直接能显示，无需转码。
 	serveThumb(data)
@@ -911,6 +911,8 @@ const (
 	scrapeImageCacheMax = 256 << 10
 	// scrapeImageTTL 预览缩略图的进程内缓存时长。
 	scrapeImageTTL = 10 * time.Minute
+	// scrapeThumbCacheSize 预览图字节缓存的条目上限。
+	scrapeThumbCacheSize = 512
 	// maxScrapeImageConcurrency 同时向上游拉取的预览图数量上限。
 	maxScrapeImageConcurrency = 4
 	// scrapeStillCacheSize 剧照地址列表的进程内条目上限（各版本快照分别计数）。

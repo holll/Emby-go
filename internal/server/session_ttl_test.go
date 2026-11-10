@@ -123,7 +123,12 @@ func TestRevokeAllSessionsKeepsAPIKeys(t *testing.T) {
 			t.Fatalf("revoked token still valid status=%d", w.Code)
 		}
 	}
-	if w := tokenRequest(a, http.MethodGet, "/api/admin/settings", created.Key); w.Code != http.StatusOK {
-		t.Fatalf("api key revoked by session sweep status=%d", w.Code)
+	// 2026-11-10 起 API 密钥只允许 Emby 兼容接口，不能访问 /api/admin/*；这里验证会话清理不影响密钥本身的 Emby 可用性。
+	keyW = httptest.NewRecorder()
+	keyReq = httptest.NewRequest(http.MethodGet, "/System/Info/Public", nil)
+	keyReq.Header.Set("X-Emby-Token", created.Key)
+	a.Handler().ServeHTTP(keyW, keyReq)
+	if keyW.Code != http.StatusOK {
+		t.Fatalf("api key revoked by session sweep status=%d body=%s", keyW.Code, keyW.Body.String())
 	}
 }

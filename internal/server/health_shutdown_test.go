@@ -97,6 +97,7 @@ func TestCloseIsIdempotentAndFlipsReadiness(t *testing.T) {
 func TestWaitBackgroundHonorsDeadline(t *testing.T) {
 	app := newShutdownApp(t)
 	app.workerWG.Add(1)
+	app.BeginShutdown()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -117,6 +118,7 @@ func TestWaitBackgroundWaitsWorkers(t *testing.T) {
 	app.workerWG.Go(func() {
 		time.Sleep(30 * time.Millisecond)
 	})
+	app.BeginShutdown()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

@@ -135,7 +135,7 @@ func (s *Store) TaskRecordByID(id int64) (TaskRecord, bool, error) {
 	return rec, true, nil
 }
 
-// LatestTaskRecordOfType 返回某类任务最近一条摘要，用于「上次备份结果」这类
+// LatestTaskRecordOfType 返回某类任务最近一条摘要，用于「上次任务结果」这类
 // 只关心最近一次的后台任务；没有记录时 found=false。
 func (s *Store) LatestTaskRecordOfType(kind string) (TaskRecord, bool, error) {
 	var rec TaskRecord

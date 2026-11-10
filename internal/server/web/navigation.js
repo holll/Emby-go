@@ -96,18 +96,5 @@
     if (node) observer.observe(node, { attributes: true, attributeFilter: ['hidden'] });
   });
   observer.observe(drawer, { childList: true, subtree: true });
-  const scanTools = document.querySelector('.scan-tools');
-  if (scanTools) {
-    document.addEventListener('click', event => {
-      if (!scanTools.contains(event.target)) scanTools.open = false;
-    });
-    scanTools.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && scanTools.open) {
-        event.stopPropagation();
-        scanTools.open = false;
-        scanTools.querySelector('summary').focus();
-      }
-    });
-  }
   reset();
 })();

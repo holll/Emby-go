@@ -49,35 +49,35 @@ func (s *Store) pruneLoginEvents(now time.Time) error {
 
 // LoginEvents 按时间倒序返回最近 limit 条登录记录；userID=0 表示全部账户。
 func (s *Store) LoginEvents(userID int64, limit int) ([]LoginEvent, error) {
-	return s.LoginEventsFiltered(userID, limit, "", nil)
+	events, _, err := s.LoginEventsFiltered(userID, 0, limit, "", nil)
+	return events, err
 }
 
-// LoginEventsFiltered applies predicates before LIMIT, so older matching events
-// are not silently hidden by unrelated recent attempts. IP is an exact match.
-func (s *Store) LoginEventsFiltered(userID int64, limit int, ip string, success *bool) ([]LoginEvent, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	query := `SELECT id,COALESCE(user_id,0),name,COALESCE(ip,''),success,created_at FROM login_events`
+// LoginEventsFiltered applies predicates before LIMIT/OFFSET, so older matching
+// events are not silently hidden by unrelated recent attempts. IP is an exact
+// match. It returns the page and the total matching rows.
+func (s *Store) LoginEventsFiltered(userID int64, start, limit int, ip string, success *bool) ([]LoginEvent, int, error) {
+	where := ` WHERE 1=1`
 	args := []any{}
-	query += ` WHERE 1=1`
 	if userID > 0 {
-		query += ` AND user_id=?`
+		where += ` AND user_id=?`
 		args = append(args, userID)
 	}
 	if ip != "" {
-		query += ` AND ip=?`
+		where += ` AND ip=?`
 		args = append(args, ip)
 	}
 	if success != nil {
-		query += ` AND success=?`
+		where += ` AND success=?`
 		args = append(args, b2i(*success))
 	}
-	query += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(query, args...)
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM login_events`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT id,COALESCE(user_id,0),name,COALESCE(ip,''),success,created_at FROM login_events`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, append(args, limit, start)...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := make([]LoginEvent, 0)
@@ -85,10 +85,10 @@ func (s *Store) LoginEventsFiltered(userID int64, limit int, ip string, success 
 		var e LoginEvent
 		var success int
 		if err := rows.Scan(&e.ID, &e.UserID, &e.Name, &e.IP, &success, &e.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		e.Success = success != 0
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }

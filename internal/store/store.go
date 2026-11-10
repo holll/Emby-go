@@ -1643,21 +1643,6 @@ func (s *Store) SavePlaybackForUser(userID, id, positionTicks, playCount int64, 
 	return err
 }
 
-func (s *Store) Probe(method, path, query, body string) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec("INSERT INTO api_probe(method,path,query,body_preview,created_at) VALUES(?,?,?,?,?)", method, path, query, body, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM api_probe WHERE id NOT IN (SELECT id FROM api_probe ORDER BY id DESC LIMIT 1000)")
-		return err
-	})
-}
-
-func (s *Store) ClearProbes() error {
-	_, err := s.db.Exec("DELETE FROM api_probe")
-	return err
-}
-
 // ReplaceActors 覆盖一部影片的演员关系，并把 NFO 带来的头像地址同步进 actors 表。
 // 传入 avatar 为空时不清空已有头像——扫库多数时候只读到姓名，
 // 不能让一次扫描把头像任务已写入的索引抹掉。
@@ -1877,23 +1862,6 @@ func (s *Store) ManualSourcePaths(libraryID int64) (map[string]bool, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) Probes(limit int) ([]map[string]any, error) {
-	rows, err := s.db.Query("SELECT id,method,path,query,body_preview,created_at FROM api_probe ORDER BY id DESC LIMIT ?", limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []map[string]any
-	for rows.Next() {
-		var id int64
-		var method, path, query, body, created string
-		if err := rows.Scan(&id, &method, &path, &query, &body, &created); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]any{"id": id, "method": method, "path": path, "query": query, "body": body, "created_at": created})
-	}
-	return out, rows.Err()
-}
 func NotFound(err error) bool   { return errors.Is(err, sql.ErrNoRows) }
 func (m Movie) IsVisible() bool { return m.Status == "success" || m.Status == "manual" }
 

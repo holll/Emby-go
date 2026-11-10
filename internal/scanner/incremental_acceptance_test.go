@@ -136,15 +136,15 @@ func TestIncrementalFinalSafetyChecks(t *testing.T) {
 					}
 				case "root":
 					// Replace only an empty disposable child root after renaming the original.
-					backup := root + "-held"
-					if e := os.Rename(root, backup); e != nil {
+					held := root + "-held"
+					if e := os.Rename(root, held); e != nil {
 						t.Fatal(e)
 					}
 					t.Cleanup(func() {
 						if e := os.Remove(root); e != nil {
 							t.Error(e)
 						}
-						if e := os.Rename(backup, root); e != nil {
+						if e := os.Rename(held, root); e != nil {
 							t.Error(e)
 						}
 					})

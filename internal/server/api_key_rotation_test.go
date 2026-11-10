@@ -23,7 +23,7 @@ func apiKeyRotationRequest(a *App, method, path, token, ifMatch, body string) *h
 	return w
 }
 
-func TestAdminRotateAPIKeyRequiresReauthAndVersion(t *testing.T) {
+func TestAdminRotateAPIKeyRequiresVersion(t *testing.T) {
 	a, token := logsTestApp(t)
 	create := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys", token, "", `{"name":"script"}`)
 	if create.Code != http.StatusOK {
@@ -48,15 +48,16 @@ func TestAdminRotateAPIKeyRequiresReauthAndVersion(t *testing.T) {
 	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, `"bogus"`, `{"current_password":"fixture-pass-123","reason":"forgotten"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad If-Match status=%d body=%s", w.Code, w.Body.String())
 	}
-	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"current_password":"wrong-password","reason":"forgotten"}`); w.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong password status=%d body=%s", w.Code, w.Body.String())
+	// 轮转不再要求再次输入密码；原因仍必填。
+	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"reason":""}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing reason status=%d body=%s", w.Code, w.Body.String())
 	}
-	// 长期 API key 不能代替交互会话做轮转。
-	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", created.Key, fmt.Sprintf(`"ak-%s-1"`, stable), `{"current_password":"fixture-pass-123","reason":"forgotten"}`); w.Code != http.StatusForbidden {
+	// 长期 API key 不能代替交互会话做轮转：管理面整体对 API 密钥关闭。
+	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", created.Key, fmt.Sprintf(`"ak-%s-1"`, stable), `{"reason":"forgotten"}`); w.Code != http.StatusForbidden {
 		t.Fatalf("api-key session status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	rotate := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"current_password":"fixture-pass-123","reason":"forgotten"}`)
+	rotate := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"reason":"forgotten"}`)
 	if rotate.Code != http.StatusOK {
 		t.Fatalf("rotate status=%d body=%s", rotate.Code, rotate.Body.String())
 	}
@@ -84,7 +85,7 @@ func TestAdminRotateAPIKeyRequiresReauthAndVersion(t *testing.T) {
 		t.Fatalf("new key invalid status=%d body=%s", w.Code, w.Body.String())
 	}
 	// 再次用旧版本轮转必须 412，且已提交的新 key 保持有效。
-	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"current_password":"fixture-pass-123","reason":"retry"}`); w.Code != http.StatusPreconditionFailed {
+	if w := apiKeyRotationRequest(a, http.MethodPost, "/api/admin/apikeys/"+created.ID+"/rotate", token, fmt.Sprintf(`"ak-%s-1"`, stable), `{"reason":"retry"}`); w.Code != http.StatusPreconditionFailed {
 		t.Fatalf("stale rotate status=%d body=%s", w.Code, w.Body.String())
 	}
 	if w := apiKeyRotationRequest(a, http.MethodGet, "/Users/1/Views", rotated.Key, "", ""); w.Code != http.StatusOK {

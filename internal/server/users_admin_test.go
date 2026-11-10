@@ -2,9 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"emby-go/internal/store"
 )
 
 func decodeJSONMap(t *testing.T, raw []byte) map[string]any {
@@ -142,19 +146,21 @@ func TestAdminUsersCRUDGrantsAndAudit(t *testing.T) {
 		t.Fatalf("播放审计 status=%d body=%s", status, raw)
 	}
 	var playback struct {
-		Events []struct {
+		Items []struct {
 			UserID     int64  `json:"user_id"`
 			UserName   string `json:"user_name"`
 			MovieID    int64  `json:"movie_id"`
 			MovieTitle string `json:"movie_title"`
-			Kind       string `json:"kind"`
-		} `json:"events"`
+			PlayCount  int    `json:"play_count"`
+			LastKind   string `json:"last_kind"`
+		} `json:"items"`
+		Total int `json:"total"`
 	}
-	if err := json.Unmarshal(raw, &playback); err != nil || len(playback.Events) == 0 {
+	if err := json.Unmarshal(raw, &playback); err != nil || len(playback.Items) == 0 {
 		t.Fatalf("播放审计为空或解码失败: %v %s", err, raw)
 	}
-	first := playback.Events[0]
-	if first.UserID != 2 || first.UserName != "viewer" || first.MovieTitle != "Contract Movie" || first.Kind != "stopped" {
+	first := playback.Items[0]
+	if first.UserID != 2 || first.UserName != "viewer" || first.MovieTitle != "Contract Movie" || first.LastKind != "stopped" || first.PlayCount != 1 || playback.Total != 1 {
 		t.Fatalf("播放审计字段错误: %s", raw)
 	}
 
@@ -194,15 +200,73 @@ func TestAdminUsersCRUDGrantsAndAudit(t *testing.T) {
 	}
 	status, raw = embyDo(t, ts, http.MethodGet, "/api/admin/playback-events?user_id=2", adminToken, "")
 	var playbackAfter struct {
-		Events []struct {
+		Items []struct {
 			MovieTitle string `json:"movie_title"`
-		} `json:"events"`
+		} `json:"items"`
 	}
-	if err := json.Unmarshal(raw, &playbackAfter); err != nil || len(playbackAfter.Events) == 0 || playbackAfter.Events[0].MovieTitle != "Contract Movie" {
+	if err := json.Unmarshal(raw, &playbackAfter); err != nil || len(playbackAfter.Items) == 0 || playbackAfter.Items[0].MovieTitle != "Contract Movie" {
 		t.Fatalf("删除用户后播放审计丢失: %d %s", status, raw)
 	}
 	status, raw = embyDo(t, ts, http.MethodGet, "/api/admin/users", adminToken, "")
 	if status != http.StatusOK || strings.Contains(string(raw), "viewer") {
 		t.Fatalf("删除后用户仍存在: %d %s", status, raw)
+	}
+}
+
+func TestAdminAuditPaginationBoundary(t *testing.T) {
+	a, token := logsTestApp(t)
+	lib, err := a.db.AddLibrary("audit", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := 0; i < 105; i++ {
+		if err := a.db.RecordLoginEvent(1, "admin", "192.0.2.1", true, now); err != nil {
+			t.Fatal(err)
+		}
+		id, err := a.db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: fmt.Sprintf("/audit/%d.strm", i), Title: fmt.Sprintf("movie-%d", i), Status: "success"}, 1, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{SessionKey: fmt.Sprintf("audit-%d", i), UserID: 1, MovieID: id, Kind: store.PlaybackStart, Now: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Internal callers retain their explicit limits; the HTTP cap is not a store cap.
+	if events, err := a.db.LoginEvents(0, 200); err != nil || len(events) != 105 {
+		t.Fatalf("internal login limit: count=%d err=%v", len(events), err)
+	}
+	if items, total, err := a.db.RecentPlaybackSummaries(0, 0, 200); err != nil || len(items) != 105 || total != 105 {
+		t.Fatalf("internal playback limit: count=%d total=%d err=%v", len(items), total, err)
+	}
+	for _, endpoint := range []string{"login-events", "playback-events"} {
+		for _, tc := range []struct {
+			query string
+			count int
+		}{
+			{"", 20}, {"?start=0&limit=1", 1}, {"?limit=100", 100},
+			{"?start=100&limit=20", 5}, {"?start=105&limit=20", 0},
+			{"?user_id=1&start=0&limit=20", 20},
+		} {
+			w := apiKeyRotationRequest(a, http.MethodGet, "/api/admin/"+endpoint+tc.query, token, "", "")
+			var page struct {
+				Items  []json.RawMessage `json:"items"`
+				Events []json.RawMessage `json:"events"`
+				Total  int               `json:"total"`
+			}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Total != 105 || len(page.Items)+len(page.Events) != tc.count {
+				t.Fatalf("%s%s status=%d body=%s, want total105 count%d", endpoint, tc.query, w.Code, w.Body.String(), tc.count)
+			}
+		}
+		for _, query := range []string{
+			"start=-1", "start=abc", "start=", "start=1.5", "start=9223372036854775808", "start=1&start=2",
+			"limit=0", "limit=-1", "limit=101", "limit=abc", "limit=", "limit=1.5", "limit=9223372036854775808", "limit=1&limit=2",
+			"user_id=-1", "user_id=abc", "user_id=", "user_id=9223372036854775808", "user_id=1&user_id=2",
+		} {
+			w := apiKeyRotationRequest(a, http.MethodGet, "/api/admin/"+endpoint+"?"+query, token, "", "")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s?%s status=%d body=%s", endpoint, query, w.Code, w.Body.String())
+			}
+		}
 	}
 }

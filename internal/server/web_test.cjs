@@ -320,7 +320,7 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
     'id="entity-clear" title="清除该筛选" aria-label="清除筛选"',
     'id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit"',
     "editToggle.setAttribute('aria-expanded', String(!editSection.hidden))",
-    'aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || item.type)}"'
+    'aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || \'其他任务\')}"'
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
@@ -348,7 +348,7 @@ test('API 密钥只显示前缀，新密钥原文仅展示一次', () => {
 test('设置页提供会话期限说明与退出全部会话', () => {
   for (const snippet of [
     '登录会话有效期',
-    's.session_ttl_days > 0 ? `${s.session_ttl_days} 天（使用中自动续期）` : \'永不过期\'',
+    'service.session_ttl_days > 0 ? `${esc(service.session_ttl_days)} 天（使用中自动续期）` : \'永不过期\'',
     'id="logout-all" class="btn btn-danger"',
     "api('/access-tokens', { method: 'DELETE' })",
     '已退出 ${result.revoked} 个会话'
@@ -1298,7 +1298,7 @@ function scanFixture(progress = async () => ({ running: false }), post = async (
     gets: () => calls.filter(c => c.path === '/scan/progress'),
     posts: () => calls.filter(c => c.options.method === 'POST'),
     snapshot: () => JSON.stringify({ hidden: node('#scan-progress').hidden, title: node('#scan-progress-title').textContent,
-      detail: node('#scan-progress-detail').textContent, disabled: node('#scan').disabled, toasts, timers: [...clock.timers.keys()] }) };
+      detail: node('#scan-progress-detail').textContent, disabled: box.scanBlocked, toasts, timers: [...clock.timers.keys()] }) };
 }
 const scanTerminal = { running: false, finished_at: 1, total: 3, done: 3, success: 2, pending: 1 };
 
@@ -1317,7 +1317,7 @@ test('扫描所有入口在状态未知或正在运行时拒绝重复提交，�
     }
     await env.fire(0); await env.box.runScan(8);
     assert.equal(env.posts().length, 1, 'confirmed running must gate every local entry');
-    await env.fire(1500); assert.equal(env.node('#scan').disabled, false);
+    await env.fire(1500); assert.equal(env.box.scanBlocked, false);
     await env.box.runScan(9); assert.equal(env.posts().length, 2);
     assert.equal(env.posts()[1].path, '/tasks/scan?library_id=9&mode=incremental');
     env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
@@ -1328,14 +1328,14 @@ test('扫描实际wrapper首GET失败退避恢复，仅明确终态释放且历�
   for (const failure of [Object.assign(Error('503'), { status: 503 }), new TypeError('offline'), {}, null, { running: 'false' }]) {
     let attempts = 0;
     const env = scanFixture(async () => { if (attempts++ === 0) { if (failure instanceof Error) throw failure; return failure; } return scanTerminal; });
-    env.box.startScanPolling(); assert.equal(env.node('#scan').disabled, true);
+    env.box.startScanPolling(); assert.equal(env.box.scanBlocked, true);
     assert.equal(env.gets().length, 0); await env.fire(0);
     assert.equal(env.node('#scan-progress').hidden, false);
     assert.match(env.node('#scan-progress-title').textContent, /状态未确认/);
     assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
     assert.equal(env.node('#scan-progress-detail').role, 'status');
-    assert.equal(env.node('#scan').disabled, true); assert.equal(env.posts().length, 0);
-    await env.fire(3000); assert.equal(env.node('#scan').disabled, false);
+    assert.equal(env.box.scanBlocked, true); assert.equal(env.posts().length, 0);
+    await env.fire(3000); assert.equal(env.box.scanBlocked, false);
     // R2：没有观察到运行身份的历史终态不算本轮完成，不通知、不排自动收起。
     assert.deepEqual(env.toasts, []); assert.equal(env.node('#scan-progress').hidden, true);
     assert.equal(env.has(4000), false); assert.equal(env.timers.size, 0);
@@ -1349,7 +1349,7 @@ test('扫描实际wrapper多次GET错误指数退避到15秒，running恢复1500
   for (const delay of [0, 3000, 6000, 12000]) await env.fire(delay);
   assert.match(env.node('#scan-progress-detail').textContent, /15秒/);
   await env.fire(15000); assert.equal(env.has(1500), true);
-  await env.fire(1500); assert.equal(env.node('#scan').disabled, false); assert.equal(env.timers.size, 0);
+  await env.fire(1500); assert.equal(env.box.scanBlocked, false); assert.equal(env.timers.size, 0);
 });
 
 test('扫描实际wrapper首GET10秒软超时，中止后未知退避恢复而非后台失败', async () => {
@@ -1362,8 +1362,8 @@ test('扫描实际wrapper首GET10秒软超时，中止后未知退避恢复而�
   assert.equal(env.has(1500), false); env.fire(10000); await pending;
   assert.equal(env.gets()[0].options.signal.aborted, true);
   assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
-  assert.equal(env.node('#scan').disabled, true); assert.deepEqual(env.toasts, []);
-  await env.fire(3000); assert.equal(env.node('#scan').disabled, false); assert.equal(env.timers.size, 0);
+  assert.equal(env.box.scanBlocked, true); assert.deepEqual(env.toasts, []);
+  await env.fire(3000); assert.equal(env.box.scanBlocked, false); assert.equal(env.timers.size, 0);
 });
 
 test('扫描软超时不并发重读，忽略abort的GET晚回也不能被当作完成', async () => {
@@ -1375,7 +1375,7 @@ test('扫描软超时不并发重读，忽略abort的GET晚回也不能被当作
   finish(scanTerminal); await pending;
   assert.match(env.node('#scan-progress-title').textContent, /状态未确认/);
   assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
-  assert.equal(env.node('#scan').disabled, true); assert.deepEqual(env.toasts, []);
+  assert.equal(env.box.scanBlocked, true); assert.deepEqual(env.toasts, []);
   assert.equal(env.has(4000), false); assert.equal(env.has(3000), true);
   env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
 });
@@ -1385,7 +1385,7 @@ test('扫描GET401/403停止且禁启动，不自动重放提交', async () => {
     const env = scanFixture(async () => { throw Object.assign(Error('denied'), { status }); });
     env.box.startScanPolling(); await env.fire(0);
     assert.match(env.node('#scan-progress-detail').textContent, /读取受限.*未确认/);
-    assert.equal(env.node('#scan').disabled, true); assert.equal(env.timers.size, 0);
+    assert.equal(env.box.scanBlocked, true); assert.equal(env.timers.size, 0);
     assert.equal(env.gets().length, 1); assert.equal(env.posts().length, 0); assert.deepEqual(env.toasts, []);
   }
 });
@@ -1394,7 +1394,7 @@ test('扫描首读历史空闲/失败/error终态都不算本轮完成，不toas
   for (const terminal of [{ running: false }, { ...scanTerminal, failed: 1 }, { ...scanTerminal, error: 'fixture scan error' }]) {
     const env = scanFixture(async () => terminal);
     env.box.startScanPolling(); await env.fire(0);
-    assert.equal(env.node('#scan').disabled, false); assert.deepEqual(env.toasts, []);
+    assert.equal(env.box.scanBlocked, false); assert.deepEqual(env.toasts, []);
     assert.equal(env.timers.size, 0);
     // R2：没有观察到 run_id 的历史终态只确认空闲并隐藏面板，不冒充本轮结果。
     assert.equal(env.node('#scan-progress').hidden, true);
@@ -1424,7 +1424,7 @@ test('扫描全局工具栏跨实际page导航继续观察同一个GET', async (
   await env.box.page('fixture');
   assert.equal(env.box.pageGen, 2); assert.equal(env.gets()[0].options.signal.aborted, false);
   finish({ running: true, current: '/fixture/new/movie.mkv', done: 1 }); await pending;
-  assert.equal(env.node('#scan').disabled, true); assert.equal(env.node('#scan-progress').hidden, false);
+  assert.equal(env.box.scanBlocked, true); assert.equal(env.node('#scan-progress').hidden, false);
   assert.match(env.node('#scan-progress-detail').textContent, /movie.mkv/);
   assert.equal(env.has(1500), true); env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
 });
@@ -1450,12 +1450,12 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
     const pending = env.box.runScan('lib &1'); await env.box.runScan(2);
     assert.equal(env.posts().length, 1); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=lib%20%261&mode=incremental');
     await env.fire(0);
-    assert.equal(env.node('#scan').disabled, true); assert.equal(env.node('#scan-progress').hidden, false);
+    assert.equal(env.box.scanBlocked, true); assert.equal(env.node('#scan-progress').hidden, false);
     assert.match(env.node('#scan-progress-title').textContent, /请求进行中/);
     assert.equal(env.has(1500), true); assert.equal(env.has(4000), false); assert.deepEqual(env.toasts, []);
-    await env.fire(1500); assert.equal(env.node('#scan').disabled, true);
+    await env.fire(1500); assert.equal(env.box.scanBlocked, true);
     finish({ success: 2, pending: 1 }); await pending;
-    assert.equal(env.node('#scan').disabled, true, 'POST success cannot confirm progress is idle');
+    assert.equal(env.box.scanBlocked, true, 'POST success cannot confirm progress is idle');
     assert.equal(env.has(0), true); assert.equal(env.has(1500), false);
     assert.equal(env.posts().length, 1); assert.equal(env.toasts.length, 1); assert.equal(env.reloads, 1);
     env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
@@ -1465,9 +1465,9 @@ test('实际runScan提交重复保护，首GET空闲或旧终态仍继续读取�
 test('实际runScan成功后只由重读终态释放按钮，不重放POST或重复toast', async () => {
   const env = scanFixture(async () => scanTerminal);
   await env.box.runScan(); assert.equal(env.posts()[0].path, '/tasks/scan?mode=incremental');
-  assert.equal(env.node('#scan').disabled, true); assert.equal(env.gets().length, 0);
+  assert.equal(env.box.scanBlocked, true); assert.equal(env.gets().length, 0);
   assert.match(env.toasts[0][0], /扫描任务已启动/);
-  await env.fire(0); assert.equal(env.node('#scan').disabled, false);
+  await env.fire(0); assert.equal(env.box.scanBlocked, false);
   assert.equal(env.posts().length, 1); assert.equal(env.toasts.length, 1);
   env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
 });
@@ -1476,14 +1476,14 @@ test('实际runScan503/network失败后只重读确认状态，401403停止不�
   for (const status of [503, undefined, 401, 403]) {
     let reads = 0;
     const env = scanFixture(async () => reads++ ? scanTerminal : { running: true }, async () => { throw Object.assign(Error('submit uncertain'), { status }); });
-    await env.box.runScan(); assert.equal(env.node('#scan').disabled, true);
+    await env.box.runScan(); assert.equal(env.box.scanBlocked, true);
     assert.deepEqual(env.toasts, [['submit uncertain', 'error']]);
     if (status === 401 || status === 403) {
       assert.equal(env.timers.size, 0); assert.equal(env.gets().length, 0);
       assert.match(env.node('#scan-progress-detail').textContent, /读取受限/);
     } else {
-      await env.fire(0); assert.equal(env.node('#scan').disabled, true);
-      await env.fire(1500); assert.equal(env.node('#scan').disabled, false);
+      await env.fire(0); assert.equal(env.box.scanBlocked, true);
+      await env.fire(1500); assert.equal(env.box.scanBlocked, false);
       assert.deepEqual(env.toasts, [['submit uncertain', 'error']]);
     }
     assert.equal(env.posts().length, 1); env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
@@ -1492,8 +1492,8 @@ test('实际runScan503/network失败后只重读确认状态，401403停止不�
 
 test('实际runScan提交失败后首读历史终态仅确认空闲，不toast本轮完成', async () => {
   const env = scanFixture(async () => scanTerminal, async () => { throw Error('network uncertain'); });
-  await env.box.runScan(); assert.equal(env.node('#scan').disabled, true);
-  await env.fire(0); assert.equal(env.node('#scan').disabled, false);
+  await env.box.runScan(); assert.equal(env.box.scanBlocked, true);
+  await env.fire(0); assert.equal(env.box.scanBlocked, false);
   assert.deepEqual(env.toasts, [['network uncertain', 'error']]);
   assert.equal(env.posts().length, 1); assert.equal(env.reloads, 0);
   env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
@@ -1508,7 +1508,7 @@ test('实际runScan旧POST成功/错误不刷新切页或新wallGen，但全局�
     if (fail) reject(Error('late submit error')); else resolve({ success: 1, pending: 0 });
     await pending; assert.equal(env.reloads, 0); assert.equal(env.posts().length, 1);
     assert.equal(env.timers.size, 1); await env.fire(0);
-    assert.equal(env.node('#scan').disabled, true); assert.equal(env.has(1500), true);
+    assert.equal(env.box.scanBlocked, true); assert.equal(env.has(1500), true);
     env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
   }
 });
@@ -1538,7 +1538,7 @@ test('实际boot首scan GET悬挂不阻塞初始page或导航，统一观察器�
   assert.equal(env.gets()[0].options.signal.aborted, false, 'navigation must not cancel global scan read');
   env.fire(10000); await pending; assert.equal(env.gets()[0].options.signal.aborted, true);
   assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
-  assert.equal(env.node('#scan').disabled, true); env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
+  assert.equal(env.box.scanBlocked, true); env.box.stopScanPolling(); assert.equal(env.timers.size, 0);
 });
 
 test('探测文件成功但版本刷新失败保持错误面板，不生成成功通知或自动隐藏', async () => {
@@ -1567,17 +1567,43 @@ test('图片请求带宽度预算与 1x/2x srcset（FE-11）', () => {
   assert.match(source, /\?maxWidth=540 1x, \$\{backdropBase\}\?maxWidth=1080 2x/);
   assert.match(source, /class="detail-backdrop" src="\$\{esc\(backdrop\)\}"\$\{backdropSrcset \? ` srcset=/);
 });
+test('防火墙页三块：黑名单复用、登录分页筛选拉黑、播放合并分页（批次 1110）', () => {
+  const body = section('async function pageFirewall()', '// 设置页 = 只读服务设置');
+  // 第一块仍是 security.js 的 IP 黑名单，不复制实现。
+  assert.match(body, /window\.mountIPBlocklist\(content\.querySelector\('#firewall-blocklist'\)/);
+  // 登录记录：默认 20/页、start+limit+result、ip 精确筛选参与分页。
+  assert.match(source, /const FIREWALL_PAGE_SIZE = 20;/);
+  assert.match(body, /new URLSearchParams\(\{ start: String\(page \* FIREWALL_PAGE_SIZE\), limit: String\(FIREWALL_PAGE_SIZE\), result: firewallFilters\.result \}\)/);
+  assert.match(body, /if \(firewallFilters\.ip\) query\.set\('ip', firewallFilters\.ip\)/);
+  // 一键拉黑：body 仅 network，已存在则「已拉黑」禁用，409 走 toast。
+  assert.match(body, /api\('\/security\/ip-blocklist', \{ method: 'POST', body: JSON\.stringify\(\{ network: ip \}\) \}\)/);
+  assert.match(body, /\$\{isBlocked \? '已拉黑' : '拉黑'\}/);
+  assert.match(body, /error\.status === 409 \? '该地址与已有黑名单规则冲突/);
+  // 播放记录：合并视图分页 + 刻度转时钟，不展开明细。
+  assert.match(body, /api\(`\/playback-events\?start=\$\{page \* FIREWALL_PAGE_SIZE\}&limit=\$\{FIREWALL_PAGE_SIZE\}`\)/);
+  assert.match(source, /const ticksToClock = ticks =>/);
+  assert.doesNotMatch(body, /展开明细/);
+  assert.match(body, /play_count/);
+  assert.match(body, /esc\(playbackKindText\(e\.last_kind\)\)/);
+});
 test('多用户管理 UI 契约：用户管理、媒体库授权与活动记录面板', () => {
   assert.match(source, /<h2 id="users-title">用户管理<\/h2>/);
   assert.match(source, /id="user-create-form"/);
   assert.match(source, /data-user-lib="\$\{u\.id\}"/);
+  // 批次 1110：授权改可换行 checkbox 网格、角色文字标签、创建用户独立区域、删除按钮有可访问名称。
+  assert.match(source, /<div class="check-grid">/);
+  assert.match(source, /<span class="role-tag\$\{u\.is_admin \? ' is-admin' : ''\}">/);
+  assert.match(source, /<div class="user-create">/);
+  assert.match(source, /<h3 class="settings-subtitle">创建用户<\/h3>/);
+  assert.match(source, /aria-label="删除用户「\$\{esc\(u\.name\)\}」"/);
+  assert.match(source, /esc\(fmtTime\(u\.last_login_at\)\)/);
   assert.match(source, /data-user-save=/);
   assert.match(source, /data-user-del=/);
   assert.match(source, /api\('\/users', \{ method: 'POST'/);
   assert.match(source, /\/users\/' \+ id \+ '\/libraries'/);
-  assert.match(source, /<h2 id="audit-title">活动记录<\/h2>/);
+  assert.match(source, /<h2 id="firewall-login-title">登录记录<\/h2>/);
   assert.match(source, /api\('\/login-events\?' \+ query\.toString\(\)\)/);
-  assert.match(source, /api\('\/playback-events\?limit=50'\)/);
+  assert.match(source, /api\(`\/playback-events\?start=/);
   assert.match(source, /id="pw-form"/);
   assert.match(source, /fetch\('\/api\/auth\/password'/);
   assert.match(source, /function renderSelfPassword\(\)/);
@@ -1587,13 +1613,32 @@ test('多用户管理 UI 契约：用户管理、媒体库授权与活动记录�
   assert.match(source, /if \(me && !me\.is_admin\) \{\n    localStorage\.removeItem\('emby_token'\);/);
 });
 
-test('活动记录是独立侧边栏页面（批次 89）', () => {
-  assert.match(html, /data-page="activity"/);
-  assert.match(html, /<span>活动记录<\/span>/);
-  assert.match(source, /activity: \{ title: '活动记录', crumb: 'Archive \/ Activity' \}/);
-  assert.match(source, /activity: pageActivity,/);
-  assert.match(source, /async function pageActivity\(\)/);
-  assert.match(source, /refreshPage\(pageActivity, gen\)/);
+test('媒体库改为封面卡片网格并保留全部管理操作（批次 1110）', () => {
+  const lib = source.slice(source.indexOf('async function pageLibraries()'), source.indexOf('async function pageLibraries()') + 6000);
+  assert.match(lib, /<div class="library-grid">/);
+  assert.match(lib, /<article class="library-card">/);
+  assert.match(lib, /data-lib-add/);
+  assert.match(lib, /data-lib-scan="\$\{esc\(item\.Id\)\}"/);
+  assert.match(lib, /data-lib-delete=/);
+  assert.match(lib, /data-lib-move="up"/);
+  assert.match(lib, /loading="lazy"/);
+  assert.match(lib, /\?maxWidth=480/);
+  assert.match(lib, /<h3 class="library-title">/);
+  assert.match(lib, /class="library-path mono"/);
+  assert.doesNotMatch(lib, /library-table/);
+  const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
+  assert.match(css, /\.library-grid \{[\s\S]*?minmax\(min\(100%, 240px\), 1fr\)/);
+  assert.match(css, /\.library-cover \{ aspect-ratio: 16 \/ 9;/);
+});
+
+test('防火墙是独立侧边栏页面并合并登录/播放记录（批次 1110）', () => {
+  assert.match(html, /data-page="firewall"/);
+  assert.match(html, /<span>防火墙<\/span>/);
+  assert.doesNotMatch(html, /data-page="security"/);
+  assert.match(source, /firewall: \{ title: '防火墙', crumb: 'Archive \/ Firewall' \}/);
+  assert.match(source, /firewall: pageFirewall,/);
+  assert.match(source, /async function pageFirewall\(\)/);
+  assert.match(source, /if \(name === 'activity'\) name = 'firewall'/);
   const settingsBody = source.slice(source.indexOf('async function pageSettings()'), source.indexOf('async function pageSettings()') + 1200);
   assert.doesNotMatch(settingsBody, /login-events|playback-events/);
 });
@@ -1658,8 +1703,8 @@ test('运行日志独立页与 ffprobe 状态（生产可诊断）', async () =>
   assert.match(source, /\?kind=app&limit=200/);
   assert.match(source, /id="dl-earlier"/);
   assert.match(source, /部分通知未送达，业务操作已完成/);
-  assert.match(source, /ffprobe_error/);
-  assert.match(source, /媒体信息探测/);
+  assert.match(source, /ff\.error/);
+  assert.match(source, /ffprobe/);
 });
 
 test('移动端表格：用户卡片化与日志堆叠', async () => {
@@ -2189,8 +2234,8 @@ test('扫描202首读历史终态必须按task_id确认；快速完成未见runn
     assert.equal(path, '/tasks/7'); return taskReads++ ? { status: 'succeeded', finished_at: 'new' } : { status: 'queued' };
   });
   await env.box.runScan(); await env.fire(0);
-  assert.equal(env.reloads, 1); assert.equal(env.node('#scan').disabled, true); assert.equal(env.has(1500), true);
-  await env.fire(1500); assert.equal(env.reloads, 2); assert.equal(env.node('#scan').disabled, false);
+  assert.equal(env.reloads, 1); assert.equal(env.box.scanBlocked, true); assert.equal(env.has(1500), true);
+  await env.fire(1500); assert.equal(env.reloads, 2); assert.equal(env.box.scanBlocked, false);
   assert.equal(env.posts().length, 1); assert.equal(taskReads, 2);
   const fast = scanFixture(async () => scanTerminal, async () => ({ task_id: 8 }));
   await fast.box.runScan(); await fast.fire(0); assert.equal(fast.reloads, 2);
@@ -2663,15 +2708,18 @@ test('扫描taskID不匹配只GET退避，不刷新冒名任务；本地换身�
   assert.equal(current.reloads, 1); current.box.stopScanPolling();
 });
 
-test('手动扫描full/incremental均显式下发，不携带允许空删；模式有可见说明', async () => {
-  for (const mode of ['full', 'incremental']) {
-    const env = scanFixture(); env.node('#scan-mode').value = mode;
-    await env.box.runScan(3); assert.equal(env.posts()[0].path, '/tasks/scan?library_id=3&mode=' + mode);
-    assert.doesNotMatch(env.posts()[0].path, /allow_empty/); env.box.stopScanPolling();
-  }
+test('页眉不再提供全局扫描，行内扫描固定显式增量下发且不携带允许空删', async () => {
+  const env = scanFixture();
+  await env.box.runScan(3);
+  assert.equal(env.posts()[0].path, '/tasks/scan?library_id=3&mode=incremental');
+  assert.doesNotMatch(env.posts()[0].path, /allow_empty/); env.box.stopScanPolling();
+  const bare = scanFixture();
+  await bare.box.runScan();
+  assert.equal(bare.posts()[0].path, '/tasks/scan?mode=incremental'); bare.box.stopScanPolling();
   const html = fs.readFileSync(path.join(__dirname, 'web/index.html'), 'utf8');
-  assert.match(html, /label for="scan-mode"/); assert.match(html, /aria-describedby="scan-mode-description"/);
-  assert.match(html, /两种模式都会完整枚举目录/);
+  assert.doesNotMatch(html, /scan-tools|id="scan-mode"|id="scan"/);
+  assert.match(html, /id="logout"/);
+  assert.match(source, /data-lib-scan/);
 });
 
 
@@ -2722,7 +2770,7 @@ test('计划列表与刮削执行先于收起配置，墙和详情维护为原�
   const items = section('async function pageItems(', 'function reloadWall(');
   assert.ok(items.indexOf('id="item-search"') < items.indexOf('id="probe-media"'));
   assert.match(items, /<details class="disclosure wall-maintenance"><summary/);
-  const detail = section('async function openDetail(', 'async function pageActivity(');
+  const detail = section('async function openDetail(', 'async function pageFirewall(');
   assert.ok(detail.indexOf('id="detail-play"') < detail.indexOf('detail-maintenance'));
   assert.match(detail, /<details class="disclosure detail-maintenance"><summary/);
   assert.match(section('function overlayFocusables(', 'function overlayContains('), /summary,/);
@@ -2907,6 +2955,148 @@ test('刮削弹窗在图片之后渲染显式剧照选择：全部 index、esc �
   assert.match(markup, /<h3 class="scrape-h3">图片<\/h3>/);
   assert.match(markup, /<h3 class="scrape-h3">字段差异/);
   assert.ok(markup.indexOf('剧照选择') > markup.indexOf('<h3 class="scrape-h3">图片</h3>'));
+});
+
+function interactionNode() {
+  return { value: '', disabled: false, hidden: false, innerHTML: '', textContent: '', handlers: {},
+    addEventListener(type, fn) { this.handlers[type] = fn; },
+    focus() { this.focused = true; }, querySelectorAll: () => [] };
+}
+
+async function firewallInteractionFixture() {
+  const nodes = new Map(), requests = [], notices = [];
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, interactionNode());
+    return nodes.get(id);
+  };
+  const content = { innerHTML: '', querySelector: node };
+  const box = sandbox({ content, me: { is_admin: true }, icon: () => '', esc: String, empty: text => text,
+    window: { mountIPBlocklist: () => () => {} }, toast: message => notices.push(message),
+    api: url => {
+      if (url === '/security/ip-blocklist') return Promise.resolve({ items: [] });
+      return new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
+    } });
+  vm.runInContext(section('const FIREWALL_PAGE_SIZE =', '// 设置页 = 只读服务设置'), box);
+  const ready = box.pageFirewall();
+  requests[0].resolve({ events: [{ name: 'initial', ip: '192.0.2.1' }], total: 80 });
+  requests[1].resolve({ items: [{ movie_title: 'initial' }], total: 80 });
+  await ready;
+  const step = kind => node(`#firewall-${kind}-body`).handlers.click({ target: {
+    closest: selector => selector.includes('data-page-step') ? { disabled: false, dataset: { pageStep: '1' } } : null
+  } });
+  return { box, node, requests, notices, step };
+}
+
+for (const kind of ['login', 'play']) {
+  for (const outcome of ['rows', 'empty', 'error']) {
+    test(`防火墙${kind}连续翻页：最新 Promise 先回，旧${outcome}不能回写页码/内容或重置分页`, async () => {
+      const env = await firewallInteractionFixture();
+      const slow = env.step(kind), fast = env.step(kind);
+      const older = env.requests[2], newer = env.requests[3];
+      assert.match(older.url, /start=20/);
+      assert.match(newer.url, /start=40/);
+      newer.resolve(kind === 'login' ? { events: [{ name: 'latest-page-three' }], total: 80 }
+        : { items: [{ movie_title: 'latest-page-three' }], total: 80 });
+      await fast;
+      const body = env.node(`#firewall-${kind}-body`), rendered = body.innerHTML;
+      assert.match(rendered, /latest-page-three/);
+      assert.match(rendered, /第 3 \/ 4 页/);
+      if (outcome === 'error') older.reject(Error('obsolete failure'));
+      else older.resolve(kind === 'login' ? { events: outcome === 'empty' ? [] : [{ name: 'obsolete' }], total: 80 }
+        : { items: outcome === 'empty' ? [] : [{ movie_title: 'obsolete' }], total: 80 });
+      await slow;
+      assert.equal(body.innerHTML, rendered);
+      assert.equal(vm.runInContext(kind === 'login' ? 'firewallLoginPage' : 'firewallPlayPage', env.box), 2);
+      assert.equal(env.requests.length, 4, '旧空页不能触发回第一页的额外请求');
+      assert.deepEqual(env.notices, []);
+    });
+  }
+}
+
+test('防火墙清除筛选同步清空控件，重新应用不恢复旧 IP/结果', async () => {
+  const env = await firewallInteractionFixture();
+  const ip = env.node('#firewall-login-ip'), result = env.node('#firewall-login-result');
+  ip.value = '192.0.2.1'; result.value = 'failed';
+  env.node('#firewall-login-filter').handlers.submit({ preventDefault() {} });
+  assert.match(env.requests[2].url, /result=failed&ip=192.0.2.1/);
+  env.requests[2].resolve({ events: [], total: 0 }); env.requests[3].resolve({ items: [], total: 0 });
+  await new Promise(setImmediate);
+  env.node('#firewall-login-reset').handlers.click();
+  assert.equal(ip.value, ''); assert.equal(result.value, 'all');
+  assert.match(env.requests[4].url, /start=0&limit=20&result=all$/);
+  env.requests[4].resolve({ events: [], total: 0 }); env.requests[5].resolve({ items: [], total: 0 });
+  await new Promise(setImmediate);
+  assert.equal(ip.focused, true);
+  env.node('#firewall-login-filter').handlers.submit({ preventDefault() {} });
+  assert.match(env.requests[6].url, /start=0&limit=20&result=all$/);
+  env.requests[6].resolve({ events: [], total: 0 }); env.requests[7].resolve({ items: [], total: 0 });
+  await new Promise(setImmediate);
+});
+
+function apiKeyInteractionFixture() {
+  const nodes = new Map(), requests = [], notices = [];
+  let refreshed = 0;
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, interactionNode());
+    return nodes.get(id);
+  };
+  node('#apikey-submit').innerHTML = '<span>创建</span>';
+  node('#key-name').value = 'Player';
+  const rotateButtons = ['ak_first', 'ak_second'].map(id => Object.assign(interactionNode(), {
+    dataset: { keyRotate: id, version: '3', name: id }
+  }));
+  const box = sandbox({ gen: 1, createdAPIKey: null, settingsCategory: 'users',
+    document: { querySelector: node, querySelectorAll: selector => selector === '[data-key-rotate]' ? rotateButtons : [] },
+    FormData: class { get() { return node('#key-name').value; } },
+    api: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
+    toast: message => notices.push(message), pageSettings() {}, refreshPage: () => { refreshed++; } });
+  vm.runInContext(section("  document.querySelector('#apikey-form').addEventListener", '  const logoutAll ='), box);
+  vm.runInContext(section("  const rotateForm = document.querySelector('#key-rotate-form');", "  document.querySelectorAll('[data-key-delete]')"), box);
+  const submit = kind => node(kind === 'create' ? '#apikey-form' : '#key-rotate-form').handlers.submit({ preventDefault() {}, target: {} });
+  return { box, node, requests, notices, rotateButtons, submit, get refreshed() { return refreshed; } };
+}
+
+test('创建密钥显示进行中并防重复，失败保留输入允许重试，成功只展示一次原文', async () => {
+  const env = apiKeyInteractionFixture(), button = env.node('#apikey-submit');
+  const pending = env.submit('create');
+  assert.equal(button.disabled, true); assert.equal(button.textContent, '创建中…');
+  await env.submit('create'); assert.equal(env.requests.length, 1);
+  env.requests[0].reject(Error('create failed')); await pending;
+  assert.equal(button.disabled, false); assert.equal(button.innerHTML, '<span>创建</span>');
+  assert.equal(env.node('#key-name').value, 'Player'); assert.deepEqual(env.notices, ['create failed']);
+  const retry = env.submit('create');
+  assert.deepEqual(JSON.parse(env.requests[1].options.body), { name: 'Player' });
+  env.requests[1].resolve({ key: 'new-key' }); await retry;
+  assert.equal(env.box.createdAPIKey, 'new-key'); assert.equal(env.refreshed, 1);
+  await env.submit('create'); assert.equal(env.requests.length, 2, '成功后等待重绘也不可再次提交');
+});
+
+test('轮转取消不提交，在途禁用且目标稳定，失败保留原因可重试并带原版本', async () => {
+  const env = apiKeyInteractionFixture();
+  const reason = env.node('#key-rotate-reason'), submit = env.node('#key-rotate-submit'), cancel = env.node('#key-rotate-cancel');
+  env.rotateButtons[0].handlers.click();
+  reason.value = 'leaked'; cancel.handlers.click();
+  await env.submit('rotate'); assert.equal(env.requests.length, 0);
+  assert.equal(env.node('#key-rotate-form').hidden, true);
+  env.rotateButtons[0].handlers.click(); reason.value = 'leaked';
+  const pending = env.submit('rotate');
+  assert.equal(submit.disabled, true); assert.equal(submit.textContent, '轮转中…');
+  assert.equal(reason.disabled, true); assert.equal(cancel.disabled, true);
+  env.rotateButtons[1].handlers.click(); cancel.handlers.click();
+  await env.submit('rotate'); assert.equal(env.requests.length, 1);
+  assert.equal(env.requests[0].url, '/apikeys/ak_first/rotate');
+  assert.equal(env.requests[0].options.headers['If-Match'], '"ak-first-3"');
+  assert.deepEqual(JSON.parse(env.requests[0].options.body), { reason: 'leaked' });
+  assert.equal(env.node('#key-rotate-name').textContent, 'ak_first');
+  env.requests[0].reject(Error('rotate failed')); await pending;
+  assert.equal(submit.disabled, false); assert.equal(reason.disabled, false); assert.equal(cancel.disabled, false);
+  assert.equal(reason.value, 'leaked'); assert.deepEqual(env.notices, ['rotate failed']);
+  const retry = env.submit('rotate');
+  env.requests[1].resolve({ key: 'rotated-key' }); await retry;
+  assert.equal(env.box.createdAPIKey, 'rotated-key'); assert.equal(env.refreshed, 1);
+  await env.submit('rotate'); assert.equal(env.requests.length, 2);
+  assert.doesNotMatch(source, /会让所有使用旧密钥的脚本\/客户端立即断开/);
+  assert.match(source, /确认轮转（旧密钥立即失效）/);
 });
 
 test('剧照缺失或为空时只提示上游没有剧照，不渲染空网格也不报错', () => {

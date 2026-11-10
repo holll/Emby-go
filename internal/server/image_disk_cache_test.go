@@ -147,7 +147,7 @@ func TestImageDiskCacheReusesVariants(t *testing.T) {
 	}
 
 	// —— 清空内存缓存：同一请求应命中磁盘，不再解码 ——
-	app.imgThumb.Clear()
+	app.scrapeThumbs.Clear()
 	resp, body2 := call(imagePath+"?maxWidth=50", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("二次取缩略图: %d", resp.StatusCode)
@@ -190,7 +190,7 @@ func TestImageDiskCacheReusesVariants(t *testing.T) {
 	}
 
 	// —— 并发去重：8 个同 URL 请求只应触发一次生成 ——
-	app.imgThumb.Clear()
+	app.scrapeThumbs.Clear()
 	base := genCount()
 	var wg sync.WaitGroup
 	failures := make(chan string, 8)

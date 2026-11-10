@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -333,31 +335,65 @@ func (a *App) changePassword(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// adminLoginEvents 返回登录审计；user_id 可选，0/缺省表示全部用户。
+// auditEventPage parses untrusted pagination once at the HTTP boundary.
+// Store queries accept the parsed values without silently changing them.
+func auditEventPage(q url.Values) (userID int64, start, limit int, err error) {
+	limit = 20
+	for _, name := range []string{"user_id", "start", "limit"} {
+		values, present := q[name]
+		if !present {
+			continue
+		}
+		if len(values) != 1 {
+			return 0, 0, 0, fmt.Errorf("%s 必须为单个整数", name)
+		}
+		value, parseErr := strconv.ParseInt(values[0], 10, 64)
+		if parseErr != nil || value < 0 || (name == "limit" && (value < 1 || value > 100)) || (name == "start" && value > int64(^uint(0)>>1)) {
+			return 0, 0, 0, fmt.Errorf("%s 无效", name)
+		}
+		switch name {
+		case "user_id":
+			userID = value
+		case "start":
+			start = int(value)
+		case "limit":
+			limit = int(value)
+		}
+	}
+	return userID, start, limit, nil
+}
+
+// adminLoginEvents 返回登录审计分页；user_id 可选，0/缺省表示全部用户。
 func (a *App) adminLoginEvents(c *gin.Context) {
 	ip, success, err := loginActivityFilters(c.Request.URL.Query())
 	if err != nil {
 		apiError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	userID, _ := strconv.ParseInt(c.Query("user_id"), 10, 64)
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	events, err := a.db.LoginEventsFiltered(userID, limit, ip, success)
+	userID, start, limit, err := auditEventPage(c.Request.URL.Query())
+	if err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	events, total, err := a.db.LoginEventsFiltered(userID, start, limit, ip, success)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "读取登录记录失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"events": events, "total": len(events)})
+	c.JSON(http.StatusOK, gin.H{"events": events, "total": total})
 }
 
-// adminPlaybackEvents 返回播放活动记录（含影片与用户快照）；user_id 可选。
+// adminPlaybackEvents 返回按用户+影片合并的播放记录分页；user_id 可选。
 func (a *App) adminPlaybackEvents(c *gin.Context) {
-	userID, _ := strconv.ParseInt(c.Query("user_id"), 10, 64)
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	events, err := a.db.RecentPlaybackEvents(userID, limit)
+	userID, start, limit, err := auditEventPage(c.Request.URL.Query())
+	if err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, total, err := a.db.RecentPlaybackSummaries(userID, start, limit)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "读取播放记录失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"events": events, "total": len(events)})
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total})
 }

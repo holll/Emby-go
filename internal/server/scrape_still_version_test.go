@@ -141,7 +141,7 @@ func TestScrapeStillVersionIsolation(t *testing.T) {
 	mu.Unlock()
 
 	// 仅图片字节淘汰时，仍应按各自列表快照重下，不能查询最新列表后偷换下标。
-	app.imgThumb.Clear()
+	app.scrapeThumbs.Clear()
 	fetch(first[0].Preview, http.StatusOK, "https://p/a.jpg")
 	fetch(second[0].Preview, http.StatusOK, "https://p/b.jpg")
 	mu.Lock()
@@ -152,7 +152,7 @@ func TestScrapeStillVersionIsolation(t *testing.T) {
 
 	// 两类缓存都失效，当前列表不再匹配旧版本：404，绝不能取新列表的同一下标。
 	app.scrapeStills.Clear()
-	app.imgThumb.Clear()
+	app.scrapeThumbs.Clear()
 	fetch(first[0].Preview, http.StatusNotFound, "")
 	mu.Lock()
 	if lookups != 4 || downloads != 7 {
@@ -172,7 +172,7 @@ func TestScrapeStillVersionIsolation(t *testing.T) {
 	fetch(second[0].Preview, http.StatusOK, "https://p/b.jpg")
 
 	// 列表及字节均丢失且上游不可用时保留 502，不伪装成过期 404，也不下图。
-	app.imgThumb.Clear()
+	app.scrapeThumbs.Clear()
 	mu.Lock()
 	lookupFailed = true
 	mu.Unlock()

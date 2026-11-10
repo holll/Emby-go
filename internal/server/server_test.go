@@ -401,15 +401,6 @@ func TestCoreAPI(t *testing.T) {
 	if probeResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("probe response: %d", probeResp.StatusCode)
 	}
-	probeListReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/probe", nil)
-	probeListReq.Header.Set("X-Emby-Token", token)
-	probeListResp, _ := http.DefaultClient.Do(probeListReq)
-	var probeList map[string]any
-	json.NewDecoder(probeListResp.Body).Decode(&probeList)
-	probeListResp.Body.Close()
-	if len(probeList["items"].([]any)) == 0 {
-		t.Fatal("probe not recorded")
-	}
 	reindexReq, _ := http.NewRequest("POST", ts.URL+"/api/admin/reindex", nil)
 	reindexReq.Header.Set("X-Emby-Token", token)
 	reindexResp, _ := http.DefaultClient.Do(reindexReq)

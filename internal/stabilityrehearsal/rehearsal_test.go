@@ -8,13 +8,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"emby-go/internal/backup"
 	"emby-go/internal/scanner"
 	"emby-go/internal/store"
 	"golang.org/x/crypto/bcrypt"
@@ -192,95 +189,6 @@ func retained(t *testing.T, s *store.Store) {
 	}
 	if b.PositionTicks != 999 || b.PlayCount != 2 || b.Played || b.IsFavorite || b.Likes != -1 || b.HideFromResume {
 		t.Fatalf("other data=%+v", b)
-	}
-}
-
-func TestSchema13UpgradeAndBackupRestore(t *testing.T) {
-	path, lib := legacyFixture(t)
-	for range 2 {
-		s, err := store.Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		retained(t, s)
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db := rawDB(t, path)
-	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 22 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 22 {
-		t.Fatal("migration ledger is not complete v22")
-	}
-	if scalar(t, db, "SELECT count(*) FROM users WHERE auth_generation=1") != 3 {
-		t.Fatal("generation backfill")
-	}
-	if scalar(t, db, "SELECT count(*) FROM playback_sessions") != 2 || scalar(t, db, "SELECT count(*) FROM playback_events") != 2 {
-		t.Fatal("playback history lost")
-	}
-	integrity(t, path)
-	s := openStore(t, path)
-	// Only the JSON index is backed up here, not the referenced artwork bytes.
-	mustExec(t, db, `UPDATE movies SET extra_backdrops='["/fixture/extrafanart/fanart2.jpg","/fixture/extrafanart/fanart10.jpg"]', auto_marks='["中文字幕"]' WHERE id=42`)
-	result, err := backup.Run(backup.Options{DBPath: path, OutDir: filepath.Join(t.TempDir(), "backups"), NFORoot: true, Now: time.Unix(1700000000, 0)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NFOCount != 1 {
-		t.Fatalf("backup=%+v", result)
-	}
-	copied, err := os.ReadFile(filepath.Join(result.Dir, "nfo", "lib-11", "A.nfo"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile(filepath.Join(lib, "A.nfo"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(copied, original) {
-		t.Fatal("NFO backup changed bytes")
-	}
-	// No public restore API: copy the completed snapshot to an unrelated fresh
-	// path, then exercise real startup and read APIs. Media paths stay unchanged.
-	restoredPath := filepath.Join(t.TempDir(), "restored.sqlite")
-	bytes, err := os.ReadFile(result.Database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(restoredPath, bytes, 0600); err != nil {
-		t.Fatal(err)
-	}
-	integrity(t, restoredPath)
-	restored := openStore(t, restoredPath)
-	retained(t, restored)
-	restoredDB := rawDB(t, restoredPath)
-	for _, check := range []struct {
-		query string
-		want  int64
-	}{
-		{"SELECT count(*) FROM schema_migrations", 22},
-		{"SELECT count(*) FROM movies WHERE id=42 AND auto_marks='[\"中文字幕\"]'", 1},
-		{"SELECT count(*) FROM movies WHERE id=42 AND extra_backdrops='[\"/fixture/extrafanart/fanart2.jpg\",\"/fixture/extrafanart/fanart10.jpg\"]'", 1},
-		{"SELECT count(*) FROM playback_sessions WHERE session_key='shared-session' AND movie_id=42 AND ((user_id=7 AND position_ticks=1234567) OR (user_id=9 AND position_ticks=999))", 2},
-		{"SELECT count(*) FROM playback_events WHERE session_key='shared-session' AND seq=1 AND kind='progress' AND ((user_id=7 AND position_ticks=1234567) OR (user_id=9 AND position_ticks=999))", 2},
-		{"SELECT count(*) FROM libraries WHERE id=11 AND name='retained' AND sort_order=3", 1},
-	} {
-		if got := scalar(t, restoredDB, check.query); got != check.want {
-			t.Fatalf("restored %s=%d want %d", check.query, got, check.want)
-		}
-	}
-	if err := s.RenameUser(7, "changed-after-backup"); err != nil {
-		t.Fatal(err)
-	}
-	u, err := restored.UserByID(7)
-	if err != nil || u.Name != "viewer" {
-		t.Fatalf("restore aliases live DB: %+v %v", u, err)
-	}
-	created, err := restored.CreateUser("post-restore", "rehearsal-password", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.ID <= 500 {
-		t.Fatalf("historical identity reused: %d", created.ID)
 	}
 }
 

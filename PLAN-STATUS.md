@@ -37,7 +37,7 @@
 | BE-08 | NoRoute 去重 map 无界 | ◐ | 16,20,21,47 | 128 上限 + 6h TTL + LRU 淘汰 + 写库令牌桶（burst 60、平均 1 QPS）；清空探针已重置 seen/epoch；跨进程不共享；真实唯一路径洪水未压测 |
 | BE-09 | 出站信任边界与响应头预算 | ◐ | 42 | 新增 internal/outbound：协议白名单、DNS 解析+拨号地址校验并钉 IP、重定向 ≤3 跳且逐跳复检、响应头 512 KiB、拨号/握手/响应头/连接预算；元数据/翻译/播放代理已接入。残余：代理模式只能校验请求目标、无法钉住代理实际连接地址；私网例外按主机名而非完整可信源策略；ffprobe 子进程出站未纳入；无真实 NAS/签名 URL/HEAD-Range/并发压测；D04 已批（批次 65） |
 | BE-10 | App/handler 编排过重 | ○ | — | 仅抽公共 helper；Auth/Task/Library/PlaybackService 未抽；属 R3 |
-| DB-01 | 迁移吞错且缺版本台账 | ◐ | 1 | 台账/校验和/同事务 DDL/未知结构拒绝已实现；支持版本仅 1，无真实历史 fixture；空间不足/硬退出/WAL 备份/恢复演练未做，**不得标完成** |
+| DB-01 | 迁移吞错且缺版本台账 | ◐ | 1 | 台账/校验和/同事务 DDL/未知结构拒绝已实现；支持版本仅 1，无真实历史 fixture；空间不足/硬退出/WAL 复制/恢复演练未做，**不得标完成** |
 | DB-02 | 播放计数读改写竞争 | ◐ | 51 | 批次 51 完成：迁移 2 建 `playback_sessions`/`playback_events`（会话键=PlaySessionId，缺失回退 `item:<id>`），`last_event_seq` 单调序号；`RecordPlaybackEvent` 单事务写会话+事件+userdata，stopped 仅 `stopped=0→1` 原子 +1，重复 Stopped/重放/重启后重放幂等，停止后迟到 Progress 忽略；事件表保留最近 2 万条。剩余：无 PlaySessionId 的旧客户端需先发 Playing 重开才能再计一次；无观看时长统计与按会话查询 API；`SavePlayback` 仍被旧测试/夹具使用 |
 | DB-03 | 业务提交与缓存版本分离 | ◐ | 9-15,24,25,27,34 | 已覆盖 metadata/删除/清理/manual/相似/图片/userdata/设置/played/头像；播放进度、Stopped/心跳、扫描检查点未合并；跨进程版本镜像未做 |
 | DB-04 | JSON 筛选与包含搜索 | ◐ | 81 | 已量化不引入 FTS5/关系表：5k 库 SQL 层 1–3ms；50k 行（复制行）标题 `%term%` 14.8ms、COUNT 18.4ms、深页 4.0ms；Go 层 `BenchmarkSearch*` 3.8–6.5ms/次（5k，含 100 行解码）；结论 `%term%`/JSON/演员 EXISTS 原语义保留，50k 真实库或延迟超预算再评估 FTS5 trigram/feature 表 |
@@ -75,13 +75,12 @@
 | D02 | ✅ 已批（2026-10-17）：API 密钥=管理员全权凭据，具名接受风险；未来多用户时非管理员不得建 key；图片保持匿名。不实现 scope 隔离 | BE-02 以风险接受关闭 |
 | D03 | ✅ 已批（2026-10-18）：密钥摘要使用 HMAC-SHA256 + 服务端 secret（迁移 3 保留旧明文列一个版本，双读窗口后可删）；管理面只展示前缀；旧 fixture 同步更新 | DB-01 放行、key 摘要迁移 |
 | D04 | ✅ 已批（2026-10-18）：单实例单写、Redis 必选、反代终止 TLS、默认不信任 XFF、初始化仅回环/显式 CIDR、预算沿用批次 41/42；公网仍需 A03/A14 + D01 落地 | 已落地（批次 65）：`setup_code`、`initialize_allow_from`、`trusted_proxies`、README 公网门禁；**未把“仅回环”设为默认**（LAN 初始化仍可用，启动时警告） |
-| D05 | ✅ 已批（2026-10-18）：仅审计本仓库/本机历史日志与备份；发现明文凭据即轮换并记录；不追溯第三方代理留存 | ✅ 已落地（批次 68，审计记录见 §2.2）：未发现真实凭据，上线前轮换 checklist 已列 |
+| D05 | ✅ 已批（2026-10-18）：仅审计本仓库/本机历史日志与复制；发现明文凭据即轮换并记录；不追溯第三方代理留存 | ✅ 已落地（批次 68，审计记录见 §2.2）：未发现真实凭据，上线前轮换 checklist 已列 |
 | D06 | ✅ 已批（2026-10-18）：版本域含 userdata/库/图片指纹；缓存键带版本；缺版本视为脏；读己之写窗口 ≤ 500ms | ✅ 已落地（批次 67）：全部可见变更推进 `g:version`，版本化键即时换域；无版本键不命中；单进程读己之写即时 |
 | D07 | ✅ 已批（2026-10-17）：新建播放会话/事件表与序号协议；DB-02 已按此落地（批次 51）：会话内永久去重、停止后心跳忽略、旧 `/Sessions/Playing*` 协议映射同一写链 | DB-02 完成（批次 51） |
-| D08 | ✅ 已批（2026-10-18）：NFO 为人工编辑真源；索引失败给恢复入口与 7 天提示；锁字段阻止自动覆盖；备份含 NFO 与数据库 | ✅ 已落地（批次 69）：迁移 5 `edit_failures`，设置页「索引恢复」列表+超 7 天提示；成功重索引自动清除；NFO 真源/锁字段此前已实现；备份含 NFO 随 D11 |
+| D08 | ✅ 已批（2026-10-18）：NFO 为人工编辑真源；索引失败给恢复入口与 7 天提示；锁字段阻止自动覆盖；复制含 NFO 与数据库 | ✅ 已落地（批次 69）：迁移 5 `edit_failures`，设置页「索引恢复」列表+超 7 天提示；成功重索引自动清除；NFO 真源/锁字段此前已实现 |
 | D09 | ✅ 已批（2026-10-17）：SIGTERM 即 readiness=false，15s 总预算，长流不撤销，部署宽限 30s | BE-04（★） |
 | D10 | ✅ 已批（2026-10-17）：进程内任务表、202+task_id、1h 幂等、容量 200、重启不恢复、旧 /scan 保留至验收集通过 | BE-07、R3 |
-| D11 | ✅ 已批（2026-10-18）：每日自动备份数据库+NFO、保留 7 份；RPO 24h/RTO 1h；恢复后需重置管理员密码（凭据不入备份） | ✅ 已落地（批次 70）：`cmd/embybackup` 一致性快照+NFO+保留清理；README 恢复步骤；定时执行由部署者配置 |
 | D12 | ✅ 已批（2026-10-18）：浏览器矩阵 Chromium/Firefox/WebKit + iOS Safari/Android Chrome 抽测；性能基线 p95 列表 ≤ 300ms、详情 ≤ 150ms、扫描 5000 项 ≤ 60s；验收人=项目所有者 | ✅ 已落地（批次 71）：矩阵与阈值已固化并有 A13/A15 证据；真机抽测仍属部署验收 |
 
 ### 2.1 提案存档
@@ -90,7 +89,7 @@ D01–D12 已于 2026-10-17/18 全部批准并落地，原提案正文与上表�
 
 ### 2.2 D05 历史凭据审计记录（2026-10-18，批次 68）
 
-范围：本仓库全部提交历史与当前工作区的配置/数据/日志文件（D05 默认值：仅审计本仓库与本机历史日志、备份；不追溯第三方代理留存）。
+范围：本仓库全部提交历史与当前工作区的配置/数据/日志文件（D05 默认值：仅审计本仓库与本机历史日志、复制；不追溯第三方代理留存）。
 
 结果：
 - 当前工作区无 `config.yaml`、无本地 `*.db`/`*.log`；被忽略的只有 `docs/`（内部文档，已知无凭据）。
@@ -126,7 +125,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | A06 文件/索引 | 人工（NFO 失败/部分成功） | 可写失败目录（只读卷） | 日志 + 文件快照 |
 | A07 扫描 | 自动（scanner 回归）+ 人工（断源/删除前取消） | 可断源目录、SIGTERM 时机 | 测试名 + 日志 |
 | A08 迁移 | 自动（migrations_test 篡改/漂移）+ 人工（只读卷） | 每个支持版本 fixture | 测试名 + 输出 |
-| A09 恢复/回退 | 人工（批次 56 本机演练） | T0 备份 + 当前二进制 + 假 Redis | 记录：SIGTERM 52ms；备份 172K；删库后 initialized=false；还原 1.2s 可服务；标题/PlayCount/PositionTicks/NFO 保留 |
+| A09 恢复/回退 | 人工（批次 56 本机演练） | T0 复制 + 当前二进制 + 假 Redis | 记录：SIGTERM 52ms；复制 172K；删库后 initialized=false；还原 1.2s 可服务；标题/PlayCount/PositionTicks/NFO 保留 |
 | A10 任务 | 自动（`scan_tasks_test.go` 6 组）+ 人工 kill -9 未做 | 真实进程 kill -9 | 单测/实跑：202/幂等/409/容量/1h 过期；崩溃不恢复语义未演练 |
 | A11 退出 | 单测 + 自动（health）；**本地 SIGTERM 实跑通过**；503 窗口/长流/超时路径待演练 | 部署侧 30s 宽限 | 测试名 + 演练记录 |
 | A12 跨层兼容 | 自动（契约测试 + Playwright 页面/axe）+ 人工旧客户端未做 | 旧版 Emby 客户端 | `contract_test.go`；批次 59 axe 0 violations；真实旧客户端抓包待做 |
@@ -149,7 +148,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A06 子集（批次 55）：8 个会话对同一影片并发 `Stopped`（各自 PlaySessionId）→ 全部 204，`PlayCount` 精确 +8；真实 SQLite 写事务无丢更新/500。
 - A10 子集（批次 55）：`POST /api/admin/tasks/scan?library_id=1` + `Idempotency-Key` → 202+`task_id=3`；轮询状态到 `succeeded`；同 key 重放 → 202、`replayed=true`、同一 `task_id`。
 - A07 子集（批次 56）：`PATCH /api/admin/items/1` `{"title":"Acceptance Edit …"}` → 200 `saved:true`；`a.nfo` 实际写入新标题；再触发扫描并等待终态后详情标题仍为人工值（未被旧 NFO 回写）。
-- A09 恢复演练（批次 56，本机）：SIGTERM 52ms 退出 → 备份 172K（DB+NFO+config）→ 删除 DB 重启得 `{"initialized":false}`（确认丢失）→ 还原后重启 1.2s：`initialized:true`、登录成功、标题/`PlayCount=12`/`PositionTicks=300000000` 全部保留、NFO 一致。
+- A09 恢复演练（批次 56，本机）：SIGTERM 52ms 退出 → 复制 172K（DB+NFO+config）→ 删除 DB 重启得 `{"initialized":false}`（确认丢失）→ 还原后重启 1.2s：`initialized:true`、登录成功、标题/`PlayCount=12`/`PositionTicks=300000000` 全部保留、NFO 一致。
 - A12 UI 冒烟（批次 59，Playwright/Chromium 156 headless，1280×800 + 390×844）：登录 → 媒体墙（100 卡）→ 搜索「Perf Movie 42」命中 → 详情抽屉打开且首焦点在抽屉内 → 连按 8 次 Tab 焦点仍在抽屉（焦点圈）→ Esc 关闭后焦点回到卡片标题按钮；控制台 0 error；脚本 `docs/acceptance/ui.cjs`。
 - A12 跨浏览器页面巡检（批次 60，Chromium/Firefox/WebKit × 7 页：总览/媒体库/媒体墙/计划任务/接口探针/刮削/设置）：三浏览器全部 0 控制台错误、移动视口横向溢出 0px；纯键盘流程（批次 60）：autofocus 账号 → Tab 密码 → Enter 提交 → Tab 到「媒体墙」Enter → Tab 到标题按钮 Enter → 详情抽屉显示对应影片，全程无鼠标、0 error。
 - A12 功能级断言（批次 61，`docs/acceptance/func.cjs`）：设置页创建 API key→用该 key 调 `/api/admin/settings` 200→UI 删除→同 key 立即 401；计划任务新建→列表出现→删除；详情「编辑元数据」改标题→保存后抽屉关闭、墙面卡片标题更新、重开详情仍为新标题（NFO 已写）；快捷播放按钮打开播放器浮层（标题=影片名）并可关闭；全程 0 error。
@@ -159,13 +158,13 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 - A02 旧正缓存回归（批次 58，本机双二进制对照）：旧提交 `9c4fcb0` 登录→删 `access_tokens` 全部行→重启→旧 token 仍 **200**（Redis 正缓存在重启后继续授权）；当前二进制同流程→**401**。证明 BE-06 取消认证正缓存后的失效路径生效。
 - A15 性能冒烟（批次 57，本机，合成 5000 部）：同步扫描 5000 项 **11.0s**（success=5000）；keep-alive 10 并发：列表 `Limit=50` p50 3.4ms/p95 **17.2ms**/p99 66ms、1639 rps；`Limit=200` p95 49.7ms；详情 p50 3.2ms/p95 **7.1ms**/p99 12.7ms；进程 RSS 47.5MB、DB 1.6MB；0 错误。均远低于 D12 建议阈值（列表 p95<300ms、详情 p95<150ms、内存<300MB）。
 
-未覆盖：生产 Redis 语义/网络、真实 Emby 客户端、TLS/反代、真实媒体文件、更大并发与压测（8 并发只覆盖计数写链）、Go 1.25 工具链、任务表重启丢失语义的演练、异地备份传输与损坏库修复、真实网络与多客户端混合负载。以上仍属「未执行」。
+未覆盖：生产 Redis 语义/网络、真实 Emby 客户端、TLS/反代、真实媒体文件、更大并发与压测（8 并发只覆盖计数写链）、Go 1.25 工具链、任务表重启丢失语义的演练、异地复制传输与损坏库修复、真实网络与多客户端混合负载。以上仍属「未执行」。
 
 ## 4. 阶段 R0–R4
 
 | 阶段 | 判断 | 说明 |
 |---|---|---|
-| R0 基线 | ◐ | 测试/vet/race 基线与 CI 已建并在 GitHub 实跑通过（run 39086840621）；A09 本机备份恢复演练通过（批次 56）；生产拓扑、观测、异地备份未做 |
+| R0 基线 | ◐ | 测试/vet/race 基线与 CI 已建并在 GitHub 实跑通过（run 39086840621）；A09 本机复制恢复演练通过（批次 56）；生产拓扑、观测、异地复制未做 |
 | R1 认证 | ◐ | BE-01 会话期限/撤销全部（批次 64）、BE-02 风险接受关闭、D03 key 摘要迁移（批次 66）已落地；BE-03/06 仍局部；A01/A02 自动部分已过，其余部署级项未执行 |
 | R1-D 部署门禁 | ◐ | BE-05 批次 41、BE-09 批次 42 已建默认收紧；D04 已批并落地初始化验证码/来源白名单/可信代理（批次 65）；D05 历史凭据审计完成（批次 68，上线前轮换为部署动作）；TLS 仍由部署侧承担；未过则不得公网暴露 |
 | R1-N 正确性 | ◐（最大进展） | DB-09、DB-03 多写路径、DB-02 播放会话/事件（批次 51）、FE-01/02/13 阶段 1/14 子项 |
@@ -177,7 +176,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 
 早期“下一步”中 FE-07/FE-15、图片预算、索引及候选分批已在后续批次落实，不再作为待施工队列重复列出。当前候选方向见 [后续计划](<dev-plan.md#4-后续工作>)。
 
-仍需保留的部署门禁：按 §3 补充 HTTP 级时钟、提交后杀进程、只读卷、任务崩溃、长流与 503 窗口、真实客户端、真机/读屏、慢头/大 header、生产库和备份恢复演练。按实际网络配置初始化保护、可信代理与 TLS；未回填不得宣称生产可用。
+仍需保留的部署门禁：按 §3 补充 HTTP 级时钟、提交后杀进程、只读卷、任务崩溃、长流与 503 窗口、真实客户端、真机/读屏、慢头/大 header、生产库和复制恢复演练。按实际网络配置初始化保护、可信代理与 TLS；未回填不得宣称生产可用。
 
 ## 6. 批次映射（1–72）
 
@@ -210,7 +209,7 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 51 | DB-02 播放会话/事件表（迁移 2）：序列号、重复停止幂等、停止后迟到心跳忽略、原子计数 |
 | 52 | 验收集骨架：验收矩阵回填格式、D04/D01/D06 提案、env 门控的实时实例自动验收（A03/A05/A11/A14） |
 | 53 | 本地真实二进制冒烟：假 Redis+合成媒体跑通 TestAcceptanceLive（A03/A05/A11/A14）与 SIGTERM 退出 |
-| 54 | CI 增 gofmt 门禁与 store race（播放并发）；补 D03/D05/D08/D11/D12 建议默认值 |
+| 54 | CI 增 gofmt 门禁与 store race（播放并发）；补 D03/D05/D08/D12 建议默认值 |
 | 55 | 验收集扩 A06 并发计数（8 并发精确 +8）与 A10 扫描任务 202/轮询/幂等重放 |
 | 56 | A07 人工编辑 NFO 往返（严格 PATCH→重扫不回写）与 A09 本机恢复演练 |
 | 57 | A15 固定机器性能基线：5000 部扫描 11s、列表 p95 17ms、详情 p95 7ms、RSS 48MB |
@@ -226,7 +225,6 @@ ACCEPTANCE_BASE_URL=https://<host> ACCEPTANCE_USER=admin ACCEPTANCE_PASS=... \
 | 67 | D06 版本域验收：收藏/评分/已看/编辑/删除后版本推进且读己之写；无版本缓存键不命中 |
 | 68 | D05 历史凭据审计：历史 `config.yaml` 无真实口令，工作区无本地库/日志，上线前轮换 checklist 入台账 |
 | 69 | D08 索引失败恢复提示：迁移 5 `edit_failures`，恢复列表与超 7 天提示，成功重索引自动清除 |
-| 70 | D11 备份与恢复：`cmd/embybackup` SQLite `VACUUM INTO` 快照 + NFO 副本 + 保留 N 份；README 恢复与轮换步骤 |
 | 71 | D12 落地记录 + A01–A15 证据回填：自动项列测试名/数据，人工部署项显式保留为未执行 |
 | 72 | CI 实跑闭环：vuln 门禁改用 `1.27.x` 补丁版，GitHub run `39052328722` 全绿 |
 ## 7. 文档漂移修复记录
@@ -303,7 +301,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 
 ## 11. 架构复审落地（2.1 起）
 
-2.1/2.2 完成：批次 90–104（P0 会话隔离、全量 schema 校验与备份加固、旧 API 删除、Redis 可选、会话摘要化、安全头/审计、部署样例、前端 P1-7/8/9/10、调度器防重入、覆盖率门禁、管理端指标、索引与 ANALYZE、会话 TTL）。
+2.1/2.2 完成：批次 90–104（P0 会话隔离、全量 schema 校验与复制加固、旧 API 删除、Redis 可选、会话摘要化、安全头/审计、部署样例、前端 P1-7/8/9/10、调度器防重入、覆盖率门禁、管理端指标、索引与 ANALYZE、会话 TTL）。
 仍未做（2.3 剩余大项）：前端虚拟滚动与模块化（P1-11）、server 抽 service 的依赖倒置、axe/读屏自动门禁、多实例调度去重与缓存共享、生产/真机人工验收。
 
 | 批次 | 主题 | 状态 | 边界 |
@@ -318,7 +316,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | 97 | 登录会话摘要化：迁移 12 把 `access_tokens.token` 原地改写为 SHA-256 摘要（无需 DDL，旧会话升级后仍有效），读写/撤销/过期全部按摘要匹配；`isTokenHash` 识别 64 位 hex 防重复摘要 | ✅ 本地完成 | 迁移后回退旧二进制将无法识别会话（需重新登录）；摘要无盐但输入为 192 位随机值 |
 | 96 | Redis 降为可选：未配置 `redis_addr` 或连接失败时回退进程内缓存（容量 4096 条）并告警；`adminSettings` 返回真实 `cache`/`redis_online`（不再写死 redis/true）；README/config.example 与部署说明同步 | ✅ 本地完成 | 内存兜底无跨实例共享、重启失效；多实例仍需外部缓存；缓存故障切换无指标 |
 | 95 | 删除硬编码 user 1 的用户数据 API（`Data/DataFor/SavePlayback/SetPlayed/SetFavorite/SetLikes/SetHideFromResume`），改 `DataUser/DataForUser/SavePlaybackForUser` 与 `SetIndexed*ForUser`；`authOK` 账户缺失按 401 fail-closed，移除 `administrators` 旧行回退；新增删除用户 token 失效与旧口令拒绝测试 | ✅ 本地完成 | 旧 `SaveAccessToken`/`CreateAPIKey` 仍是 user 1 包装（服务端已走 ForUser）；回退旧二进制仍读 administrators |
-| 94 | 全量 schema 校验：参考库跑完迁移 1–11 后逐表比对列/类型/默认值/主键/外键/唯一/CHECK，索引按语义签名（列序/排序/唯一/部分谓词）；备份 CLI 加固：只读 DSN + busy_timeout、暂存目录成功后才发布、`PRAGMA integrity_check` 失败即删、NFO 落盘 fsync | ✅ 本地完成 | 崩溃残留 `.tmp` 目录不自动清理；备份保留期外的异地副本仍靠部署侧 |
+| 94 | 全量 schema 校验：参考库跑完迁移 1–11 后逐表比对列/类型/默认值/主键/外键/唯一/CHECK，索引按语义签名（列序/排序/唯一/部分谓词）；复制 CLI 加固：只读 DSN + busy_timeout、暂存目录成功后才发布、`PRAGMA integrity_check` 失败即删、NFO 落盘 fsync | ✅ 本地完成 | 崩溃残留 `.tmp` 目录不自动清理；复制保留期外的异地副本仍靠部署侧 |
 | 93 | `userdata(movie_id)`、`login_events(user_id,created_at)` 索引（迁移 11，末尾 ANALYZE）；周期性 ANALYZE（启动一次 + 每 7 天，随进程退出 join）；图片缓存 TTL 5 分钟→24 小时（配合 Cloudflare） | ✅ 本地完成 | 真实 20k 删库基准与索引写放大未测；ANALYZE 周期是固定 7 天，不感知写入量 |
 
 ## 12. 全栈复审修复（2026-10-23，本地）
@@ -329,14 +327,13 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 |---|---|---|
 | 身份与并发（3 项） | migration 14：账户 ID 不复用、会话签发校验凭据代际；改密/撤销原子推进代际；最后管理员在 SQLite 写锁内检查。成功登录审计在签发提交后记录，自助改密同时校验不可变账户 ID。 | [Store 身份测试](<internal/store/identity_test.go>)、[HTTP 身份测试](<internal/server/auth_identity_test.go>)、[改密身份交错回归](<internal/server/users_password_identity_test.go>) |
 | 库授权（5 项 + Similar） | Suggestions、实体聚合/详情、Images JSON、AdditionalParts、个人状态写入和 Similar 源对象限定可见库；聚合在分页前过滤，缓存绑定账户与授权快照；缺身份/删除/旧管理员角色/读库故障失败关闭。匿名图片字节边界不变。 | [对象授权与缓存回归](<internal/server/object_scope_test.go>)、[实体查询回归](<internal/store/entity_scope_test.go>) |
-| 备份边界（1 项） | 写入及清理前拒绝源数据库/媒体库与输出互相包含；关闭 NFO 复制同样保护媒体库；统一实际规范路径处理符号链接与 `..`。 | [输出边界回归](<internal/backup/output_boundary_test.go>)、[清理边界回归](<internal/backup/output_cleanup_boundary_test.go>) |
 | 前端（8 项） | 管理按钮遮挡、旧身份响应、当前会话退出、密钥明文生命周期、扫描终态刷新、隐藏字段占位、日志刷新快照及刮削 inspect 失败恢复。 | [前端 VM 与静态 Chromium 回归](<internal/server/web_test.cjs>) |
 
 统一验证：`go test -count=1 -timeout=15m -coverprofile=… ./...` 全部通过（server 128.689s、store 55.838s），总语句覆盖率 **75.9%**，通过 70% 门禁；`go vet ./...`、`go build ./...`、本轮 Go 文件格式与 `git diff --check` 通过。`node --test internal/server/web*_test.cjs` **144/144** 通过，app/login 语法检查通过。全量 `go test -race -count=1 -timeout=30m ./...` **全部通过**（server 928.409s、store 518.849s），本轮本地统一回归完成。
 
 真实浏览器覆盖限缓存 Chromium 的宽/窄静态 DOM/CSS；不代表真实服务、客户端播放、Firefox/Safari、读屏或生产迁移验收。
 
-升级前备份，schema 15（含 API 密钥 stable_id）不支持直接降级旧二进制；回退须停服恢复升级前数据库，详见 [备份与恢复](<README.md#备份与恢复d11>)。历史已删除且无留存引用的用户 ID 无法追溯。备份目录检查不固定 inode，仍要求备份期间不由外部替换目录/符号链接或变更库路径；SQLite 与 NFO 仍非联合快照。
+升级前停服自行复制数据库及匹配配置、媒体文件，schema 15（含 API 密钥 stable_id）不支持直接降级旧二进制；回退须恢复整套升级前副本。历史已删除且无留存引用的用户 ID 无法追溯；SQLite 与 NFO 仍非联合快照。
 
 ## 13. 独立翻译与手动计划任务
 
@@ -751,13 +748,12 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | N-02 | M2 扫描任务中心 MVP | ○ 待施工 | M1 放行、持久登记、旧契约兼容、崩溃/幂等/权限验收；无自动续跑 |
 | N-03 | M3 诊断与恢复 | ○ 待施工 | 只读不联网，执行复核范围、路径、版本和锁；重探依赖 M1 |
 | N-04 | M4 Webhook 投递历史 | ○ 待施工 | 有界、白名单净化、无秘密落盘、无隐式重发 |
-| N-05 | M5 备份管理 | ○ 待施工 | 秘密政策先决策，固定范围、预算、权限及恢复演练通过 |
 
 ### 合并后的施工约束
 
 - N-01 为首个正式发布公共门禁；只读任务界面可以并行，不据此标记 M1 完成。MT 项保持 §20 状态与原依赖，不等待整个原生线结束，但共同发布时不能绕过 M1。
-- M1 后管理线按 M2 → M3 → M4 → M5 分批交付；探测和批量刮削接入任务中心单独验收。N-00 分批冻结，不让备份未决政策阻塞无关可靠性补丁。
-- 旧同步扫描 Sunset 2027-04-01、既有状态和权限契约保持；新统一 DTO 不覆盖旧枚举。任务摘要持久化不代表执行恢复；备份含秘密政策尚未解决，不修改历史 D11 批准记录。
+- M1 后管理线按 M2 → M3 → M4 分批交付；探测和批量刮削接入任务中心单独验收。N-00 分批冻结，不让未决政策阻塞无关可靠性补丁。
+- 旧同步扫描 Sunset 2027-04-01、既有状态和权限契约保持；新统一 DTO 不覆盖旧枚举。任务摘要持久化不代表执行恢复。
 - 原生二进制与 Docker 支持退出是待实施目标，本轮没有清理部署入口、改变服务或宣布平台支持已验收。MetaTube 暂缓项、翻译维持现状继续有效。
 
 ### 本轮验证边界
@@ -776,13 +772,13 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | 文件字节与耗时承诺混淆 | 原生 §3.2：全入口 max+1、保留旧状态与抑制误清理；挂载支持范围或针对性隔离待批准，不声称 context 可打断内核 I/O | ○ 待冻结/施工/验收；N-01 首发门禁，既有关闭门禁不放宽 |
 | ffprobe 可信链接与资源边界 | 原生 §3.3：2026-11-05用户决定默认信任STRM，取消实际出站隔离；保留输出/并发/时间/子进程退出与脱敏 | ◐ 资源边界见§39；隔离需求已撤销而非实现完成，见§50；其余N-01门禁不变 |
 | 任务观察与幂等留存 | 原生 §4：全部入口单一观察、旧表投影、稳定身份、崩溃后不重跑；展示淘汰不删除窗口内映射 | ○ 待冻结/施工/验收；仅 N-02，扫描 MVP 仍不可取消 |
-| 诊断、Webhook、备份 | 原生 §5–7：范围/版本复核、白名单有限观察、全部认证材料的秘密政策二选一 | ○ 待各批冻结/施工/验收；分别 N-03/04/05，不全阻塞 M1；历史 D11 不改 |
+| 诊断、Webhook | 原生 §5–6：范围/版本复核、白名单有限观察 | ○ 待各批冻结/施工/验收；分别 N-03/04，不全阻塞 M1 |
 | 后缀选项与图片链路 | MetaTube MT-01/02：typed 身份/选项、预览/详情/确认/批量/图片贯穿、写回政策、服务端/浏览器/落地缓存 | ○ 待冻结/施工/验收；MT-01→02→03 依赖不变 |
 | 候选来源、标记归属及演员真源 | MetaTube MT-03/04/05/06：服务端候选/写路径、多背景图重建、程序标记来源、稳定演员身份与人工确认 | ○ 待对应批冻结/施工/验收；不扩大匿名图片或管理员授权契约 |
 
 ### 决策与证据入口
 
-- 分批负责人/批准人、决策日期/结果和阻断范围分别登记于[原生 §9.1](<docs/native-roadmap-design.md#91-分批决策登记2026-11-04-评审修订>)与[MetaTube §6](<docs/metatube-alignment-design.md#6-分批冻结与决策记录>)。当前仅责任角色，具名待指派；本轮不替负责人确定挂载范围、阈值、隔离机制、存储或备份政策。
+- 分批负责人/批准人、决策日期/结果和阻断范围分别登记于[原生 §9.1](<docs/native-roadmap-design.md#91-分批决策登记2026-11-04-评审修订>)与[MetaTube §6](<docs/metatube-alignment-design.md#6-分批冻结与决策记录>)。当前仅责任角色，具名待指派；本轮不替负责人确定挂载范围、阈值、隔离机制、存储或复制政策。
 - 后续逐用例按[证据模板](<docs/native-roadmap-design.md#81-发布证据登记模板>)登记批次、平台/前版/schema、fixture/动作/预期、源码与产物标识、命令/环境/时间、原始证据及 PASS/FAIL/SKIP/待执行，并列未覆盖项。只对实际完成矩阵验收的平台/版本作支持承诺。
 - 当前全部功能仍待实施/验收，没有新增 PASS 运行证据。局部 mock、历史测试或评审报告不替代真实嵌入页面/API、受保护监听、图片及升级回退证据。
 
@@ -808,9 +804,9 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 
 | 选项 | 内容 | 代价 |
 |---|---|---|
-| A（推荐） | 片目录 `extrafanart/` 存 `fanart1.jpg…`，DB 新增 `movies.extra_backdrops TEXT`（JSON 顺序），DTO 按序输出 `BackdropImageTags`，`Images/Backdrop/:index` 按索引取文件，缺文件跳过该索引；`Primary` 仍取 `poster.webp` | 一次加列迁移 + 图片端点分派 + 清理/备份纳入新目录 |
+| A（推荐） | 片目录 `extrafanart/` 存 `fanart1.jpg…`，DB 新增 `movies.extra_backdrops TEXT`（JSON 顺序），DTO 按序输出 `BackdropImageTags`，`Images/Backdrop/:index` 按索引取文件，缺文件跳过该索引；`Primary` 仍取 `poster.webp` | 一次加列迁移 + 图片端点分派 + 清理/复制纳入新目录 |
 | B | 不改布局，只允许「选一张剧照覆盖 `fanart.webp`」 | 最小改动，但客户端仍只有 1 张背景图 |
-| C | 剧照字节存 DB blob | 备份/迁移体积膨胀，不推荐 |
+| C | 剧照字节存 DB blob | 复制/迁移体积膨胀，不推荐 |
 
 ### D-2 MT-04 程序标记归属（决定能否只撤销自己写的标签）
 
@@ -821,7 +817,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | 选项 | 内容 | 代价 |
 |---|---|---|
 | A（推荐） | 新增 `movies.auto_marks TEXT`（JSON 数组，记录程序上次写入的 tag），重刮时只移除该集合内的 tag 再按当前判定重写；人工标签不动 | 一次加列迁移 + 写入/撤销两条路径的测试 |
-| B | 片目录旁挂 `.marks.json` | 不动 DB，但多一份需备份/清理的状态 |
+| B | 片目录旁挂 `.marks.json` | 不动 DB，但多一份需复制/清理的状态 |
 | C | 维持现状（块级替换） | 零改动，但会误伤人工标签（已实测） |
 
 ### D-3 MT-01 Position 是否写回官方标记
@@ -831,7 +827,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | 选项 | 内容 | 代价 |
 |---|---|---|
 | A（推荐） | 不写回（现状）。身份串只含 `Provider:escaped-ID` | 零改动；重扫/迁移稳定 |
-| B | 写回 `Provider:ID:Position` | 身份串携带渲染参数，重扫、备份导入导出、外部 NFO 编辑都要跟着兼容，且无法区分人工设置与自动写入 |
+| B | 写回 `Provider:ID:Position` | 身份串携带渲染参数，重扫、复制导入导出、外部 NFO 编辑都要跟着兼容，且无法区分人工设置与自动写入 |
 
 ### D-4 图片代理的资源边界（本轮新发现）
 
@@ -854,7 +850,7 @@ v1 台账冻结在批次 72（tag `v1.5.0`）。变更规则统一见 [API 契�
 | STRM/NFO 有界读取 | NFO ≤ 8MB、STRM ≤ 1MB；超限跳过该文件并记 warn，不中断整库扫描 | 数值是否批准；超限算「跳过」还是「失败」 |
 | ffprobe 边界 | 单次 60s、stdout ≤ 4MB、stderr ≤ 64KB、并发 ≤ 2，超时杀进程组 | 数值是否批准；并发 2 是否合适 |
 | 播放会话绑定 | 已批准方案是同一 `(user_id,session_key)` 不得改绑另一 `movie_id`，在同一事务内冲突拒绝且零写入；影片存在性与库授权沿用 HTTP 入口既有检查 | 本项无需新增阈值决策，已按原生 §3.1 开始施工；此前把此项写成「item_id 属于当前库」不准确，以本行和 §24 为准 |
-| 升级/重启/回退矩阵 | 保留上一版二进制；DB 迁移保持向前一版兼容；回退以 DB 备份 + NFO 快照为准 | 支持矩阵范围（仅 Linux/amd64？Docker？） |
+| 升级/重启/回退矩阵 | 保留上一版二进制；DB 迁移保持向前一版兼容；回退以 DB 复制 + NFO 快照为准 | 支持矩阵范围（仅 Linux/amd64？Docker？） |
 
 ### 待你回复的最小集
 
@@ -1016,10 +1012,10 @@ MT-01/02/04 仍维持看板中的部分完成状态；继续开发待决写入�
 
 | 决策 | 用户选择 / 冻结结果 | 实际进度 |
 |---|---|---|
-| D-1 / MT-03 | A：片目录 `extrafanart/` 下 `fanart1.jpg…`，`movies.extra_backdrops TEXT` 保存有序 JSON 索引，客户端按序列举/访问背景图；迁移、重扫重建与备份一并适配 | 已授权，待补具体 API 契约并开始迁移/读写施工；不是已实现 |
+| D-1 / MT-03 | A：片目录 `extrafanart/` 下 `fanart1.jpg…`，`movies.extra_backdrops TEXT` 保存有序 JSON 索引，客户端按序列举/访问背景图；迁移、重扫重建与复制一并适配 | 已授权，待补具体 API 契约并开始迁移/读写施工；不是已实现 |
 | D-3 / MT-01 | A：Position 不写回 NFO，身份只保存 `Provider:escaped-ID`；位置仅供预览与主海报裁切，Update 仍为请求选项 | 现有实现与 §28 回归吻合；该政策阻断已解除，不需再请求确认 |
 
-下一施工顺序：核对 store/scanner/图片端点与备份实际调用链 → 先补多图确认输入、顺序/缺图、失败及重扫契约 → 迁移与索引 → 文件写入/重建 → 客户端枚举、取图与选择界面 → 全量/真实图片/浏览器验证。保留原 `poster.webp` / `fanart.webp` / `landscape.webp` 的兼容行为；剧照来源仍由服务端按列表版本和受限下标复核，客户端不提交任意远端 URL。每个阶段分别记实际进度，不能把允许写图当成现有只读网格已支持写入。
+下一施工顺序：核对 store/scanner/图片端点与复制实际调用链 → 先补多图确认输入、顺序/缺图、失败及重扫契约 → 迁移与索引 → 文件写入/重建 → 客户端枚举、取图与选择界面 → 全量/真实图片/浏览器验证。保留原 `poster.webp` / `fanart.webp` / `landscape.webp` 的兼容行为；剧照来源仍由服务端按列表版本和受限下标复核，客户端不提交任意远端 URL。每个阶段分别记实际进度，不能把允许写图当成现有只读网格已支持写入。
 
 D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发布矩阵仍未确认，保持原阻断范围，不因这两项选择擅自施工。历史 §23 的全套建议顺序不再要求先做未获批 D-4/D-2 才能推进已获批的 D-1。
 
@@ -1043,12 +1039,12 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - `go test ./internal/store ./internal/scanner -run 'ExtraBackdrop' -count=3`：PASS，store 1.101s / scanner 2.697s。
 - `go test -race ./internal/store ./internal/scanner -run 'ExtraBackdrop' -count=1`：PASS，store 6.009s / scanner 16.191s。
 - 迁移回归覆盖合成 v16 升级、账本插入失败时新增列事务回滚、重启重入、旧校验和/影片兼容字段保留、新校验和篡改拒绝；有序数组往返、清空及坏 JSON 诊断通过。扫描回归覆盖数字序、非规范名/软链接排除、相对输入转绝对路径、增删改/稳定跳过、单片与新 DB 重建、提交前删除检测。
-- 首轮全量 build/vet 通过，Go 测试仅稳定性演练两处末版预期仍写 v16 而失败；已同步预期 v17，冻结 v13 fixture 与 v16 故障注入未改。数据库备份/手工恢复演练另增加非空有序索引保留断言，**只验证数据库列，不代表图片文件已备份**。
+- 首轮全量 build/vet 通过，Go 测试仅稳定性演练两处末版预期仍写 v16 而失败；已同步预期 v17，冻结 v13 fixture 与 v16 故障注入未改。数据库复制/手工恢复演练另增加非空有序索引保留断言，**只验证数据库列，不代表图片文件已复制**。
 - 最终命令：`go test ./internal/stabilityrehearsal -run 'TestSchema13' -count=1 && go build ./... && go vet ./... && go test ./... -count=1 && node --test internal/server/web*_test.cjs && git diff --check`，PASS，退出码 0。升级专项 1.244s；全量 store 55.380s / scanner 7.467s / server 90.387s / stabilityrehearsal 2.821s；前端 280/280、0 跳过，41.025s。台账追加曾引入一个文件尾空行，已移除并通过最终差异检查。
 
 ### 明确未完成
 
-阶段契约见 [API 契约 §4.7](<API-CONTRACT.md#47-多背景图磁盘索引mt-03-分阶段施工>)。管理端原始 `movie` 增量含 `ExtraBackdrops` 路径，但路径不是客户端图片 URL；Emby DTO 与图片端点仍单背景图。多图确认输入、顺序/缺图/部分失败写入、选择界面、客户端枚举与访问、图片文件备份仍待后续施工。当前备份含数据库新列及可选 NFO，不复制 extrafanart 字节。未部署、提交、运行生产迁移或做真实客户端/浏览器验收；D-2/D-4/D-5 不变。此处是 §30 当时的范围记录，后续客户端取图推进见 §31。
+阶段契约见 [API 契约 §4.7](<API-CONTRACT.md#47-多背景图磁盘索引mt-03-分阶段施工>)。管理端原始 `movie` 增量含 `ExtraBackdrops` 路径，但路径不是客户端图片 URL；Emby DTO 与图片端点仍单背景图。多图确认输入、顺序/缺图/部分失败写入、选择界面、客户端枚举与访问、图片文件复制仍待后续施工。当前复制含数据库新列及可选 NFO，不复制 extrafanart 字节。未部署、提交、运行生产迁移或做真实客户端/浏览器验收；D-2/D-4/D-5 不变。此处是 §30 当时的范围记录，后续客户端取图推进见 §31。
 
 ## 31. 客户端多背景图枚举与按序取图（2026-11-04）
 
@@ -1072,31 +1068,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 契约已同步 [API 契约 §4.7](<API-CONTRACT.md#47-多背景图磁盘索引mt-03-分阶段施工>)。已有路径 tag 采用 5 分钟正缓存/30 秒负缓存、实际 tag 仅取 mtime；扫描切换索引版本并不清 tag，覆盖同路径图像或缺失图带旧 If-None-Match 时仍可能短期命中旧 tag、304 或变体。这是既有缓存限制，不把本轮多图枚举说成已修复；本轮未改全局失效策略，不承诺跨扫描永久下标或字节快照。对象权限的细分用户范围继续由既有 ObjectScope 回归验证，新用例只额外断言匿名元信息 401。
 
-仍待多图确认写入的输入/顺序/缺图/部分失败契约与实施、图片资产备份、选择界面及真实客户端/浏览器验收。没有部署、提交、重启或变更 D-2/D-4/D-5。此为 §31 当时范围，图片备份后续进度见 §32。
-
-## 32. 额外背景图文件备份与手工恢复回归（2026-11-04）
-
-**范围：已批准 D-1/A 的图片资产备份阶段；生产接入与专项/CLI/race、最终全量验证通过，不代表 MT-03 整批完成。**
-
-### 实际实现
-
-- 新增 `backup.Options.ExtraBackdrops` 与 `Result.ExtraBackdropCount`，前者零值 false，不改变已有库内调用的默认行为；CLI 新增 `--extra-backdrops` 默认 true，可独立关闭。`--nfo=false` 不再等于 CLI 的数据库单独备份；无 libraries 表的自定义数据库须同时关闭两个开关，使用说明已同步。
-- 只读库清单在 NFO 或额外图任一开启时必需，仍只查 libraries，不读 movies 新列。物理遍历规范 `extrafanart/fanartN.jpg` 普通文件，与扫描器保持正整数/无前导零/大小写/溢出规则一致；根、子目录及文件链接不跟随，结果按库及完整库内相对路径存到 `extra-backdrops/lib-ID/`。旧应用数据库没有迁移 17 列也可复制图片，无需源库迁移或写入。
-- 图片复制在现有 stage 内、替换完整备份前执行；复制错误返回、清理 stage/锁，同秒已有备份不会因该类错误被替换。不增加下载、文件锁、自动重试或共享匹配抽象。离线/删除库跳过，其他根检查错误传播；在线库遍历/复制失败不静默发布半份图片备份。NFO 原有行为不顺手重写。
-- 恢复为离线手工复制：额外图文件树回到相应库根，绝对路径迁移需调整库路径并重扫。合并复制不会删除备份之外的新图，精确回退需人工对账；数据库和文件不是联合时点快照，不包含 STRM、视频、原三张封面或全部 JPG。
-
-### 复核与实际验证
-
-- 独立只读审查未改代码、未跑测试，指出 NFO 既有根错误吞并和符号链接文件跟随不能复制到新链路；新链路单独使用 Lstat/普通文件筛选，只有不存在根按离线跳过。原 NFO 逻辑的修改需单独确认，未扩大本轮范围。
-- 新 `TestRunExtraBackdropsOptionsAndRestore` 在无 extra_backdrops 列的旧 schema fixture 上验证四种开关组合、根/嵌套目录、规范名筛选；真实 24×16 JPEG 逐字节不变，按产物相对路径手工复制到新根后可解码。此为字节/目录恢复测试，不冒称已用恢复数据库启动并完成客户端整链路验收。
-- 链接/离线库跳过、extras-only 输出与媒体目录重叠拒绝、无库表时开启失败和 DB-only 兼容均回归。故障测试在快照后精确制造图片目标目录阻塞，验证复制错误保留先前同秒图片与完整 SQLite、清理 stage 与锁，不用 chmod 假定 root 会权限失败。
-- 新 CLI 回归实际构建并运行 embybackup，验证默认、仅关 NFO、仅关额外图、两者关闭四种行为及计数/产物。
-- `go test ./internal/backup -run 'ExtraBackdrop' -count=3`：PASS，0.555s；`go test ./internal/backup ./cmd/embybackup -count=1`：PASS，0.939s / 0.816s；新增专项 `-race`：PASS，1.338s。
-- 最终 `go build ./... && go vet ./... && go test ./... -count=1`、`node --test internal/server/web*_test.cjs` 与 `git diff --check` 全部通过，完整命令退出码 0。全量 backup 1.283s / embybackup 0.678s / server 91.249s / store 55.335s；前端 280/280、0 跳过，37.278s。
-
-### 保留限制
-
-沿用现有备份发布/清理规则：替换同秒备份是 RemoveAll 后 Rename，不承诺跨崩溃原子替换；prune 也可能在完整产物已发布后失败。根文件系统在复制期间保持稳定仍为运行假设，未引入 TOCTOU 加固或跨 DB/文件事务。额外图多库同名隔离、源读取/磁盘满等故障组合未专门穷举；此处不把建议清单当成已执行测试。多图确认写入、选择界面、真实客户端/生产恢复验收仍未完成，D-2/D-4/D-5 未改。
+仍待多图确认写入的输入/顺序/缺图/部分失败契约与实施、图片资产复制、选择界面及真实客户端/浏览器验收。没有部署、提交、重启或变更 D-2/D-4/D-5。此为 §31 当时范围，图片复制后续进度见 §32。
 
 ## 33. 用户确认非删除多图写入及部分成功语义（2026-11-04）
 
@@ -1167,7 +1139,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 存储底座已落盘：迁移 18 默认空归属且沿用既有事务/校验账本；普通 upsert 新行走默认空集合、冲突保留原值，完整 Movie 读取与 JSON 诊断包含 AutoMarks。`SetAutoMarks` 仅改归属，以实际 library 发布版本，失败回滚、不清除 scrape_error。存储专项 5.745s、覆盖迁移/扫描/空元数据的 scoped race 160.432s、scoped vet/diff 均通过；首次仅新测试的 MovieIDs 索引类型误用导致编译失败，修正为 sourcePath 映射索引后复测通过。存储任务未冒称全包验收。
 - NFO 合并在现有路径锁内完成。数据库记录与 NFO 不是联合事务：NFO 提交后归属记录失败应单独报告已保存的部分成功，不冒充图片或索引失败，也不声称重扫能恢复归属。基础接口已稳定并通过专项验证，接入与故障测试正在施工；API 契约 §4.8 已登记获批语义，不提前宣称联合通过。
 - NFO 子任务已实际落盘：复用既有路径锁及公共实现，旧手工编辑接口语义保留；新增归属接口覆盖撤回、冲突、历史不猜、补缺失/字段锁/全局锁、读写失败与并发编辑。子任务报告全包 8.081s、归属专项重复 10 次 0.106s、全包 race 9.218s、scoped vet/diff 检查通过；父会话已核对核心合并与错误返回路径。接入和跨包联合测试尚未执行，不将单包通过冒充链路验收。
-- 存储接口落盘后，父会话实际跑通四种普通扫描路径保留归属、缺记录不推断及删库重建不认领回归：重复 3 次 1.935s，专项 race 12.056s；旧 v13 升级失败回滚/重试与含非空归属、额外图索引的数据库备份恢复演练通过 1.184s。独立只读复核未发现 store 阻断，指出新测试未直达 manual 分支：父会话已补 manual 且 NFO 缺失的四类扫描，普通/manual 联合重复 3 次 3.315s、race 21.140s 全通过。复核不覆盖刮削接入，不把原始备份值断言冒充恢复后再刮削行为证明。父会话自有文件已 gofmt、差异检查通过；以上不替代存储全包、刮削接入与全仓测试，其余结果待登记。
+- 存储接口落盘后，父会话实际跑通四种普通扫描路径保留归属、缺记录不推断及删库重建不认领回归：重复 3 次 1.935s，专项 race 12.056s；旧 v13 升级失败回滚/重试与含非空归属、额外图索引的数据库复制恢复演练通过 1.184s。独立只读复核未发现 store 阻断，指出新测试未直达 manual 分支：父会话已补 manual 且 NFO 缺失的四类扫描，普通/manual 联合重复 3 次 3.315s、race 21.140s 全通过。复核不覆盖刮削接入，不把原始复制值断言冒充恢复后再刮削行为证明。父会话自有文件已 gofmt、差异检查通过；以上不替代存储全包、刮削接入与全仓测试，其余结果待登记。
 - 刮削接入已落盘：当前生成标签与上游 Tags 分开合并，只有实际归属变化才写库；NFO 提交后优先记录归属，再执行取消检查及重扫。单条 HTTP 独立返回脱敏 auto_marks_error；批量仍计 NFO 成功，并保留人工核对诊断；前端沿用已保存面板，独立展示归属、索引及图片问题，不自动重试。接入专项重复 5 次 scraper 6.586s / server 5.244s，联合 race scraper 22.790s / server 30.803s，VM 18/18 通过；补强真实 RunMovies(nil-store) 的成功计数/OnItem 诊断及归属不变不发布版本，重复 5 次 6.357s / race 20.347s 通过。以上均为已收集子任务证据，不代替全仓验证。
 - 联合复核发现真实触发路径：既有 claimNFO 允许同 kind 的两次 scrape 同时通过，两请求可读取同一旧 AutoMarks；第一次 NFO/DB 提交后第二次仍按旧归属合并，可能静默错配。按已批准 NFO 互斥边界和用户自主决策授权，Lead 仅将 scrape 加入既有独占条件，并在 confirm 取得通道后重读 Movie；未新增锁、排队、重试，也不改探测等同 kind 政策。原确认/部分成功/选图回归通过 2.891s；新增两项确定性并发专项重复 10 次通过 7.418s，与部分成功联合 race 重复 3 次通过 68.115s。测试覆盖真实 HTTP 双确认和真实批量任务与确认互斥，409 时 NFO/影片/版本/上游调用不变；完整认证路由的 JSON Read 屏障另覆盖 movieParam 读后、拿门前旧快照，证明只有独占而不重读仍会错误删除已放弃归属的标签。无生产测试 hook。
 - 独立只读复核未发现生产 scrape 嵌套 claim 或门前旧归属回写路径；底层 Apply/RunMovies 本身不增加跨文件与 DB 互斥，保证限于 App 生产入口。既有批量释放 scrape 后再申请 scan 的窗口可能令整库刷新失败，但会明确上报 IndexRefreshFailed；不顺手改写既有任务生命周期。另确认取消与归属失败同时发生时，原取消错误会遮住成功响应/批量专属人工核对提示，归属错误仍写日志；契约已明确此诊断边界，不把 502 当作零写入，未扩大取消后的写入或重扫行为。
@@ -1183,7 +1155,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 首批 scanner 专项重复 3 次 4.988s、race 27.673s 通过。独立复核随后指出提交前 stillMatches 把超限折叠成普通变化，已改为保留原错误类型、两处调用按超限跳过；原普通变化仍失败。另补共享 NFO 与侧车同时存在的边界检查，并把非 HTTP 删除移到 NFO 大小检查之后，避免超限依赖仍删除旧行。共享/侧车、四种扫描与无 CD1 独立 CD 成员专项重复 3 次 9.186s 通过；不将修复之前的全量通过当作最终证据。
 - 上次执行增长专项的成员中断且没有交付报告；恢复时已检查真实文件并唤醒同一成员收尾，未把启动或未收集结果当通过。增长/snapshot 专项重复 5 次通过（10.645s）；覆盖 Snapshot/增长/超限/额外图/Incremental 的 scoped race 通过（149.737s），随后 scanner vet、scoped diff 检查通过。12 个 snapshot 情形覆盖第一复核前/构建后、缺失 NFO 新建超限、正常变化及真实 I/O；16 个真实扫描情形在既有 context.Err/health 窗口触发第二复核，验证 full/incremental 跳过、旧行/演员/基线/版本保留、孤儿不清理及健康后组继续。第一复核窗口仅由直接 snapshot 测试覆盖，不声称原子文件快照。初次仅新测试的健康组 B.strm 排在 lowercased CD key 前导致窗口失配，改成 b.strm 后重复/race 通过；无生产测试 hook、锁或重试。重复命令中两项历史测试名未匹配，不据此声称额外覆盖；上述 race 用实际匹配范围补齐。成员全部作业已收集。
 - 最终 build/vet、全仓 `go test ./... -count=1`、前端 300/300（0 跳过，41.828s）和差异检查通过，exit 0（server 117.883s / store 75.429s / scanner 21.557s / NFO 9.073s / scraper 8.587s / stabilityrehearsal 3.348s）。默认 Go 命令未启用 Chromium，不把完整应用浏览器专项跳过计作本阶段覆盖；本轮不改 UI，也不重报历史浏览器结果。早期全量曾因 edit_recovery.go 的未使用 os 导入编译失败，已删除导入；后续复核修复后的结果才是本次最终证据。全部本阶段成员与 Lead 的验证作业已收集，生产代码未在最终验证后变化。
-- 本子项只处理文件解析读取，不限制配置 YAML、媒体 JSON、流式备份或总内存/耗时；ffprobe 输出/超时/进程治理及升级回退矩阵尚未实施。保留全部既有未提交改动，无部署、提交、重启或生产库迁移，整体目标继续。
+- 本子项只处理文件解析读取，不限制配置 YAML、媒体 JSON、流式复制或总内存/耗时；ffprobe 输出/超时/进程治理及升级回退矩阵尚未实施。保留全部既有未提交改动，无部署、提交、重启或生产库迁移，整体目标继续。
 
 ## 39. N-01 ffprobe 执行资源边界（2026-11-05）
 
@@ -1205,19 +1177,8 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 依据原生方案退出 Docker 支持，已删除经绝对路径核实的两个容器样例并替换 README 推荐入口，不删除历史台账。systemd 保留 emby 身份/严格沙盒，补 StateDirectory/RuntimeDirectory 0750、UMask0077、明确 PATH、KillMode=control-group 与 config 文件回写放行；媒体库须显式 ReadWritePaths + Unix/ACL/NAS 权限，不能靠沙盒放行授予权限。独立成员静态契约重复 10 次通过（0.009s）、最终复验 0.008s、vet/scoped diff 通过，全部作业已收集。不是安装/systemd/真实媒体挂载运行证明；未在当前主机安装/重启真实服务。
 - 新增 Linux 真实入口点冒烟：在临时目录构建并记录 fixture 二进制 SHA256，核验 `-version` 与真实 `/api/version` 注入值；启动、SIGTERM join、重新启动，检查稳定 ServerId 与真实 SQLite 设置保留。首次通过 5.474s，两个关闭分别 7.456499ms / 4.029685ms。不是 Handler 测试，也不是生产或 systemd 运行证明；版本标记为 fixture，不伪造正式 SHA。空闲进程退出不能代替带后台写入/长流的全部关闭证据。重复 3 次通过（11.810s，6 次 SIGTERM join 3.671933–6.558132ms），已有 stabilityrehearsal 全包 2.421s、cmd vet 及差异检查通过；这仍不是前版升级/回退证明。
 - 发布 workflow 在原同批版本输出核验后生成并反查 `SHA256SUMS`，由既有 dist 上传步骤发布；本地临时目录实际运行同样的 trimpath build、版本注入、`sha256sum` 生成/反查命令通过，fixture 产物位于 `/tmp/emby-go-native-checksum.Jsiz4l`。不声称本轮跑了 GitHub Release、其它平台二进制或同 SHA 正式门禁。最终 build/vet/全仓 Go 通过：cmd/metatube 2.916s、stabilityrehearsal 3.510s、server 161.692s、store 100.152s；差异检查通过，所有成员与本轮作业已收集。无 UI 代码变更，本轮未另跑前端/浏览器，不挪用上一轮前端结果作为本轮重跑证据。
-- 独立只读迁移/回退复核：schema13→18 两次 Open、ledger16 注入失败回滚与重试、未知未来19/checksum 拒绝已有组件证据；但升级后 DB 复制给同一新版、NFO 备份比对、仅字符串额外图索引不是真正回退。只读核到本地 v2.2.6（234a220c9febfba4b1d610fd764448609a31e325）旧代码识别到16，面对17/18预期拒绝而非向后一版兼容；尚无旧 artifact 实际启动证据，WAL PRAGMA 在迁移前执行，不承诺拒绝前后 DB 字节零变化。发布同 SHA CI 绑定、受支持平台原生运行、迁移进程中断/磁盘满/备份失败仍待补，不把事务 trigger 等同断电。复核无编辑/测试；校验和原缺口已由本轮修改收口，但未跑 GitHub 发布。
+- 独立只读迁移/回退复核：schema13→18 两次 Open、ledger16 注入失败回滚与重试、未知未来19/checksum 拒绝已有组件证据；但升级后 DB 复制给同一新版、NFO 复制比对、仅字符串额外图索引不是真正回退。只读核到本地 v2.2.6（234a220c9febfba4b1d610fd764448609a31e325）旧代码识别到16，面对17/18预期拒绝而非向后一版兼容；尚无旧 artifact 实际启动证据，WAL PRAGMA 在迁移前执行，不承诺拒绝前后 DB 字节零变化。发布同 SHA CI 绑定、受支持平台原生运行、迁移进程中断/磁盘满/复制失败仍待补，不把事务 trigger 等同断电。复核无编辑/测试；校验和原缺口已由本轮修改收口，但未跑 GitHub 发布。
 - 重新逐项阅读详细方案：实际 ffprobe 出站/重定向/嵌套资源机制、文件特殊类型/链接/挂载耗时支持矩阵仍未冻结或实测，之前资源预算子项不能代替。升级回退还需具名前版二进制/schema 与匹配 DB/NFO/额外图及归属恢复、秘密保护/恢复后凭据处置、损失窗口和真实平台证据。未放松未知迁移拒绝，无部署/提交/生产迁移。
-
-## 41. N-01 匹配快照恢复与本地跨版演练（2026-11-05）
-
-**状态：冻结组合的本地匹配恢复/跨版演练子项完成；不放行 N-01/M1 或正式发布兼容矩阵。**
-
-- 冻结本地组合：Linux 6.1.0-53-amd64 x86_64 / Go1.27.2，旧源码 v2.2.6 tag `234a220c9febfba4b1d610fd764448609a31e325`，从本地 git archive 到临时目录、GOPROXY/GOSUMDB=off 构建；未 checkout/清理当前 dirtytree，未联网下载。旧二进制 `/tmp/emby-go-v2.2.6-source.Y1gtmy/emby-go-previous`，SHA256 `25665f57b56e618ca51119bb6a71103c38a49e3a4cabaaca6ad6eb2a64e8d7b5`，版本输出明确 local-rehearsal，不冒充官方发布 artifact。新版为当前 HEAD52836dd 加既有未提交施工，测试另记实际 binary SHA，不伪称正式源码 SHA。
-- 两条验证分开：schema18 DB + 人工 NFO + 真实额外图片 + auto_marks 匹配恢复验证当前归属；旧二进制实际生成16后再由新二进制升级18、旧版实际拒绝17/18、新版停服后恢复旧匹配集合再启动验证跨版路径。旧16无 auto_marks，不给它虚构归属能力。缺旧artifact环境时 skip 不计通过；不删除ledger绕过拒绝。
-- README 已补恢复流程：备份前全体写入者停写、配置与工具未涵盖图片另存、先原始业务/文件清单比对再重扫、停服后处理 WAL/SHM、显式对账新增文件。损失窗口为快照后全部写入；恢复不是自动合并或零损失。工具不加密且默认目录不保证私密，材料含摘要/源 URL/配置凭据，要求私密父目录和受控传输；恢复旧凭据可能复活撤销前状态，维护隔离中按目标版本流程完成轮换/撤销后再开放。未声称上述安全处置已做真实旧版验收。
-- 跨版实证：新增 `cmd/metatube/native_upgrade_test.go` 实际依次启动/停止两个二进制，旧16种业务数据→新18两次健康启动/优雅退出→旧明确拒绝 migration17→恢复匹配 DB/config/STRM/人工 NFO/真实 JPEG、移除后增图与旧 WAL/SHM→原始比对后旧健康启动。业务快照覆盖账户摘要/库授权/影片/个人播放状态/会话事件/settings/版本；启动不改 config/媒体；旧16既有标签在新18的 auto_marks 为空。首轮5.606s，最终有旧env重复3次10.744s（0skip）；既有Restart 2.959s、cmd vet/限定diff PASS。未设旧env单独执行明确skip1（0.022s），不计升级证据。新版 fixture SHA256 `e756168af9348bf03e5a70e23c86e782a0f6effdf5703efea32daa7638add827`，工作树源码本地构建非官方artifact。
-- schema18 匹配恢复新增 `internal/stabilityrehearsal/matched_restore_test.go`：升级历史fixture至18，停写后由真实 `backup.Run` 备份 NFO/额外图；再实际改账户摘要/授权/播放/标签归属/警告及 NFO/JPEG、删除旧图和新增图；覆盖回原路径并删新增图，**先原始 SQL 与 NFO/JPEG bytes/目录清单比对**，再 `Store.Open` 验证认证/授权/播放/非空 auto_marks 与有序额外图。所有匹配snapshot/restore阶段的 SQL/Store 句柄显式关闭；历史隐藏句柄只在fixture准备子测试结束时cleanup，不把准备复制视为离线快照证明。初始新测试错引用 `Movie.ScrapeError` 且 SQL 列名错写 `scrape_error`，Lead静态契约命令被编译阻断，成员已改为真实 `LastScrapeError/last_scrape_error`；修正后专项重复3次1.710s、race专项1次5.175s、稳定性包 vet/限定diff 均 PASS，成员全部job已收集（task-6完成）。两条专项均进入最终全仓回归。
-- 最终 Lead 作业 `bash-9a8d70f8ff264781` exit0，build/vet/全仓 Go/diff 均 PASS；全仓 Go 显式设置实际旧artifact env，不以默认skip充当升级证据（cmd 5.539s / stabilityrehearsal 3.439s / server 98.816s / store 59.550s）。Lead 阅读两条新测试并复核修正，两项共享任务完成、全部成员及后台作业结果已收集。无 UI 改动，本轮不重标此前前端数字；不安装/启动 systemd、不触碰生产库/服务，不据此补齐迁移kill/磁盘满、实际 ffprobe 出站或特殊文件/挂载支持门禁。
 
 ## 42. N-01 迁移中断与引擎容量失败演练（2026-11-05）
 
@@ -1238,7 +1199,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - d2-nfo 仅新增 `internal/nfo/special_file_test.go` / `special_file_unix_test.go`，10 API × direct/link FIFO = 20 隔离子进程，5s watchdog + Wait；含有效 translation snapshot 后换 FIFO、零 ownership/changed 误报、原 inode/mtime/link target 与目录条目不变。普通文件链接四种改写验证原路径替换链接而目标字节不变。重复3次0.108s、race1.225s、NFO vet/限定diff PASS，全部job已收集；Windows/Darwin amd64 仅编译，不作特殊文件运行证明。Lead完整阅读两文件。
 - task-10 由 d2-store 独占扫描生产分类与新 special-file 测试；范围只扩展既有超限跳过分支，不把非普通 NFO 误当坏 XML 覆盖原行，也不提前删除原非 HTTP 行。完整/增量/单片、CD 依赖及复验窗口已接通类型传播；新测试冻结后开始全仓回归。Lead 完整阅读 314 行新测试：36 预存 FIFO 场景（4入口及 full/inc 健康组继续 × 6依赖）、6 替换窗口、缺 NFO 直接复验及4普通链接路径；显式 seed ownership、比较 Movie/演员/基线/版本、保留 orphan 且健康组继续。未显式 seed 用户播放数据，不能将源码保留推论冒称该项 fixture 证据。首轮全仓发现旧测试 `TestIncrementalNFOSelectionSwitchesAndReadFailure` 将目录当 I/O 失败，现正确归类为非普通跳过而使旧断言失败；已由原成员最小对齐并重命名为 `TestIncrementalNFOSelectionSwitchesAndDirectorySkip`；旧 growth 目录 fixture 也改名并精确断言 ErrNotRegular，不改生产语义、不再冒称真实 I/O 失败证据。共享入口 race 重复3次4.040s、vet、Win/Darwin仅编译已 PASS；扫描冻结后同范围重复3次32.149s、race 178.813s、scanner vet/限定空白检查均 PASS，task-10 revision3完成，成员全部job已收集。
 - 修正旧目录 fixture 后，最终 Lead 作业 `bash-e66a9c3c99e644b0` exit0：`go build ./...`、`go vet ./...`、显式旧 artifact env 的全仓 Go 与差异检查均 PASS（cmd 9.897s / scanner 24.297s / nfo 9.200s / server 122.287s / store 75.027s / stabilityrehearsal 5.673s）。冻结后的扫描重复/race/vet 最终报告亦已收集，未遗留运行任务。不把首轮 FAIL 或父 helper-only skip 当作成功覆盖。无 UI 改动，本轮未重跑前端。
-- 剩余边界：非 Unix Open 替换竞态不具备 Unix FIFO 保证；Stat/Open/普通文件读取本身仍可能受挂载、NFS/FUSE 或 OS 不可中断 I/O 影响。此变更不是一致性快照、恶意目录/设备攻击沙箱、根标记/图片/备份全覆盖或硬关闭时限，也不证明 ffprobe 出站/重定向/嵌套资源政策与正式发布门禁。无生产操作/提交。
+- 剩余边界：非 Unix Open 替换竞态不具备 Unix FIFO 保证；Stat/Open/普通文件读取本身仍可能受挂载、NFS/FUSE 或 OS 不可中断 I/O 影响。此变更不是一致性快照、恶意目录/设备攻击沙箱、根标记/图片/复制全覆盖或硬关闭时限，也不证明 ffprobe 出站/重定向/嵌套资源政策与正式发布门禁。无生产操作/提交。
 
 ## 44. N-01 发布与完整 CI 的同 SHA 绑定（2026-11-05）
 
@@ -1326,16 +1287,6 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 已同步[主计划当前范围与排期](<dev-plan.md>)、[原生方案§3.3和决策表](<docs/native-roadmap-design.md#33-ffprobe-可信-strm-输入与进程资源>)以及本台账当前门禁行。§45–49及旧评审的探测隔离施工要求是历史，不再作为该项发布阻断。历史研究组件/测试没有生产调用，本轮不继续扩建、不删除既有未提交成果，也不放宽共享outbound策略。
 - 本轮仅修订三份文档与持久目标范围，并静态核对生产调用和资源常量；不重跑长测试来冒充新业务修改或隔离验收。文档差异检查结果以本轮实际命令为准。其他文件/挂载支持、原生发布及升级回退余项仍须依原计划验收，未宣布M1或整体完成，无提交/部署/生产操作。
 
-## 51. N-01 备份发布前失败保留与显式重试（2026-11-05）
-
-**状态：本地三阶段失败回归及完整验证完成；不代表实际OS磁盘满、断电、正式安装或整个M1发布矩阵完成。按§50默认信任STRM，不再施工探测出站隔离。**
-
-- 独立只读检查指出既有 `TestRunReleasesLockOnFailure` 使用损坏源DB，实际在 `readLibraries` 阶段失败，尚未到输出锁/暂存目录，因此不能证明持锁后失败清理。既有额外图测试只覆盖另一复制分支，也没有清故障后的显式重试。本切片按原生方案§3.4“备份失败不损坏旧环境”补证据，不修改旧测试或生产实现；只读成员没有跑测试、编辑或提供新测试二次审查，不把建议当验收。
-- 新增[失败保留回归](<internal/backup/failure_preservation_test.go>)：仅使用fixture临时目录和既有Before/AfterSnapshot同步点，分别让db.sqlite目标成为目录、nfo/extra-backdrops目录成为普通文件，触发真实VACUUM或目的目录创建失败。没有新增生产注入点、锁、重试或异常兜底；不依赖root可绕过的chmod权限拒绝，也不使用全局磁盘填满。三个场景均先发布两份完整备份，再修改源NFO为新内容，以同秒替换+retain=1触发故障。
-- 逐项要求注入恰一次、错误命中具体阶段、Result为空；旧备份整树路径/内容及源DB/NFO/JPEG字节不变，无stage/锁遗留，较早一份没有提前prune。撤销hook后显式重试必须成功，DB通过integrity_check，整树含新NFO/两份NFO/一份真实JPEG，且只有重试成功后才prune更早备份，输出仅余新完整目录。比较重试前保存的旧备份树并更新预期NFO，不以同一路径自比较作证明。全局hook只在串行测试使用并Cleanup复原。
-- 首轮测试错误地把 `Pruned` 与绝对路径比较，三场景都在重试结果断言处失败；实际既有契约返回目录名，已将预期改为 `filepath.Base(first.Dir)`，未改生产语义。修正后专项重复10次1.921s通过；最终backup全包race重复3次6.874s、build/vet/全仓Go均PASS（backup1.161s/cmd2.350s/server93.700s/store54.555s/stabilityrehearsal4.356s），作业 `bash-6f09b68f90244d20` 已收集exit0，差异检查通过。本轮未显式启用旧artifact/真实ffprobe/浏览器专项，不把条件skip算新增覆盖；无UI变更，不重跑前端。
-- 这是发布前路径创建失败传播与恢复证据，不是实际OS ENOSPC、写到一半、fsync/rename故障、崩溃断电或跨DB/NFO一致性快照证明；发布后同秒替换窗口等其余既有行为未改。整体目标保持active，文件/挂载和原生发布支持矩阵余项继续按原计划，不因本测试放行M1。无提交、部署、生产服务或生产库操作。
-
 ## 52. N-01 非特权服务身份原生重启冒烟（2026-11-05）
 
 **状态：Linux amd64本地真实非root子进程冒烟完成，N-01/M1仍未放行；未启动systemd或操作生产服务。**
@@ -1344,7 +1295,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 服务分支仅在测试runner为root时运行，以临时可遍历安装根+root拥有的0755二进制+UID/GID65534拥有的0750状态目录及0600配置运行；`syscall.Credential`指定实际用户、主组和补充组，不创建或查询系统账号、不改真实/etc或/var/lib。非root runner明确skip该分支，原current-user冒烟继续执行；不能据此宣称非root runner已覆盖独立服务UID。
 - 子进程健康后读取/proc/PID/status，逐个核验真实/有效/保存/文件系统UID及GID均为65534，防止只chown夹具却仍以root运行的伪验收。正常SIGTERM退出后核验配置及DB归属、无other权限，配置确已写入稳定server_id；父进程随后核对并写入真实SQLite状态供第二次启动读取，两次身份均不变、退出码正常且日志包含已退出而非强制退出。
 - 首轮真实服务启动与退出正常，但DB以继承runner的022 mask创建为0644，权限断言失败；这是夹具未模拟unit已有UMask0077，未将其冒充生产缺陷。修正为仅服务子进程通过/bin/sh设置umask077后exec绝对路径真实二进制，runner全局mask不变。没有修改生产创建权限或放宽断言。
-- 修正后专项重复3次6.170s，两身份每次各启动/退出两次均通过；观察到服务SIGTERM约3.9–7.0ms（仅空载本地实测，不是负载承诺）。工作树二进制SHA256 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，标识native-rehearsal/fixture，不是官方发布产物。cmd/metatube全包race7.083s、build/vet/全仓Go通过（cmd2.258s/server94.056s/store54.589s/backup1.279s/stabilityrehearsal4.480s），作业 `bash-60fdbaa8e6c04434` 已收集exit0，gofmt及差异检查通过；首轮失败作业 `bash-1825367cddf345d3` 亦已收集。不将未显式启用的旧artifact、真实ffprobe、浏览器专项算新增证据，无前端变更。
+- 修正后专项重复3次6.170s，两身份每次各启动/退出两次均通过；观察到服务SIGTERM约3.9–7.0ms（仅空载本地实测，不是负载承诺）。工作树二进制SHA256 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，标识native-rehearsal/fixture，不是官方发布产物。cmd/metatube全包race7.083s、build/vet/全仓Go通过（cmd2.258s/server94.056s/store54.589s/stabilityrehearsal4.480s），作业 `bash-60fdbaa8e6c04434` 已收集exit0，gofmt及差异检查通过；首轮失败作业 `bash-1825367cddf345d3` 亦已收集。不将未显式启用的旧artifact、真实ffprobe、浏览器专项算新增证据，无前端变更。
 - 证据范围仅临时本地布局的Linux UID/GID、mask、真实入口与重启；配置位于状态目录，并非完整/etc独立布局。不证明systemd ProtectSystem/ProtectHome/ReadWritePaths、NoNewPrivileges、capability剥离、OS账号创建流程、NAS/NFS/CIFS权限或其他CPU/OS平台；也没有新增路径沙箱、磁盘满或断电保证。正式unit/安装路径/媒体挂载与发布产物矩阵继续待验收，无提交、部署或生产数据操作。
 
 ## 53. N-01 独立只读配置父目录的真实服务身份验证（2026-11-05）
@@ -1354,18 +1305,8 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [原生重启冒烟](<cmd/metatube/native_lifecycle_test.go>)的公共断言显式区分状态根与配置目录：current-user保持原同目录行为；service-account将配置放入临时独立etc/emby-go目录，DB、日志等仍在单独状态根。没有新增生产配置项或启动包装接口。
 - 逐项核对[安装说明](<README.md#L312-L336>)及[unit样例](<deploy/emby-go.service>)：配置父目录由root拥有、组为服务组65534、0750，只通过组授予读取/遍历，不授予服务目录写权限；配置文件服务账号0600，状态目录服务账号0750；继承§52的子进程UMask0077和真实UID/GID核验。仅设置临时夹具，不创建账号或触碰实际/etc、/run、/var/lib。
 - 两次真实入口启动均能在无父目录写权限情况下回写已有配置的server_id，并保留身份和数据库持久状态；两次SIGTERM正常退出。最终断言配置父目录的root属主、服务组、0750未改变，目录内只有config.yaml，没有把DB/日志/临时产物错误写入配置目录。现有配置回写直接打开文件，不要求父目录可写；未改成rename式写入，也未放宽目录权限。
-- 中间较宽0755配置父目录专项3次7.241s通过，随后按文档收紧root:服务组0750并重验。最终专项3次7.188s、cmd/metatube全包race7.299s、build/vet/全仓Go通过（cmd2.218s/server94.206s/store54.637s/backup1.041s/stabilityrehearsal4.263s），格式/差异检查通过。两个作业 `bash-861c8c8089bd4e65`、`bash-3dc5025bbc3841b5` 已收集exit0；工作树fixture二进制SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，业务入口源码未变，不是正式release产物。
+- 中间较宽0755配置父目录专项3次7.241s通过，随后按文档收紧root:服务组0750并重验。最终专项3次7.188s、cmd/metatube全包race7.299s、build/vet/全仓Go通过（cmd2.218s/server94.206s/store54.637s/stabilityrehearsal4.263s），格式/差异检查通过。两个作业 `bash-861c8c8089bd4e65`、`bash-3dc5025bbc3841b5` 已收集exit0；工作树fixture二进制SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，业务入口源码未变，不是正式release产物。
 - §52所述“配置与状态同目录”限制已由本轮本地Unix证据补齐；仍不证明systemd对单个配置文件的可写bind mount、ProtectSystem/ProtectHome/PrivateTmp、NoNewPrivileges/capability剥离，亦不证明真实安装绝对路径、系统账号流程或NAS/NFS/CIFS/失联挂载行为。生产服务、正式发布与N-01/M1放行均未执行，默认信任STRM的既定政策保持不变。
-
-## 54. N-01 私有定容tmpfs真实ENOSPC与备份恢复（2026-11-05）
-
-**状态：本地Linux真实OS空间耗尽子项通过；不是整机填盘、正式挂载介质或N-01/M1发布验收。**
-
-- [新增Linux备份回归](<internal/backup/disk_full_linux_test.go>)必须显式设置 `EMBY_GO_TEST_TMPFS_ENOSPC=1`，并具备创建挂载命名空间/tmpfs的权限；未启用明确skip不计证据，启用后缺权限按失败处理而非静默跳过。父测试通过CLONE_NEWNS启动独立测试子进程，子进程先核验命名空间与父进程不同再设private传播，只在自己创建的临时输出目录挂载1MiB tmpfs，随用例卸载；即使未观察到ENOSPC，填充尝试也只允许2MiB。未改变宿主挂载传播、生产磁盘容量、系统账号或任何服务。
-- 三个串行场景分别在既有快照前/快照后同步点实际write填满临时卷，并用 `errors.Is(err, syscall.ENOSPC)`确认内核错误，不替换驱动或伪造错误。快照失败实际为 `backup: snapshot: database or disk is full (13)`；NFO/额外图复制错误均为 `no space left on device`且保留可解包ENOSPC。未添加生产hook、重试、锁、配置项或修改备份实现。
-- 每次先发布两个完整备份，在最新备份同秒、retain=1条件下触发失败，逐目录/字节核对旧备份、源SQLite和媒体不变、stage/锁无残留且失败Result为空。释放仅本fixture的填充文件后显式重试，检查快照integrity、新图片字节、完整树和计数，同秒替换成功后才清理较早备份。源图片只作规范路径的字节复制fixture，不宣称图片解码测试。
-- [原路径冲突回归](<internal/backup/failure_preservation_test.go#L137-L162>)中的目录/字节快照断言提取为两组真实调用方共用，原三场景继续执行。首轮两组通过0.293s；专项重复10次2.831s、backup全包race重复3次11.068s通过。最终build/vet及显式启用真实ENOSPC的全仓Go通过（backup1.217s/cmd2.688s/server96.047s/store55.902s/stabilityrehearsal4.575s），作业 `bash-664cb4167bae42f5` 已收集exit0；真实ffprobe、旧artifact及浏览器专项未显式启用，不挪用历史证据。Node基础门禁300/300、0skip通过41.729s，作业 `bash-e9669d53ec7d4721` 已收集exit0；没有前端源码改动。
-- §51仅路径冲突、§42仅SQLite页限的证据限制不作历史篡改：本轮补的是实际tmpfs文件写入ENOSPC与备份发布前失败恢复，尚未覆盖迁移事务中真实OS容量失败、publish/rename/fsync失败窗口、断电一致性、正式磁盘/NFS/CIFS行为或真实systemd。只读子任务另确认实际二进制SIGTERM与正在运行的探测进程链路仍缺端到端证据，现有空载重启/直接取消测试不能替代；留作后续施工，不把建议写成已验收。可信STRM政策不变，无提交/部署/生产数据操作。
 
 ## 55. N-01 活跃后台探测中的真实OS SIGTERM（2026-11-05）
 
@@ -1373,8 +1314,8 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 - [新增原生关停回归](<cmd/metatube/native_shutdown_test.go>)构建真实入口二进制，通过真实HTTP初始化/登录/建媒体库/扫描后启动批量探测，要求202且恰好一个候选；不是直接调用BeginShutdown或取消probe.Run。测试探测器只在版本自检返回成功，实际执行时启动持有继承管道的sleep子进程，并记录自己与子进程PID；等待标记且确认两者仍活着后才发SIGTERM，避免空载关停伪通过。全部配置、数据库、媒体和探测器均为临时fixture，不接公网媒体或操作生产服务。
 - 实际服务必须17秒内正常退出（15秒共享预算加测试余量），日志包含“已退出”且不含“强制退出”。在测试defer失败清理之前检查两个PID均已消失或进入Z/X死亡态；每个PID允许退出后1秒观察余量，因此不证明子进程严格早于主进程退出。孤儿僵尸回收归宿主init，不把它计作仍运行。NFO字节、完整影片结构前后不变，媒体目录仅保留原STRM/NFO，无辅助输出；取消相关任务状态/日志允许记录，未要求整个DB字节不变。失败清理只用于不泄漏fixture，不能作为成功清理证据。
-- 只读复核发现初版失败清理依赖已解析PID：若在HTTP返回/标记解析前失败，单杀服务进程不能清理已独立分组的probe。已改为测试服务独立Setsid会话，fallback按/proc会话ID发现所有非Z/X成员，SIGKILL后有界等待无活成员（2秒）；不要求PID标记已成功读取，也不把fallback用于通过正常关停断言。新增无标记、实际shell+sleep的清理专项；只改测试夹具，不加生产hook/防护。修正后两个专项重复10次15.705s、cmd/probe全包race18.300s/10.130s、build/vet及显式ENOSPC全仓Go均通过（cmd4.055s/backup1.441s/server93.995s/store54.901s/stabilityrehearsal4.737s）。作业 `bash-e5289bc59ed943cd` 已收集，最终因本次台账追加的EOF空行触发 `git diff --check` exit2，而非Go用例失败；已删除多余空行并独立重跑差异/格式门禁，保留原始日志 `/tmp/emby-go-round10-final-go.log`，不将该作业误记为exit0。
-- 首轮专项2.429s，活动关停约5.975ms通过。续轮之前两个作业句柄失效且无完整Go持久日志，不计全量验证；未发现仍运行的旧Go测试或sleep fixture后重新收集：专项重复10次30.593s、cmd/metatube及probe全包race分别34.121s/15.928s、build/vet及显式启用ENOSPC的全仓Go通过（cmd4.562s/backup1.707s/server95.216s/store55.331s/stabilityrehearsal4.657s）。作业 `bash-6b32659764c64bb6` 已收集exit0，持久日志 `/tmp/emby-go-round10-go.log` 含 `VALIDATION_EXIT=0`；fixture SHA256 `d10cc146a3f8bb97712bc00e32e225ddb466728d2206d1c6d17ac0e1c8c783c8` 是工作树构建，不是正式release。
+- 只读复核发现初版失败清理依赖已解析PID：若在HTTP返回/标记解析前失败，单杀服务进程不能清理已独立分组的probe。已改为测试服务独立Setsid会话，fallback按/proc会话ID发现所有非Z/X成员，SIGKILL后有界等待无活成员（2秒）；不要求PID标记已成功读取，也不把fallback用于通过正常关停断言。新增无标记、实际shell+sleep的清理专项；只改测试夹具，不加生产hook/防护。修正后两个专项重复10次15.705s、cmd/probe全包race18.300s/10.130s、build/vet及显式ENOSPC全仓Go均通过（cmd4.055s/server93.995s/store54.901s/stabilityrehearsal4.737s）。作业 `bash-e5289bc59ed943cd` 已收集，最终因本次台账追加的EOF空行触发 `git diff --check` exit2，而非Go用例失败；已删除多余空行并独立重跑差异/格式门禁，保留原始日志 `/tmp/emby-go-round10-final-go.log`，不将该作业误记为exit0。
+- 首轮专项2.429s，活动关停约5.975ms通过。续轮之前两个作业句柄失效且无完整Go持久日志，不计全量验证；未发现仍运行的旧Go测试或sleep fixture后重新收集：专项重复10次30.593s、cmd/metatube全包race34.121s、build/vet及显式启用ENOSPC的全仓Go通过（cmd4.562s/server95.216s/store55.331s/stabilityrehearsal4.657s）。作业 `bash-6b32659764c64bb6` 已收集exit0，持久日志 `/tmp/emby-go-round10-go.log` 含 `VALIDATION_EXIT=0`；fixture SHA256 `d10cc146a3f8bb97712bc00e32e225ddb466728d2206d1c6d17ac0e1c8c783c8` 是工作树构建，不是正式release。
 - Node初轮持久日志仅42通过、11取消，诊断为 `Promise resolution is still pending but the event loop has already resolved`，没有fail但不能记为通过；根因未定，不据此修改前端或运行器。未改前端复验300/300、0fail/0cancel/0skip通过58.469s，作业 `bash-f83a51f18b84448d` 已收集exit0，日志 `/tmp/emby-go-round10-node.log` 含 `VALIDATION_EXIT=0`。两份持久日志保留；不把复验通过解释为根因已修复。
 - §54登记的真实SIGTERM到活动探测链路缺口现有本地证据补齐；并不证明DB关闭精确时序（仍由直接worker join回归承担）、外部信号后的readiness503可观察窗口或所有新任务入口拒绝（监听器可能已关闭）。本次子进程为受控探测器而非真实ffprobe媒体网络访问，也未显式启用旧版artifact、Go浏览器或真实ffprobe专项。systemd沙箱、正式产物/平台矩阵、迁移真实OS容量失败及媒体挂载等门禁仍保留，N-01/M1不放行；未改生产逻辑，不重开已取消的探测隔离。
 
@@ -1385,7 +1326,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [新增迁移磁盘满回归](<internal/stabilityrehearsal/migration_disk_full_linux_test.go>)沿用显式开关 `EMBY_GO_TEST_TMPFS_ENOSPC=1`；默认skip不计容量验收。父进程创建CLONE_NEWNS子进程，核对挂载命名空间不同，先设私有传播，再只在测试目录挂载8MiB tmpfs（nosuid/nodev/noexec）。不填宿主盘、不操作systemd/生产库。正常清理按连接关闭→卸载→临时目录删除；硬超时/被杀由命名空间销毁释放挂载，可能残留空临时目录，不承诺硬杀时Go cleanup已执行。
 - 独立schema13 fixture准备连接全部关闭后运行真实store.Open；仅测试库增加ledger18 BEFORE INSERT触发器，先验证同事务内schema17/18列与ledger17已存在，再通过仅子进程注册的函数实际写填充文件直到内核ENOSPC。回调返回成功，不以RAISE/驱动错误注入替代磁盘满，也不设置max_page_count。最终要求SQLite错误code13且错误来源前缀为 `commit schema migration:`，明确证明tx.Commit分支，而不将最后账本INSERT失败混称提交失败；实际为 `commit schema migration: database or disk is full (13)`。
 - 失败后释放仅该临时卷的填充文件，先用原始SQL连接比较sqlite_master全部DDL及既有capacitySnapshot列出的11张表全部行，ledger完整恢复13并通过integrity/FK检查，之后才删除测试触发器并显式重试store.Open。重试保留fixture业务数据、ledger完整18条、双用户sessions/events各2及auto_marks默认值。此快照不包含access_tokens/api_keys/login_events等表的历史行，原fixture也未填这些行，不能据此宣称token删除/stable_id回填的历史行回滚已全覆盖；不修改共用快照函数或生产迁移。
-- 初轮0.569s通过；专项重复10次5.233s、stabilityrehearsal全包race34.138s、build/vet、显式启用ENOSPC的全仓Go通过（cmd5.826s/backup1.446s/server94.590s/store55.741s/stabilityrehearsal5.025s），作业 `bash-ac4c0772a37a47d7` 已收集exit0，原始日志 `/tmp/emby-go-round11-validation.log`。只读复核未改文件/运行测试，指出初版code13不足以定位Commit；已加严来源断言并最终专项重复10次5.269s通过。全包race/build/vet/全仓Go发生在该最终断言加严前，断言变更后不冒称重新全验。格式/差异检查单独复验。
+- 初轮0.569s通过；专项重复10次5.233s、stabilityrehearsal全包race34.138s、build/vet、显式启用ENOSPC的全仓Go通过（cmd5.826s/server94.590s/store55.741s/stabilityrehearsal5.025s），作业 `bash-ac4c0772a37a47d7` 已收集exit0，原始日志 `/tmp/emby-go-round11-validation.log`。只读复核未改文件/运行测试，指出初版code13不足以定位Commit；已加严来源断言并最终专项重复10次5.269s通过。全包race/build/vet/全仓Go发生在该最终断言加严前，断言变更后不冒称重新全验。格式/差异检查单独复验。
 - Node基础门禁300/300、0fail/0cancel/0skip通过50.341s，作业 `bash-6cb077dc39014369` 已收集exit0，日志 `/tmp/emby-go-round11-node.log`；没有前端源码改动。未显式启用真实ffprobe、旧artifact或Go浏览器专项，不挪用历史证据。
 - 本轮补齐§54/§55登记的迁移事务提交真实OS容量失败本地证据，不等同物理磁盘/NFS/CIFS、所有中间迁移阶段、publish/rename/fsync故障或断电一致性。systemd沙箱、正式产物平台矩阵与媒体挂载等仍未放行，N-01/M1继续施工；无生产逻辑变更、提交、部署或生产数据操作，可信STRM政策保持不变。
 
@@ -1397,7 +1338,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [共用容量快照](<internal/stabilityrehearsal/migration_capacity_test.go#L73-L111>)在原11表之上加入access_tokens/api_keys/login_events全部行，失败后原始SQL完整对比14表与DDL，证明这组非空认证历史没有随失败部分提交。没有将全表快照扩大解释为所有业务表或任意历史库；另一组max_page_count测试仍使用空认证fixture，新增三表快照只验证其空表不被污染。
 - 填盘触发器要求live token保留/孤立token已删除、认证新列已出现、key两条、login两条和历史最高用户序列702已写入，从而不会在认证迁移尚未执行时伪通过。初版直接引用新增auth_generation/stable_id字段导致v14 ALTER/DROP/RENAME校验触发器时报 `schema migration 14: SQL logic error: error in trigger stability_fill_v18: no such column: auth_generation (1)`；已改为pragma_table_info字符串列名检查，不变更生产DDL，修正后首轮0.502s通过。失败诊断现保留真实store.Open错误。
 - 释放填充文件后先证明原始schema13回滚，才删除fixture触发器并显式重试。要求live token摘要/原字段/generation1不变、总数1（孤立token已删）；两key原摘要/name/prefix/user/time保留，stable_id长度32且两条各自唯一、version1、rotated_at为空；login全行不变、users序列702，并保留原双用户播放数据及完整schema18 ledger断言。
-- 两组容量专项重复10次11.963s、stabilityrehearsal全包race38.326s、build/vet及显式启用ENOSPC的全仓Go通过（cmd4.324s/backup1.108s/server94.575s/store55.562s/stabilityrehearsal5.070s），作业 `bash-a654958688a84baf` 已收集exit0，日志 `/tmp/emby-go-round12-validation.log`。Node300/300、0fail/0cancel/0skip通过45.688s，作业 `bash-3781003cb488449d` 已收集exit0，日志 `/tmp/emby-go-round12-node.log`；无前端源码变更。格式/差异检查最终单独复验。
+- 两组容量专项重复10次11.963s、stabilityrehearsal全包race38.326s、build/vet及显式启用ENOSPC的全仓Go通过（cmd4.324s/server94.575s/store55.562s/stabilityrehearsal5.070s），作业 `bash-a654958688a84baf` 已收集exit0，日志 `/tmp/emby-go-round12-validation.log`。Node300/300、0fail/0cancel/0skip通过45.688s，作业 `bash-3781003cb488449d` 已收集exit0，日志 `/tmp/emby-go-round12-node.log`；无前端源码变更。格式/差异检查最终单独复验。
 - 独立只读复核未改文件/运行测试，确认断言与既有迁移规则一致，未发现实质缺陷；提醒702来自login且高于token700/key701，不能分别证明用户序列UNION每个来源都覆盖，未实际创建下一账号。stable_id断言不覆盖hex格式、再次成功重开稳定性或实际鉴权/轮转；不将这些说成已完成。未显式启用旧artifact、真实ffprobe或Go浏览器验收。正式存储/断电、systemd/发布平台矩阵与挂载等门禁不变，N-01/M1未放行；无生产操作，可信STRM政策不变。
 
 ## 58. N-01 真实systemd沙箱回归（2026-11-05）
@@ -1410,7 +1351,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 显式开关EMBY_GO_TEST_SYSTEMD=1；默认skip，启用但root/manager不满足则fail。真实主进程/proc取证要求UID/GID各四项65534及NoNewPrivs1；mountinfo按最长挂载前缀证明fixture/配置父目录/安装目录ro、state及独立配置文件rw，避免把Unix权限错误当作沙箱证据。服务视图/tmp与宿主/tmp不是同一目录、/root被替换成权限000的不可访问目录，证明PrivateTmp/ProtectHome实际作用于应用。配置父目录保持root:65534/0750且仅config.yaml，config/DB均65534:65534/0600。
 - 同一工作树binary双次启动，真实HTTP health与PublicInfo就绪且server ID跨单元重启稳定；server ID在父目录ro但文件rw情况下成功写回配置，停服后设置SQLite条目并在第二次停服后核验保留。systemctl stop要求17s预算内返回，ExecStopPost保存Result=success/ExecMainCode=1/ExecMainStatus=0；专项3轮的6次实际停止约34–52ms。fixture SHA256 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，不是发行产物。失败或正常结束均仅停止自己的unit，确认inactive/failed/unknown后才核验绝对路径/父目录/前缀并删除自己的目录；无法确认不活跃则保留现场并报错，不通过清理制造成功。
 - 新测试接入前的基线build/vet通过（作业 `bash-f7c6a92724db408d` exit0）；已有真实原生启动/非特权身份/独立配置/活跃探测SIGTERM及fixture清理race通过10.414s（`bash-9620219560be4a52` exit0）。全仓Go显式启用既有ENOSPC通过（`bash-7c176b9e316140c8` exit0，server100.314s/store58.143s/stabilityrehearsal5.173s，日志 `/tmp/emby-go-round13-baseline-go.log`）。这些基线早于新增systemd测试，不冒称其应用路径已执行。
-- 增强后应用专项3次5.782s、显式启用systemd的cmd全包race13.612s、build/vet及同时启用systemd/真实ENOSPC的最终全仓Go通过（cmd5.975s/backup1.250s/server95.937s/store55.538s/stabilityrehearsal5.272s），作业 `bash-da6d2475bf1d45b2` 已收集exit0，日志 `/tmp/emby-go-round13-validation.log`。首次基础双启动2.996s通过，随后增加PrivateTmp/ProtectHome实证及配置父目录核验再跑上述完整验证。Node/旧artifact/真实ffprobe/Go浏览器本轮未显式重验，未改前端或生产业务逻辑。追加台账曾触发EOF空行diff检查exit2，已删除多余空行；最终gofmt/diff检查通过，systemctl无该前缀残留unit，/run与/tmp无自身fixture目录。默认未启用时明确skip（0.009s），不将此skip计作实际验收；启用验收证据为上述专项/race/全仓运行。
+- 增强后应用专项3次5.782s、显式启用systemd的cmd全包race13.612s、build/vet及同时启用systemd/真实ENOSPC的最终全仓Go通过（cmd5.975s/server95.937s/store55.538s/stabilityrehearsal5.272s），作业 `bash-da6d2475bf1d45b2` 已收集exit0，日志 `/tmp/emby-go-round13-validation.log`。首次基础双启动2.996s通过，随后增加PrivateTmp/ProtectHome实证及配置父目录核验再跑上述完整验证。Node/旧artifact/真实ffprobe/Go浏览器本轮未显式重验，未改前端或生产业务逻辑。追加台账曾触发EOF空行diff检查exit2，已删除多余空行；最终gofmt/diff检查通过，systemctl无该前缀残留unit，/run与/tmp无自身fixture目录。默认未启用时明确skip（0.009s），不将此skip计作实际验收；启用验收证据为上述专项/race/全仓运行。
 - [README](<README.md#原生-linux-部署样例>)登记可复现开关与前置条件。样例实际StateDirectory/RuntimeDirectory创建、正式绝对安装路径、Restart策略、活跃worker在systemd下关停、发行产物与平台/挂载矩阵仍需各自验收。临时路径与额外只读binary映射不冒充原样安装；这些门禁不变，N-01/M1保持未放行，可信STRM政策不变。
 
 ## 59. N-01 systemd自动目录生命周期（2026-11-05）
@@ -1420,7 +1361,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [真实systemd测试](<cmd/metatube/native_systemd_test.go>)不再手工mkdir/chown状态目录。用测试根目录随机名称派生唯一目录名，StateDirectory指向/var/lib下自身目录、RuntimeDirectory指向/run下自身目录，Mode均0750。预先Lstat证明两路径不存在，再注册其清理；若遇同名既有路径，仅删除刚创建的空测试根目录，不触碰碰撞路径。没有使用固定emby-go名称或修改现有服务/账号。
 - manager实际完成创建/赋权：两目录均65534:65534/0750；真实应用/proc环境含对应STATE_DIRECTORY/RUNTIME_DIRECTORY，mountinfo证明两路径有效rw。ExecStartPre以同一服务身份向运行目录写fixture并核对字节。独立配置父目录ro、文件rw、实际UID/NoNewPrivs、PrivateTmp/ProtectHome和配置持久化等§58断言继续保留。
 - 两次启动复用同一StateDirectory，停服后SQLite/server ID/显式持久设置保留；每次systemctl stop后RuntimeDirectory必须已经不存在，下一单元重新由manager创建。ExecStopPost继续把正常退出证据保存到状态目录。测试完成确认自身unit不活跃后，才核验绝对路径、直接父目录和自身前缀并删除自己的持久目录；确认失败则报错保留现场。
-- 首轮真实应用双启动2.331s通过，两次正常停止45.640ms/39.054ms，ExecMainCode=1/Status=0/Result=success；作业 `bash-4db6fa46aeaf4470` 已收集exit0。工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，不是发行产物。后续专项3轮5.408s（6次正常停止约34–42ms）、启用systemd的cmd全包race13.023s、build/vet和同时启用systemd/真实ENOSPC的全仓Go通过（cmd5.906s/backup1.263s/server95.036s/store55.289s/stabilityrehearsal5.445s）；作业 `bash-c2269d33605345a4` 已收集exit0，日志 `/tmp/emby-go-round14-validation.log`。gofmt/diff检查通过，systemctl无自身前缀unit、/run /tmp /var/lib无自身fixture残留；未将此清理检查代替上述运行证据。本轮未显式重验Node、旧artifact、真实ffprobe或浏览器。
+- 首轮真实应用双启动2.331s通过，两次正常停止45.640ms/39.054ms，ExecMainCode=1/Status=0/Result=success；作业 `bash-4db6fa46aeaf4470` 已收集exit0。工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，不是发行产物。后续专项3轮5.408s（6次正常停止约34–42ms）、启用systemd的cmd全包race13.023s、build/vet和同时启用systemd/真实ENOSPC的全仓Go通过（cmd5.906s/server95.036s/store55.289s/stabilityrehearsal5.445s）；作业 `bash-c2269d33605345a4` 已收集exit0，日志 `/tmp/emby-go-round14-validation.log`。gofmt/diff检查通过，systemctl无自身前缀unit、/run /tmp /var/lib无自身fixture残留；未将此清理检查代替上述运行证据。本轮未显式重验Node、旧artifact、真实ffprobe或浏览器。
 - 本节仅补齐§58“自动目录未验”的唯一名称、本机新目录子集，不宣称固定安装目录的既有数据/属主变更、Restart、活跃worker在systemd下关停、正式产物平台矩阵及媒体挂载已验收。[README](<README.md#原生-linux-部署样例>)同步覆盖范围；无生产业务逻辑修改、提交或生产部署，可信STRM政策不变，N-01/M1仍未放行。
 
 ## 60. N-01 systemd故障自动重启（2026-11-05）
@@ -1429,7 +1370,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 - [真实systemd测试](<cmd/metatube/native_systemd_test.go>)在自己的唯一单元启用样例Restart=on-failure/RestartSec=3s。第一次启动完成既有真实UID/GID、沙箱、目录与HTTP身份核验后，只向该fixture MainPID发送SIGKILL；要求不同MainPID恢复健康、PublicInfo身份保持、有效策略为on-failure/3s、NRestarts恰为1，随后对新进程再检查沙箱。ExecStopPost必须保留Result=signal/ExecMainCode=2/ExecMainStatus=9，避免仅凭健康请求或换PID冒称故障路径执行。
 - 首单元自动重启后正常systemctl stop，第二单元改为直接向应用发送SIGTERM，不创建stop job来提前抑制重启。要求单元最终LoadState=not-found（--collect收集、不再持有自动重启任务）、正常退出success/1/0、运行目录消失，继续检查配置身份、SQLite跨单元设置和权限。无需靠固定sleep猜测子进程启动/单元退出；轮询有截止时间，底层systemctl命令沿用既有独立超时，不宣称整个异常路径硬实时界限。
-- 首轮专项5.875s通过，真实SIGKILL后3.221s恢复；原工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，不是正式发行产物。随后专项3次25.486s通过，三次重启约3.211–3.478s；显式启用systemd的cmd全包race29.114s、build/vet和同时启用systemd/真实ENOSPC的全仓Go通过（cmd9.528s/backup1.227s/server96.291s/store58.852s/stabilityrehearsal5.252s），作业 `bash-22e1478c505f4b54` 已收集exit0，原始日志 `/tmp/emby-go-round16-validation.log`。最终gofmt/diff检查通过；自身前缀unit与/run /tmp /var/lib fixture无残留。Node300/300、0fail/0cancel/0skip通过50.509s，作业 `bash-9a53ae6bb8554887` 已收集exit0，日志 `/tmp/emby-go-round16-node.log`。未显式重验正式旧artifact、真实ffprobe或Go浏览器。
+- 首轮专项5.875s通过，真实SIGKILL后3.221s恢复；原工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，不是正式发行产物。随后专项3次25.486s通过，三次重启约3.211–3.478s；显式启用systemd的cmd全包race29.114s、build/vet和同时启用systemd/真实ENOSPC的全仓Go通过（cmd9.528s/server96.291s/store58.852s/stabilityrehearsal5.252s），作业 `bash-22e1478c505f4b54` 已收集exit0，原始日志 `/tmp/emby-go-round16-validation.log`。最终gofmt/diff检查通过；自身前缀unit与/run /tmp /var/lib fixture无残留。Node300/300、0fail/0cancel/0skip通过50.509s，作业 `bash-9a53ae6bb8554887` 已收集exit0，日志 `/tmp/emby-go-round16-node.log`。未显式重验正式旧artifact、真实ffprobe或Go浏览器。
 - 只读复核未发现本轮重启/正常退出断言可确认的伪通过缺陷，未修改文件或重跑测试；退出文件覆盖与轮次隔离、SIGKILL正MainPID范围、直接SIGTERM加成功退出文件和unit收集链已核对。局限：没有真实子进程负载；PID检查到发信号间未用pidfd绑定；15s收集期限可能在繁忙manager下假失败；只验证有效RestartUSec=3s并记录耗时，不把调度时延说成硬实时；重启后复核沙箱但未重验环境和runtime marker。既有失败清理接受failed状态，并不能严格证明停止超时/不可杀任务下cgroup为空；本轮无该异常证据，未擅自重写既有清理策略，也不宣称该失败路径已验收。
 - 此次只补齐§58/59未验的本机Restart子集，未验证连续崩溃/启动限流、活跃探测任务在systemd下关停、SIGKILL期间并发业务写入或掉电持久性、固定正式目录迁移及发行平台/媒体挂载矩阵。失败清理仍先停止自己的unit并确认不活跃才删除自己的路径；未修改样例服务、生产业务逻辑、现有服务/账号或生产数据。[README](<README.md#原生-linux-部署样例>)同步范围，可信STRM政策不变，N-01/M1仍未放行。
 
@@ -1440,7 +1381,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [真实systemd测试](<cmd/metatube/native_systemd_test.go>)复用§58–60的唯一命名目录/单元，增加第三次启动；[活跃探测夹具](<cmd/metatube/native_systemd_probe_test.go>)仅以真实HTTP完成初始化/认证/新增库/扫描/批量探测（202、total=1）。STRM使用fixture.invalid源，脚本只模拟执行且不发网络请求；不是实际ffprobe格式或网络兼容验证，没有重新接入已取消的出站隔离。
 - 同一临时只读安装目录放置服务用户可执行的ffprobe脚本，版本自检成功；实际探测分支忽略SIGTERM，再启动继承忽略设置的sleep子进程。停服前从PID marker与/proc检查两进程活着、父子关系与独立probe PGID、与MainPID同cgroup，且两者SigIgn包含Linux TERM位14，避免unit最初向整个cgroup发SIGTERM就使夹具退出、冒充接纳任务取消。此为已知shell/sleep负载，不是失联文件系统或不可杀任务。
 - 只在第三轮systemctl stop，保留第一轮真实SIGKILL自动重启与第二轮直接SIGTERM不重启。停服须在17s（应用15s+宽限）预算内返回且ExecStopPost为success/1/0、RuntimeDirectory消失；在任何fallback清理前要求已知探测父子进程不存在或Z/X（死而未收割不等同仍运行），STRM/NFO原始字节、媒体目录仅2项和完整store.Movie行均保持原值。允许任务取消日志/状态等非Movie写入，不宣称全DB零写入或精确DB关闭时序；后者仍依赖已有直接worker/关闭测试。
-- 首版专项5.514s通过，活跃轮真实systemctl stop32.584ms，两个已知探测进程当时活着且TERM忽略；工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，非发行产物。随后将新夹具按准备与停服断言、HTTP任务接纳、进程树证据拆成具名职责函数；最终专项3次22.306s通过，三次活跃轮stop约38.530/63.055/50.359ms。启用systemd的cmd全包race35.491s、build/vet及同时启用systemd/真实ENOSPC的全仓Go通过（cmd10.826s/backup1.348s/server95.869s/store56.104s/stabilityrehearsal5.702s），作业 `bash-dcf1acb858894717` 已收集exit0，日志 `/tmp/emby-go-round17-validation.log`。Node300/300、0fail/0cancel/0skip通过54.690s，作业 `bash-6c546ca3d0d143db` 已收集exit0，日志 `/tmp/emby-go-round17-node.log`。gofmt/diff检查及自身unit、/run /tmp /var/lib fixture无残留检查通过。未显式重验正式旧artifact、真实ffprobe或Go浏览器。
+- 首版专项5.514s通过，活跃轮真实systemctl stop32.584ms，两个已知探测进程当时活着且TERM忽略；工作树fixture SHA256仍为 `73fa5c381fa75e8c2a1b5a882b16552b28e654c9519905fd8467ce7e99c60bb4`，非发行产物。随后将新夹具按准备与停服断言、HTTP任务接纳、进程树证据拆成具名职责函数；最终专项3次22.306s通过，三次活跃轮stop约38.530/63.055/50.359ms。启用systemd的cmd全包race35.491s、build/vet及同时启用systemd/真实ENOSPC的全仓Go通过（cmd10.826s/server95.869s/store56.104s/stabilityrehearsal5.702s），作业 `bash-dcf1acb858894717` 已收集exit0，日志 `/tmp/emby-go-round17-validation.log`。Node300/300、0fail/0cancel/0skip通过54.690s，作业 `bash-6c546ca3d0d143db` 已收集exit0，日志 `/tmp/emby-go-round17-node.log`。gofmt/diff检查及自身unit、/run /tmp /var/lib fixture无残留检查通过。未显式重验正式旧artifact、真实ffprobe或Go浏览器。
 - 只读复核未发现本轮可确认的新伪通过或安全问题，未改文件/运行测试；已核对TERM忽略、HTTP接纳前后顺序、父子/PGID/cgroup、success/1/0及fallback前断言。额外范围限制：直接SIGTERM仍是第二轮空闲负载，活跃任务仅覆盖第三轮systemctl stop；阻塞夹具不覆盖真实ffprobe成功输出临近发布的全部竞争窗口，不保证测试属性与未来打包unit永远同步。
 - 本节不证明任意后代逃逸、全部cgroup为空、systemd强杀兜底的单独归因、关闭超时/不可杀任务下的安全清理或真实ffprobe解析；§60既有failed状态清理限制不变，未擅自重写。正式路径既有数据迁移、发行/平台/媒体挂载矩阵仍未放行；无生产业务代码、正式服务/账号变更、提交或部署，可信STRM政策不变，N-01/M1保持进行中。
 
@@ -1452,7 +1393,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 构建后从实际Go buildinfo核验CGO、GOOS/GOARCH、trimpath与exe模式；从ELF检查无PT_INTERP、无导入共享库、无.symtab/.debug_info，并实际执行-version精确比较注入字段。保留Go构建信息与运行时必要元数据，不宣称删除所有符号线索。读取同一文件SHA用于日志及非特权安装副本；现有HTTP/身份/目录/重启/SIGTERM/systemd故障和活跃关停断言均继续执行，没有以构建成功替代运行证据。
 - 首版专项失败39.793s（作业 `bash-7d394be3e7f34038` exit1，三项均为 `fixture build setting -ldflags="", want "-s -w -X main.version=native-rehearsal -X main.commit=fixture -X main.buildTime=fixture"`）；trimpath产物未记录该buildinfo键，已删除错误期望，仍通过ELF裁剪与真实-version核验实际效果，不删减构建命令。修正后三类专项7.748s通过，当前用户+服务身份两次重启、活跃探测SIGTERM及真实manager三轮均实际运行；活跃systemd轮stop36.474ms。三份构建SHA均为 `ca4a49545fa6955ec18dd1d774edc1c69bf85d90cbc77727e2b389749e5cee2d`（go1.27.2/linux amd64，非正式产物），修正日志 `/tmp/emby-go-round18-native-fixed.log`。随后重复三类场景39.248s、cmd race19.489s、build/vet及全仓Go通过（作业 `bash-e80dfb9897b84d3d` exit0已收集），未将此早一版结果冒充后续环境归一化后的验证。
 - 只读复核确认构建/ELF/version均为实物断言，三处先验证同一个将运行的文件；发现条件性P2：继承GOFLAGS（含go env -w）可混入-gcflags/-tags，额外实验和微架构设置也可能偏离发布默认，原断言不能完整识别。复核时本机GOFLAGS/GOEXPERIMENT为空、GOAMD64=v1，没有证据说上面的运行实际被污染；但可构造的触发路径成立，故只在新helper的子构建环境设置GOENV=off、GOFLAGS/GOEXPERIMENT空值及GOAMD64=v1/GOARM64=v8.0，并从buildinfo检查额外编译选项为空和当前架构默认级别，不改父runner或生产发布工作流。
-- 新增主动污染回归：用测试独有GOENV文件和t.Setenv临时注入禁优化、额外tag、非法实验及更高架构级别（测试结束自动还原），仍要求同一个helper成功构建、实际buildinfo与ELF/version符合约束；首次2.407s通过。最终四项专项重复3次24.942s全部执行、服务身份与真实systemd无skip，本机每次fixture SHA仍为上述值；活跃unit stop约39.843/57.104/40.474ms。cmd全包race17.666s、build/vet及同时启用systemd/真实ENOSPC的全仓Go通过（cmd9.509s/backup1.153s/server94.783s/store54.626s/stabilityrehearsal5.039s），作业 `bash-647bf96026934732` 已收集exit0，日志 `/tmp/emby-go-round18-final-validation.log`。race作用于测试包，子应用刻意仍按非race发布profile构建，不宣称子应用含race插桩。
+- 新增主动污染回归：用测试独有GOENV文件和t.Setenv临时注入禁优化、额外tag、非法实验及更高架构级别（测试结束自动还原），仍要求同一个helper成功构建、实际buildinfo与ELF/version符合约束；首次2.407s通过。最终四项专项重复3次24.942s全部执行、服务身份与真实systemd无skip，本机每次fixture SHA仍为上述值；活跃unit stop约39.843/57.104/40.474ms。cmd全包race17.666s、build/vet及同时启用systemd/真实ENOSPC的全仓Go通过（cmd9.509s/server94.783s/store54.626s/stabilityrehearsal5.039s），作业 `bash-647bf96026934732` 已收集exit0，日志 `/tmp/emby-go-round18-final-validation.log`。race作用于测试包，子应用刻意仍按非race发布profile构建，不宣称子应用含race插桩。
 - Node VM300/300、0fail/0cancel/0skip通过50.318s，作业 `bash-357feaa3be614404` 已收集exit0，日志 `/tmp/emby-go-round18-node.log`；此轮无前端修改，Node在最后一次仅Go测试配置修正前执行，不挪作真实浏览器证明。未显式重验正式旧artifact、真实ffprobe或Chromium专项。最终gofmt/diff检查和自身测试unit、/run /tmp /var/lib fixture无残留检查通过。
 - 这是本机发布构建profile的运行子集，不是执行GitHub打包/上传、干净提交或官方Release身份认证；不将fixture的相同SHA推导为其它构建环境可复现。未验证其它OS/架构的原生运行、旧官方产物升级/回退、完整固定安装布局、连续崩溃或任意不可中断I/O，未放宽§60–61失败清理与cgroup局限。无生产业务逻辑/现有服务/账号/数据变更、提交或部署，可信STRM政策不变，N-01/M1仍未放行。
 
@@ -1465,7 +1406,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 两种组合均另验缺失ffprobe的500和实际探测失败之后，详情与PlaybackInfo仍200有效JSON，播放器流仍302到完整原始凭据URL。客户端禁止跟随重定向，并检查源HTTP命中数不增加，证明这些浏览/302请求本身未代客户端取源；不是证明ffprobe无出站访问，也未执行真实Emby客户端播放。测试明确允许受信本地回环输入，绝不重新引入已取消的隔离政策。
 - [普通门禁回归](<internal/server/probe_limits_test.go>)扩展既有POSIX夹具的error模式，输出带源URL的真实stderr，断言502、可用诊断/主机路径仍在且三种凭据不在；无需安装外部ffprobe。继承既有Windows跳过限制，不冒充Windows运行验收。真实回归需显式EMBY_GO_TEST_FFPROBE；未设置跳过不算验收，指定但不可执行则失败。复演命令与可信输入警告已同步[README](<README.md#L352>)及[API契约](<API-CONTRACT.md#L214>)。
 - 修复前真实两个子用例均失败：`probe response or logs exposed probe-user-canary`，作业 `bash-f9e27d0729b84059` exit1已收集，日志 `/tmp/emby-go-round19-before.log`；修复后首版专项0.995s通过（后续才补缺失二进制/逐文件断言，未挪用首版结果覆盖最终版本）。只读子任务只返回中途发现、随后执行失败，无最终审查报告，不计完整独立评审。
-- 最终专项重复10次19.503s、四条探测关键路径race26.315s、go build/vet及同时启用真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd13.800s/backup1.308s/server97.112s/store55.562s/stabilityrehearsal5.231s），作业 `bash-aa2a12718c7c4022` exit0已收集，日志 `/tmp/emby-go-round20-validation.log`。前端Node300/300、0fail/0cancel/0skip通过51.545s，作业 `bash-e9193a615d824cab` exit0已收集，日志 `/tmp/emby-go-round20-node.log`；包含既有Chromium用例但未新增本场景完整GUI/远端媒体/真实客户端专项。两作业结束后仅同步文档，不把临时日志视为持久发布材料。
+- 最终专项重复10次19.503s、四条探测关键路径race26.315s、go build/vet及同时启用真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd13.800s/server97.112s/store55.562s/stabilityrehearsal5.231s），作业 `bash-aa2a12718c7c4022` exit0已收集，日志 `/tmp/emby-go-round20-validation.log`。前端Node300/300、0fail/0cancel/0skip通过51.545s，作业 `bash-e9193a615d824cab` exit0已收集，日志 `/tmp/emby-go-round20-node.log`；包含既有Chromium用例但未新增本场景完整GUI/远端媒体/真实客户端专项。两作业结束后仅同步文档，不把临时日志视为持久发布材料。
 - 没有正式旧artifact、跨平台或生产媒体挂载的新验收；实际ffprobe本机fixture不替代其余协议与真实服务用户环境。未部署/提交、未改现有服务/账号/生产库；不承诺SSRF防护、全响应内容任意秘密识别或任意网络协议兼容。文件/挂载支持与正式原生发行/安装/升级矩阵门禁仍待冻结/验收，整体目标继续。
 
 ## 64. N-01 升级/匹配恢复的实际认证契约（2026-11-06）
@@ -1476,7 +1417,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [HTTP断言](<cmd/metatube/native_upgrade_api_test.go>)对同一旧token与API key分别执行：Users/Me为用户2且非管理员；递归列表仅影片1；详情保留Original、进度654321、播放2次和收藏；PlaybackInfo含一个相对DirectStreamUrl及非空PlaySessionId；流302的Location精确为原HTTPS URL；跨库详情/流404、管理接口403。客户端不跟随302，不访问example.invalid。检查分别在旧版种子、当前版第一次/第二次启动、匹配恢复后旧版运行；测试回调在真实进程就绪之后、SIGTERM之前执行，失败仍由既有defer杀死并join主进程。
 - 当前二进制改用[已验证发布配置fixture](<cmd/metatube/native_release_fixture_test.go>)，仍是明确native-rehearsal/fixture/fixture身份。本机Go1.27.2/linux-amd64，旧SHA256 `25665f57b56e618ca51119bb6a71103c38a49e3a4cabaaca6ad6eb2a64e8d7b5`，版本v2.2.6-local-rehearsal、commit `234a220c9febfba4b1d610fd764448609a31e325`；当前SHA256 `3c32cbf77182c2b6bceb377eaa628e6b46bcf5bb6d15253296735f0e0b9cb3f3`。均为本地源码构建，不是官方Release。旧fixture身份与版本检查保持固定，未重建或用其它tag静默替换。
 - 保留原有schema16→18、两次当前版启动的业务快照不变、拒绝旧版直接打开新DB、同停写窗口的SQLite/配置/STRM/NFO/封面匹配恢复及清除新增额外图断言；新增受限库文件也纳入匹配集合。恢复时比较SQLite原始字节，运行后只比业务行，避免把正常SQLite页变化当损坏。不提交新登录或播放事件，故不覆盖密码登录、有限期token续期、会话撤销/密钥轮换、新播放写入或真实Emby客户端取流。恢复旧凭据仍有效不代表可以直接对外上线，仍须按[恢复说明](<README.md#L303>)隔离并处置凭据。
-- 首次专项4.040s失败于旧版PlaybackInfo404；原因是种子缺source_protocol，并非生产回归。两部影片均补https，避免受限流因无效协议而伪通过。修正专项3.878s通过；最终重复3次20.321s、启用旧fixture/systemd的cmd全包race28.308s、go build/vet及同时启用旧fixture/真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd10.791s/backup1.142s/server102.016s/store60.299s/stabilityrehearsal5.155s）。作业 `bash-35ec1981a42e4690` exit0已收集，日志 `/tmp/emby-go-round21-validation.log`；前端Node300/300、0fail/0cancel/0skip通过48.613s，作业 `bash-e75ed74cacb74c8a` exit0已收集，日志 `/tmp/emby-go-round21-node.log`。包含既有Chromium回归，未新增完整升级GUI专项。父测试启用race不等于子二进制启用race，子二进制保持发布配置。
+- 首次专项4.040s失败于旧版PlaybackInfo404；原因是种子缺source_protocol，并非生产回归。两部影片均补https，避免受限流因无效协议而伪通过。修正专项3.878s通过；最终重复3次20.321s、启用旧fixture/systemd的cmd全包race28.308s、go build/vet及同时启用旧fixture/真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd10.791s/server102.016s/store60.299s/stabilityrehearsal5.155s）。作业 `bash-35ec1981a42e4690` exit0已收集，日志 `/tmp/emby-go-round21-validation.log`；前端Node300/300、0fail/0cancel/0skip通过48.613s，作业 `bash-e75ed74cacb74c8a` exit0已收集，日志 `/tmp/emby-go-round21-node.log`。包含既有Chromium回归，未新增完整升级GUI专项。父测试启用race不等于子二进制启用race，子二进制保持发布配置。
 - 旧schema/凭据读取副作用的只读审查已返回，无编辑或重测试；Lead已复查最终测试源码、恢复比较及门禁输出。最终独立夹具只读复核已返回（无编辑、未重跑测试），未确认阻断问题；确认同步断言失败会展开Kill+Wait清理直接服务进程、保留凭据有真实身份/权限/数据断言、恢复仍是匹配旧包而非向下迁移。覆盖限制对账：PlaybackInfo仅检查DirectStreamUrl前缀，302检查另请求硬编码端点，未消费返回URL，故不证明客户端按返回URL及其query凭据成功起播；Movie快照是列子集，不是全列保护；登录历史为空，不证明非空历史迁移；直接进程清理不替代全进程树/systemd/cgroup验收，本机冻结旧fixture不等于官方artifact认证。复演入口及明确启用/跳过规则见[README](<README.md#L314>)。临时日志不是持久发行材料；本轮只改测试和文档，未部署/提交、未改现有服务/账号/生产库。正式旧artifact、安装布局、版本/schema、平台及文件/挂载矩阵仍待验收；可信STRM直接URL政策保持不变。
 
 ## 65. N-01 返回播放URL的真实query认证（2026-11-06）
@@ -1486,7 +1427,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [认证演练](<cmd/metatube/native_upgrade_api_test.go#L91-L129>)不再用HasPrefix接受可能的stream-bad路径。JSON及单一来源/非空PlaySessionId断言之后解析URL，要求相对地址、无主机、精确路径/Videos/1/stream且无fragment；query中的api_key必须等于当前请求凭据。URL属于子服务响应边界，校验仅在此执行，无新增生产参数、锁、重试或抽象。
 - 不改写正向返回URL、不附加X-Emby-Token，直接向本机服务请求原始path/query，要求302及精确Location=https://example.invalid/original.mp4。随后仅移除api_key并保留其它query参数，再以无鉴权头请求要求401，排除匿名可用或原请求鉴权头掩盖凭据丢失的伪通过。原有单独带头请求流端点的302和跨库/管理拒绝检查保留。
 - 同一旧token与API key分别在旧版种子、当前第一次/第二次启动和匹配旧包恢复后执行；共8组返回URL的正反向检查，并继续比较原有业务行及恢复文件。客户端仍拒绝跟随302，不请求远端媒体；不会登录、提交播放事件或新增ffprobe进程。这补齐URL/query认证链路，不等于真实播放器起播、远端媒体内容/协议/挂载或全进程树验收。
-- 首次专项4.384s通过（作业bash-7368b5ea61714f6b，exit0已收集，日志`/tmp/emby-go-round22-focused.log`）；当前/旧二进制SHA与§64一致，仅修改测试断言。最终重复3次16.194s、cmd全包race39.966s、go build/vet及同时启用旧fixture/真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd12.020s/backup1.349s/server98.185s/store57.207s/stabilityrehearsal5.222s）；作业bash-273a507083c248b4 exit0已收集，日志`/tmp/emby-go-round22-validation.log`。前端Node300/300、0fail/0cancel/0skip通过51.001s，作业bash-cd26ce227cc345a3 exit0已收集，日志`/tmp/emby-go-round22-node.log`；含既有Chromium回归，不是新增真实播放器验收。最终源码未在门禁后改变，gofmt/diffcheck通过、已检自有前缀临时unit/目录无残留。本节替代§64历史前缀检查的单项限制；非全Movie列快照、空登录历史、本地非官方旧artifact等限制继续有效。父测试race不等于发布配置子二进制race。仅改测试与文档，未提交/部署或修改现有服务/账号/生产库；整体目标仍继续。
+- 首次专项4.384s通过（作业bash-7368b5ea61714f6b，exit0已收集，日志`/tmp/emby-go-round22-focused.log`）；当前/旧二进制SHA与§64一致，仅修改测试断言。最终重复3次16.194s、cmd全包race39.966s、go build/vet及同时启用旧fixture/真实ffprobe/systemd/真实OS容量故障的全仓Go通过（cmd12.020s/server98.185s/store57.207s/stabilityrehearsal5.222s）；作业bash-273a507083c248b4 exit0已收集，日志`/tmp/emby-go-round22-validation.log`。前端Node300/300、0fail/0cancel/0skip通过51.001s，作业bash-cd26ce227cc345a3 exit0已收集，日志`/tmp/emby-go-round22-node.log`；含既有Chromium回归，不是新增真实播放器验收。最终源码未在门禁后改变，gofmt/diffcheck通过、已检自有前缀临时unit/目录无残留。本节替代§64历史前缀检查的单项限制；非全Movie列快照、空登录历史、本地非官方旧artifact等限制继续有效。父测试race不等于发布配置子二进制race。仅改测试与文档，未提交/部署或修改现有服务/账号/生产库；整体目标仍继续。
 
 ## 66. N-01 非空登录历史与非默认认证元数据（2026-11-06）
 
@@ -1495,65 +1436,9 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - [旧库种子](<cmd/metatube/native_upgrade_test.go#L270-L277>)包含3条不同登录历史：管理员与普通用户各一次成功、未知用户一次失败；覆盖确定ID、NULL用户、IPv4/IPv6和不同时间。普通用户及其有效token的auth_generation均为3；API key使用32位十六进制内部stable_id（对外ak_前缀由生产代码生成），version=4、非空rotated_at。它们是旧库显式SQL种子，不是实际登录/轮换操作产生，不证明这些写入操作本身或任意旧schema迁移。
 - [全行快照](<cmd/metatube/native_upgrade_test.go#L120-L140>)已包含users/access_tokens/api_keys/login_events；本轮[将基线前移](<cmd/metatube/native_upgrade_test.go#L291-L298>)到旧版认证HTTP验证之前，并在旧版退出后比较，避免旧版先改写再采集而伪通过。随后沿用两次当前版启动、旧版拒绝新schema、匹配旧包恢复前后及恢复旧版退出后的比较。原有非空播放历史、业务选定列、配置/资源集合、稳定server ID及真实凭据权限/query认证检查保留。
 - 首次专项4.630s通过，作业bash-ca844b46f86f40ba exit0已收集，日志`/tmp/emby-go-round23-focused.log`。当前/旧fixture SHA及身份与§64一致；仍是本机Linux amd64、本地冻结schema16→18及匹配恢复，不是官方artifact、全版本/schema、平台/安装/文件/挂载矩阵认证。URL仍不跟随302；未新增登录/播放事件请求，也未新增探测或生产抽象。
-- 独立定向只读复核已返回（无编辑、未重跑测试），未发现本轮阻断项；确认基线前移、停机比较与匹配恢复顺序有效。覆盖限制对账：token/user代次均为3且NULL过期，不证明代次不匹配/过期拒绝、续期、撤销或改密；API鉴权只按摘要取用户，版本/稳定ID/轮换时间由全行相等证明保留，非管理列表/轮换CAS语义验收；登录历史仅证明原始3行，不覆盖写入、显示或清理；快照不含sqlite_sequence/schema_migrations及全Movie列（新列另验片1默认值）；匹配恢复为停机内存bundle手动回写，不是生产备份工具、在线WAL/崩溃一致性或未知新增文件发现。旧fixture按固定version串校验、记录实际SHA而非比对可信发行hash；缺少环境变量的skip不算升级证据。
-- 首轮门禁的重复3次8.046s及cmd全包race23.042s通过，build/vet也通过；随后全仓失败（作业bash-4e1980ed0ebc40f0 exit1已收集，日志`/tmp/emby-go-round23-validation.log`），原因是执行时误将EMBY_GO_TEST_FFPROBE设为1而非可执行路径，导致TestFFprobePipeInputBoundary报`exec: "1": executable file not found in $PATH`及真实STRM测试报`ffprobe 不可执行: 1`；非本轮代码问题，不计作全仓通过。已按文档改用`EMBY_GO_TEST_FFPROBE="$(command -v ffprobe)"`（本机/usr/bin/ffprobe），不改源码，完整重跑build/vet/全仓门禁通过，作业bash-a71d89dd77e14190 exit0已收集，日志`/tmp/emby-go-round23-corrected-validation.log`（cmd13.428s/backup1.111s/probe5.050s/server100.512s/store59.512s/stabilityrehearsal5.160s）。同时启用固定旧fixture、真实ffprobe路径、systemd和真实OS容量故障。本轮未修改前端，未重跑Node/真实浏览器，不复用上轮300/300冒充本轮执行；父测试race不代表发布配置子二进制race。最终门禁后没有再改测试源码。
+- 独立定向只读复核已返回（无编辑、未重跑测试），未发现本轮阻断项；确认基线前移、停机比较与匹配恢复顺序有效。覆盖限制对账：token/user代次均为3且NULL过期，不证明代次不匹配/过期拒绝、续期、撤销或改密；API鉴权只按摘要取用户，版本/稳定ID/轮换时间由全行相等证明保留，非管理列表/轮换CAS语义验收；登录历史仅证明原始3行，不覆盖写入、显示或清理；快照不含sqlite_sequence/schema_migrations及全Movie列（新列另验片1默认值）；匹配恢复为停机内存bundle手动回写，不是生产复制工具、在线WAL/崩溃一致性或未知新增文件发现。旧fixture按固定version串校验、记录实际SHA而非比对可信发行hash；缺少环境变量的skip不算升级证据。
+- 首轮门禁的重复3次8.046s及cmd全包race23.042s通过，build/vet也通过；随后全仓失败（作业bash-4e1980ed0ebc40f0 exit1已收集，日志`/tmp/emby-go-round23-validation.log`），原因是执行时误将EMBY_GO_TEST_FFPROBE设为1而非可执行路径，导致TestFFprobePipeInputBoundary报`exec: "1": executable file not found in $PATH`及真实STRM测试报`ffprobe 不可执行: 1`；非本轮代码问题，不计作全仓通过。已按文档改用`EMBY_GO_TEST_FFPROBE="$(command -v ffprobe)"`（本机/usr/bin/ffprobe），不改源码，完整重跑build/vet/全仓门禁通过，作业bash-a71d89dd77e14190 exit0已收集，日志`/tmp/emby-go-round23-corrected-validation.log`（cmd13.428s/probe5.050s/server100.512s/store59.512s/stabilityrehearsal5.160s）。同时启用固定旧fixture、真实ffprobe路径、systemd和真实OS容量故障。本轮未修改前端，未重跑Node/真实浏览器，不复用上轮300/300冒充本轮执行；父测试race不代表发布配置子二进制race。最终门禁后没有再改测试源码。
 - 本节仅替代§64–65的空登录历史限制；其它既有限制保持。当前只改测试及施工文档，可信STRM直接URL政策不变，未提交/部署、未改既有服务/账号/生产库。正式artifact、完整版本/schema、平台/安装/文件/挂载支持矩阵仍未验收，整体目标保持进行中。
-
-## 67. N-01 生产备份产物参与匹配恢复（2026-11-06）
-
-**状态：首次专项、重复3次、cmd/backup两包race、build/vet及全仓Go门禁通过，独立只读复核无阻断项；前端300/300通过，本地子项完成，不放行N-01/M1。**
-
-- [原生升级演练](<cmd/metatube/native_upgrade_test.go#L301-L356>)在旧服务SIGTERM并Wait之后，直接调用生产backup.Run生成SQLite与两库NFO，输出与源DB/媒体目录分离。实际生产路径为只读源库VACUUM INTO、integrity_check和NFO复制/发布，不经store.Open迁移。断言NFO=2、extra-backdrops=0、pruned=0；源DB前后主文件字节不变，生产快照的选定业务/认证/历史行与基线相等，独立只读查询快照MAX(version)=16，防止备份时提前迁移。
-- [恢复阶段](<cmd/metatube/native_upgrade_test.go#L423-L448>)重新读取磁盘上的Result.Database与nfo/lib-1/ABC-123.nfo、nfo/lib-2/hidden.nfo，对比最初产物字节后回写，不存在产物读取失败则改用原始内存DB/NFO的兜底。沿用当前两次启动/schema18、旧版拒绝新schema、停机匹配恢复、旧版真实HTTP权限/query认证及非空历史比较。数据库采用VACUUM后的物理布局，不要求备份与源DB物理字节相同。
-- 首次专项4.795s通过，作业bash-704e227eec6c4c1e exit0已收集，日志`/tmp/emby-go-round24-focused.log`。当前/旧fixture身份及SHA与§64相同；没有生产源码变动。独立只读复核已返回（未编辑、未执行测试），确认输出路径、产物消费、停机顺序、源不变和temp-root清理无本轮阻断项。
-- 最终Go作业bash-3e5e254745b64280 exit0已收集，日志`/tmp/emby-go-round24-validation.log`：重复3次7.885s、cmd全包race22.003s/backup全包race4.612s、go build/vet通过；同时启用固定旧fixture、真实ffprobe可执行路径、systemd和真实OS容量故障的全仓Go通过（cmd11.436s/backup1.183s/server97.603s/store57.092s/stabilityrehearsal5.127s）。父测试race不等于发布配置子二进制race；门禁后未修改测试源码。前端Node300/300、0fail/0cancel/0skip通过42.018s，作业bash-833817597c584a39 exit0已收集，日志`/tmp/emby-go-round24-node.log`；含既有浏览器回归，不是新增备份管理UI或真实播放器验收。
-- 覆盖限制：这是停止服务后的Go生产备份服务调用，不是备份CLI入口执行、在线写入/未checkpoint WAL/崩溃恢复或DB与NFO跨文件原子一致性证明。配置、STRM与普通poster仍是人工补充材料，不属于backup.Run输出；ExtraBackdrops虽启用但种子为空，后备新增fanart的手动删除不是额外海报备份恢复证据。仅一份备份，pruned=0不证明轮换清理。快照比较仍不含完整sqlite_master/sqlite_sequence/每个Movie字段/完整迁移ledger，MAX(version)不替代全schema校验；本地固定version与日志SHA不等于可信官方artifact。未知新增文件发现、敌意symlink/并发目录替换及正式安装/平台/挂载矩阵仍未验收。只补测试/施工文档，可信STRM直接URL政策不变；未提交/部署或修改既有服务、账号、生产库。
-
-## 68. N-01 实际备份CLI与非空背景图匹配恢复（2026-11-06）
-
-**状态：首次专项、重复3次、cmd/metatube及cmd/embybackup/internal/backup的race、build/vet/全仓Go与前端300项门禁通过；独立只读复核无阻断项，本地子项完成，不放行N-01/M1。**
-
-- [实际CLI入口](<cmd/metatube/native_upgrade_test.go#L315-L352>)在旧服务退出后构建并执行embybackup，传入db/out/retain=1，省略nfo/extra-backdrops开关以验证默认开启。检查exit成功、NFO=2/额外图=2、无prune输出，输出根仅一个目录；源DB主文件字节不变，快照选定业务/认证/历史行等于基线且MAX(version)=16，未提前迁移。CLI本轮为普通本机go build，不冒充正式发布配置产物。
-- [真实文件产物](<cmd/metatube/native_upgrade_test.go#L353-L378>)包含db.sqlite、两库NFO及extra-backdrops/lib-1/extrafanart/fanart2.jpg与lib-2/extrafanart/fanart1.jpg。两个JPEG内容不同，逐字节比源，放入匹配集合；不凭计数日志判定通过。升级schema16→18及两次当前启动后，[恢复阶段](<cmd/metatube/native_upgrade_test.go#L421-L475>)故意破坏第一张图、删除第二张图，并再次读取CLI磁盘产物（无原图兜底）恢复、即时比对；恢复旧服务运行退出后，所有非DB材料再次字节一致，数据库选定行保持。旧凭据、query-only返回URL至精确302/缺key401、库权限及非空认证历史检查保留，URL不跟随远端。
-- 首次专项6.668s通过，作业bash-de74851fb6c94ae5 exit0已收集，日志`/tmp/emby-go-round25-focused.log`。当前/旧fixture身份和SHA仍同§64；显式提供固定旧二进制，不将默认skip计为升级通过。独立只读审查已返回，无编辑或重跑测试，确认实际CLI/默认开关、磁盘产物消费、两种损坏恢复及临时根内文件清理无本轮阻断。
-- 最终作业bash-84ace4fea6994cbb exit0已收集，日志`/tmp/emby-go-round25-validation.log`：重复3次23.543s，metatube race38.570s、embybackup race3.384s、backup race5.017s；go build/vet通过。全仓Go通过（cmd11.459s/backup1.270s/stabilityrehearsal5.204s），环境同时设置旧fixture、真实ffprobe可执行路径、systemd与真实OS容量故障；server/store/probe等显示cached，不宣称本轮这些外部用例重新实际执行。父测试race不是发布配置子二进制race；门禁后未修改测试源码。前端300/300、0fail/0cancel/0skip通过52.928s，作业bash-6add5f7acbec4bc8 exit0已收集，日志`/tmp/emby-go-round25-node.log`；不代表新增UI或真实播放器验收。
-- 限制：仅停服Linux本地冻结旧库/源码构建fixture和手工匹配恢复，不是官方artifact、在线WAL/崩溃一致性、systemd或一键恢复证明。配置/STRM/普通poster仍是人工补充；新fanart99由测试手动清理，不证明产品恢复器自动发现/删除未知新增文件。磁盘额外图非空，不代表schema17图片索引非空；目前仅另验片1迁移后extra_backdrops/auto_marks为空，未覆盖片2/已有schema17非空索引或图片API。显式retain=1且无旧备份，不证明默认retain或真实prune。DB恢复即时字节一致，但旧服务后仅比较选定业务行；Movie列子集、sqlite_master/sqlite_sequence/完整迁移ledger及checksum、正式版本/schema/平台/安装/挂载矩阵仍未验收。固定自报version及日志SHA不等于可信官方制品校验。本节只替代§67的CLI未执行/磁盘额外图为空限制；可信STRM直接URL政策不变，未提交/部署或改既有服务、账号、生产库。
-
-## 69. N-01 实际备份CLI的活动WAL快照（2026-11-06）
-
-**状态：首次专项、重复10次、CLI/backup两包race、build/vet及无缓存全仓Go门禁通过；前端300/300通过，独立只读审查无阻断项，本地子项完成，不放行N-01/M1。**
-
-- [独立CLI测试](<cmd/embybackup/wal_test.go>)使用合成SQLite源库，确认journal_mode=wal、关闭自动checkpoint，初始TRUNCATE checkpoint成功后保存主库字节。两个标记行从代次1提交到2，要求WAL大于头部且主库仍与初始字节一致，以证明不是关闭源连接后才备份的伪在线场景。
-- 源连接不关闭，保持将两行改为3的写事务未提交，通过独立CLI进程运行数据库备份（关闭NFO/额外图）。要求CLI退出成功、唯一备份目录的真实db.sqlite通过integrity_check且两行均为2；同时源主库/WAL字节不变。随后提交源事务并验证源为3，关闭源库；仅将备份db.sqlite复制到空恢复目录，不提供源WAL/SHM，恢复库与原备份均仍为2且integrity正常。
-- 首次专项0.542s通过，作业bash-40846461574347d6 exit0已收集，日志`/tmp/emby-go-round26-focused.log`。真实执行普通本机构建CLI，不调用测试hook或生产Store.Open；无需旧fixture环境变量，不会因缺旧二进制而跳过。
-- 最终作业bash-41905674c9ba40f7 exit0已收集，日志`/tmp/emby-go-round26-validation.log`：专项重复10次5.205s，CLI race2.266s/backup race4.367s；go build/vet通过，`go test ./... -count=1`无缓存全仓通过（CLI1.615s/cmd14.456s/backup1.249s/probe4.678s/server118.121s/store67.600s/stabilityrehearsal7.381s），同时启用固定旧fixture、真实ffprobe路径、systemd和真实OS容量故障。父测试race不是CLI子二进制race；测试源码在门禁后未修改。前端300/300、0fail/0cancel/0skip通过55.276s，作业bash-4d0c866b829a4585 exit0已收集，日志`/tmp/emby-go-round26-node.log`；不是新增备份管理UI或实际播放器验收。
-- 独立只读审查已返回（无编辑、未执行构建/测试），确认实际CLI、未checkpoint证据、未提交事务持有顺序、源后续提交及不依赖源sidecar的恢复无本轮阻断项。可移植限制：依赖原生Go工具链及可执行临时目录；构建本身无超时，SQLite URI沿用直接拼接方式，特殊TMPDIR中的URI保留字符未覆盖；30秒为本地测试上限，不是性能承诺。
-- 覆盖限制：这是合成SQL表和受控未提交的小事务，不覆盖大事务cache spill/超大WAL，不是实际应用HTTP/调度写入、多进程压力、写事务持续提交时精确快照时点、在线NFO/图片联合一致性、崩溃/断电或NAS失联验证。主库/WAL字节不变不代表SHM不被读取者使用。独立恢复为测试手工复制，不是自动恢复产品能力；CLI为普通本机go build，无官方artifact或平台/挂载矩阵支持承诺。§67–68的停服匹配恢复历史不改写成活动服务备份；可信STRM直接URL政策不变，未改生产逻辑或提交/部署。
-
-## 70. N-01 正式前版Release制品升级与匹配恢复（2026-11-06）
-
-**状态：真实下载前版专项、错误摘要拒执行、双入口重复/race、build/vet及无缓存全仓Go门禁通过，前端300/300通过，独立只读审查无阻断项；本地子项完成，不放行N-01/M1。**
-
-- 来源：[仓库v2.2.6 Release](https://github.com/holll/Emby-go/releases/tag/v2.2.6)，published_at=2026-11-02T08:22:13Z；[Linux amd64资产元数据](https://api.github.com/repos/holll/Emby-go/releases/assets/701031564)，asset ID701031564、大小20017312、uploader=github-actions[bot]。实际`gh release download`原始产物的SHA256与GitHub API digest同为`7ab1e33307186c660ecfd5f154594293d7079f9f864314cc32274d14b522a758`；本轮下载路径`/tmp/emby-go-official-v2.2.6.jnYWPk/emby-go-linux-amd64`，原始元数据同目录asset.json。这是仓库分发来源与字节一致性证据，不是签名/attestation或独立供应链证明。
-- 实际完整版本为`Emby-go v2.2.6-234a220 (commit 234a220c9febfba4b1d610fd764448609a31e325, built 2026-11-02T08:19:36Z)`，commit与本地标签解析一致。不是把§64的`v2.2.6-local-rehearsal`改名冒充正式二进制；当前仍由本地release-profile构建，SHA为`3c32cbf77182c2b6bceb377eaa628e6b46bcf5bb6d15253296735f0e0b9cb3f3`，明确不是当前正式发行artifact。
-- [原生升级测试](<cmd/metatube/native_upgrade_test.go>)增加`TestNativeReleasedBinaryUpgradeAndMatchingRestore`，只接受`EMBY_GO_PREVIOUS_RELEASE_BINARY`显式路径，先读文件固定摘要匹配再首次执行-version，并精确比较版本/commit/time及换行；未提供SKIP不算验收，提供不匹配则FAIL。原`EMBY_GO_PREVIOUS_BINARY`本地fixture入口和身份约束不变；两实际调用方才提取共同流程，没有新增生产抽象或支持自动下载。
-- 两入口共用旧schema16建库及SQL seed→真实token/API key权限/用户状态/query流URL→实际backup CLI停服快照+2NFO/2不同JPEG→当前schema18两次启动→旧版在迁移17边界拒绝新库且业务行不变→破坏/删除资源并从磁盘备份产物和补充材料匹配恢复→旧版实际启动与同一HTTP契约。当前启动不会追认旧额外图/自动标签索引；Movie仍为选定列快照，非全库所有列/ledger/sequence证明。
-- 首次真实官方前版专项5.487s通过，作业bash-ac7019c64a4c4f0e exit0已收集，日志`/tmp/emby-go-round27-focused.log`。错误摘要边界：独立可执行脚本若被调用会创建标记；作为release路径执行测试时要求失败含`(refusing execution)`且标记不存在，外层作业bash-79e16a5ef42c4bab exit0已收集，证据`/tmp/emby-go-release-reject.9J6Jus/rejection.log`；这是预期拒绝，不是忽略门禁错误。
-- 最终作业bash-2bb4e44e21424c97 exit0已收集，日志`/tmp/emby-go-round27-validation.log`：正式/本地旧版双入口各重复3次17.366s，cmd race28.372s，build/vet通过；`go test ./... -count=1`无缓存全仓通过（cmd17.340s/CLI1.421s/backup1.407s/probe4.534s/server117.906s/store68.549s/stabilityrehearsal6.923s），同时启用两前版路径、真实ffprobe、systemd与OS容量故障。父测试race不是子二进制race；测试源码在门禁后未修改。前端作业bash-23a55a4e7c604a4d exit0已收集，日志`/tmp/emby-go-round27-node.log`，300pass/0fail/0cancel/0skip，57.822s；不新增UI或媒体播放验收。
-- 独立只读复核未编辑/执行构建测试，确认摘要先于执行、完整身份匹配、原本地调用方兼容、旧正式/当前本地来源日志、共用流程与清理无阻断项。旧启动helper注释笼统“不构成official release-artifact test”不改变旧侧实际下载来源；本节与运行日志明确区分，不顺手改既有helper。
-- 覆盖限制：仅Linux amd64上的v2.2.6正式旧制品→当前本地源码fixture；非当前正式发布、完整升级/platform/schema/挂载支持矩阵或正式安装路径。库为旧版创建schema后人工SQL seed，不是长期生产数据；停服备份不覆盖活动应用写入，§69仍为独立合成WAL证据。配置/STRM/普通海报仍是手工补充材料，恢复由测试显式编排而非自动恢复工具；不跟随302、不证明真实媒体起播，不修改生产服务/账号、不提交/部署。可信STRM直接URL及既有资源边界政策不变。
-
-## 71. N-01 旧影片全列保留与范围外字段恢复（2026-11-06）
-
-**状态：双前版全旧列比较、范围外字段负向检测及匹配恢复的重复/race、build/vet、无缓存全仓Go通过，前端300/300通过；独立只读复核对其读取版本无阻断项，最终负向断言由主Agent核对并实跑验证。本地子项完成，不放行N-01/M1。**
-
-- [原生升级快照](<cmd/metatube/native_upgrade_test.go>)此前只比较十个Movie列。现从`pragma_table_info('movies')`按cid发现列名，经SQL双引号转义后查询所有旧列，明确只排除迁移17/18新增的extra_backdrops/auto_marks；后两列仍在当前schema18另行断言为[]。快照将Columns与Rows一起编码，列名/列序变化不再能仅因值相同而假通过。普通未来新增的存储列不会自动排除，会使前后快照不同而失败；pragma_table_info不返回generated/hidden列，当前影片表无此类列，不据此承诺所有未来列均能检出。JSON不编码SQLite typeof/DDL，整数与等值浮点、某些BLOB/base64文本可能同编码，不是任意存储类型一致性证明。
-- SQL seed补入非默认file_size/file_mtime/source_container、number/output_dir、original_title/plot/year/premiered/rating、director/series/maker/label/collection/official_rating/sortname/taglines/provider_id/genres/studios、backdrop_path/landscape_path/runtime_seconds；保持Title及原凭据/权限/query认证场景不变，不添加扫描、登录或播放写入。
-- 新增真实负向敏感性检查：旧版拒绝升级库后，在当前库仅修改原十列范围之外的original_title/runtime_seconds，要求新快照与升级前baseline不同；随后连同文件损坏/丢失，从实际CLI产物和补充材料恢复，最终旧版运行后全列快照必须重新等于baseline。它同时说明回退会丢弃备份后的业务写入，不擅自批准生产可接受丢写窗口。
-- 初次双前版专项9.725s通过，作业bash-474def4bb49d4f87 exit0已收集，日志`/tmp/emby-go-round28-focused.log`；这一首次输出早于补入范围外字段负向断言，不作为该断言通过证据。最终测试在源码改完后才启动。
-- 最终作业bash-03fe68d228c64598 exit0已收集，日志`/tmp/emby-go-round28-validation.log`：包含最终负向断言的双前版各重复3次31.085s，cmd race42.103s，build/vet通过；`go test ./... -count=1`无缓存全仓通过（cmd16.032s/CLI1.315s/backup1.184s/probe4.774s/server95.134s/store54.474s/stabilityrehearsal5.307s），同时启用正式/本地前版路径、真实ffprobe、systemd与OS容量故障。父测试race不是子二进制race，源码在最终门禁后未改。前端作业bash-48a8764ae8e44cd9 exit0已收集，日志`/tmp/emby-go-round28-node.log`，300pass/0fail/0cancel/0skip，53.632s。
-- 独立只读复核未编辑或跑测试，读取的是517行版本（revision9728f32c9dc8a4d3330006d0ae69735cc6cbfe6294c62ec5fb2ec3b74404d84a），确认动态列/标识符引用、列和值编码、非默认种子及调用兼容无当前阻断项；其明确未读到后来补入的负向断言。主Agent已核对最终533行版本中UPDATE两字段→快照必须不同→磁盘匹配恢复→旧版运行后快照回归的实际顺序，并由上述最终门禁验证；不把早期只读审查冒充完整最终版本独立复核。
-- 覆盖限制：本轮只提升Movie旧列值/名称/顺序的保留证据，不是所有SQL表、sqlite_master/索引/触发器、sqlite_sequence或完整migration ledger验证。其余表沿用既有快照范围；某些字段仍是默认/空值，不能声称全部字段非空种子。正式前版固定资产/版本与当前本地fixture来源同§70，旧SQL种子不等于长期生产库；恢复仍是测试编排，配置/STRM/普通海报为补充材料；不是当前正式发布或全平台/schema/安装/挂载矩阵，不修改生产逻辑，不提交/部署，可信STRM政策不变。
 
 ## 72. N-00 M1验收矩阵与发布决策整理（2026-11-06）
 
@@ -1561,7 +1446,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 - 新增[M1验收矩阵](<docs/m1-release-matrix.md>)，明确实施记录人为当前会话lead，发布验收范围/损失政策由当前用户于2026-11-06批准、正式发布/迁移复核具名负责人仍待登记。将已批准的STRM政策、NFO8MiB/STRM1MiB、探测资源、有界关闭和配套恢复要求与未决支持承诺分开，不重新询问已批准决定。
 - 本轮只读环境核对：Debian12、Linux x86_64、systemd252.39、Go1.27.2、工作区/临时目录ext4，HEAD52836dd640d6cf169db2173fd8c8c49ceee775b0；核对时64个tracked改动、87个untracked文件（新增本轮矩阵前统计），不能用HEAD或fixture SHA冒充正式源码身份。集中记录正式前版下载制品、当前本地fixture、临时服务布局、CLI/匹配恢复和OS故障证据的实际边界。
-- 草案阶段提议D-M1-A：首批限定Linux amd64/Debian12/systemd/本地ext4，远端NAS/其它平台未验收；D-M1-B：固定v2.2.6/schema16→18及现有样例正式布局，旧版拒绝新库、只做配套恢复；D-M1-C：升级验收前不重新开放业务写入，开放后需先评估/保存新增数据并另获丢弃批准，不自动回退。草案形成时建议尚未采用；随后用户在M1范围确认中明确选择“按建议范围继续验收 (Recommended)”，D-M1-A/B/C均获批准、无例外，已写回矩阵并仅勾选批准记录项。不授权操作生产账号/目录/服务、提交或发布；M5网页备份秘密政策仍独立待定。
+- 草案阶段提议D-M1-A：首批限定Linux amd64/Debian12/systemd/本地ext4，远端NAS/其它平台未验收；D-M1-B：固定v2.2.6/schema16→18及现有样例正式布局，旧版拒绝新库、只做配套恢复；D-M1-C：升级验收前不重新开放业务写入，开放后需先评估/保存新增数据并另获丢弃批准，不自动回退。草案形成时建议尚未采用；随后用户在M1范围确认中明确选择“按建议范围继续验收 (Recommended)”，D-M1-A/B/C均获批准、无例外，已写回矩阵并仅勾选批准记录项。不授权操作生产账号/目录/服务、提交或发布；M5网页复制秘密政策仍独立待定。
 - [原生详细方案](<docs/native-roadmap-design.md>)将“缺上限”的段落标为修复前历史，补上已采用阈值与台账证据，更新§9.1已落地API/文件边界及真正未决发布项；新增§9.2链接矩阵，不把2026-11-04旧待定表继续当作全部当前状态。
 - 本轮仅文档及只读环境核对，未运行新Go/前端门禁，不沿用§71测试数字冒充本轮发布验收；git diff --check通过，当前工作区这四份文档的新增内部链接148处路径/行界/标题锚点校验通过，未测外链可用性或渲染。独立只读复核未编辑/运行命令，确认建议/授权、证据层级、关闭与凭据边界及主要链接一致；发现总计划§4.3仍残留“实际连接”门禁，主Agent已按2026-11-05决定改为直接URL/进程资源并明确取消历史出站隔离，同时澄清已定文件阈值/多图布局不重复待选。独立复核读到的是修订前残留，最终澄清由主Agent核对，不冒称已获二次独立复核。范围获批后仍须确定正式候选源码/制品身份、同包实际平台/安装/关闭/升级恢复/文件组合门禁；不能因批准矩阵而勾销未执行验收。
 
@@ -1570,7 +1455,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 **状态：固定私有源码快照及单一摘要验收候选的本地子项完成；不是正式Release来源、正式安装或M1放行。**
 
 - [原生构建入口](<cmd/metatube/native_release_fixture_test.go>)新增成对EMBY_GO_NATIVE_BINARY/EMBY_GO_NATIVE_SHA256：任一非空则校验64位hex摘要和源字节，失败不回退构建；复制同一次已验证读取的data，不在校验后重新读取外部路径。随后仍共用buildinfo、CGO0/linux/本机架构/trimpath/默认微架构、无额外实验/标签、静态裁剪ELF及精确fixture版本检查，再首次执行-version。默认编译路径保留，污染环境回归主动清空candidate变量后独立构建。缺路径、缺摘要、非法hex、错误摘要四个负向子进程均非零退出、匹配拒绝消息且无恶意脚本marker；首次专项3.267s，作业bash-ab7aee2628af4fa3 exit0已收集，日志`/tmp/emby-go-round30-boundary.log`。
-- 未提交/未跟踪工作不能仅用HEAD标识。将583个现存tracked/未忽略untracked路径冻结为私有目录`/tmp/emby-go-m1-candidate.uW2pse`中的source.tar及解包source；归档规范化时间/owner/group、保留文件mode，路径清单source-paths.z和base-head.txt/worktree-status.z辅助溯源。归档SHA256=`6eaf586dc29056b1d92df13fe9e3ac078d992e50ff3f440d418ddb47ee5e09a2`，基础HEAD仍是`52836dd640d6cf169db2173fd8c8c49ceee775b0`，不是干净commit。清单遵从既有.gitignore（其中`/docs/`被忽略），因此新M1矩阵等忽略文件不在归档中；这是可构建源码快照，不是整个工作区/全部文档的完整交付备份。临时私有材料不得提交或公开；/tmp不是长期发布存储。
+- 未提交/未跟踪工作不能仅用HEAD标识。将583个现存tracked/未忽略untracked路径冻结为私有目录`/tmp/emby-go-m1-candidate.uW2pse`中的source.tar及解包source；归档规范化时间/owner/group、保留文件mode，路径清单source-paths.z和base-head.txt/worktree-status.z辅助溯源。归档SHA256=`6eaf586dc29056b1d92df13fe9e3ac078d992e50ff3f440d418ddb47ee5e09a2`，基础HEAD仍是`52836dd640d6cf169db2173fd8c8c49ceee775b0`，不是干净commit。清单遵从既有.gitignore（其中`/docs/`被忽略），因此新M1矩阵等忽略文件不在归档中；这是可构建源码快照，不是整个工作区/全部文档的完整交付复制。临时私有材料不得提交或公开；/tmp不是长期发布存储。
 - 从该解包源码一次构建`emby-go`：Go1.27.2、GOENVoff/GOFLAGS空/GOEXPERIMENT空/GOWORKoff、CGO0/linux/amd64v1、trimpath、-s -w，明确注入native-rehearsal/fixture/fixture；制品SHA256=`38bef8d8c81f24a08db8affae8bb7bc4e4f0ece64f73592d05ea118c6fe39289`，精确身份`Emby-go native-rehearsal (commit fixture, built fixture)`。SHA256SUMS关联归档和二进制，构建作业bash-726601f6714b4bd9 exit0已收集。源码归档摘要是本地快照身份，不把fixture嵌入的commit字段冒充该身份或正式版本。
 - 从同一解包源码运行最终作业bash-923d7be3d10a4f8a exit0已收集，日志`/tmp/emby-go-round30-validation.log`：`^TestNative`重复2次33.759s，无SKIP；日志十次明确复用同一个上述SHA，分别为重启/非特权身份、实际SIGTERM活跃探测、真实transient systemd、冻结本地前版升级恢复及正式v2.2.6前版升级恢复各两次。污染构建回归另行编译，不计为复用入口；恰好得到相同摘要不是其绕过编译。systemd的失败重启、正常停止及已知忽略TERM探测树覆盖沿用§61边界；正式旧侧固定资产701031564，当前侧为本次私有候选。
 - 同作业cmd race25.400s、build/vet通过；`go test ./... -count=1`无缓存全仓通过（cmd11.551s/CLI1.082s/probe4.466s/server97.675s/store55.365s/stability5.401s），显式启用两前版路径、真实ffprobe路径、systemd与OS容量故障；归档/二进制最终sha256sum -c均OK。父测试race不等于候选或旧子二进制开启race，CLI仍由测试本地构建而非同包emby-go。冻结源码前端作业bash-3542a0b9fbef4ccf exit0已收集，日志`/tmp/emby-go-round30-node.log`：300pass/0fail/0cancel/0skip，48.041s。
@@ -1693,7 +1578,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 ## 84. M1-A源码复现与M1-D窗口差距收口（2026-11-06，本地补证完成，正式门禁未关闭）
 
 - 按总计划A与D并行：只读盘点确认增长/替换已有确定性snapshot、full/incremental复核测试；原生24组合是先造故障再发扫描，不冒充扫描中变化。剩余正式emby身份/ext4/最终native二进制窗口组合仍未执行，不扩NAS或CD笛卡尔积。
-- 捕获当前589个正常文件、显式记录两个已删除的Docker部署文件；原始源码清单来自tracked+非忽略untracked，忽略docs/reports/tools、私有配置/运行数据不混入源码包。归档不是整个工作区备份，也不是已审签可发布源码。
+- 捕获当前589个正常文件、显式记录两个已删除的Docker部署文件；原始源码清单来自tracked+非忽略untracked，忽略docs/reports/tools、私有配置/运行数据不混入源码包。归档不是整个工作区复制，也不是已审签可发布源码。
 - 从独立解包源码、禁用开发环境GOFLAGS/GOEXPERIMENT/GOENV后按既有CGO0/linux-amd64-v1/trimpath/stripped参数重建，逐字节SHA仍为`0c44b1e85227fdf380862ef756e7459e90517f9159e2291914e51d4155204696`，CLI三字段保持`m1-local-20261106` / `snapshot-6eaf586dc29056b1` / `2026-11-06T02:31:32Z`。快照标签指原生产源码基线，不伪装Git commit。首次源码捕获把已删除tracked当文件而失败，第二次遇主机Python不支持extractall(filter=...)；均在构建/执行前失败，改为显式墓碑记录及主机tar后成功，未改业务代码。
 - 原始复现产物在`/tmp/emby-go-m1-source-closure.cbpZ0M`，作业`bash-68c5b0db6df6433a`已收集exit0；包含源码tar、逐文件SHA/模式/大小manifest、HEAD/status、二进制及校验文件。后续新测试驱动与此捕获分别记录，最终交付来源及具名复核仍不能据此自动勾选。
 - 不新增生产hook、重试或防护；只补已有八个代表窗口的非空播放/收藏和恢复闭环：full/incremental下STRM/NFO增长四例、STRM/NFO替换FIFO四例。它们执行同源码scanner测试，不声称最终native二进制本体、实际emby账号或安装布局验证。STRM/NFO已索引场景另增加非空个人状态，missing-NFO的pending控制仍保留原语义；source/nfo替换四例使用真实非空CD2、healthy即时落库及orphan保留/恢复清理，新标题证明确实发生恢复更新。
@@ -1717,7 +1602,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 首次在仓库内解包目录构建遗漏显式关闭VCS注入，Go继承父Git的dirty模块版本与vcs字段，导致SHA为`7c734dd733d946c5a0beabc4be2025c65ed221860638e87d6cf1664fabf71a9c`，校验失败退出1；保存失败日志/产物并明确禁作具名候选。调查后仅增加`-buildvcs=false`，不改源码，新建产物与原候选SHA `0c44b1e85227fdf380862ef756e7459e90517f9159e2291914e51d4155204696`及CLI三字段完全一致。
 - 从净化归档自身源码执行三个已有增长/替换专项，`-count=1`通过，scanner合计5.518s；[重建及专项日志](<reports/m1-clean-source.u2alm2hr/rebuild-window-validation-vcs-off.log>)退出0。归档自身[全仓vet/test](<reports/m1-clean-source.u2alm2hr/archive-go-validation.log>)已收集退出0，各包无`(cached)`，scanner20.619s、server101.305s、store58.334s；不是正式opt-in验收。八项来源/制品/日志/构建信息的[校验清单](<reports/m1-clean-source.u2alm2hr/SHA256SUMS>)全部通过，目录权限0700。
 - 独立只读复核正常结束，在本次私有来源一致性范围内无阻断，不构成正式Release/M1签收：逐成员复核589/588项、准确三处差异、驱动与全部八项摘要、新旧候选逐字节一致；静态解析两产物buildinfo与元数据记录吻合。未改文件、未提取、未执行候选、未构建/测试，不独立重证历史构建因果，不扩展B–E；八项摘要不代表全目录完整性或外部可信签名。
-- 新包仍为私有派生，不是当前工作区完整备份、Release或公开分发授权；文档仍保留父捕获时版本，忽略材料不擅自加入。目录0700，无宿主账号/安装/服务操作，无提交、发布或候选版本变更；未重跑race/Node/浏览器/正式native矩阵。A具名签收/交付范围与B–E继续待执行，独立隔离环境连接及具体授权仍未提供。
+- 新包仍为私有派生，不是当前工作区完整复制、Release或公开分发授权；文档仍保留父捕获时版本，忽略材料不擅自加入。目录0700，无宿主账号/安装/服务操作，无提交、发布或候选版本变更；未重跑race/Node/浏览器/正式native矩阵。A具名签收/交付范围与B–E继续待执行，独立隔离环境连接及具体授权仍未提供。
 
 ## 87. MT-05演员身份与资料冻结前草案（2026-11-06，仅设计）
 
@@ -1725,7 +1610,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 独立只读盘点已正常结束，未改文件、构建/测试或联网。确认[姓名主键与关系](<internal/store/store.go#L235-L237>)会合并同名、改名换键；NFO已有MetaTubeID，但[扫描](<internal/scanner/scanner.go#L303-L307>)未投影、[刮削生成](<internal/scraper/apply.go#L431-L435>)只带姓名并可覆盖旧actor块。因此不能把字段存在、历史孤名或普通full扫描当持久身份/删索引恢复证明。
 - [头像匹配](<internal/scraper/avatar.go#L273-L285>)不是任意搜索首条，而是第一个归一化精确姓名/别名命中；多个精确候选仍按顺序选择，再按姓名向全部参演NFO扩散。[旧PersonIds](<internal/server/library.go#L1660-L1685>)则编码/解码姓名，随后仍为姓名子串筛选，不是精准演员ID。仅记录本批设计必须覆盖的调用链，不顺手改旧行为。
 - 建议持久演员sidecar＋影片NFO稳定引用，SQLite保留投影；只为建议，尚未决定路径/格式/跨库共享或新接口。三项待冻结：真源与恢复包；稳定身份与历史迁移；来源、人工确认、冲突与旧Person兼容。先有真实详情fixture，再补正式契约和迁移；未知旧NFO不猜身份，不自动合并或整库改名。
-- 草案列出同名/更名/旧NFO/历史混合行、删索引、NFO覆盖与锁、头像副本/tag、增量资料变化、真源损坏、冲突、部分成功、备份回退的验收预期；这些是待实施测试，不是本轮PASS。本轮只做文档与证据检查，不重跑Go/race/Node/浏览器；M1与MT-05均未验收放行。最终校验通过：75项本地路径/章节/行号引用，三项草案决策及明确未批准/未实现/未迁移标记，五项M1执行门禁仍未勾选；新草案与本节无行尾空白，git diff --check通过。父会话复查了扫描投影、姓名头像匹配、影片刮削生成、PersonId编码/解码、头像跨库版本查询及备份筛选等关键源码片段。未将此设计文档混入既有冻结候选来源包。
+- 草案列出同名/更名/旧NFO/历史混合行、删索引、NFO覆盖与锁、头像副本/tag、增量资料变化、真源损坏、冲突、部分成功、复制回退的验收预期；这些是待实施测试，不是本轮PASS。本轮只做文档与证据检查，不重跑Go/race/Node/浏览器；M1与MT-05均未验收放行。最终校验通过：75项本地路径/章节/行号引用，三项草案决策及明确未批准/未实现/未迁移标记，五项M1执行门禁仍未勾选；新草案与本节无行尾空白，git diff --check通过。父会话复查了扫描投影、姓名头像匹配、影片刮削生成、PersonId编码/解码、头像跨库版本查询及复制筛选等关键源码片段。未将此设计文档混入既有冻结候选来源包。
 
 ## 88. MT-04独立本地字幕标记整理入口范围草案（2026-11-06，仅设计）
 
@@ -1770,13 +1655,13 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 ## 92. 默认root部署与Web自升级需求（2026-11-06，政策更新；待实现）
 
 - 用户明确决定程序默认部署在 `/opt/emby-go`，直接使用root，不使用emby账号。覆盖此前默认emby身份及分散安装目录的方案；停止为旧emby部署模型补正式身份验收。同步总计划及M1矩阵，并标记§91交接中的旧账号要求已被覆盖；历史测试和已封存候选不改写。
-- 新增Web自升级需求：打开页面自动检查更新，左下角版本号处提示，点击弹窗由管理员确认，下载对应平台完整安装包、校验、切换程序并重启。设计方向为首装sh脚本管理初装和systemd，应用安装更新后正常关闭、由systemd重启，不创建emby账号、不配sudo、不增加常驻特权代理。后续用户明确收敛布局：正式程序直接为 `/opt/emby-go/emby-go`，不保留上一版，不创建releases/backups目录，不使用current链接。升级只在根目录暂存新文件，下载校验完成后原子替换，再正常关闭由systemd重启；不原地覆写运行中的二进制，不自动备份或降级。覆盖此前保留旧版和版本目录的建议，不删除既有手动备份功能或历史材料。实现与验收仍待施工，不能称已交付。
+- 新增Web自升级需求：打开页面自动检查更新，左下角版本号处提示，点击弹窗由管理员确认，下载对应平台完整安装包、校验、切换程序并重启。设计方向为首装sh脚本管理初装和systemd，应用安装更新后正常关闭、由systemd重启，不创建emby账号、不配sudo、不增加常驻特权代理。后续用户明确收敛布局：正式程序直接为 `/opt/emby-go/emby-go`，不保留上一版，不创建releases目录，不使用current链接。升级只在根目录暂存新文件，下载校验完成后原子替换，再正常关闭由systemd重启；不原地覆写运行中的二进制，不自动复制或降级。覆盖此前保留旧版和版本目录的建议，不删除既有手动复制功能或历史材料。实现与验收仍待施工，不能称已交付。
 - 本轮仅更新文档；现Service模板仍为旧布局/emby账号，尚未适配。未修改系统服务、安装路径、运行身份、业务代码或真实数据，未构建测试、迁移、提交或发布。root与可信STRM组合意味着媒体探测使用root进程可访问的网络和文件权限，不再声明隔离边界。
 
 ## 93. 完成归档与DeepSeek新窗口交接（2026-11-06）
 
 - 按用户要求，将MT-01—04已实施功能、N-01可靠性实现及来源/候选本地验证整理为[完成归档](<docs/archive/completed-2026-11-06.md>)。主计划移除已完成的逐项范围/流水，保留联合发布、真实上游覆盖及M1未签收事项；不是把本地完成冒称正式放行。产品边界及§3正确性约束不删改，历史台账与封存制品不改写。
-- 新增[DeepSeek交接说明](<docs/deepseek-handoff.md>)：最新root＋单二进制平铺部署、Web自升级需求、无旧版/releases/backups/current、直接ffprobe、未清理输入组件、已有代码入口及未交付项。说明旧Service模板尚未适配，不再为旧emby模型补验；核查旧64MiB下载组件并提出删除影响，不擅自清理其它出站策略。归档不改变正式验收或数据恢复政策。
+- 新增[DeepSeek交接说明](<docs/deepseek-handoff.md>)：最新root＋单二进制平铺部署、Web自升级需求、无旧版/releases/current、直接ffprobe、未清理输入组件、已有代码入口及未交付项。说明旧Service模板尚未适配，不再为旧emby模型补验；核查旧64MiB下载组件并提出删除影响，不擅自清理其它出站策略。归档不改变正式验收或数据恢复政策。
 - 交接盘点工作区为63项tracked修改、2项tracked删除、98项untracked，共163项；不是新提交，也不能把已有改动都归本轮。docs/reports被git忽略，另一个窗口需使用同一工作目录，换clone/机器必须显式同步未提交源码及必要文档，私有材料不自动公开。新窗口先读交接/主计划/编码红线，再核查当前事实，不先通读所有历史日志或重跑全部旧门禁。
 - 本轮只编辑文档，未实现U-01、删除C-01、操作真实服务/媒体/数据、迁移、提交或发布；Go/race/Node历史结果只存归档，未在本轮重跑。最终277项本地路径/章节/行号引用、归档与待办分离、五项正式门禁未勾选、git diff --check通过；主计划§3与封存来源逐字一致，571项Go/JS/CJS/CSS源码与上一候选一致。首次核验退出1是校验脚本误以为A–E标签带Markdown加粗，实际为普通文本，修正表达式后通过；没有产品故障或为通过校验改门禁。同步矩阵表内遗留旧emby条款为已批准root/平铺政策，不改历史结果。
 
@@ -1826,25 +1711,24 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 未在真实主机安装、升级或重启；发布提交为 25453a9，工作树仍有未提交的 `dev-plan.md`/`PLAN-STATUS.md` 文档编辑与新增 opt-in `internal/upgrade/live_release_test.go`，另有被忽略的 `docs/`、`reports/`、`.github/scripts/__pycache__/`；这些按“提交需授权”留给用户决定。
 - 真实 Release 端到端升级（2026-11-07）：新增 opt-in `internal/upgrade/live_release_test.go`（默认 skip，`EMBY_UPGRADE_LIVE=1` 才联网），在临时目录放"旧程序"占位文件后执行 `Check`（真实 GitHub API 读到 `v2.3.0`）→`Begin`→`Run`：下载 20MB 资产、SHA256 校验、执行 `-version` 验证、`os.Rename` 原子替换、关闭重启通道；结果 PASS（2.04s），替换后二进制 `-version` 为 `Emby-go v2.3.0-25453a9 (commit 25453a93..., built 2026-11-07T02:46:27Z)`，临时文件仅剩正式程序一个。该演练不触碰 `deploy/` 或当前服务。未在真实 systemd 主机安装/升级。
 
-### 98. N-02～N-05 仓库侧实施（2026-11-07）
+### 98. N-02～N-04 仓库侧实施（2026-11-07）
 
 - 迁移：新增 schema 19 `task_records`（任务摘要，保留 500，启动把 queued/running 标 interrupted，id 从摘要续接）与 schema 20 `webhook_deliveries`（字段白名单 event/item_id/target_id/status/error_code/created_at，保留 1000 条且 7 天）。四处迁移接线（参考库列表、checksum switch、apply、record）同步；`internal/stabilityrehearsal` 的旧 schema18 演练与 `cmd/metatube/native_upgrade_test.go` 的期望升级为 20，`internal/store` 的未知版本负例改用 21，M1 矩阵/dev-plan/README 的目标 schema 同步为 20。
 - N-02 任务中心：`startTask`/`finishTask` 尽力写库；异步扫描在 `registerScanTask` 内同步落 queued、`setScanTaskRunning` 落 started、`finishScanTask` 落终态与 `result_json`；`/api/admin/tasks` 合并内存实时任务与最近 100 条摘要（同 id 以内存为准、`history_error`），`/tasks/:id` 内存丢失后回落摘要；前端任务状态增加 `interrupted` 文案。契约 §4.12。
 - N-03 诊断：`GET /api/admin/diagnostics` 聚合版本/库结构/数据量/任务与调度/Webhook/图片缓存/ffprobe 证据，只读不联网，DB 读失败 500；左侧「运维诊断 → 诊断」页（刷新、跳转既有入口，无自动修复）；契约 §4.13。
 - N-04 投递历史：`notifyWebhook` 在 send 返回后按目标 best-effort 写库（失败只记日志，不回滚业务）；`GET /api/admin/webhook/deliveries?limit=`（1–500，默认 100）与 `DELETE`（返回清空行数）；设置页「投递历史」表（加载/刷新/清空需确认）；契约 §4.14。
-- N-05 备份：固定范围 DB `VACUUM INTO` + NFO + extrafanart，Retain 7，目录固定 `<db 所在目录>/backups` 且由进程以 0700 建立（快照含凭据材料，不提供网页下载/恢复/删除单份）；`GET /api/admin/backup` 返回目录/留存/运行中/最近结果，`POST /api/admin/backup/run` 202 + `task_id`（已有备份 409，关停期 503），复用 `task_records`（`type=backup`）记录状态与结果元数据；诊断页「备份」面板显示最近结果并轮询完成；契约 §4.15。
-- 测试：`internal/store` 的摘要/投递历史测试；`internal/server` 的任务中心回落、诊断聚合与 403、投递历史查询/清空与 403、备份 202/轮询/0700/重复触发 409/非管理员 403；冻结路由清单与权限矩阵登记新路由（`POST /api/admin/backup/run` 归 admission）；真实浏览器：设置页投递历史（`TestWebhookSettingsBrowser`）、诊断页备份面板（`TestAdminBackupBrowser`）；VM web 套件 161 pass（投递历史夹具补历史节点并隔离其调用序号）。
-- 门禁：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test -count=1 ./...` 全绿（internal/server 107.6s、store 56.0s、scanner 18.1s、cmd/metatube 8.6s）；`go test -race ./internal/server -run 'TestAdminBackup|TestScanTaskRecordLifecycle|TestAdminWebhookDeliveriesListAndClear'` 通过；`node --check app.js` 与新增浏览器脚本通过。
-- 未实机安装/重启、未操作真实媒体或迁移、未提交/未发布。剩余：M1 正式放行后按正式候选复验；任务中心暂无独立页面；备份不提供恢复。
+- 测试：`internal/store` 的摘要/投递历史测试；`internal/server` 的任务中心回落、诊断聚合与 403、投递历史查询/清空与 403；冻结路由清单与权限矩阵；真实浏览器：设置页投递历史（`TestWebhookSettingsBrowser`）；VM web 套件 161 pass（投递历史夹具补历史节点并隔离其调用序号）。
+- 门禁：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test -count=1 ./...` 全绿（internal/server 107.6s、store 56.0s、scanner 18.1s、cmd/metatube 8.6s）；`go test -race ./internal/server -run 'TestScanTaskRecordLifecycle|TestAdminWebhookDeliveriesListAndClear'` 通过；`node --check app.js` 与新增浏览器脚本通过。
+- 未实机安装/重启、未操作真实媒体或迁移、未提交/未发布。剩余：M1 正式放行后按正式候选复验；任务中心暂无独立页面。
 
 ### 99. 真实主机安装、受控升级与回滚演练（2026-11-07，未提交）
 
 - 主机：Debian 12 bookworm（1.6GiB 内存，根盘 ext4），root 直跑 systemd 单元；升级前 `v2.2.6-234a220`。安装前布局：`/opt/emby-go/emby-go`、DB/WAL/log/avatars/image-cache/video-previews 同在 `/opt/emby-go`，配置 `/opt/emby-go/config.yaml`（0666），unit `ExecStart=/opt/emby-go/emby-go`（无 `-c`）、`WorkingDirectory=/opt/emby-go`、`Restart=on-failure`、`disabled`；DB schema 16、影片 11,342、用户 1；NFO 写 `/data/emby/media/AV/...`；nginx 80/443 反代 `127.0.0.1:8097`，同机另有 redis、easytier、smartstrm、nginx-ui 等无关服务。
-- 变更前备份 `/root/prechange-20261107/`：`sqlite3 .backup` 一致性 DB（integrity_check ok、schema16、11342 行）、旧配置、旧 unit、旧二进制 v2.2.6，以及后续的 v2.3.0 二进制、schema20 DB 副本、df、sha256 清单。
+- 变更前复制 `/root/prechange-20261107/`：`sqlite3 .backup` 一致性 DB（integrity_check ok、schema16、11342 行）、旧配置、旧 unit、旧二进制 v2.2.6，以及后续的 v2.3.0 二进制、schema20 DB 副本、df、sha256 清单。
 - 安装：GitHub 直连下载反复 `curl (35) Connection reset`（IPv6 路径），改用用户提供的只读镜像 `https://<内部镜像>/github.com/<repo>/...`；install.sh 仅替换 `BASE=` 一行，其余未改（因此脚本仍自带 `--proto-redir`、SHA256SUMS 校验与原子安装路径）；下载物 sha256 与 Release SHA256SUMS 中 linux-amd64 行一致（`6fe8a07…`）。按 A 方案把配置复制为 `/etc/emby-go/config.yaml`（0600，内容 sha 与原文件一致），unit 使用发布模板、仅把 `ReadWritePaths` 追加 `/data`（NFO 写入目录）。安装后 `enabled`+`active`，`User=root`、`ExecStart=/opt/emby-go/emby-go -c /etc/emby-go/config.yaml`、`Restart=always`。
 - 安装后核对：`/api/version`=`v2.3.0-25453a9`；schema 18（v2.3.0 不包含 19/20）；影片 11,342、用户 1；`/healthz` 200；nginx 443 的 `/` 与 `/api/version` 200；未认证 `/api/admin/update` 401；沙箱 mountinfo 中 `/opt/emby-go`、`/etc/emby-go`、`/data` 均 rw；启动日志无 error，ffprobe 就绪、计划任务 3/2。
 - 受控升级演练（使用工作树构建的 v2.3.1-test，含 19/20 迁移）：`CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v2.3.1-test -X main.commit=25453a9 -X main.buildTime=2026-11-07T07:20:00Z"` → scp → 以 `.emby-go.installing` + `mv` 原子替换 → `kill -TERM` 旧 PID。日志显示正常关闭（17:55:14 `Deactivated successfully`）→ systemd `Restart=always` 拉起新 PID（17:55:17 `Started`，17:55:18 `listening version=v2.3.1-test`）；`/api/version`=v2.3.1-test，DB 自动 18→20，影片数不变。这验证了“原子替换 + 正常关闭 + systemd 重启 + 恢复后版本核对”链路，但测试二进制并非 tag v2.3.0（见下一条）。
-- 回滚：v2.3.0 的迁移代码只认识 ≤18，对 19/20 ledger 会报 `unsupported or modified schema migration 19` 并拒绝启动。停服后应用 schema20 回滚脚本：`DROP TABLE task_records, webhook_deliveries`、`DELETE FROM schema_migrations WHERE version>=19`、`PRAGMA wal_checkpoint(TRUNCATE)`；恢复 v2.3.0 二进制并启动。结果 schema 18、影片 11,342、用户 1、`integrity_check` ok、healthz 200、`/api/version`=v2.3.0-25453a9。schema20 DB 副本保留在备份目录。
+- 回滚：v2.3.0 的迁移代码只认识 ≤18，对 19/20 ledger 会报 `unsupported or modified schema migration 19` 并拒绝启动。停服后应用 schema20 回滚脚本：`DROP TABLE task_records, webhook_deliveries`、`DELETE FROM schema_migrations WHERE version>=19`、`PRAGMA wal_checkpoint(TRUNCATE)`；恢复 v2.3.0 二进制并启动。结果 schema 18、影片 11,342、用户 1、`integrity_check` ok、healthz 200、`/api/version`=v2.3.0-25453a9。schema20 DB 副本保留在复制目录。
 - 真实主机运行 `deploy/verify-native-install.sh <installed sha> /`：5 项 OK（二进制 owner/mode、`/opt`、`/etc`、config、SHA256），rc=0；输出保留“static installation checks only / NOT CHECKED…”的口径，不构成 M1 放行。
 - 状态：主机当前运行 `v2.3.0-25453a9`（schema 18），`/opt/emby-go/config.yaml` 留作回滚材料（0600）；N-02～N-05 尚未进入任何 Release；工作树未提交、未发布新版本。临时 SSH 公钥由用户加入 `/root/.ssh/authorized_keys`（尾注 `emby115-rehearsal-2026-11-07`），演练结束后应删除。
 - 剩余：页面自升级（左下角徽标 → 管理员确认 → 下载/SHA256/`-version`/原子替换 → 正常关闭 → systemd 重启 → 恢复后核对版本）需要比 v2.3.0 更新的 Release 才能真机实测；建议以包含 N-02～N-05 的工作树发布 v2.3.1 后在主机上走一遍（需提交/发布授权）。
@@ -1857,7 +1741,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 页面实测（`/tmp/emby115-ui-upgrade.test.cjs`，真实 Chromium，19.3 秒）：打开管理页 → 左下角徽标出现 → 管理员打开弹层 → 目标 `v2.3.3` → 点击更新 → 服务端镜像下载、SHA256 校验、`-version` 通过后原子替换 → 日志 `升级包已原子替换，等待 systemd 重启`、`升级已安装：正常关闭，等待 systemd 重启`、`开始有界关闭 budget=15s`、systemd `Deactivated successfully` → `Started`（19:28:09）→ 新进程 `listening version=v2.3.3-2b679c9`；页面恢复后读取 `/api/version` 显示“已升级到 v2.3.3-2b679c9。重新加载页面即可使用新版本前端资源。”，徽标隐藏、按钮状态正确、无浏览器错误。点击「重新加载页面」后诊断入口出现，证明前端资源随程序更新。
 - 主机核对：`/api/version`=`v2.3.3-2b679c9`、`NRestarts=1`、schema 20、影片 11,342、`integrity_check` ok、`/opt/emby-go` 无残留临时文件。
 - 清理：删除演练用 `access_tokens` 行与 `/root/.emby115-rehearsal-token`，从 `/root/.ssh/authorized_keys` 移除尾注 `emby115-rehearsal-2026-11-07` 的临时公钥并删除本地私钥；清理 `/tmp/emby-go-install`。drop-in 镜像环境变量保留（该网络环境下后续升级需要）。
-- 未做：M1 A–E 正式验收包、具名候选签收、真实媒体/NAS 操作；`/opt/emby-go/config.yaml`（0600）与 `/root/prechange-20261107/` 备份保留供回滚。本记录不改变“不实机迁移数据”的边界。
+- 未做：M1 A–E 正式验收包、具名候选签收、真实媒体/NAS 操作；`/opt/emby-go/config.yaml`（0600）与 `/root/prechange-20261107/` 复制保留供回滚。本记录不改变“不实机迁移数据”的边界。
 
 ## 101. 死代码清理（2026-11-08，用户确认三步）
 
@@ -1987,7 +1871,7 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 
 ## 117 README 改为用户手册（2026-11-09，未提交）
 
-- 将 `README.md` 从开发者技术文档重写为面向终端用户的说明书：只保留安装、建库、扫描、播放、客户端接入、后台操作、配置、安全部署与备份等用户需要了解的内容；删除台账编号、migration/checksum、原生回归测试、发布门禁、FFmpeg 探测细节等开发者细节（保留必要约束如 Docker 不支持、目录权限、写权限不自动授予、升级无回退、SHA256SUMS 要求）。
+- 将 `README.md` 从开发者技术文档重写为面向终端用户的说明书：只保留安装、建库、扫描、播放、客户端接入、后台操作、配置、安全部署与复制等用户需要了解的内容；删除台账编号、migration/checksum、原生回归测试、发布门禁、FFmpeg 探测细节等开发者细节（保留必要约束如 Docker 不支持、目录权限、写权限不自动授予、升级无回退、SHA256SUMS 要求）。
 - 同步 `internal/stabilityrehearsal/native_deploy_test.go` 的 README 约束断言，仅保留仍在手册中的关键约束（`deploy/emby-go.service`、`deploy/install.sh`、`ReadWritePaths=/srv/media`、`SHA256SUMS`），删除已移除的手册文案断言；不改业务代码。
 - 全量 `gofmt/build/vet/go test ./...` 通过，`TestNativeDeploymentReadmeAndAssets` 通过。未提交/推送、未改 tag、未部署或重启。
 
@@ -1997,3 +1881,64 @@ D-2 字幕标记归属、D-4 饱和处理政策、D-5 文件/探测预算与发�
 - 同步 `release_pipeline_test.go`：去掉同批打包断言，改为确保 workflow 不含部署材料打包；保留二进制/SHA256SUMS/`-version`/`files: dist/*` 断言及 install.sh 失败关闭守卫。
 - `README.md`、`API-CONTRACT.md`、`deploy/install.sh` 已同步为仓库内部署材料 + Release 只含二进制的描述；旧 Release 兼容性按用户要求不做区分，新 tag 直接按新格式发布。
 - 全量 `gofmt/build/vet/go test ./...` 通过。未提交/推送、未改已发布 tag、未部署或重启。
+
+## 119 图片变体异步预热（2026-11-10，未提交）
+
+- 背景：图片变体此前只在请求到来时同步解码/缩放/编码，首个请求要等完整生成；11000 部库 + 2 核机器上墙页首批海报会明显排队。
+- 实现（`internal/server/media.go`）：`thumbnail` 的参数解析与生成拆开，新增 `thumbVariant(ctx, path, tag, width, height, quality) ([]byte, bool)` 复用磁盘缓存 → 单飞 → 生成链路；`generateThumbnail` 接受 ctx，等 `thumbSem` 时响应取消。新增 `prewarmJob`、`prewarmThumbnails(ms)`、`enqueuePrewarm`、`runPrewarmWorker`、`prewarmOne`；常量 `prewarmQueueSize=200`、`prewarmWorkers=2`、`prewarmPosterWidth=360`。
+- 触发点：`respondItemsWithFields` 在写缓存后、返回响应前调用 `prewarmThumbnails(ms)`，只为当前页有海报路径的影片投递 360 档位；队列满直接丢弃（非阻塞 send + default），磁盘缓存未开启或海报缺失时整段跳过；后台生成 panic 就地 recover 记日志，不影响 worker 与请求。
+- 生命周期（初版结论已由 §124 修正）：预热 worker 常驻到 `rootCtx` 取消（`BeginShutdown` 末步），仍以独立 `prewarmWG` 登记，但必须纳入 `WaitBackground` 的同一关闭预算；不能在 `Close` 中预算外单独无界等待。调用 `WaitBackground` 前必须先 `BeginShutdown`，原两项未触发关闭的测试也已修正调用顺序。
+- 语义保持：无参数仍发原图、生成失败仍回退原图、ETag/304、`maxWidth` 档位归一化、单飞去重、磁盘缓存 TTL/容量均未改；未新增配置项。
+- 收益边界：只省生成等待与 CPU 峰值，不减少传输字节，3Mbps 带宽下总传输时间不变。
+- 回归：新增 `internal/server/prewarm_test.go`（落盘后可命中且不再生成、磁盘缓存关闭不投递、队列满丢弃不阻塞、panic 不逃逸、rootCtx 取消后 worker 退出）。`go build ./...`、`go vet ./internal/server/`、`go test ./internal/server/ -count=1`（107.245s）与全量 `go test ./... -count=1` 通过。未提交/推送、未改 tag、未部署或重启。
+
+## 120 1110 施工方案批次一：删除与合并（2026-11-10，未提交）
+
+- 依据用户确认的 `1110施工方案.md` v4 批次一执行，范围：页眉全局扫描、接口探针、备份全链路、诊断页拆解。
+- 页眉全局扫描移除：`web/index.html` 删除 `.scan-tools`（`#scan-mode`/`#scan`），`web/app.js` 改为 `scanBlocked` 门禁 + `runScan` 固定显式增量，`web/navigation.js`/`web/style.css` 清理相关规则；行内 `data-lib-scan` 与计划任务仍是唯一扫描入口，进度浮层保留。
+- 接口探针移除：删除 `/api/admin/probe` 路由与 `adminProbe`/`adminClearProbes`、`diagnostic_probes.go`、内存去重/限流状态及 `store` 的 `Probe`/`ClearProbes`；`noRoute` 只回 404 + `no-store`；历史 `api_probe` 数据与表定义保留但不再写入/查询。前端删除探针页、导航与 `META.probe`。
+- 备份全量删除：删除 `internal/backup/`、`cmd/embybackup/`、`internal/server/backup.go(+_test)`、`internal/store/backup_integration_test.go`、`internal/server/diagnostics_browser_test.go/.cjs`、`internal/stabilityrehearsal/matched_restore_test.go`；`cmd/metatube/native_upgrade_test.go` 初版误删，审查修复已恢复原生升级/重启断言，仅移除 CLI 产物依赖；`/api/admin/backup`、`/api/admin/backup/run` 路由与 `backupRunning` 字段移除；任务类型 `backup` 文案与未知类型兜底改「其他任务」；README/API-CONTRACT/dev-plan/deploy/upgrade/task_records 注释同步为「停服后自行复制数据库」；旧 `data/backups/` 与历史 `task_records` 行不删。
+- 诊断页拆解：删除侧边栏「诊断」与 `pageDiagnostics`，新增总览「服务状态」单块面板 `renderServiceStatus`（合并 `GET /api/admin/diagnostics` 证据与 `GET /api/admin/settings` 启动配置，只读刷新，无自动修复）；设置页删除「服务信息」分类与面板，`/api/admin/settings` 接口保留。
+- 归档文本清理：`PLAN-STATUS.md` 删除 D11/批次70/N-05 与 §32/§41/§51/§54/§67/§68/§69/§70/§71 等备份专章，其余「备份」表述改「复制/快照」，初版只做词语替换，仍遗漏 CLI 操作段落，审查修复见 §124；`.go`/清单/日志按方案保留。
+- 验证：`gofmt -l ./cmd ./internal` 干净；`go build ./...`、`go vet ./...` 通过；`node internal/server/web_test.cjs` 162/162 通过；全量 `go test ./... -count=1` 见下一条记录。
+
+## 121 1110 施工方案批次二：防火墙页与审计分页（2026-11-10，未提交）
+
+- 依据 `1110施工方案.md` v4 批次二执行：把「活动记录」与「访问安全」合并成侧边栏「防火墙」（`data-page="firewall"`），旧 `#activity` 地址仍落到该页（`page()` 内别名）。
+- 页面结构三块自上而下：① IP 黑名单，仍由 `web/security.js` 的 `mountIPBlocklist` 渲染（5s 刷新、规则表、本次拦截计数、409 冲突文案全部沿用，不复制实现）；② 登录记录（分页 + 精确 IP/结果筛选 + 每行「拉黑」）；③ 播放记录（合并视图 + 分页）。
+- 登录记录：默认 20/页，`start`/`limit`/`ip`/`result` 由服务端处理，响应 `{"events":[…],"total":n}`；筛选与翻页同时生效，非法 IP 400 走行内提示。拉黑按钮提交 `{"network":"<IP>"}`，已在规则表（精确 `network` 相同）则显示「已拉黑」并禁用；成功即刷新规则块与登录表，409 只 toast 不刷新。
+- 播放记录：`store.RecentPlaybackSummaries` 按 `(user_id, COALESCE(movie_id,0))` 分组，`play_count=COUNT(DISTINCT session_key)`，`last_at/position_ticks/last_kind` 取组内 id 最大事件，按最近播放倒序分页，响应 `{"items":[…],"total":n}`；不做逐次明细，前端按 10,000,000 ticks/s 显示 `HH:MM:SS`。
+- Webhook：`notifyMovieDeleted` 在 `sender.Send` 后补 `recordWebhookDeliveries`，删除事件的 `item.deleted` 从此进入投递历史；`disabled`/`skipped` 仍不写行。回归加在 `TestDeleteWebhookOnlyAfterCommit`。
+- 契约：`API-CONTRACT.md` §4.1 更新两个审计端点参数与响应；§4.14 补删除事件记录说明。登录结果筛选用单一 `result=all|success|failed`（方案草稿写的是 `success=true|false`）：UI 本就是三态下拉，单参数避免 `success` 与 `all` 组合产生歧义，服务端只解析一次。
+
+- 验证：`gofmt -l ./cmd ./internal` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/server/ ./internal/store/ -run 'TestUsersAdmin|TestActivity|TestLoginEvents|TestDeleteWebhook|TestAdminWebhook|TestPlayback' -count=1` ok；`node internal/server/web_test.cjs` 163/163 通过（新增防火墙三块契约用例）。
+
+## 122 1110 施工方案批次三：Emby API 密钥权限与轮转（2026-11-10，未提交）
+
+- 权限收口：`authOK` 记录本次凭据类型（`credentialKind`），`requireAuth` 对 API 密钥做 Emby 路径白名单校验——只放行 `/emby/` 与根路径 Emby 端点（`/Items`、`/Users`、`/Videos`、`/Audio`、`/Images`、`/System/`、`/Sessions`、`/Branding`、`/DisplayPreferences`、`/Search`、`/Genres`、`/Persons`、`/Studios`、`/Library`、`/Collections`、`/Playlists`、`/Artists`），其余返回 `403 {"error":"API 密钥仅可用于 Emby 兼容接口","code":"API_KEY_SCOPE"}`。`/api/*`、`/admin`、`/healthz` 全部拒绝；会话不受影响。
+- 轮转免密：`adminRotateAPIKey` 去掉当前密码再认证与失败限流分支，仍要求管理员交互会话（`If-Match` 版本语义、`reason` 必填 ≤200 字、成功一次性返回新明文并立即失效旧 key）。实现上以当前会话用户（带 `authGeneration`）作为 actor 传入 `RotateAPIKeyForRequest`，避免 `UserByID` 缺代数导致的 `AUTH_INVALID`。
+- 前端：面板标题改「Emby API 密钥」，删除 D02「等同管理员」警示块与轮转密码输入，说明改为「仅用于 Emby 兼容接口，不能访问管理面」；列表与新建区用小标题分隔，操作改文字按钮、窄屏表格转纵向记录。
+- 回归：`api_key_scope_test.go` 覆盖 Emby 端点 200 与管理端点 403（含 code/文案）且会话仍可访问管理面；`api_key_rotation_test.go` 覆盖免密轮转、空 reason 400、密钥代替会话轮转 403；`auth_authority_test.go`/`request_token_test.go` 的私有探测路由改挂 `/emby/private`（密钥只允许 Emby 路径）；`session_ttl_test.go` 改为断言轮转后密钥仍可访问 Emby 端点而非管理面；`stability_endtoend_test.go` 同步新语义。
+- 契约与手册：`API-CONTRACT.md` 认证表与 §4.3 改为「Emby API 密钥 / 管理员交互会话」，rotate 行写 `body {reason}` 且不再要求密码；`README.md` 客户端接入段补密钥范围说明。
+- 验证：`gofmt -l ./cmd ./internal` 干净；`go build ./...`、`go vet ./...` 通过；`go test ./internal/server/ ./internal/store/ -count=1` ok（server 113.341s、store 59.890s）；`node internal/server/web_test.cjs` 164/164 通过。
+
+## 123 1110 施工方案批次四：媒体库卡片与设置页用户管理（2026-11-10，未提交）
+
+- 媒体库改封面卡片网格：`pageLibraries` 由表格改为 `library-grid`（`repeat(auto-fill, minmax(min(100%, 240px), 1fr))`、16px 间距），卡片含 16:9 封面区（`maxWidth=480`、`loading="lazy"`、无图回退图标）、库名、影片数、ID（次级）、可选中换行路径；卡片底部按「排序 / 常规操作 / 危险操作」分组，扫描、封面上传/移除、预览设置、上移/下移、删除索引全部保留，管理员预览设置条件不变。顶部工具栏含「共 N 个」与「添加媒体库」主按钮（跳到添加表单并聚焦名称输入），不新增全库扫描、不做多海报拼图与倒影。
+- 设置页用户管理：账户名与 owner 标记成组、角色改文字标签、最后登录用 `fmtTime` 本地可读（原始值在 `title`）、授权由单列 chip 改可换行 `check-grid`（不裁项、不加全选）；操作区可换行，删除按钮补 `aria-label`；新增独立「创建用户」分区（小标题 + 分隔线，宽屏对齐、窄屏纵排），校验规则未改。
+- 清理：删除表格版媒体库遗留样式（`.lib-cover`/`.lib-cell`/`.lib-index`/`.lib-count`/`.library-table*` 等）与 `sprites.css` 中已无对应 DOM 的媒体库表格规则。
+- 验证：`node internal/server/web_test.cjs` 164/164 通过（新增媒体库卡片网格与用户管理布局断言）；`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全包通过（server 126.493s、store 65.772s、stabilityrehearsal 3.933s 等）。
+- 真实浏览器验收（临时实例 :18099，空库建 3 个媒体库，Chromium 375/768/1280 三档 + 640px≈200% 缩放）：媒体库网格列宽 292px@1280 / 343px@768 / 309px@375，间距 16px，封面 16:9，长库名与长路径不溢出（`scrollWidth<=clientWidth`），卡片按钮桌面 40px、触摸 44px；设置页用户行为 5 列、授权 `check-grid` 可换行不裁项、删除按钮有 `aria-label`、最后登录显示本地时间、创建用户独立分区；防火墙三块（黑名单/登录/播放）均渲染，触屏按钮无小于 44px 的目标；三页在 375/640/768/1280 下 `scrollWidth-window.innerWidth=0`，无横向滚动。
+
+## 124 1110 审查修复与回归验收（2026-11-10）
+
+- 范围：修复本批审查的六项发现及相关筛选、密钥交互与文档遗漏；用户授权完成后提交、推送 `main`，不包含部署、tag 或 Release。
+- 有界关闭：预热 worker 加入 `joinBackground`，由 `BeginShutdown` 取消后与扫描/启动任务共享 `WaitBackground(ctx)` 预算，不再在预算之后单独无界等待；取消后不继续消耗积压预热任务。阻塞缩略图生成的回归验证超时返回且数据库尚未关闭，再释放生成工作后正常关闭；定向 `-race` 通过。
+- 密钥范围：补齐小写路由及 Shows/Episode/MediaSegments；全局 middleware 覆盖已注册的公开入口 `/api/auth/status`、`/healthz`、`/admin`，有效 API 密钥返回 `403 API_KEY_SCOPE` + `no-store`，匿名/会话/无效 token 保持原行为。NoRoute 不扩为 Emby 接口，有效 key 访问未实现路径也保持 `404/no-store`。旧认证测试改用已允许的 `/Items/auth-test`，不是放宽到任意 `/emby/*`。
+- 审计分页：HTTP 边界统一默认 `start=0/limit=20`、最大 100，非法格式/溢出/负数/显式空值/重复分页参数返回 400；store 不重复兜底，保留内部显式 limit=200 的调用。105 行数据覆盖默认页、最大页、末页、越界与筛选。前端登录与播放各用请求代际和页码快照阻止旧成功/空页/错误回包改写新页面，清筛选同步重置输入控件。
+- 密钥及响应式交互：创建/轮转有提交中状态与防重复，失败保留输入，轮转在途不能切换目标或取消；去除长警告。浏览器实测修复长轮转名称、长用户名导致的横向溢出及新密钥提示竖排；原文独立满宽行。
+- 原生升级测试：恢复 `cmd/metatube/native_upgrade_test.go`，只去掉已删除 CLI 的产物依赖，改用测试内停机复制的 DB/配置/媒体内存 bundle。以旧提交 `234a220c9febfba4b1d610fd764448609a31e325` 构建的本地旧二进制运行真实升级：schema16→22、凭据/库隔离、两次重启、稳定 ServerID、拒绝旧库、整套手工恢复及 SIGTERM 关闭均通过（11.006s）；不是官方旧 Release 二进制验证。旧 schema20 断言按现有迁移21/22修正，没有改生产迁移。
+- 文档：README 删除旧工具操作小节，保留停服自行复制的升级风险说明；API-CONTRACT 与 dev-plan 同步密钥、分页与已移除功能。归档与设计材料共15份 Markdown 删除遗漏的 CLI/D11/N-05 专属段落，1849份非 Markdown 归档文件哈希不变；这些归档/设计文件原本受 Git 忽略，仅本地清理，不强制加入提交。
+- 已通过：`go build ./...`、`go vet ./...`、`go test ./... -count=1`（server 123.172s、store 69.104s）、Node 主回归 173/173、JS 语法检查、gofmt 与 diff 检查；scope/auth/审计与关闭预热定向 `-race` 通过。
+- 追加浏览器：`NOV10_BROWSER=1 go test ./internal/server -run '^TestNov10Browser$' -count=1 -v`，四组均通过（375×812、768×1024、1280×900、640×450/DPR2），每组5图，0页面错误/0意外请求；涵盖键盘焦点、乱序 fetch、清筛选、防重复及失败恢复。200%为1280窗口的等效 CSS 布局视口，不是浏览器菜单缩放；离线 mock 不验证真实 DB，不宣称 WebKit/Firefox 覆盖。最近证据 `/tmp/emby-nov10-browser-40z14g_s`。
+- 额外全量 Node 首跑327项323通过、4失败。本批迁移后失效的报告 fixture 已改用计划扫描模式与防火墙控件、登录 total/播放 items 响应，并断言旧导航移除，定向报告测试通过；最终 `node --test internal/server/web*_test.cjs` 复跑327项324通过、3失败，退出码1，剩余恰为以下既有项，不宣称全套通过。另3项经独立 `git archive HEAD` 基线证明既有：artwork/sprites 跨挂载完成回调测试分别报 `1 !== 0`（基线33项31通过2失败），详情对比度测试仍在 `web_layout_test.cjs:410` 的 `contrast >= 4.5` 断言失败；基线提交 `e5f73d2e05734ddf79a51d81875707ff27b4d79a`，证据 `/tmp/emby-nov10-head-baseline.OlWrpe` 与 `/tmp/emby-layout-head-Zo6ZG4`。没有降低阈值、隐藏失败或顺手改写无关产品模块，按 AGENTS 保留待用户决定。

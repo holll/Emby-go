@@ -62,8 +62,8 @@ async function browser(t) {
         if(options.method==='DELETE'){const body=JSON.parse(options.body);__securityRules=__securityRules.filter(rule=>rule.network!==body.network);}
         data={items:__securityRules,max_rules:256,total_blocked:3,client_ip:'192.0.2.10',stats_since:'2026-10-29T12:00:00Z'};
       }
-      else if(p.endsWith('/login-events'))data={events:[{name:'<img src=x onerror=alert(1)>',ip:'203.0.113.5',success:false,created_at:'2026-10-29'}]};
-      else if(p.endsWith('/playback-events'))data={events:[]};
+      else if(p.endsWith('/login-events'))data={total:1,events:[{name:'<img src=x onerror=alert(1)>',ip:'203.0.113.5',success:false,created_at:'2026-10-29'}]};
+      else if(p.endsWith('/playback-events'))data={total:0,items:[]};
       else if(p.endsWith('/probe'))data={items:[{method:'GET',path:'/Items/123/[redacted:123456789abc]',created_at:'2026-10-29'}]};
       else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),ts:'2026-10-29T12:00:00Z',level:'info',msg:'auto-log-'+id}],next_after:String(id),next_before:String(id),has_more_before:false};}
       else if(p.endsWith('/tasks'))data={items:[]};
@@ -368,20 +368,19 @@ test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自�
     const sprites=await evaluate(`(()=>{document.querySelector('#sched-form').closest('details').open=true;const s=document.querySelector('#s-type');s.value='sprites';s.dispatchEvent(new Event('change'));return {shown:!document.querySelector('#s-sprites-limit').closest('.field').hidden,text:document.querySelector('#sched-form').innerText,scroll:document.documentElement.scrollWidth};})()`);
     assert.match(sprites.text,/雪碧图/);assert.ok(sprites.scroll<=width+1);await shot('scheduled-sprites-'+width);
     await openOptions('#s-type','scheduled-options-'+width);
-    await evaluate("document.querySelector('.scan-tools').open=true");
-    await openOptions('#scan-mode','scan-options-'+width);
-    await evaluate("document.querySelector('.scan-tools').open=false");
-    await evaluate("page('security')");await evaluate(`(async()=>{for(let i=0;i<30&&!document.querySelector('[data-security="client"]').textContent;i++)await new Promise(r=>setTimeout(r,10));})()`);
+    await evaluate(`(()=>{const s=document.querySelector('#s-type');s.value='scan';s.dispatchEvent(new Event('change'));})()`);
+    await openOptions('#s-scan-mode','scan-options-'+width);
+    await evaluate("page('firewall')");await evaluate(`(async()=>{for(let i=0;i<30&&!document.querySelector('[data-security="client"]').textContent;i++)await new Promise(r=>setTimeout(r,10));})()`);
     await shot('security-'+width);assert.ok(await evaluate('document.documentElement.scrollWidth')<=width+1);
   }
   const security=await evaluate(`(async()=>{const q=k=>document.querySelector('[data-security="'+k+'"]');q('network').value='203.0.113.5';q('note').value='<img src=x onerror=alert(1)>';q('form').requestSubmit();await new Promise(r=>setTimeout(r,40));const result={row:q('rules').innerText,xss:!!q('rules').querySelector('img'),calls:__calls.filter(c=>c.method==='POST'&&c.url.includes('ip-blocklist')).length};q('rules').querySelector('button').click();await new Promise(r=>setTimeout(r,40));result.deleted=!q('rules').querySelector('button');result.body=JSON.parse(__calls.findLast(c=>c.method==='DELETE').body);return result;})()`);
   assert.match(security.row,/<img/);assert.equal(security.xss,false);assert.equal(security.calls,1);assert.equal(security.deleted,true);assert.deepEqual(security.body,{network:'203.0.113.5'});
   const denial=await evaluate(`(async()=>{__securityFail=true;const q=k=>document.querySelector('[data-security="'+k+'"]');q('network').value='127.0.0.1';q('form').requestSubmit();await new Promise(r=>setTimeout(r,40));return {error:q('error').textContent,draft:q('network').value,disabled:q('add').disabled};})()`);
   assert.match(denial.error,/误封/);assert.doesNotMatch(denial.error,/<img/);assert.equal(denial.draft,'127.0.0.1');assert.equal(denial.disabled,false);
-  await evaluate("page('activity')");
-  const audit=await evaluate(`(async()=>{document.querySelector('#audit-ip').value='203.0.113.5';document.querySelector('#audit-result').value='failed';document.querySelector('#audit-filter').requestSubmit();await new Promise(r=>setTimeout(r,40));return {url:__calls.findLast(c=>c.url.includes('login-events')).url,xss:!!document.querySelector('#content img')};})()`);
-  assert.match(audit.url,/ip=203.0.113.5/);assert.match(audit.url,/result=failed/);assert.equal(audit.xss,false);await shot('audit-filter-1280');
-  await evaluate("page('probe')");assert.match(await evaluate("document.querySelector('#content').innerText"),/redacted:123456789abc/);
+  await evaluate("page('firewall')");
+  const audit=await evaluate(`(async()=>{document.querySelector('#firewall-login-ip').value='203.0.113.5';document.querySelector('#firewall-login-result').value='failed';document.querySelector('#firewall-login-filter').requestSubmit();await new Promise(r=>setTimeout(r,40));return {url:__calls.findLast(c=>c.url.includes('login-events')).url,xss:!!document.querySelector('#content img')};})()`);
+  assert.match(audit.url,/ip=203.0.113.5/);assert.match(audit.url,/result=failed/);assert.equal(audit.xss,false);await shot('firewall-filter-1280');
+  assert.equal(await evaluate(`document.querySelectorAll('.nav-item[data-page="probe"],.nav-item[data-page="security"],.nav-item[data-page="activity"]').length`),0,'旧诊断/审计导航已移除，登录记录与黑名单统一在防火墙');
   await evaluate("page('logs')");assert.equal(await evaluate("!!document.querySelector('#dl-newbar')"),false);
   const before=await evaluate("__logID");await evaluate("new Promise(r=>setTimeout(r,1400))");assert.ok(await evaluate('__logID')>before);
   const paused=await evaluate(`(()=>{document.querySelector('#dl-pause').click();return __logID;})()`);await evaluate('new Promise(r=>setTimeout(r,1300))');assert.equal(await evaluate('__logID'),paused);

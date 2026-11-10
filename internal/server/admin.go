@@ -993,23 +993,6 @@ func (a *App) adminStatus(c *gin.Context) {
 	c.JSON(200, result)
 }
 
-func (a *App) adminProbe(c *gin.Context) {
-	v, e := a.db.Probes(100)
-	if e != nil {
-		apiError(c, 500, e.Error())
-		return
-	}
-	c.JSON(200, gin.H{"items": v})
-}
-
-func (a *App) adminClearProbes(c *gin.Context) {
-	if err := a.clearDiagnosticProbes(); err != nil {
-		apiError(c, 500, "probe history clear failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
 // —— API 密钥管理：密钥可作 X-Emby-Token / api_key 直接调用 Emby 接口 ——
 
 // API 密钥是管理员凭据（D02，2026-10-17 已确认）：当前单用户版本中

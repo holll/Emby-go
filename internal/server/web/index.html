@@ -66,25 +66,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 9h10M4 13h16M4 17h7"/><path d="M17 15l2 2-2 2"/></svg>
         <span>运行日志</span>
       </button>
-      <button class="nav-item" data-page="activity">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>
-        <span>活动记录</span>
-      </button>
-      <button class="nav-item" data-page="probe">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <span>接口探针</span>
-      </button>
-      <button class="nav-item" data-page="diagnostics">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
-        <span>诊断</span>
+      <button class="nav-item" data-page="firewall">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6z"/><path d="M8 12h8M12 8v8"/></svg>
+        <span>防火墙</span>
       </button>
       </section>
       <section class="nav-group" aria-label="账户与安全">
         <h2 class="nav-group-label">账户与安全</h2>
-      <button class="nav-item" data-page="security">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
-        <span>访问安全</span>
-      </button>
       <button class="nav-item" data-page="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
         <span>设置</span>
@@ -106,21 +94,6 @@
         </div>
       </div>
       <div class="top-actions">
-        <details class="scan-tools">
-          <summary class="btn">全局扫描<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-          <div class="scan-tools-panel">
-        <div class="scan-mode-field"><label for="scan-mode">扫描模式</label>
-        <select id="scan-mode" class="scan-mode-select" aria-describedby="scan-mode-description" title="扫描两种模式都会完整枚举目录；增量模式只重建变化的影片组">
-          <option value="incremental">增量扫描（推荐）</option>
-          <option value="full">全量重建</option>
-        </select>
-        <small id="scan-mode-description">两种模式都会完整枚举目录</small></div>
-        <button id="scan" class="btn btn-accent">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>
-          <span>开始扫描</span>
-        </button>
-          </div>
-        </details>
         <button id="logout" class="btn account-action" type="button" aria-label="退出当前会话" title="退出当前会话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 4H4v16h5M14 8l4 4-4 4M9 12h12"/></svg><span>退出</span></button>
       </div>
     </header>

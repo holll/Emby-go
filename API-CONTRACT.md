@@ -18,7 +18,7 @@
 | `X-Emby-Token` / `X-MediaBrowser-Token` 请求头 | Emby 客户端会话 token |
 | `X-Emby-Authorization` / `Authorization` 中的 `Token=` | 兼容部分客户端的鉴权头 |
 | `api_key` / `ApiKey` / `X-Emby-Token` 查询参数 | 脚本/播放 URL 携带 |
-| 管理 API 密钥 | 等价管理员全权（D02，已具名接受风险） |
+| Emby API 密钥 | 只用于已注册的 Emby 兼容接口（根路径、`/emby` 前缀及已注册的小写变体；不是任意 `/emby/*`）；访问已注册的 `/api/*`、`/admin`、`/healthz` 一律 `403 API_KEY_SCOPE`；未实现路径仍为 `404` + `no-store` |
 
 - 图片端点（`/Items/:id/Images/*`、刮削图片代理）保持匿名，以兼容浏览器 `<img>` 与客户端图片缓存。
 - 流端点（`/Videos/:id/stream`）必须鉴权：302 直拉真实地址，未鉴权可凭据外泄。
@@ -132,8 +132,8 @@
 
 - `GET /api/admin/users` → `{"users":[{id,name,is_admin,created_at,last_login_at,library_ids}],"total":n}`；不返回密码哈希。
 - `POST /api/admin/users` → 201；`PUT /api/admin/users/:id`、`PUT /api/admin/users/:id/libraries`、`DELETE /api/admin/users/:id`（删除当前账户 400）。
-- `GET /api/admin/login-events?user_id=&limit=` → 登录审计（失败登录 `user_id=0`，不归因具体账户）。
-- `GET /api/admin/playback-events?user_id=&limit=` → 播放事件（含 `movie_title`/`user_name` 快照；用户删除后快照仍在）。
+- `GET /api/admin/login-events?user_id=&start=&limit=&ip=&result=` → 登录审计分页（批次 1110）：`start` 默认 0，`limit` 默认 20、范围 1–100；`user_id`/`start` 必须为非负整数，分页参数只允许单值，显式空值、非法格式、溢出或越界返回 400；`ip` 为 IPv4/IPv6 精确匹配（不支持模糊/CIDR，非法 400），`result` 取 `all|success|failed`。响应 `{"events":[…],"total":n}`，`total` 是筛选后的匹配总数，翻页直接使用。失败登录 `user_id=0`，不归因具体账户。
+- `GET /api/admin/playback-events?user_id=&start=&limit=` → 播放记录合并视图（批次 1110）：同一 `(user_id, movie_id)` 只保留一行，`play_count` 是不同播放会话数（`COUNT(DISTINCT session_key)`），`last_at/position_ticks/last_kind` 取该组合 id 最大的事件；按最近播放倒序，`start` 默认 0、`limit` 默认 20、范围 1–100；分页参数与登录审计相同，非法、空值、重复或越界返回 400。响应 `{"items":[…],"total":n}`。不提供逐次明细；`position_ticks` 由前端按 10,000,000 ticks/秒显示，没有总时长就不算百分比。`movie_title`/`user_name` 为快照，用户删除后仍保留（`user_name` 为空）。
 - `POST /api/auth/password`（需登录）→ 204，改密后撤销该账户全部会话；改密前已通过密码验证但尚未签发的登录请求也不能再产生有效会话。
 - `POST /api/auth/logout`（需登录）→ 204，仅撤销当前登录 token；其他设备的登录会话及 API 密钥不受影响。Emby 兼容入口 `POST /Sessions/Logout` 保留。
 - 可见性（批次 87 起强制）：媒体库按用户授权（`user_libraries`，默认无授权）；未授权库的列表为空、详情/PlaybackInfo/流/代理/播放 404；管理员不受限。Suggestions 与实体聚合也必须限定可见库，实体缓存按授权范围隔离；Images JSON 清单、AdditionalParts、Similar 源影片及个人状态写入遵守同样的对象授权。Emby 数据只认本人；仅图片字节端点保持匿名（已批准兼容边界）。
@@ -148,7 +148,7 @@
 
 ### 4.3 安全运维与多目标通知（R1/R3/R4/R5）
 
-以下端点均要求管理员会话或管理 API 密钥；错误信封见 §3，凭据入口超限统一 `429 AUTH_RATE_LIMITED` + 正整数 `Retry-After`。
+以下端点均要求管理员**交互会话**（Emby API 密钥已被限制在兼容接口，不能调用管理面）；错误信封见 §3，凭据入口超限统一 `429 AUTH_RATE_LIMITED` + 正整数 `Retry-After`。
 
 | 端点 | 契约要点 |
 |---|---|
@@ -156,15 +156,15 @@
 | `GET /api/admin/security/auth-limits` | 只读快照：`backend:"memory"`、配置上限、计数（`rejected_*`、`overflow` 等）与 IP/账号失败键摘要；不返回密码/token。 |
 | `POST /api/admin/security/unlock` | body `{target_type:"account"\|"ip",value,reason,current_password}`；需当前管理员密码再认证。成功 `200 {"unlocked":true}`；再认证失败 `401 AUTH_REVERIFY_FAILED`。 |
 | `GET /api/admin/logs/disk?kind=app&limit=200&after=<cursor>` | 独立磁盘 app 日志页数据源：`kind` 仅 `app`；`after`/`before` 互斥；`limit` 1–500；响应含 `items[{id,time,level,message}]`、`next_after`/`next_before`/`has_more`/`reset`/`gap`，`message` 已脱敏；非法游标 `400`、目录不可用 `503 LOGS_UNAVAILABLE`。旧 ring 接口 `GET /api/admin/logs` 保持不变。 |
-| `POST /api/admin/apikeys/:key/rotate` | `:key` 为稳定 ID `ak_<32hex>`；必须 `If-Match: "ak-<stable_id>-<version>"`（缺失 428、格式非法 400、过期/并发 412）；body `{current_password,reason}`；成功 200 一次返回新明文 `key`（`Cache-Control: no-store`），旧 key 立即失效；`401`/`403`/`404`/`429`/`503` 分类见实现。 |
+| `POST /api/admin/apikeys/:key/rotate` | `:key` 为稳定 ID `ak_<32hex>`；必须 `If-Match: "ak-<stable_id>-<version>"`（缺失 428、格式非法 400、过期/并发 412）；body `{reason}`（不再要求当前密码，2026-11-10 起）；成功 200 一次返回新明文 `key`（`Cache-Control: no-store`），旧 key 立即失效；`403`/`404`/`412`/`428`/`503` 分类见实现。 |
 | `GET/PUT /api/admin/image-cache/settings`、`POST /api/admin/image-cache/trim` | 缩略图变体目录（`image_cache`）的运行期容量上限：`GET` 返回 `{dir,enabled,max_bytes,used_bytes,files,max_allowed_bytes,config_etag}`（`max_bytes=0` 表示不限制，`used_bytes`/`files` 为变体目录快照，不含临时文件）。`PUT` body `{max_bytes}`（0–64 GiB），必须 `If-Match: "ic1-<max_bytes>"`（缺 428、过期 412 `IMAGE_CACHE_SETTINGS_CHANGED`）；保存立即生效并按新上限清理，配置禁用时返回 `409 IMAGE_CACHE_DISABLED`。`trim` 立即清理过期/超限变体，返回 `{removed,freed_bytes,files,used_bytes,config_etag}`。变体是纯派生数据，清理不影响任何接口语义。 |
 | `GET/PUT /api/admin/webhook/targets` | v2 多目标整集合：`GET` 返回 `version:2`、`targets[{id,name,enabled,url_configured,events,format,timeout_seconds,allow_private}]`、`config_etag`、`multi_target`，永不回显 URL。`PUT` 必须 `If-Match`（缺 428、过期 412）；body `{targets:[...],confirm_delete,confirm_empty_targets}`，按目标 ID 合并秘密（空白 URL 保留、`clear_url` 清除），新目标由服务端生成 `wh_<16hex>` ID；最多 10 个目标、整体 ≤64 KiB；清空需显式确认。v2 形成后旧 `PUT /api/admin/webhook/settings` 返回 `409 WEBHOOK_MULTI_TARGET_CONFIG`，旧 `GET` 标 `multi_target:true`。 |
 
-#### 请求 URL 日志与未知接口探针（2026-11-09）
+#### 请求 URL 日志（2026-11-09，接口探针已于 2026-11-10 移除）
 
 - 普通与 debug 请求日志均记录原始 `RequestURI`（构造请求缺省时回退 `URL.RequestURI()`），包括未知路径、敏感路由、全部 query、重复值和原始转义；不再将路径替换为模板或将 query 脱敏。日志字符串仍采用可逆引号转义。普通模式继续高频成功请求降噪，不新增头/body/error 内容，panic 详情仍省略；debug 的敏感头遮盖与敏感路由请求体保护保持不变，审计日志政策不变。
-- 未匹配路由继续返回 `404 NOT_FOUND`、`Cache-Control: no-store`。非 `/api/` 且非扫描器的探针保存 `URL.EscapedPath()` 与 `RawQuery` 原文；`GET /api/admin/probe` 要求管理员、返回最近 100 条。去重键为 method + 转义路径（区分大小写及转义拼写，不含 query），请求体不读取，`body="[OMITTED]"`。既有 128 个去重槽、6 小时去重窗口、突发 60/每秒 1 次及 1000 条历史上限不变；并非每次请求都保证留存。
-- **安全取舍：即使 debug 关闭，URL 内 api_key/token 等凭据仍可能落入 request 日志和探针数据库。** 此项仅取消入站请求 URL 脱敏，不改变 app 日志视图、上游错误脱敏、鉴权或响应内容。不恢复历史已遮盖的 URL；关闭 debug 不删除旧记录，也不恢复 URL 脱敏。
+- 未匹配路由只返回 `404 NOT_FOUND`、`Cache-Control: no-store`，不再记录未实现端点，`/api/admin/probe` 与历史清空接口已删除。历史 `api_probe` 数据保留在库中但不再写入、不再提供查询入口；需要补接口时直接看请求日志。
+- **安全取舍：即使 debug 关闭，URL 内 api_key/token 等凭据仍可能落入 request 日志。** 此项仅取消入站请求 URL 脱敏，不改变 app 日志视图、上游错误脱敏、鉴权或响应内容。不恢复历史已遮盖的 URL；关闭 debug 不删除旧记录，也不恢复 URL 脱敏。
 
 ### 4.4 全量与增量扫描
 
@@ -227,8 +227,8 @@
 - 匿名 `GET /Items/:id/Images/Backdrop/:index`（以及既有 `Fanart` 别名与路由大小写/`/emby` 兼容）按该序列取图；不带下标等价 0。显式下标非整数、负数或整数溢出返回 400，合法但越界返回 404。序列不按磁盘存在性过滤，缺失文件保持原下标，普通原图请求返回 404，不回退别图；后续扫描重建才更新序列。其它图片类型与库/合集/实体封面仍沿用既有语义，本轮不改变其下标行为。
 - 每项复用既有 `serveImage` 的 ETag、公开缓存、304 与缩略图路径；不同文件的变体按真实路径隔离。已有路径 tag 缓存（正缓存 5 分钟、负缓存 30 秒、tag 取 mtime）并不因扫描统一失效，同路径图片替换/删除可能短期沿用旧 tag、304 或变体；不承诺扫描后立即刷新该类字节。未新增列表快照或跨扫描永久下标保证。
 - 手工片缺失 NFO、已索引片 NFO 不可读时，刷新上述磁盘索引必须保留已有元数据、演员与用户数据。有效 NFO 仍按原规则刷新元数据并保留 manual 分类，不能误解为手工片永不接受 NFO 更新。
-- 备份阶段新增 `backup.Options.ExtraBackdrops`（零值 false，保持已有调用行为），独立于 `NFORoot`；命令行 `embybackup --extra-backdrops` 默认 true，可显式关闭。开启时按库遍历物理文件，只复制上述规范 `extrafanart/fanartN.jpg` 普通文件到产物 `extra-backdrops/lib-<ID>/<库内相对路径>`，不依赖数据库索引、也不跟随子目录或文件符号链接；结果 `ExtraBackdropCount` 单独计数。离线/已移除库跳过，在线库遍历/复制失败不发布半份备份，沿用输出边界校验、暂存发布、锁与保留规则。旧数据库不要求有 `extra_backdrops` 列，但开启文件备份要求有库路径表。
-- 恢复仍为离线手工操作：将 `extra-backdrops/lib-<ID>/` 内容按原相对路径放回对应媒体库，数据库快照保留有序索引；迁移根目录后须重新扫描恢复绝对路径。不包含 STRM、原三张图片或任意其它 JPG；数据库与文件不是跨介质事务快照，并发修改/离线库可能导致不一致，不能仅恢复数据库就声称恢复图片。未增加自动恢复、覆盖冲突处理或文件级历史版本。
+- 额外背景图只由扫描维护为磁盘派生索引，本服务不导出、不打包、不提供恢复端点；需要留存时按媒体目录原样复制。
+- 手工恢复即把 `extrafanart/` 连同影片目录一起复制回媒体库后重新扫描；扫描会按磁盘重建绝对路径，不做跨介质事务，也不能仅恢复数据库就声称恢复图片。
 - 确认写图增量输入：`POST /api/admin/items/:id/scrape` 可带 `stills: {"version":"<64位小写hex>","indices":[2,0]}`，版本从本次 inspect 的剧照 preview URL 获取；下标 1–24 个、互异、每项在 `[0,23]` 内。不提供/为 null 保持原确认行为，不写额外图；空数组、非法版本/下标返回 400，不能用空选择删除旧图。客户端不提供图片 URL。
 - 服务端在既有 NFO 写入门内重新取详情，按相同归一化列表核对摘要；版本不符返回 409，超出当前列表下标返回 400，上游查询失败 502。这些前置失败不下载任何图片、不写 NFO/影片/文件，也不更改 scrape_error。Update 仍决定重新查询时的 lazy，并非保证远端源站最新；版本绑定 URL 列表，不绑定远端字节。
 - 通过后按提交下标顺序对应 `extrafanart/fanart1.jpg…`，经 MetaTube backdrop 16:9 居中路径下载并编码为真实 JPEG，沿用既有解码限制；不写入 Position/角标。只在 DownloadImages 开启时保存，关闭时仍校验选择版本但不下载额外图，沿用元数据成功语义。overwrite=false 跳过已有非空目标，true 可替换；不会删除未涉及的旧尾图，不承诺最终集合恰等于本次选择。
@@ -239,7 +239,7 @@
 ### 4.8 自动字幕/版本标签归属（MT-04，D-2/A）
 
 - 迁移 18 新增 `movies.auto_marks TEXT NOT NULL DEFAULT '[]'`，记录本服务上次实际拥有的生成标签。空集合保存为 `[]`；现有行不根据 NFO 标签追认历史归属。管理端原始 `movie` 对象增量包含只读 `auto_marks`（Go字段名 `AutoMarks`），不是允许调用方提交归属的请求字段。
-- 普通扫描、单片重扫、索引重建与普通影片 upsert 保留已有归属，不从字幕文件或 NFO 的同名文字推断归属；新建数据库重扫只能恢复 NFO 元数据，不能恢复此记录。数据库备份恢复可以保留记录，单独 NFO 快照不能。
+- 普通扫描、单片重扫、索引重建与普通影片 upsert 保留已有归属，不从字幕文件或 NFO 的同名文字推断归属；新建数据库重扫只能恢复 NFO 元数据，不能恢复此记录。整库文件复制可以保留记录，单独 NFO 副本不能。
 - 自动刮削在既有 NFO 路径锁内合并标签：覆盖模式仅撤销上次记录的生成标签，保留其它原标签，再合并当前上游标签及生成标签。当前生成文字若已是未归属旧标签或本次上游标签，不将其认领为程序标签；已记录的同名文字按归属记录处理，无法识别外部工具是否后来赋予相同文字人工含义。
 - 补缺失模式已有标签时、Tags 字段锁或全局锁生效时，标签保持不变，不扩张归属；只保留原归属与当前实际标签的交集。手工 NFO 编辑仍走原编辑契约，不自动认领或猜测生成标签。文件名显式 `-C/-U/-UC` 仍优先于同主名外挂中文字幕推断，不新增字幕内容探测。
 - 独立影片刮削（批量任务或单条确认）之间同样独占既有 NFO 通道；已占用时单条确认返回 409，不排队、不自动重试。单条确认取得通道后重新读取影片归属快照，持有到 NFO、归属记录与索引刷新结束；保留探测等既有同 kind 引用计数，不把此变更扩展为所有任务的新并发政策。
@@ -265,8 +265,8 @@
 - RescanOne/ReindexOne 对超限同样不覆盖原记录、不将该项列入已刷新源；有 CD1 的栈必须包含所有从属 STRM 以及所读共享 NFO 的边界检查。没有 CD1 时原有独立条目仍逐项处理；不将已完成的其它条目当作回滚。扫描为跳过，不代表文件已成功索引或已通过发布验收。
 - NFO 修改、演员头像更新、翻译读/提交、预览以及编辑恢复摘要均通过同一有界原文读取入口。超限时该 NFO 不写入、不留下临时文件，保留原文件锁与原子写政策；不另外扩大纯写入 API 的输出限制。已读取字节的内部 XML 解析不重复校验文件大小。各 HTTP 调用沿用原错误映射，未新增状态码；拒绝某个 NFO 不保证其它先前提交的图片/文件没有写入，既有部分提交与取消边界保持。
 - NFO/STRM 文件入口只交付普通文件句柄：预先 Stat 跟随文件链接并拒绝稳定的 FIFO/设备/目录，实际打开后再检查句柄类型；Unix 以非阻塞方式打开，避免 Stat 后路径被换成无 writer FIFO 时等待。非 Unix 保留静态与句柄检查，但不承诺同等的替换竞态防阻塞。非普通对象通过明确类型错误返回，不将流内容送入 XML/URL 解析；扫描按上述超限相同的跳过/保留/不清理政策处理，原有真实 I/O 错误政策不变。
-- 保留普通目标文件 symlink（含库外）读取兼容；NFO 改写仍在原路径 rename，替换链接而非写穿目标。不新增根目录沙箱、链接解析、inode 锁或全局文件类型政策。该边界不是一致性快照，也不是恶意目录替换、设备 driver 副作用或挂载/NFS/FUSE I/O 的硬超时保证；根标记、图片、备份与其它读取入口未在本次一并改写。
-- 流式文件备份不是 NFO 解析入口，仍沿用备份规则；本子项不限制媒体信息 JSON、配置 YAML 或任意其它格式。ffprobe 独立执行边界见 §4.10，不能与文件读取的剩余限制互相替代。
+- 保留普通目标文件 symlink（含库外）读取兼容；NFO 改写仍在原路径 rename，替换链接而非写穿目标。不新增根目录沙箱、链接解析、inode 锁或全局文件类型政策。该边界不是一致性快照，也不是恶意目录替换、设备 driver 副作用或挂载/NFS/FUSE I/O 的硬超时保证；根标记、图片与其它读取入口未在本次一并改写。
+- 该入口只覆盖 NFO/STRM；本子项不限制媒体信息 JSON、配置 YAML 或任意其它格式。ffprobe 独立执行边界见 §4.10，不能与文件读取的剩余限制互相替代。
 
 ### 4.10 ffprobe 执行边界（N-01 本地已验收子项）
 
@@ -297,7 +297,7 @@
 任务摘要持久化在 `task_records`，迁移 19。不是新队列：提交仍复用既有异步扫描执行器，首版不可取消、进程重启不恢复、不补跑；重启时未完成任务只标记中断。
 
 - `POST /api/admin/tasks/scan`：语义不变（202 仅表示已接受）。202 之前先写入摘要行，写入失败直接返回错误，不会出现「已受理但查不到任务」。
-- `GET /api/admin/tasks`：`{"items":[{"id","type","status","started_at","ended_at?","error?","result?"}],"running":bool,"history_error":bool}`。items 是进程内实时任务与最近 100 条持久摘要按 `id` 降序合并，同一 id 以内存状态为准；`result` 是执行结果摘要（扫描/探测/备份各自的 JSON 对象），`result_json` 永不暴露；`history_error=true` 表示摘要读取失败但实时列表仍返回。
+- `GET /api/admin/tasks`：`{"items":[{"id","type","status","started_at","ended_at?","error?","result?"}],"running":bool,"history_error":bool}`。items 是进程内实时任务与最近 100 条持久摘要按 `id` 降序合并，同一 id 以内存状态为准；`result` 是执行结果摘要（扫描/探测各自的 JSON 对象），`result_json` 永不暴露；`history_error=true` 表示摘要读取失败但实时列表仍返回。
 - `GET /api/admin/tasks/{id}`：内存命中返回异步扫描 DTO（`task_id` 等既有字段）；内存已丢失时回落摘要，返回同一 DTO 形状的只读视图（含 `library_id`、`created_at`、`finished_at`、`error`，有结果时含 `result`）。都不存在返回 404。
 - 留存：摘要最多 500 条，超出按 id 淘汰最旧；启动时 `queued`/`running` 标为 `interrupted`（`error` 说明进程重启），任务 id 从摘要最大 id 继续递增，避免重启后 id 重叠。
 - 幂等：`Idempotency-Key` 的窗口与重放行为不变；重放仍返回原任务 id，不新建执行。
@@ -311,24 +311,16 @@
   - `scheduler`：数组，条目为 `id`/`name`/`type`/`cron`/`enabled`/`last_run_at`/`last_status`/`last_message`，启用任务附 `next_run`（服务器本地时区计算后的 RFC3339）。
   - `webhook{targets,enabled_targets,multi_target}`、`image_cache{enabled,dir,files,bytes,max_bytes}`、`ffprobe{path,error}`。
 - 读取数据库结构版本/文件信息失败时返回 500，不返回部分推测值；单个运行中任务的状态是读取瞬间快照，不做一致性等待。
-- 诊断页只展示证据与跳转到既有动作入口，不提供「一键修复」、远程探测或自动变更范围。
+- 展示位置只有总览「服务状态」单块面板（2026-11-10 起诊断页与侧边栏入口已移除）：面板合并本接口证据与 `GET /api/admin/settings` 的启动配置（监听地址/数据库路径/缓存与 Redis/会话期限/ffprobe 路径与错误/特征回填），只读刷新，不提供「一键修复」、远程探测或自动变更范围。`GET /api/admin/settings` 接口本身保留。
 
 ### 4.14 Webhook 投递历史（N-04）
 
-- 记录点：业务事件在 `send` 返回后按目标逐行写入；管理员测试消息（任意 draft 地址）不记录。写入 best-effort，失败只记日志，不回滚业务结果、不触发重发。
+- 记录点：业务事件在 `send` 返回后按目标逐行写入；管理员测试消息（任意 draft 地址）不记录。写入 best-effort，失败只记日志，不回滚业务结果、不触发重发。删除影片联动事件（`item.deleted`）与其它事件同一路径记录（2026-11-10 修复：此前只发 webhook 不写历史）；未订阅（`disabled`）或源路径不是绝对 `.strm`（`skipped`）仍不写行。
 - 字段白名单：`event`/`item_id`/`target_id`/`status`/`error_code`/`created_at`。不存接收地址、请求体、响应体或响应头。
 - `status`：`sent`（接收端已确认）/`failed`/`skipped_budget`；`error_code` 为稳定分类。
 - `GET /api/admin/webhook/deliveries?limit=`：`limit` 为 1–500 的整数，默认 100；返回 `{"items":[{"id","event","item_id","target_id","status","error_code","created_at"}],"retention":{"max_rows":1000,"days":7}}`，按 `id` 倒序。
 - `DELETE /api/admin/webhook/deliveries`：清空历史，返回 `{"cleared":n}`；只删除历史记录，不重发、不回滚业务、不影响目标配置。
 - 留存：最多 1000 条且 7 天，任一超限即淘汰；不建 outbox、不自动重试。非管理员访问返回 403。
-
-### 4.15 固定范围备份（N-05）
-
-- `GET /api/admin/backup`：`{"dir","retention","running","last"}`。`dir` 固定为数据库同级的 `backups/`；`retention` 恒为 7；`last` 为最近一条 `type=backup` 的任务摘要（`task_id`/`status`/`started_at`/`finished_at`/`error`/`result`），没有记录时为 `null`。只读，不访问媒体盘。
-- `POST /api/admin/backup/run`：受理返回 202 `{"task_id"}`，后台执行一次固定范围备份。已有备份在进行时返回 409；服务关停登记期返回 503。
-- 固定范围：SQLite 一致性快照（`VACUUM INTO`）+ 媒体库 NFO + 规范 extrafanart 目录，保留 7 份；不提供网页恢复、任意路径、匿名下载或删除指定备份。
-- 结果元数据：`result{dir,nfo_count,extra_backdrop_count,pruned,finished_at}`，`dir` 为该次备份的时间戳子目录。快照含凭据材料（密码哈希/令牌/API Key）与媒体信息，因此目录由进程以 `0700` 建立、不回显内容、不经 Web 提供下载；取回请用服务器文件工具。
-- 落库复用 `task_records`（`type=backup`），失败原因写入任务摘要；单飞：进程内 atomic 标记 + `internal/backup` 输出目录锁（跨进程）。任务不自动重试，失败后由管理员重新发起。非管理员访问返回 403。
 
 ### 4.16 Web 管理界面仅管理员登录
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -137,15 +138,20 @@ const (
 	imageMaxAge = 24 * time.Hour
 	// imageMetaTTL 图片元信息（影片图片路径、演员头像路径）的进程内缓存时长。
 	imageMetaTTL = time.Minute
-	// imageThumbTTL 缩略图字节的进程内缓存时长。
-	imageThumbTTL = 30 * time.Minute
-	// imageMetaCacheSize / imageThumbCacheSize 两个 LRU 的条目上限。
-	imageMetaCacheSize  = 8192
-	imageThumbCacheSize = 512
+	// imageMetaCacheSize 是进程内元信息 LRU 的条目上限。
+	imageMetaCacheSize = 8192
 	// maxThumbConcurrency 同时生成缩略图的数量上限（解码 + 缩放 + 编码都是 CPU 活）。
 	maxThumbConcurrency = 4
 	// maxThumbEdge 目标边长上限：超过就不生成，直接发原图。
 	maxThumbEdge = 4000
+	// prewarmQueueSize 预热队列长度上限：一页 100 部影片约排 100 条，装满两页的量。
+	// 满了直接丢弃——预热只是优化，刷页刷出来的待办不该堆在内存里。
+	prewarmQueueSize = 200
+	// prewarmWorkers 是后台预热的并发数。2 核机器上留出 CPU 给正常请求：
+	// worker 与请求路径共用 thumbSem，前台优先拿名额。
+	prewarmWorkers = 2
+	// prewarmPosterWidth 是预热的海报档位，与前端墙页 <img src> 的 maxWidth=360 一致。
+	prewarmPosterWidth = 360
 	// thumbDiskKeyVersion 是磁盘变体的命名空间：编码参数或缩放实现变化时递增，
 	// 旧变体自然过期淘汰，不需要逐条改文件名。
 	thumbDiskKeyVersion = "v1"
@@ -245,20 +251,22 @@ func thumbCacheKey(path, tag string, width, height, quality int) string {
 
 // thumbnail 返回按请求参数生成的缩略图；未请求缩放或生成失败时返回 false（调用方发原图）。
 //
-// 命中顺序：进程内 LRU → 磁盘变体 → 同 key 合并生成。前两层都是纯读，
-// 只有都落空才值得花 CPU；磁盘层让重启进程、或内存 LRU 被新条目顶掉之后
-// 仍不必重新解码。
+// 命中顺序：磁盘变体 → 同 key 合并生成。内存 LRU 已关闭：只留最近几百条、
+// 重启即失效，在小内存机器上性价比低；磁盘层让重启进程后仍不必重新解码。
 func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 	width, height, quality := imageResizeParams(c)
 	if width <= 0 && height <= 0 {
 		return nil, false
 	}
+	return a.thumbVariant(c.Request.Context(), path, tag, width, height, quality)
+}
+
+// thumbVariant 是缩略图变体的公共实现：请求路径与后台预热（prewarmThumbnails）共用。
+// ctx 只影响「等名额」和「等别人生成」这两个等待点：生成一旦开始就做完并落盘，
+// 中断它只会白白浪费已经花掉的 CPU。
+func (a *App) thumbVariant(ctx context.Context, path, tag string, width, height, quality int) ([]byte, bool) {
 	key := thumbCacheKey(path, tag, width, height, quality)
-	if data, ok := a.imgThumb.Get(key); ok {
-		return data, true
-	}
 	if data, ok := a.imgDisk.Get(key); ok {
-		a.imgThumb.Set(key, data, imageThumbTTL)
 		return data, true
 	}
 	// 同一张图的同一个尺寸常被并发请求（<img> 与 srcset 同时开）。
@@ -267,11 +275,8 @@ func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 	if !leader {
 		select {
 		case <-flight.done:
-			if flight.ok {
-				return flight.data, true
-			}
-			return nil, false
-		case <-c.Request.Context().Done():
+			return flight.data, flight.ok
+		case <-ctx.Done():
 			return nil, false
 		}
 	}
@@ -287,27 +292,23 @@ func (a *App) thumbnail(c *gin.Context, path, tag string) ([]byte, bool) {
 				panic(r)
 			}
 		}()
-		return a.generateThumbnail(c, key, path, width, height, quality)
+		return a.generateThumbnail(ctx, key, path, width, height, quality)
 	}()
 	a.finishThumbFlight(key, flight, data, ok)
 	return data, ok
 }
 
 // generateThumbnail 是 leader 的生成路径：限流 → 复查 → 生成 → 落盘。
-func (a *App) generateThumbnail(c *gin.Context, key, path string, width, height, quality int) ([]byte, bool) {
+func (a *App) generateThumbnail(ctx context.Context, key, path string, width, height, quality int) ([]byte, bool) {
 	// 限流：解码/缩放/编码是纯 CPU 活，一次性放开会把 CPU 打满。
 	select {
 	case a.thumbSem <- struct{}{}:
 		defer func() { <-a.thumbSem }()
-	case <-c.Request.Context().Done():
+	case <-ctx.Done():
 		return nil, false
 	}
-	// 排队期间可能已被别的请求填上（内存或磁盘）。
-	if data, ok := a.imgThumb.Get(key); ok {
-		return data, true
-	}
+	// 排队期间可能已被别的请求写上磁盘。
 	if data, ok := a.imgDisk.Get(key); ok {
-		a.imgThumb.Set(key, data, imageThumbTTL)
 		return data, true
 	}
 	generate := a.thumbGenerate
@@ -323,12 +324,79 @@ func (a *App) generateThumbnail(c *gin.Context, key, path string, width, height,
 		}
 		return nil, false
 	}
-	a.imgThumb.Set(key, data, imageThumbTTL)
 	if err := a.imgDisk.Put(key, data); err != nil {
 		// 写盘失败只影响下次复用，这一次的响应照常返回。
 		slog.Debug("写入缩略图磁盘缓存失败", "path", path, "error", err)
 	}
 	return data, true
+}
+
+// prewarmJob 是一条后台预热任务：把某张图按某档位生成并落盘。
+type prewarmJob struct {
+	path          string
+	tag           string
+	width, height int
+}
+
+// prewarmThumbnails 把一页影片的海报档位排进后台预热队列。
+//
+// 目的：首次打开墙页时，浏览器请求的 ?maxWidth=360 若只能现场生成，要等解码、
+// 缩放、编码（单张 45~130ms，2 核机器一次只能跑 4 个）；预热让这些变体在
+// 用户点开之前就落盘，之后只是读盘 + 传输。
+//
+// 它只是优化：磁盘缓存关闭、文件缺失、队列满、生成失败都静默跳过，
+// 绝不影响这次列表响应本身。
+func (a *App) prewarmThumbnails(ms []store.Movie) {
+	if !a.imgDisk.Enabled() {
+		return
+	}
+	for _, m := range ms {
+		if m.PosterPath == "" {
+			continue
+		}
+		a.enqueuePrewarm(m.PosterPath, prewarmPosterWidth, 0)
+	}
+}
+
+// enqueuePrewarm 投递一条预热任务；队列满就丢弃，调用方不阻塞。
+func (a *App) enqueuePrewarm(path string, width, height int) {
+	tag := a.posterTag(path)
+	if tag == "0" {
+		// posterTag 对不存在的文件返回 "0"：没有源图就没有可预热的变体。
+		return
+	}
+	select {
+	case a.prewarmQueue <- prewarmJob{path: path, tag: tag, width: width, height: height}:
+	default:
+	}
+}
+
+// runPrewarmWorker 消费预热队列，直到服务关停（rootCtx 取消）。
+func (a *App) runPrewarmWorker() {
+	for {
+		// 生成中的磁盘 I/O 不能取消；完成后先检查退出，不再消费积压队列。
+		if a.rootCtx.Err() != nil {
+			return
+		}
+		select {
+		case <-a.rootCtx.Done():
+			return
+		case job := <-a.prewarmQueue:
+			a.prewarmOne(job)
+		}
+	}
+}
+
+// prewarmOne 生成一条预热任务。
+func (a *App) prewarmOne(job prewarmJob) {
+	// 后台 goroutine 里没有 monitor 中间件兜底：解码器对畸形图 panic 时
+	// 不能让整个进程退出，记日志后丢弃这一条（请求路径仍会回退原图）。
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("预热缩略图 panic，已跳过", "path", job.path, "panic", r)
+		}
+	}()
+	a.thumbVariant(a.rootCtx, job.path, job.tag, job.width, job.height, 0)
 }
 
 // beginThumbFlight 登记一次生成；leader=true 表示由当前请求负责生成，

@@ -61,12 +61,12 @@ func authorityApp(t *testing.T) (*App, *legacyCredentialCache, string) {
 
 func authorityRouter(a *App) *gin.Engine {
 	r := gin.New()
-	r.GET("/private", a.requireAuth, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	r.GET("/Items/auth-test", a.requireAuth, func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	return r
 }
 
 func authorityRequest(r http.Handler, token string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req := httptest.NewRequest(http.MethodGet, "/Items/auth-test", nil)
 	if token != "" {
 		req.Header.Set("X-Emby-Token", token)
 	}
@@ -205,7 +205,7 @@ func TestAuthPreservesCredentialTransports(t *testing.T) {
 			{"X-Emby-Authorization", `MediaBrowser Client="fixture", Token="` + token + `"`, ""},
 			{"Authorization", `MediaBrowser Client="fixture", Token="` + token + `"`, ""},
 		} {
-			req := httptest.NewRequest(http.MethodGet, "/private?"+transport.query, nil)
+			req := httptest.NewRequest(http.MethodGet, "/Items/auth-test?"+transport.query, nil)
 			if transport.header != "" {
 				req.Header.Set(transport.header, transport.value)
 			}
@@ -231,7 +231,7 @@ func TestAuthRevocationAllowsOnlyAlreadyAuthorizedRequest(t *testing.T) {
 	authorized, release, done := make(chan struct{}), make(chan struct{}), make(chan int, 1)
 	defer close(release)
 	r := gin.New()
-	r.GET("/private", a.requireAuth, func(c *gin.Context) {
+	r.GET("/Items/auth-test", a.requireAuth, func(c *gin.Context) {
 		close(authorized)
 		<-release
 		c.Status(http.StatusNoContent)
@@ -287,7 +287,7 @@ func TestAuthPreservesPriorityAndHistoricalSessions(t *testing.T) {
 		t.Fatalf("historical session status=%d", w.Code)
 	}
 	for _, query := range []string{"api_key=" + token, "ApiKey=" + token, "X-Emby-Token=" + token} {
-		req := httptest.NewRequest(http.MethodGet, "/private?"+query, nil)
+		req := httptest.NewRequest(http.MethodGet, "/Items/auth-test?"+query, nil)
 		req.Header.Set("X-Emby-Token", "fixture-invalid-higher-priority")
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)

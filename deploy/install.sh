@@ -9,7 +9,7 @@
 #   sudo EMBY_GO_MIRROR=https://mirror.example.com/github.com ./install.sh
 #                                      # 无法直连 GitHub 时用镜像下载资产
 #
-# 本脚本只做首次安装/重装，不保留旧程序、不创建 releases/backups 目录、
+# 本脚本只做首次安装/重装，不保留旧程序、不创建 releases 目录、
 # 不迁移旧数据；已存在的配置不会被覆盖。
 set -euo pipefail
 
