@@ -3,12 +3,18 @@
   'use strict';
   // 未确认的提交跨面板挂载保留：重开面板只能核对状态，绝不重发 POST。
   const submissions = new Map();
+  // 只记住当前会话最近 128 个完成身份；淘汰后重访允许再通知一次。
+  const completions = new Map();
+  let identity;
 
-  // spec: apiRequest, movieKey, runPath, cancelPath, statusPath(instance, taskID), statusBase,
+  // spec: identity, apiRequest, movieKey, runPath, cancelPath, statusPath(instance, taskID), statusBase,
   //       current(), onState(msg), onError(msg), onChange(snapshot), describe(status, observingOther),
   //       targetsMovie(status), completed(status), unavailable(), idleText, onComplete(status)
   function taskRunner(spec) {
     const { apiRequest, movieKey, runPath, cancelPath, statusPath, statusBase } = spec;
+    if (identity !== spec.identity) {
+      submissions.clear(); completions.clear(); identity = spec.identity;
+    }
     // 面板作用域隔离：封面与雪碧图的任务注册表各自独立，即使同一影片。
     const submissionKey = spec.scope + '|' + movieKey;
     let disposed = false, ready = false, busy = false, uncertain = submissions.has(submissionKey);
@@ -86,7 +92,13 @@
         if (status.running) { schedule(1200); return; }
         acceptedTaskID = null; cancelling = false; changed();
         if (!observingOther && targetVerified && spec.completed(status) && current()) {
-          spec.onComplete(status);
+          const key = JSON.stringify([spec.scope, movieKey, instance, taskID]);
+          if (!completions.has(key)) {
+            // 回调可能同步重新挂载详情，必须先记账，再触发刷新。
+            completions.set(key, true);
+            if (completions.size > 128) completions.delete(completions.keys().next().value);
+            spec.onComplete(status);
+          }
         }
         observingOther = false;
         if (uncertain && current()) recover();

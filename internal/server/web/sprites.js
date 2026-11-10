@@ -29,7 +29,7 @@
       el('retry').hidden = !snap.retry;
     }
     const runner = global.TaskRunner({
-      apiRequest, movieKey, scope: 'sprites', current, confirm: confirmAction,
+      apiRequest, movieKey, identity: options.identity, scope: 'sprites', current, confirm: confirmAction,
       runPath: '/sprites/run', cancelPath: '/sprites/cancel', statusBase: '/sprites/status',
       statusPath: (instance, taskID) => '/sprites/status?task_id=' + taskID + '&instance_id=' + encodeURIComponent(instance),
       onState: state, onError: error, onChange: controls,

@@ -404,7 +404,42 @@ test('详情固定外壳：加载关闭、错误重试、长详情关闭、背�
   assert.equal(failed.retry,true);assert.equal(failed.close,true);assert.equal(failed.focus,'detail-close');assert.equal(failed.loaded,true);assert.equal(failed.closeVisible,true);assert.equal(failed.feedback,'持久操作错误');assert.equal(failed.persistent,'持久操作错误');assert.equal(failed.inert,false);
   const longFeedback=await evaluate(`(async()=>{await openDetail({id:1});toast('长错误反馈'.repeat(500),'error');const feedback=document.querySelector('#detail-overlay .overlay-feedback');const height=feedback.getBoundingClientRect().height;feedback.scrollTop=feedback.scrollHeight;const close=document.querySelector('#detail-close').getBoundingClientRect();const result={height,limit:innerHeight*.25,readable:feedback.scrollHeight>feedback.clientHeight,close:close.top>=0&&close.bottom<innerHeight};closeDetail();return result;})()`);
   assert.ok(longFeedback.height<=longFeedback.limit+1); assert.equal(longFeedback.readable,true); assert.equal(longFeedback.close,true);
-  const contrast=await evaluate(`(()=>{const b=document.createElement('button');b.className='btn btn-accent';document.body.appendChild(b);const style=getComputedStyle(b);const result={fg:style.color,bg:style.backgroundColor};b.remove();return result;})()`);
-  const lum=color=>{const rgb=color.match(/\d+/g).slice(0,3).map(n=>{const c=Number(n)/255;return c<=.04045?c/12.92:((c+.055)/1.055)**2.4});return .2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2]};
-  assert.ok((Math.max(lum(contrast.fg),lum(contrast.bg))+.05)/(Math.min(lum(contrast.fg),lum(contrast.bg))+.05)>=4.5);
+});
+
+test('实心强调控件：详情保存与媒体库添加在各视口及交互状态保持4.5文字对比度', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await call('DOM.enable');
+  await call('CSS.enable');
+  const luminance=rgb=>rgb.map(c=>c/255).map(c=>c<=.04045?c/12.92:((c+.055)/1.055)**2.4).reduce((sum,c,i)=>sum+c*[.2126,.7152,.0722][i],0);
+  for (const viewport of [{width:375,height:812,scale:1},{width:768,height:1024,scale:1},{width:1280,height:900,scale:1},{width:640,height:450,scale:2}]) {
+    // 640 CSS px at DPR 2 exercises the layout equivalent of 1280px at 200%, not browser-menu zoom.
+    await call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:false});
+    await evaluate("page('libraries')");
+    for (const selector of ['[data-lib-add]','#detail-edit-save']) {
+      if (selector==='#detail-edit-save') await evaluate(`(async()=>{await openDetail({id:1});document.querySelector('.detail-maintenance').open=true;document.querySelector('#detail-edit-toggle').click();})()`);
+      const {root}=await call('DOM.getDocument');
+      const {nodeId}=await call('DOM.querySelector',{nodeId:root.nodeId,selector});
+      assert.ok(nodeId,selector);
+      for (const forcedPseudoClasses of [[],['hover'],['focus','focus-visible'],['hover','active']]) {
+        // Force Chromium's real CSS pseudo states without submitting either form.
+        await call('CSS.forcePseudoState',{nodeId,forcedPseudoClasses});
+        const colors=await evaluate(`(async()=>{const b=document.querySelector(${JSON.stringify(selector)});b.scrollIntoView({block:'center'});await new Promise(requestAnimationFrame);await Promise.all(b.getAnimations().map(a=>a.finished));const s=getComputedStyle(b),text=getComputedStyle(b.querySelector('span'));return {fg:text.color,bg:s.backgroundColor,backgroundImage:s.backgroundImage,opacity:s.opacity,visible:b.getBoundingClientRect().width>0};})()`);
+        const label=JSON.stringify({viewport,selector,state:forcedPseudoClasses,colors});
+        assert.equal(colors.visible,true,label);
+        assert.equal(colors.opacity,'1',label);
+        assert.equal(colors.backgroundImage,'none',label);
+        // These controls have opaque fills and opaque text. Do not silently discard
+        // rgba alpha and compare against black if their composition ever changes.
+        const fg=colors.fg.match(/[\d.]+/g).map(Number),bg=colors.bg.match(/[\d.]+/g).map(Number);
+        assert.equal(fg[3]??1,1,label);
+        assert.equal(bg[3]??1,1,label);
+        const a=luminance(fg.slice(0,3)),b=luminance(bg.slice(0,3)),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+        assert.ok(ratio>=4.5,`${label}; contrast=${ratio}`);
+      }
+      await call('CSS.forcePseudoState',{nodeId,forcedPseudoClasses:[]});
+    }
+    await evaluate('closeDetail()');
+    assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true,JSON.stringify(viewport));
+  }
 });

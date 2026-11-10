@@ -1260,7 +1260,7 @@ async function openDetail(item) {
     if (typeof mountArtwork === 'function') {
       const identity = token, originalWall = wallGen;
       detailArtworkStop = mountArtwork(artworkRoot, {
-        apiRequest: api, movie: m,
+        apiRequest: api, movie: m, identity,
         imageRequest: async (path, { signal }) => {
           if (token !== identity || localStorage.getItem('emby_token') !== identity) throw new Error('登录状态已改变');
           const response = await fetch(path, { signal, headers: { 'X-Emby-Token': identity } });
@@ -1284,7 +1284,7 @@ async function openDetail(item) {
     const identity = token;
     if (typeof mountSprites === 'function') {
       detailSpritesStop = mountSprites(spritesRoot, {
-        apiRequest: api, movie: m,
+        apiRequest: api, movie: m, identity,
         isCurrent: () => isCurrent() && token === identity && localStorage.getItem('emby_token') === identity && document.querySelector('#detail-sprites') === spritesRoot,
         onComplete: () => { if (isCurrent() && token === identity) toast('视频预览已生成，重新打开播放器可使用最新时间轴预览；封面与元数据保持不变'); }
       });

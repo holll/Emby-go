@@ -41,7 +41,7 @@
   --accent: var(--blue);
   --accent-strong: #3fa4ff;
   --accent-soft: rgba(10, 132, 255, 0.15);
-  --accent-ink: #ffffff;
+  --accent-ink: #000000;
   --ok: var(--green);
   --ok-soft: rgba(48, 209, 88, 0.15);
   --warn: var(--orange);
@@ -235,7 +235,7 @@ a { color: var(--info); }
 .btn-accent {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--accent-ink);
   font-weight: 700;
   box-shadow: 0 8px 22px var(--blue-glow);
 }

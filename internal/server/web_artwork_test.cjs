@@ -21,7 +21,7 @@ function fixture(api, confirm = () => true, options = {}) {
   } };
   const box = options.box || vm.createContext({ AbortController, URL: options.URL || URL, console, setTimeout(fn, ms) { const id = ++next; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); } });
   if (!options.box) { vm.runInContext(runnerSource, box); vm.runInContext(source, box); }
-  const dispose = box.mountArtwork(host, { movie: { id: 19, Title: '<unsafe>' }, confirm, imageRequest: options.imageRequest, isCurrent: () => current, onComplete: () => completed++, apiRequest: (p, o) => { calls.push([p, o]); return p === '/artwork/status' ? Promise.resolve(options.latest || { task_id: 0, instance_id: 'test-instance', running: false, movie_ids: null }) : api(p, o); } });
+  const dispose = box.mountArtwork(host, { movie: { id: options.movieID ?? 19, Title: '<unsafe>' }, identity: options.identity, confirm, imageRequest: options.imageRequest, isCurrent: () => current, onComplete: () => completed++, apiRequest: (p, o) => { calls.push([p, o]); return p === '/artwork/status' ? Promise.resolve(options.latest || { task_id: 0, instance_id: 'test-instance', running: false, movie_ids: null }) : api(p, o); } });
   return { box, host, calls, timers, node, dispose, completed: () => completed, stale: () => { current = false; }, click: key => node(key).events.get('click')?.(), async tick(ms) { const entry = [...timers].find(([, t]) => t.ms === ms); assert.ok(entry, 'timer ' + ms); timers.delete(entry[0]); entry[1].fn(); await flush(); } };
 }
 test('real Chromium cover controls retain native keyboard focus, 44px targets and no overflow at mobile width', async t => {
@@ -143,6 +143,75 @@ test('reopening restores the accepted task and refreshes completion only once ac
   assert.equal(f.completed(), 1); assert.equal(f.calls.some(([p]) => p.includes('task_id=8')), true); f.dispose();
   const g = fixture(api, undefined, { box: f.box, latest: status() }); await flush();
   assert.equal(g.completed(), 0); assert.equal(g.calls.some(([p]) => p.endsWith('/run')), false); g.dispose();
+});
+
+test('completion identity distinguishes movies and tasks and resets on session changes', async () => {
+  const api = async p => p.includes('capabilities') ? caps : status({ movie_ids: [19, 20] });
+  async function mount(options, expected) {
+    const f = fixture(api, undefined, { latest: status({ movie_ids: [19, 20] }), ...options });
+    await flush(); assert.equal(f.completed(), expected); f.dispose(); return f;
+  }
+  const first = await mount({ identity: 'session-a' }, 1), box = first.box;
+  await mount({ box, identity: 'session-a', movieID: 20 }, 1);
+  await mount({ box, identity: 'session-a' }, 0);
+  const newer = status({ task_id: 9 });
+  const next = fixture(async p => p.includes('capabilities') ? caps : newer, undefined, { box, identity: 'session-a', latest: newer });
+  await flush(); assert.equal(next.completed(), 1); next.dispose();
+  await mount({ box, identity: 'session-a' }, 0); // Older, already-notified task remains deduplicated.
+  await mount({ box, identity: 'session-b' }, 1);
+  await mount({ box, identity: 'session-a' }, 1); // Historical session state was cleared, not retained.
+});
+
+test('late old-session completion cannot pollute the new-session remount guard', async () => {
+  let resolve;
+  const old = fixture(p => p.includes('capabilities') ? Promise.resolve(caps) : new Promise(done => { resolve = done; }), undefined,
+    { identity: 'session-a', latest: status({ running: true }) });
+  await flush(); old.stale(); // App isCurrent checks both token and localStorage identity before any dispose.
+  const api = async p => p.includes('capabilities') ? caps : status();
+  const next = fixture(api, undefined, { box: old.box, identity: 'session-b', latest: status() });
+  await flush(); assert.equal(next.completed(), 1);
+  resolve(status()); await flush(); assert.equal(old.completed(), 0); old.dispose(); next.dispose();
+  const again = fixture(api, undefined, { box: old.box, identity: 'session-b', latest: status() });
+  await flush(); assert.equal(again.completed(), 0); again.dispose();
+});
+
+function terminalRunner(box, options = {}) {
+  const task = status(options.status), movieKey = options.movieKey || '19';
+  return box.TaskRunner({
+    identity: options.identity || 'session-a', scope: options.scope || 'artwork', movieKey,
+    apiRequest: async () => task, statusBase: '/status', statusPath: () => '/status/exact',
+    current: () => true, onState() {}, onError() {}, onChange() {},
+    targetsMovie: value => value.movie_ids.includes(Number(movieKey)), completed: value => value.success > 0,
+    unavailable: () => '', describe: () => '', onComplete: options.onComplete || (() => {})
+  });
+}
+
+test('shared runner marks completion before synchronous remount and callback errors never retry reads', async () => {
+  const box = vm.createContext({ AbortController, setTimeout, clearTimeout }); vm.runInContext(runnerSource, box);
+  let completed = 0, remounted;
+  const runner = terminalRunner(box, { onComplete() {
+    completed++;
+    remounted = terminalRunner(box, { onComplete() { completed++; } });
+    remounted.recover();
+    throw new Error('consumer refresh failed');
+  } });
+  await runner.recover(); await flush();
+  assert.equal(completed, 1); assert.equal(runner.snapshot().retry, false); assert.equal(remounted.snapshot().retry, false);
+  runner.dispose(); remounted.dispose();
+});
+
+test('shared runner isolates panel scopes and bounds completion memory to the latest 128 identities', async () => {
+  const box = vm.createContext({ AbortController, setTimeout, clearTimeout }); vm.runInContext(runnerSource, box);
+  async function complete(options, expected) {
+    let count = 0;
+    const runner = terminalRunner(box, { ...options, onComplete: () => count++ });
+    await runner.recover(); await flush(); assert.equal(count, expected); runner.dispose();
+  }
+  await complete({}, 1); await complete({ scope: 'sprites' }, 1); await complete({}, 0);
+  for (let task_id = 9; task_id < 136; task_id++) await complete({ status: { task_id } }, 1);
+  await complete({ status: { task_id: 135 } }, 0);
+  await complete({}, 1); // FIFO eviction may notify once more when an old task is revisited.
+  await complete({}, 0); // That notification immediately restores the remount guard.
 });
 
 test('other-movie tasks block mutations but cannot cancel or refresh this movie', async () => {

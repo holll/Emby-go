@@ -14,7 +14,7 @@ function fixture(api, options={}) {
   const host={isConnected:true,innerHTML:'',querySelector:s=>node(s.match(/data-sprite="([^"]+)"/)[1])};
   const box=options.box||vm.createContext({AbortController,console,setTimeout(fn,ms){const id=++next;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}});
   if(!options.box){vm.runInContext(runnerSource,box);vm.runInContext(source,box);}
-  const dispose=box.mountSprites(host,{movie:{id:19},confirm:options.confirm||(()=>true),isCurrent:()=>current,onComplete:()=>completed++,apiRequest:(p,o)=>{calls.push([p,o]);return p==='/sprites/capabilities?movie_id=19'?Promise.resolve({enabled:options.enabled!==false,interval_seconds:options.interval??10}):p==='/sprites/status'?Promise.resolve(options.latest||{task_id:0,instance_id:'instance',running:false,movie_ids:null}):api(p,o);}});
+  const dispose=box.mountSprites(host,{movie:{id:19},identity:options.identity,confirm:options.confirm||(()=>true),isCurrent:()=>current,onComplete:()=>completed++,apiRequest:(p,o)=>{calls.push([p,o]);return p==='/sprites/capabilities?movie_id=19'?Promise.resolve({enabled:options.enabled!==false,interval_seconds:options.interval??10}):p==='/sprites/status'?Promise.resolve(options.latest||{task_id:0,instance_id:'instance',running:false,movie_ids:null}):api(p,o);}});
   return {box,host,node,calls,timers,dispose,completed:()=>completed,stale:()=>{current=false;},click:key=>node(key).events.get('click')?.(),async tick(ms){const entry=[...timers].find(([,t])=>t.ms===ms);assert.ok(entry,'timer '+ms);timers.delete(entry[0]);entry[1].fn();await flush();}};
 }
 const status=extra=>({task_id:8,instance_id:'instance',running:false,movie_ids:[19],done:1,total:1,success:1,...extra});
@@ -35,6 +35,18 @@ test('ambiguous submit stays disabled across close and only recovers newer match
   const f=fixture(async()=>{throw Error('network');});await flush();f.click('generate');await flush();assert.equal(f.node('generate').disabled,true);f.dispose();
   const g=fixture(async()=>status(),{box:f.box});await flush();assert.equal(g.node('generate').disabled,true);assert.equal(g.calls.some(([p])=>p.endsWith('/run')),false);g.dispose();
   const h=fixture(async()=>status(),{box:f.box,latest:status({running:true})});await flush();assert.equal(h.completed(),1);assert.equal(h.node('generate').disabled,false);h.dispose();
+});
+test('new server instance and new session can each report the same numeric task once',async()=>{
+  const first=fixture(async()=>status(),{latest:status(),identity:'session-a'});await flush();assert.equal(first.completed(),1);first.dispose();
+  const restarted=status({instance_id:'restarted-instance'});
+  for(const [identity,expected] of [['session-a',1],['session-a',0],['session-b',1],['session-b',0]]){
+    const f=fixture(async()=>restarted,{latest:restarted,identity,box:first.box});await flush();assert.equal(f.completed(),expected);f.dispose();
+  }
+});
+test('session switch clears an ambiguous previous-session submission without replaying it',async()=>{
+  const first=fixture(async()=>{throw Error('network');},{identity:'session-a'});await flush();first.click('generate');await flush();assert.equal(first.node('generate').disabled,true);first.dispose();
+  const same=fixture(async()=>status(),{identity:'session-a',box:first.box});await flush();assert.equal(same.node('generate').disabled,true);same.dispose();
+  const next=fixture(async()=>status(),{identity:'session-b',box:first.box});await flush();assert.equal(next.node('generate').disabled,false);assert.equal(next.calls.some(([p])=>p.endsWith('/run')),false);next.dispose();
 });
 test('unrelated task cannot be cancelled and does not complete this movie',async()=>{
   const f=fixture(async()=>status({running:true,movie_ids:[20]}),{latest:status({running:true,movie_ids:[20]})});await flush();assert.equal(f.node('cancel').hidden,true);f.click('cancel');await flush();assert.equal(f.calls.some(([p])=>p.endsWith('/cancel')),false);assert.equal(f.completed(),0);f.dispose();

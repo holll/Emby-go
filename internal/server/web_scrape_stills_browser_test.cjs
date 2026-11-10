@@ -42,6 +42,8 @@ async function fixture(t, width) {
   const b = await browser(t);
   await b.call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 860 });
   await b.navigate(`http://127.0.0.1:${server.address().port}/`);
+  // URL arrival can precede document load; install the deferred API only after the fixture DOM exists.
+  await waitFor(b, 'document.readyState === "complete" && !!document.querySelector("#scrape-body")');
   await b.evaluate(`
     window.__calls = []; window.__errors = []; window.__toasts = []; window.__refreshes = 0;
     addEventListener('error', e => __errors.push(e.message));

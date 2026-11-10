@@ -66,7 +66,7 @@
       for (const node of host.querySelectorAll('[data-candidate]')) node.disabled = blocked;
     }
     const runner = global.TaskRunner({
-      apiRequest, movieKey, scope: 'artwork', current, confirm: confirmAction,
+      apiRequest, movieKey, identity: options.identity, scope: 'artwork', current, confirm: confirmAction,
       runPath: '/artwork/run', cancelPath: '/artwork/cancel', statusBase: '/artwork/status',
       statusPath: (instance, taskID) => '/artwork/status?task_id=' + taskID + '&instance_id=' + encodeURIComponent(instance),
       onState: state, onError: error, onChange: controls,
