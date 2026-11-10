@@ -37,7 +37,7 @@ func TestApplyImageFailureKeepsExistingImage(t *testing.T) {
 
 	scraper := newTestScraper(t, ts.URL, DefaultConfig())
 	scraper.cfg.Translate = translate.Config{}
-	info, _ := scraper.MovieInfo(context.Background(), "fanza", "abc")
+	info, _ := scraper.client.MovieInfo(context.Background(), "fanza", "abc", true)
 	result, err := scraper.Apply(context.Background(), movie, info, ApplyOptions{Provider: "fanza", ID: "abc", Overwrite: true})
 	if err != nil {
 		t.Fatalf("图片失败不应让刮削整体失败: %v", err)

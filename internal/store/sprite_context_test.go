@@ -32,7 +32,7 @@ func TestSpriteCancelledConnectionPoolWait(t *testing.T) {
 			case "state":
 				_, err = f.s.SpriteContext(ctx, m.ID)
 			case "CAS":
-				err = f.s.CompareAndSwapSprite(ctx, m, lib.Path, SpriteState{}, next, func() error { t.Error("callback ran despite blocked pool"); return nil })
+				err = f.s.CompareAndSwapSpriteFiles(ctx, m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: func() error { t.Error("callback ran despite blocked pool"); return nil }})
 			}
 			if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
 				t.Fatalf("%v after %v", err, time.Since(start))
@@ -51,7 +51,7 @@ func TestSpriteCancelAfterVerificationRollsBack(t *testing.T) {
 	next := SpriteState{Revision: 1, Generation: strings.Repeat("a", 32), LibraryID: m.LibraryID, LibraryRoot: lib.Path, SourcePath: m.SourcePath, SourceHash: strings.Repeat("b", 64)}
 	before := indexSnapshot(t, f.s)
 	ctx, cancel := context.WithCancel(context.Background())
-	err := f.s.CompareAndSwapSprite(ctx, m, lib.Path, SpriteState{}, next, func() error { cancel(); return nil })
+	err := f.s.CompareAndSwapSpriteFiles(ctx, m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: func() error { cancel(); return nil }})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestSpriteIndependentDatabaseWritersCAS(t *testing.T) {
 			if index == 1 {
 				next = second
 			}
-			results <- s.CompareAndSwapSprite(context.Background(), m, lib.Path, SpriteState{}, next, nil)
+			results <- s.CompareAndSwapSpriteFiles(context.Background(), m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: nil})
 		}(i, s)
 	}
 	close(start)
@@ -104,7 +104,9 @@ func TestSpriteIndependentDatabaseWritersCAS(t *testing.T) {
 	if success != 1 || rejected != 1 {
 		t.Fatalf("success=%d rejected=%d", success, rejected)
 	}
-	state, err := f.s.Sprite(m.ID)
+	state, err := f.s.SpriteContext(context.Background(),
+
+		m.ID)
 	if err != nil || state.Revision != 1 {
 		t.Fatalf("%+v %v", state, err)
 	}

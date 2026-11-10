@@ -13,13 +13,13 @@ func TestExtraBackdropOrderedRoundTripAndDiagnostics(t *testing.T) {
 	s, libID := newFeatureStore(t)
 	m := Movie{LibraryID: libID, SourcePath: "/fixture/A.strm", Status: "success", Title: "retained", BackdropPath: "/fixture/fanart.webp"}
 	mtime := time.Unix(1234, 0)
-	id, err := s.UpsertMovie(m, 10, mtime)
+	id, err := s.IndexMovie(m, 10, mtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range [][]string{{"/fixture/extrafanart/fanart2.jpg", "/fixture/extrafanart/fanart10.jpg"}, nil} {
 		m.ExtraBackdrops = want
-		if gotID, err := s.UpsertMovie(m, 10, mtime); err != nil || gotID != id {
+		if gotID, err := s.IndexMovie(m, 10, mtime, nil); err != nil || gotID != id {
 			t.Fatalf("upsert ID=%d err=%v", gotID, err)
 		}
 		got, err := s.Movie(id)
@@ -54,7 +54,7 @@ func TestExtraBackdropMigrationUpgradeRollbackAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.UpsertMovie(Movie{LibraryID: lib.ID, SourcePath: "/fixture/A.strm", Status: "success", Title: "keep", BackdropPath: "/fixture/fanart.webp"}, 10, time.Unix(1234, 0))
+	id, err := s.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/fixture/A.strm", Status: "success", Title: "keep", BackdropPath: "/fixture/fanart.webp"}, 10, time.Unix(1234, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

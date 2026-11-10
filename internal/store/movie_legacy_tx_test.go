@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestMovieLegacyWrappersKeepVersionsAndCleanFailedCommit(t *testing.T) {
+func TestIndexMovieMetadataAndActorsCleanFailedCommit(t *testing.T) {
 	for _, kind := range []string{"upsert", "actors"} {
 		t.Run(kind, func(t *testing.T) {
 			s, lib := newFeatureStore(t)
@@ -21,15 +21,15 @@ func TestMovieLegacyWrappersKeepVersionsAndCleanFailedCommit(t *testing.T) {
 			m.Title = "Fault"
 			write := func() error {
 				if kind == "actors" {
-					return s.ReplaceActors(id, []ActorRef{{Name: "FaultActor"}})
+					return indexFixtureActors(s, id, []ActorRef{{Name: "FaultActor"}})
 				}
-				_, err := s.UpsertMovie(m, 2, time.Unix(2, 0))
+				_, err := s.IndexMovie(m, 2, time.Unix(2, 0), nil)
 				return err
 			}
 			if err := write(); err != nil {
 				t.Fatal(err)
 			}
-			if s.Version("g:version") != "1" || storedVersion(t, s, "g:version") != "1" || storedVersion(t, s, "lib:"+strconv.FormatInt(lib, 10)+":version") != "1" {
+			if s.Version("g:version") != "2" || storedVersion(t, s, "g:version") != "2" || storedVersion(t, s, "lib:"+strconv.FormatInt(lib, 10)+":version") != "2" {
 				t.Fatal("legacy wrapper unexpectedly bumped versions")
 			}
 			before := indexSnapshot(t, s)

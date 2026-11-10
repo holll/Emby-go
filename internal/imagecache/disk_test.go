@@ -60,12 +60,10 @@ func TestDiskPutGetRoundTrip(t *testing.T) {
 		t.Errorf("Get 字节不一致: %q", got)
 	}
 	// 变体落在磁盘上，且没有留下临时文件。
-	if path := disk.PathFor(key); path == "" {
-		t.Fatal("PathFor 应返回路径")
-	} else if _, err := os.Stat(path); err != nil {
+	if _, err := os.Stat(disk.path(key)); err != nil {
 		t.Errorf("变体文件不存在: %v", err)
 	}
-	entries, err := os.ReadDir(filepath.Dir(disk.PathFor(key)))
+	entries, err := os.ReadDir(filepath.Dir(disk.path(key)))
 	if err != nil {
 		t.Fatalf("读分片目录: %v", err)
 	}
@@ -79,7 +77,7 @@ func TestDiskPutGetRoundTrip(t *testing.T) {
 func TestDiskKeyIsStableAndDistinct(t *testing.T) {
 	disk := newTestDisk(t, t.TempDir(), 0, 0, true)
 	base := "v1|t:/media/poster.jpg:1:50x25:q0"
-	if disk.PathFor(base) != disk.PathFor(base) {
+	if disk.path(base) != disk.path(base) {
 		t.Error("同一个 key 必须映射到同一个文件")
 	}
 	variants := []string{
@@ -89,7 +87,7 @@ func TestDiskKeyIsStableAndDistinct(t *testing.T) {
 	}
 	seen := map[string]string{base: base}
 	for _, key := range variants {
-		path := disk.PathFor(key)
+		path := disk.path(key)
 		if other, ok := seen[path]; ok {
 			t.Errorf("不同 key 撞到同一文件: %q 与 %q", key, other)
 		}
@@ -110,7 +108,7 @@ func TestDiskTrimRemovesOldestAndExpired(t *testing.T) {
 		}
 		// 伪造 mtime：old 最旧、new 最新（Trim 只按 mtime 判断"最近使用"）。
 		stamp := now.Add(time.Duration(i-3) * time.Hour)
-		if err := os.Chtimes(disk.PathFor(key), stamp, stamp); err != nil {
+		if err := os.Chtimes(disk.path(key), stamp, stamp); err != nil {
 			t.Fatalf("Chtimes %s: %v", key, err)
 		}
 	}
@@ -140,7 +138,7 @@ func TestDiskTTLExpiresVariants(t *testing.T) {
 	}
 	// 两天前的变体已经超过 24 小时保留期。
 	old := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(disk.PathFor("stale"), old, old); err != nil {
+	if err := os.Chtimes(disk.path("stale"), old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
 	if gone, _, err := disk.Trim(); err != nil || gone != 1 {
@@ -184,7 +182,7 @@ func TestDiskStatsAndSetMaxBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 残留的临时文件不该计入占用（它随时会被清理）。
-	if err := os.WriteFile(filepath.Join(filepath.Dir(disk.PathFor("stats-a")), tmpPrefix+"leftover"), make([]byte, 64), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(disk.path("stats-a")), tmpPrefix+"leftover"), make([]byte, 64), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, err := disk.Stats()
@@ -202,7 +200,7 @@ func TestDiskStatsAndSetMaxBytes(t *testing.T) {
 	now := time.Now()
 	for key, age := range map[string]time.Duration{"stats-a": time.Minute, "stats-b": 2 * time.Minute} {
 		at := now.Add(-age)
-		if err := os.Chtimes(disk.PathFor(key), at, at); err != nil {
+		if err := os.Chtimes(disk.path(key), at, at); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -36,7 +36,7 @@ func TestScrapePreviewStoredIdentityAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.ProviderID = "FANZA:abc%2B123:0.5:True"
-	if _, err = app.db.UpsertMovie(m, 0, time.Now()); err != nil {
+	if _, err = indexFixtureMovie(t, app, m, 0, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(m.NFOPath)

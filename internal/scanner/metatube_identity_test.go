@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ func TestScanMetaTubePluginIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = Scan(s, lib); err != nil {
+			if _, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 				t.Fatal(err)
 			}
 			movies := visible(t, s)

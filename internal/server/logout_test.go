@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"emby-go/internal/config"
 )
@@ -25,20 +26,20 @@ func TestLogoutRevokesOnlyCurrentSessionOnAllAliases(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
 	seedOwner(t, a)
 	const other = "fixture-other-session"
-	if err := a.db.SaveAccessToken(other); err != nil {
+	if err := saveFixtureSession(t, a, other, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/Sessions/Logout", "/sessions/logout", "/emby/Sessions/Logout", "/emby/sessions/logout"} {
 		t.Run(path, func(t *testing.T) {
 			token := "fixture-session-" + path
-			if err := a.db.SaveAccessToken(token); err != nil {
+			if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 				t.Fatal(err)
 			}
 			w := logoutRequest(a, http.MethodPost, path, token)
 			if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
 				t.Fatalf("logout status=%d body=%s", w.Code, w.Body.String())
 			}
-			if valid, err := a.db.HasAccessToken(token); err != nil || valid {
+			if _, valid, err := a.db.ValidateAccessTokenUser(token, time.Now(), 0); err != nil || valid {
 				t.Fatalf("not revoked: valid=%v err=%v", valid, err)
 			}
 			if w := logoutRequest(a, http.MethodGet, "/Users/Me", token); w.Code != http.StatusUnauthorized {
@@ -62,14 +63,14 @@ func TestLogoutRevokesOnlyCurrentSessionOnAllAliases(t *testing.T) {
 func TestLogoutPreservesAPIKey(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
 	seedOwner(t, a)
-	key, err := a.db.CreateAPIKey("fixture key")
+	key, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "fixture key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", key.Key); w.Code != http.StatusNoContent {
 		t.Fatalf("key logout status=%d", w.Code)
 	}
-	if valid, err := a.db.HasAPIKey(key.Key); err != nil || !valid {
+	if _, valid, err := a.db.APIKeyUser(key.Key); err != nil || !valid {
 		t.Fatalf("key changed: valid=%v err=%v", valid, err)
 	}
 	if w := logoutRequest(a, http.MethodGet, "/Users/Me", key.Key); w.Code != http.StatusOK {
@@ -84,7 +85,7 @@ func TestLogoutWriteFailureDoesNotReportSuccess(t *testing.T) {
 	a, legacy, path := authorityApp(t)
 	seedOwner(t, a)
 	const token = "fixture-session-secret"
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	fixture, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
@@ -112,7 +113,7 @@ func TestLogoutWriteFailureDoesNotReportSuccess(t *testing.T) {
 			t.Fatalf("leaked %q", secret)
 		}
 	}
-	if valid, err := a.db.HasAccessToken(token); err != nil || !valid {
+	if _, valid, err := a.db.ValidateAccessTokenUser(token, time.Now(), 0); err != nil || !valid {
 		t.Fatalf("failed delete changed session: valid=%v err=%v", valid, err)
 	}
 	if _, err := fixture.Exec("DROP TRIGGER fixture_reject_logout"); err != nil {
@@ -131,7 +132,7 @@ func TestLogoutPersistsAcrossReopen(t *testing.T) {
 	seedOwner(t, a)
 	const revoked, other = "fixture-revoked-session", "fixture-retained-session"
 	for _, token := range []string{revoked, other} {
-		if err := a.db.SaveAccessToken(token); err != nil {
+		if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 			t.Fatal(err)
 		}
 	}

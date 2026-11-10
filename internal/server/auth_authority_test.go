@@ -103,11 +103,11 @@ func TestAuthConsultsStoreAfterCredentialDeletion(t *testing.T) {
 			seedOwner(t, a)
 			token := "fixture-session"
 			if kind == "session" {
-				if err := a.db.SaveAccessToken(token); err != nil {
+				if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				key, err := a.db.CreateAPIKey("fixture")
+				key, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "fixture")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -127,7 +127,7 @@ func TestAuthConsultsStoreAfterCredentialDeletion(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			} else if err := a.db.DeleteAPIKey(token); err != nil {
+			} else if err := deleteFixtureAPIKey(t, a, token); err != nil {
 				t.Fatal(err)
 			}
 			// New requests after the committed delete must never use stale positives.
@@ -187,10 +187,10 @@ func TestAuthPreservesCredentialTransports(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
 	seedOwner(t, a)
 	const token = "fixture-valid-session"
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	key, err := a.db.CreateAPIKey("transport fixture")
+	key, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "transport fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestAuthPreservesCredentialTransports(t *testing.T) {
 func TestAuthRevocationAllowsOnlyAlreadyAuthorizedRequest(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
 	seedOwner(t, a)
-	key, err := a.db.CreateAPIKey("revocation fixture")
+	key, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "revocation fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestAuthRevocationAllowsOnlyAlreadyAuthorizedRequest(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("request did not pass authentication")
 	}
-	if err := a.db.DeleteAPIKey(key.Key); err != nil {
+	if err := deleteFixtureAPIKey(t, a, key.Key); err != nil {
 		t.Fatal(err)
 	}
 	// The older authorized handler is deliberately held while a new query starts.
@@ -270,7 +270,7 @@ func TestAuthPreservesPriorityAndHistoricalSessions(t *testing.T) {
 	a, legacy, path := authorityApp(t)
 	seedOwner(t, a)
 	const token = "fixture-historical-session"
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	fixture, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
@@ -302,7 +302,7 @@ func TestAuthPreservesPriorityAndHistoricalSessions(t *testing.T) {
 
 func TestAuthenticateDoesNotPopulateCredentialCache(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
-	if err := a.db.InitializeAdministrator("fixture-admin", "fixture-password"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "fixture-admin", "fixture-password"); err != nil {
 		t.Fatal(err)
 	}
 	r := gin.New()
@@ -321,7 +321,7 @@ func TestAuthenticateDoesNotPopulateCredentialCache(t *testing.T) {
 	if body.AccessToken == "" {
 		t.Fatal("missing access token")
 	}
-	if valid, err := a.db.HasAccessToken(body.AccessToken); err != nil || !valid {
+	if _, valid, err := a.db.ValidateAccessTokenUser(body.AccessToken, time.Now(), 0); err != nil || !valid {
 		t.Fatalf("token not persisted: valid=%v err=%v", valid, err)
 	}
 	if calls := legacy.calls.Load(); calls != 0 {

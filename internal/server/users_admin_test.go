@@ -224,7 +224,7 @@ func TestAdminAuditPaginationBoundary(t *testing.T) {
 		if err := a.db.RecordLoginEvent(1, "admin", "192.0.2.1", true, now); err != nil {
 			t.Fatal(err)
 		}
-		id, err := a.db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: fmt.Sprintf("/audit/%d.strm", i), Title: fmt.Sprintf("movie-%d", i), Status: "success"}, 1, now)
+		id, err := indexFixtureMovie(t, a, store.Movie{LibraryID: lib.ID, SourcePath: fmt.Sprintf("/audit/%d.strm", i), Title: fmt.Sprintf("movie-%d", i), Status: "success"}, 1, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestAdminAuditPaginationBoundary(t *testing.T) {
 		}
 	}
 	// Internal callers retain their explicit limits; the HTTP cap is not a store cap.
-	if events, err := a.db.LoginEvents(0, 200); err != nil || len(events) != 105 {
+	if events, _, err := a.db.LoginEventsFiltered(0, 0, 200, "", nil); err != nil || len(events) != 105 {
 		t.Fatalf("internal login limit: count=%d err=%v", len(events), err)
 	}
 	if items, total, err := a.db.RecentPlaybackSummaries(0, 0, 200); err != nil || len(items) != 105 || total != 105 {

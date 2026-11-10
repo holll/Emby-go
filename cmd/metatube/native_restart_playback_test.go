@@ -82,7 +82,7 @@ func (p *nativeRestartPlayback) afterReady(t *testing.T, base, dbPath string, ru
 				t.Fatal(err)
 			}
 			for i, dest := range []*int64{&p.movie, &p.other} {
-				*dest, err = db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(lib.Path, fmt.Sprintf("playback-%d.strm", i)), SourceProtocol: "https", Status: "success", Title: fmt.Sprintf("Restart movie %d", i)}, 1, time.Now())
+				*dest, err = db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(lib.Path, fmt.Sprintf("playback-%d.strm", i)), SourceProtocol: "https", Status: "success", Title: fmt.Sprintf("Restart movie %d", i)}, 1, time.Now(), nil)
 				if err != nil {
 					t.Fatal(err)
 				}

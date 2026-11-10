@@ -6,17 +6,16 @@ import (
 	"time"
 )
 
-// actorAvatarUpsertSQL is shared by the legacy and versioned avatar setters.
+// actorAvatarUpsertSQL preserves the avatar setter's upsert semantics.
 // Empty fields preserve existing values; conflicts intentionally keep updated_at.
 const actorAvatarUpsertSQL = `INSERT INTO actors(name,avatar_url,avatar_tag,updated_at) VALUES(?,?,?,?)
    ON CONFLICT(name) DO UPDATE SET
     avatar_url=CASE WHEN excluded.avatar_url<>'' THEN excluded.avatar_url ELSE actors.avatar_url END,
     avatar_tag=CASE WHEN excluded.avatar_tag<>'' THEN excluded.avatar_tag ELSE actors.avatar_tag END`
 
-// SetIndexedActorAvatar preserves SetActorAvatar's empty-field/upsert semantics,
-// but commits its global and every referencing library's version atomically.
-// The actor can belong to multiple movies and libraries; library 0 is a real
-// domain, never a sentinel. Legacy SetActorAvatar remains unversioned.
+// SetIndexedActorAvatar preserves empty-field/upsert semantics and commits its
+// global and every referencing library's version atomically. The actor can belong
+// to multiple movies and libraries; library 0 is a real domain, never a sentinel.
 func (s *Store) SetIndexedActorAvatar(name, url, tag string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {

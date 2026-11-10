@@ -71,7 +71,7 @@ func TestCoreAPI(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Fatalf("repeat initialize: %d", r.StatusCode)
 	}
-	if valid, err := a.db.AuthenticateAdministrator("admin", "password-1234"); err != nil || !valid {
+	if _, valid, err := a.db.AuthenticateUser("admin", "password-1234"); err != nil || !valid {
 		t.Fatalf("stored admin invalid: valid=%v err=%v", valid, err)
 	}
 	r, v := post("/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`)

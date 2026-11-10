@@ -21,7 +21,7 @@ func TestIncrementalManualMissingNFORetainsCurrentPartsAndZeroWriteBaseline(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := s.MovieIDByPath(primary)
@@ -39,9 +39,7 @@ func TestIncrementalManualMissingNFORetainsCurrentPartsAndZeroWriteBaseline(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePlaybackForUser(1, id, 1234, 2, "2026-10-23T01:00:00Z", -1); err != nil {
-		t.Fatal(err)
-	}
+	seedStoppedPlaybacks(t, s, 1, id, 1234, 2, "2026-10-23T01:00:00Z")
 	userdata, err := s.DataUser(1, id)
 	if err != nil {
 		t.Fatal(err)

@@ -51,7 +51,7 @@ func TestLibraryAdminCoverAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.db.UpsertMovie(store.Movie{
+	if _, err := indexFixtureMovie(t, a, store.Movie{
 		LibraryID:  first.ID,
 		Title:      "A-1",
 		SourcePath: filepath.Join(libDir, "A-1.strm"),

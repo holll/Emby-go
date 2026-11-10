@@ -1,6 +1,7 @@
 package server
 
 import (
+	"emby-go/internal/store"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -41,15 +42,15 @@ func TestSpritesAdmissionAfterBodyParsing(t *testing.T) {
 func TestSpritesLibraryRevocationAndQueryBoundaries(t *testing.T) {
 	f := artworkFixture(t)
 	m := spriteSeed(t, f)
-	u, err := f.a.db.CreateUser("sprite-granted", "password-123", false)
+	u, err := createFixtureUser(t, f.a, "sprite-granted", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SetUserLibraries(u.ID, []int64{f.lib}); err != nil {
+	if err = updateFixtureUser(t, f.a, u.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{f.lib})}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "sprite-granted"
-	if err = f.a.db.SaveAccessTokenForUser(token, u.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, token, u.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	paths := []string{fmt.Sprintf("/api/items/%d/sprites", f.movie), fmt.Sprintf("/api/items/%d/sprites/sheets/0?generation=%s", f.movie, m.Generation), fmt.Sprintf("/Items/%d/ThumbnailSet", f.movie), fmt.Sprintf("/Items/%d/Images/Thumbnail?PositionTicks=0", f.movie), fmt.Sprintf("/Videos/%d/index.bif", f.movie)}
@@ -61,7 +62,7 @@ func TestSpritesLibraryRevocationAndQueryBoundaries(t *testing.T) {
 			t.Fatalf("allowed %s: %d %s", path, w.Code, w.Body.String())
 		}
 	}
-	if err = f.a.db.SetUserLibraries(u.ID, nil); err != nil {
+	if err = updateFixtureUser(t, f.a, u.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64(nil))}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range paths {

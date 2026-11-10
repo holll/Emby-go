@@ -52,7 +52,7 @@ func TestSecurityAuthLimitsAndUnlock(t *testing.T) {
 	if code, _, _ := do("POST", "/api/auth/initialize", `{"Username":"admin","Pw":"password-1234"}`, ""); code != http.StatusNoContent {
 		t.Fatalf("initialize: %d", code)
 	}
-	if _, err := a.db.CreateUser("victim", "password-1234", false); err != nil {
+	if _, err := createFixtureUser(t, a, "victim", "password-1234", false); err != nil {
 		t.Fatal(err)
 	}
 	code, _, v := do("POST", "/Users/AuthenticateByName", `{"Username":"admin","Pw":"password-1234"}`, "")

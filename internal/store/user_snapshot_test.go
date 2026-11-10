@@ -16,9 +16,21 @@ var snapshotSettings = []struct {
 	set   func(*Store, int64) (UserData, error)
 	check func(UserData) bool
 }{
-	{"favorite", func(s *Store, id int64) (UserData, error) { return s.SetIndexedFavoriteData(id, true) }, func(d UserData) bool { return d.IsFavorite }},
-	{"likes", func(s *Store, id int64) (UserData, error) { return s.SetIndexedLikesData(id, -1) }, func(d UserData) bool { return d.Likes == -1 }},
-	{"hidden", func(s *Store, id int64) (UserData, error) { return s.SetIndexedHideFromResumeData(id, true) }, func(d UserData) bool { return d.HideFromResume }},
+	{"favorite", func(s *Store, id int64) (UserData, error) {
+		return s.SetIndexedFavoriteDataForUser(1,
+
+			id, true)
+	}, func(d UserData) bool { return d.IsFavorite }},
+	{"likes", func(s *Store, id int64) (UserData, error) {
+		return s.SetIndexedLikesDataForUser(1,
+
+			id, -1)
+	}, func(d UserData) bool { return d.Likes == -1 }},
+	{"hidden", func(s *Store, id int64) (UserData, error) {
+		return s.SetIndexedHideFromResumeDataForUser(1,
+
+			id, true)
+	}, func(d UserData) bool { return d.HideFromResume }},
 }
 
 func TestUserDataSnapshotsCommittedAndDetached(t *testing.T) {
@@ -143,7 +155,9 @@ func TestUserDataSnapshotsRuntimeAndLegacyMissingDefaults(t *testing.T) {
 			if _, err := f.s.db.Exec("UPDATE userdata SET position_ticks=600000000 WHERE movie_id=?", f.victim); err != nil {
 				t.Fatal(err)
 			}
-			got, err := f.s.SetIndexedFavoriteData(f.victim, true)
+			got, err := f.s.SetIndexedFavoriteDataForUser(1,
+
+				f.victim, true)
 			if err != nil {
 				t.Fatal(err)
 			}

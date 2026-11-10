@@ -14,14 +14,14 @@ import (
 func TestDashboardRealHTTPContractAndSampling(t *testing.T) {
 	a, _, _ := authorityApp(t)
 	seedOwner(t, a)
-	if err := a.db.SaveAccessTokenForUser("dash-owner-token", 1, time.Now().Add(time.Hour)); err != nil {
+	if err := saveFixtureSession(t, a, "dash-owner-token", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := a.db.CreateUser("dash-viewer", "dash-viewer-password", false)
+	viewer, err := createFixtureUser(t, a, "dash-viewer", "dash-viewer-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.SaveAccessTokenForUser("dash-viewer-token", viewer.ID, time.Now().Add(time.Hour)); err != nil {
+	if err := saveFixtureSession(t, a, "dash-viewer-token", viewer.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	handler := a.Handler()

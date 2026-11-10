@@ -24,10 +24,12 @@ func TestSpritePointerOnlyAndCAS(t *testing.T) {
 	versions := indexedDeleteVersions(t, f)
 	next := SpriteState{Revision: 1, Generation: strings.Repeat("a", 32), LibraryID: m.LibraryID, LibraryRoot: lib.Path, SourcePath: m.SourcePath, SourceHash: strings.Repeat("b", 64)}
 	calls := 0
-	if err = f.s.CompareAndSwapSprite(context.Background(), m, lib.Path, SpriteState{}, next, func() error { calls++; return nil }); err != nil {
+	if err = f.s.CompareAndSwapSpriteFiles(context.Background(), m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: func() error { calls++; return nil }}); err != nil {
 		t.Fatal(err)
 	}
-	state, err := f.s.Sprite(m.ID)
+	state, err := f.s.SpriteContext(context.Background(),
+
+		m.ID)
 	if err != nil || state != next {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
@@ -36,7 +38,7 @@ func TestSpritePointerOnlyAndCAS(t *testing.T) {
 		t.Fatal("movie metadata changed")
 	}
 	assertIndexedDeleteVersions(t, f, versions, false)
-	if err = f.s.CompareAndSwapSprite(context.Background(), m, lib.Path, SpriteState{}, next, func() error { t.Fatal("stale CAS callback ran"); return nil }); !errors.Is(err, ErrSpriteChanged) {
+	if err = f.s.CompareAndSwapSpriteFiles(context.Background(), m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: func() error { t.Fatal("stale CAS callback ran"); return nil }}); !errors.Is(err, ErrSpriteChanged) {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -76,13 +78,13 @@ func TestSpriteRollbackCancellationAndMetadataCAS(t *testing.T) {
 				cancel()
 			}
 			calls := 0
-			err := f.s.CompareAndSwapSprite(ctx, m, lib.Path, SpriteState{}, next, func() error {
+			err := f.s.CompareAndSwapSpriteFiles(ctx, m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: func() error {
 				calls++
 				if fault == "verify" {
 					return errors.New("changed source")
 				}
 				return nil
-			})
+			}})
 			if err == nil {
 				t.Fatal("expected failure")
 			}
@@ -100,12 +102,12 @@ func TestSpriteCancelledWriterWait(t *testing.T) {
 	m, _ := f.s.Movie(f.victim)
 	lib, _ := f.s.Library(m.LibraryID)
 	next := SpriteState{Revision: 1, Generation: strings.Repeat("a", 32), LibraryID: m.LibraryID, LibraryRoot: lib.Path, SourcePath: m.SourcePath, SourceHash: strings.Repeat("b", 64)}
-	f.s.writeMu.Lock()
+	f.s.writeMu.LockContext(context.Background())
 	defer f.s.writeMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := f.s.CompareAndSwapSprite(ctx, m, lib.Path, SpriteState{}, next, nil)
+	err := f.s.CompareAndSwapSpriteFiles(ctx, m, lib.Path, SpriteState{}, next, SpriteFiles{Commit: nil})
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
 		t.Fatalf("%v after %v", err, time.Since(start))
 	}

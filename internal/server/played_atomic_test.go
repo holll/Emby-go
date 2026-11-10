@@ -14,7 +14,7 @@ func TestExplicitPlayedAtomicAPI(t *testing.T) {
 				f := newAdminDeleteFixture(t)
 				h := f.a.Handler()
 				// Ensure both operations actually change the stored flag.
-				if err := f.a.db.SetIndexedPlayedForUser(1, f.victim, method == "DELETE"); err != nil {
+				if _, err := f.a.db.SetIndexedPlayedDataForUser(1, f.victim, method == "DELETE"); err != nil {
 					t.Fatal(err)
 				}
 				beforeData, err := f.a.db.DataUser(1, f.victim)

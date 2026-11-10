@@ -73,7 +73,7 @@ func TestUserSettingsResponseShapeAndCapturedValue(t *testing.T) {
 			t.Fatalf("response=%v want=%v", body, want)
 		}
 	}
-	data, err := f.a.db.SetIndexedFavoriteData(f.victim, true)
+	data, err := f.a.db.SetIndexedFavoriteDataForUser(1, f.victim, true)
 	if err != nil {
 		t.Fatal(err)
 	}

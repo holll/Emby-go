@@ -53,11 +53,11 @@ func decodeWebhookTest(t *testing.T, w *httptest.ResponseRecorder) webhookTestRe
 
 func TestAdminWebhookTestAuthorizationAndInvalidDraft(t *testing.T) {
 	f := newAdminDeleteFixture(t)
-	user, err := f.a.db.CreateUser("probe-ordinary", "test-password", false)
+	user, err := createFixtureUser(t, f.a, "probe-ordinary", "test-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("probe-ordinary-token", user.ID, time.Now().Add(time.Hour)); err != nil {
+	if err = saveFixtureSession(t, f.a, "probe-ordinary-token", user.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for token, want := range map[string]int{"": 401, "probe-ordinary-token": 403} {

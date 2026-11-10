@@ -52,7 +52,7 @@ func TestAuthIdentityAuditsOnlyCommittedTokenIssuance(t *testing.T) {
 			if err != nil || last[1] != "" {
 				t.Fatalf("failed mint advanced last login: %v %v", last, err)
 			}
-			events, err := a.db.LoginEvents(1, 100)
+			events, _, err := a.db.LoginEventsFiltered(1, 0, 100, "", nil)
 			if err != nil || len(events) != 0 {
 				t.Fatalf("failed mint recorded success: %v %v", events, err)
 			}
@@ -125,7 +125,11 @@ func TestAuthIdentityPasswordChangeAndWebLogout(t *testing.T) {
 	}
 	current := login("changed-password-1")
 	retained := login("changed-password-1")
-	key, err := a.db.CreateAPIKey("logout-retained")
+	proof, err := a.db.RequestCredentialUser(current, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := a.db.AdminCreateAPIKey(proof, "logout-retained")
 	if err != nil {
 		t.Fatal(err)
 	}

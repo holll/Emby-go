@@ -11,10 +11,19 @@ import (
 	"emby-go/internal/logging"
 )
 
+// Exercise the real cwd/log fallback rather than a production test-only override.
+func diskLogsFixtureDir(t *testing.T) string {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	dir := logging.AppLogDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestAdminDiskLogsContractAndValidation(t *testing.T) {
-	dir := t.TempDir()
-	logging.SetAppLogDir(dir)
-	t.Cleanup(func() { logging.SetAppLogDir("") })
+	dir := diskLogsFixtureDir(t)
 	line := `time=2026-10-23T08:00:00+08:00 level=INFO msg="探测进度 token=CANARY_TOKEN"` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "app-2026-10-23.log"), []byte(line), 0o644); err != nil {
 		t.Fatal(err)

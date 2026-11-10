@@ -63,20 +63,20 @@ func TestSelectExactOnlyAcceptsNumberMatch(t *testing.T) {
 		{Provider: "a", ID: "1", Number: "ABF-019"},
 		{Provider: "b", ID: "2", Number: "ABF-018"},
 	}
-	chosen, ok := selectExact(results, "ABF-018")
-	if !ok || chosen.Provider != "b" {
-		t.Fatalf("应选中番号一致的那条: %+v %v", chosen, ok)
+	chosen := selectAllExact(results, "ABF-018")
+	if len(chosen) != 1 || chosen[0].Provider != "b" {
+		t.Fatalf("应选中番号一致的那条: %+v", chosen)
 	}
 	// 无精确命中时不能退回首个（否则会把错误影片的元数据写进去）。
-	if _, ok := selectExact(results, "ABF-020"); ok {
-		t.Error("无精确命中时不应选中任何结果")
+	if got := selectAllExact(results, "ABF-020"); len(got) != 0 {
+		t.Errorf("无精确命中时不应选中任何结果: %+v", got)
 	}
-	if _, ok := selectExact(results, ""); ok {
-		t.Error("预期番号为空时不应选中")
+	if got := selectAllExact(results, ""); len(got) != 0 {
+		t.Errorf("预期番号为空时不应选中: %+v", got)
 	}
 	// 分隔符差异视为同一部。
-	if chosen, ok := selectExact(results, "ABF_018"); !ok || chosen.Provider != "b" {
-		t.Errorf("分隔符差异应视为同一番号: %+v %v", chosen, ok)
+	if got := selectAllExact(results, "ABF_018"); len(got) != 1 || got[0].Provider != "b" {
+		t.Errorf("分隔符差异应视为同一番号: %+v", got)
 	}
 }
 
@@ -390,7 +390,7 @@ func TestApplyWritesNFOAndImages(t *testing.T) {
 	}
 
 	scraper := newTestScraper(t, backend.URL, DefaultConfig())
-	info, err := scraper.MovieInfo(context.Background(), "fanza", "abc")
+	info, err := scraper.client.MovieInfo(context.Background(), "fanza", "abc", true)
 	if err != nil {
 		t.Fatalf("MovieInfo: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestApplyFillMissingKeepsExisting(t *testing.T) {
 
 	scraper := newTestScraper(t, backend.URL, DefaultConfig())
 	scraper.cfg.Translate = translate.Config{}
-	info, err := scraper.MovieInfo(context.Background(), "fanza", "abc")
+	info, err := scraper.client.MovieInfo(context.Background(), "fanza", "abc", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestApplyCreatesNFOWhenMissing(t *testing.T) {
 
 	scraper := newTestScraper(t, backend.URL, DefaultConfig())
 	scraper.cfg.Translate = translate.Config{}
-	info, _ := scraper.MovieInfo(context.Background(), "fanza", "abc")
+	info, _ := scraper.client.MovieInfo(context.Background(), "fanza", "abc", true)
 	if _, err := scraper.Apply(context.Background(), movie, info, ApplyOptions{Provider: "fanza", ID: "abc", Overwrite: true}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestApplyImageFailureIsNotFatal(t *testing.T) {
 
 	scraper := newTestScraper(t, ts.URL, DefaultConfig())
 	scraper.cfg.Translate = translate.Config{}
-	info, _ := scraper.MovieInfo(context.Background(), "fanza", "abc")
+	info, _ := scraper.client.MovieInfo(context.Background(), "fanza", "abc", true)
 	result, err := scraper.Apply(context.Background(), movie, info, ApplyOptions{Provider: "fanza", ID: "abc", Overwrite: true})
 	if err != nil {
 		t.Fatalf("图片失败不应让刮削整体失败: %v", err)

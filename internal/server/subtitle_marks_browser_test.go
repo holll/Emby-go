@@ -49,7 +49,7 @@ func TestSubtitleMarksBrowser(t *testing.T) {
 				// No MetaTube configuration: this organizer is strictly local.
 				beforeFiles := scrapeBrowserFiles(t, media)
 				beforeVersion := app.db.Version("g:version")
-				if _, err := app.db.CreateUser("subtitle-viewer", "password-1234", false); err != nil {
+				if _, err := createFixtureUser(t, app, "subtitle-viewer", "password-1234", false); err != nil {
 					t.Fatal(err)
 				}
 				resp, login := embyCall(t, setup, "POST", "/Users/AuthenticateByName", "", `{"Username":"subtitle-viewer","Pw":"password-1234"}`)

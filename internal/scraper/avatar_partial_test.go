@@ -85,7 +85,7 @@ func TestAvatarSavedOutputReportsNFOAndIndexFailures(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var result AvatarResult
-			progress, err := s.RunAvatarsFor(ctx, []string{actor}, nil, func(r AvatarResult) {
+			progress, err := s.RunAvatars(ctx, lib.ID, 0, nil, func(r AvatarResult) {
 				result = r
 				if mode == "canceled" {
 					cancel()

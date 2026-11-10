@@ -82,11 +82,11 @@ func spriteJoin(t *testing.T, a *App) spriteStatus {
 }
 func TestSpritesPermissionsStrictInputsAndIdentity(t *testing.T) {
 	f := artworkFixture(t)
-	u, err := f.a.db.CreateUser("sprite-reader", "password-123", false)
+	u, err := createFixtureUser(t, f.a, "sprite-reader", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("sprite-reader", u.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "sprite-reader", u.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range []struct{ method, path string }{{"GET", "capabilities"}, {"GET", "status"}, {"POST", "run"}, {"POST", "cancel"}} {
@@ -213,11 +213,11 @@ func TestSpritesNativeProtocolWebImagesAndAccess(t *testing.T) {
 	if head.Code != 200 || head.Body.Len() != 0 {
 		t.Fatalf("head %d len%d", head.Code, head.Body.Len())
 	}
-	u, err := f.a.db.CreateUser("sprites-denied", "password-123", false)
+	u, err := createFixtureUser(t, f.a, "sprites-denied", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("sprites-denied", u.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "sprites-denied", u.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{base + "/ThumbnailSet", base + "/Images/Thumbnail?PositionTicks=0", bifPath, fmt.Sprintf("/api/items/%d/sprites", f.movie), web.Sheets[0].URL} {

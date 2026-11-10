@@ -790,44 +790,6 @@ func (a *App) backfillFromMediaInfo(target probeTarget, file mediaInfoFile) bool
 	return true
 }
 
-// probeFailure 记录一次失败：累计计数、留存样例、输出日志，并追踪连续失败次数。
-//
-// 日志必须打——失败详情只回给管理端 API 的话，运维在服务日志里什么都看不到，
-// 生产上出现「几千条全失败」时无从归因。这里对条数做限流，避免刷爆日志。
-func (a *App) probeFailure(movie store.Movie, reason string) {
-	a.probeTaskMu.Lock()
-	status := &a.probeStatus
-	status.Failed++
-	status.consecutiveFailures++
-	if len(status.Failures) < maxProbeFailures {
-		// reason 由调用方带上「标题/分段名：」前缀，这里不再重复拼接。
-		status.Failures = append(status.Failures, reason)
-	}
-	shouldLog := status.failureLogged < maxProbeFailureLogs
-	if shouldLog {
-		status.failureLogged++
-	}
-	total, consecutive := status.Failed, status.consecutiveFailures
-	// 刚达到熔断阈值：顺手取消本轮的 context，把还在跑的 ffprobe 一并杀掉。
-	// 否则任务要等这些进程各自超时（可长达 probe_timeout）才结束，白等一场。
-	tripped := consecutive == maxProbeConsecutiveFailures && a.probeCancel != nil
-	cancel := a.probeCancel
-	a.probeTaskMu.Unlock()
-
-	if tripped {
-		slog.Warn("媒体信息探测触发熔断：连续失败过多，中止任务", "consecutive", consecutive, "failed", total, "reason", reason)
-		cancel()
-	}
-
-	switch {
-	case shouldLog:
-		slog.Warn("媒体信息探测失败", "title", movie.Title, "strm", movie.SourcePath, "reason", reason, "failed", total)
-	case total%500 == 0:
-		// 长时间持续失败时给出进度级提示，避免日志完全静默。
-		slog.Warn("媒体信息探测持续失败", "failed", total, "consecutive", consecutive, "last_reason", reason)
-	}
-}
-
 func (a *App) setProbeCurrent(title string) {
 	a.probeTaskMu.Lock()
 	a.probeStatus.Current = title

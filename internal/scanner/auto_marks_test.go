@@ -21,7 +21,7 @@ func TestManualScanPreservesAutoMarks(t *testing.T) {
 			if err := s.SetAutoMarks(id, []string{"中文字幕"}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.MarkManual(source, nfoPath); err != nil {
+			if err := s.MarkIndexedManual(source, nfoPath); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Remove(nfoPath); err != nil {
@@ -29,7 +29,7 @@ func TestManualScanPreservesAutoMarks(t *testing.T) {
 			}
 			switch mode {
 			case "full":
-				_, err = Scan(s, lib)
+				_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 			case "incremental":
 				_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 			case "rescan":
@@ -62,7 +62,7 @@ func TestScanPreservesAutoMarksWithoutInferringOwnership(t *testing.T) {
 				var err error
 				switch mode {
 				case "full":
-					_, err = Scan(s, lib)
+					_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 				case "incremental":
 					_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 				case "rescan":
@@ -105,7 +105,7 @@ func TestScanPreservesAutoMarksWithoutInferringOwnership(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Scan(rebuilt, rebuiltLib); err != nil {
+			if _, err := ScanWithOptions(context.Background(), rebuilt, rebuiltLib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 				t.Fatal(err)
 			}
 			rebuiltID, err := rebuilt.MovieIDByPath(source)

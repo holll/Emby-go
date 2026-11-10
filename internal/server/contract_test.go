@@ -232,7 +232,7 @@ func TestContractPlaybackInfo(t *testing.T) {
 func TestPlaybackURLAuthentication(t *testing.T) {
 	app, ts, token := contractEnv(t)
 	escapedToken := "playback+token&with=special?chars"
-	if err := app.db.SaveAccessToken(escapedToken); err != nil {
+	if err := saveFixtureSession(t, app, escapedToken, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
@@ -300,7 +300,7 @@ func assertPlayableURL(t *testing.T, ts *httptest.Server, path string) {
 func TestCachedMediaURLsUseCurrentToken(t *testing.T) {
 	app, ts, token := contractEnv(t)
 	otherToken := "second+session&token"
-	if err := app.db.SaveAccessToken(otherToken); err != nil {
+	if err := saveFixtureSession(t, app, otherToken, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/Users/1/Items/1", "/Users/1/Items?Fields=MediaSources"} {

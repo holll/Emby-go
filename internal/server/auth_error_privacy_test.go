@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const privateAuthBody = `{"Username":"private-admin-canary","Pw":"private-password-canary"}`
@@ -46,7 +47,7 @@ func TestAuthenticationClosedStoreErrorsArePrivate(t *testing.T) {
 
 func TestAuthenticationPasswordReadFailureIsPrivateAndRecoverable(t *testing.T) {
 	a, legacy, path := authorityApp(t)
-	if err := a.db.InitializeAdministrator("private-admin-canary", "private-password-canary"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "private-admin-canary", "private-password-canary"); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)")
@@ -74,7 +75,7 @@ CREATE VIEW users AS SELECT id,name,NULL AS password_hash,is_admin,created_at,up
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil || response.AccessToken == "" {
 		t.Fatalf("retry=%d body=%s", w.Code, w.Body.String())
 	}
-	if valid, err := a.db.HasAccessToken(response.AccessToken); err != nil || !valid {
+	if _, valid, err := a.db.ValidateAccessTokenUser(response.AccessToken, time.Now(), 0); err != nil || !valid {
 		t.Fatalf("token not persisted: %v", err)
 	}
 	if legacy.calls.Load() != 0 {
@@ -123,7 +124,7 @@ func TestAuthenticationWriteFailuresRemainPrivate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			a, _, path := authorityApp(t)
 			if !initializing {
-				if err := a.db.InitializeAdministrator("private-admin-canary", "private-password-canary"); err != nil {
+				if err := initializeFixtureAdministrator(t, a, "private-admin-canary", "private-password-canary"); err != nil {
 					t.Fatal(err)
 				}
 			}

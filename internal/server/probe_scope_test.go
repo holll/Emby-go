@@ -77,7 +77,7 @@ func TestProbeAllPreservesNFOLibraryAndLegacyEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	scanOnce(t, ts, token)
-	if err := app.db.MarkManual(filepath.Join(media, "manual.strm"), filepath.Join(media, "manual.nfo")); err != nil {
+	if err := app.db.MarkIndexedManual(filepath.Join(media, "manual.strm"), filepath.Join(media, "manual.nfo")); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {

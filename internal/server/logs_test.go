@@ -26,7 +26,7 @@ func logsTestApp(t *testing.T) (*App, string) {
 	t.Cleanup(func() { a.Close() })
 	seedOwner(t, a)
 	token := "fixture-admin-token"
-	if err := a.db.SaveAccessTokenForUser(token, 1, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	return a, token

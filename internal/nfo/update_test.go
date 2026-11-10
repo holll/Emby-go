@@ -280,28 +280,15 @@ func TestPreviewHelpers(t *testing.T) {
 	if values["title"] != "旧标题" || values["mpaa"] != "" {
 		t.Errorf("TagPreview = %v", values)
 	}
-	lists, actors, err := ListPreview(path)
+	meta, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lists["genre"]) != 1 || lists["genre"][0] != "旧类型" {
-		t.Errorf("ListPreview genres = %v", lists["genre"])
+	if len(meta.Genres) != 1 || meta.Genres[0] != "旧类型" {
+		t.Errorf("Read genres = %v", meta.Genres)
 	}
-	if len(actors) != 1 || actors[0].Name != "旧演员" {
-		t.Errorf("ListPreview actors = %v", actors)
-	}
-
-	diff := FormatScrapeDiff(values, ScrapeFields{Title: "新标题", Mpaa: "JP-18+"})
-	joined := strings.Join(diff, "\n")
-	if !strings.Contains(joined, "title: 旧标题 → 新标题") {
-		t.Errorf("diff 缺少标题变化: %s", joined)
-	}
-	if !strings.Contains(joined, "mpaa: （空） → JP-18+") {
-		t.Errorf("diff 缺少空值标注: %s", joined)
-	}
-	// 值未变化时不产生 diff 行。
-	if strings.Contains(joined, "year") {
-		t.Errorf("未变化的字段不应出现在 diff: %s", joined)
+	if len(meta.Actors) != 1 || meta.Actors[0].Name != "旧演员" {
+		t.Errorf("Read actors = %v", meta.Actors)
 	}
 }
 

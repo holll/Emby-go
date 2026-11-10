@@ -20,7 +20,7 @@ func TestNFOFIFORejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"ReadFile", "Read", "TagPreview", "ListPreview", "ReadTranslationSnapshot", "UpdateScraped", "UpdateScrapedWithAutoMarks", "SaveFileInfo", "SetActorThumb", "CommitTranslation"} {
+	for _, operation := range []string{"ReadFile", "Read", "TagPreview", "ReadTranslationSnapshot", "UpdateScraped", "UpdateScrapedWithAutoMarks", "SaveFileInfo", "SetActorThumb", "CommitTranslation"} {
 		for _, kind := range []string{"direct", "symlink"} {
 			t.Run(operation+"/"+kind, func(t *testing.T) {
 				// An accidental blocking open must fail this test, not hang the
@@ -90,8 +90,6 @@ func TestNFOSpecialFileChild(t *testing.T) {
 		_, err = Read(path)
 	case "TagPreview":
 		_, err = TagPreview(path, []string{"title"})
-	case "ListPreview":
-		_, _, err = ListPreview(path)
 	case "ReadTranslationSnapshot":
 		_, err = ReadTranslationSnapshot(path)
 	case "UpdateScraped":

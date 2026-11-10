@@ -245,23 +245,6 @@ func (a *App) stopWorkerAdmission() {
 	a.workerGate.mu.Unlock()
 }
 
-// workerAdmissionOpen 报告登记门是否仍开着（测试与断言用）。
-func (a *App) workerAdmissionOpen() bool {
-	a.workerGate.mu.Lock()
-	defer a.workerGate.mu.Unlock()
-	return !a.workerGate.shuttingDown
-}
-
-// waitWorkers 关门后等待全部后台 worker 结束（无预算版本，供 Close 使用）。
-// 关门之后不再有新的 Add，因此 Wait 期间计数只减不增：
-// 关门前已登记的 Add 一定先于 Wait 发生，关门后的登记请求一律被拒 —— 这正是
-// WaitGroup 要求的顺序，故不会触发 misuse panic，也不会漏等。
-// 前提：worker 必须响应 rootCtx 取消，否则这里会一直阻塞（调用方负责给预算）。
-func (a *App) waitWorkers() {
-	a.stopWorkerAdmission()
-	a.workerWG.Wait()
-}
-
 // scanStatus 管理端可轮询的扫描进度快照。
 type scanStatus struct {
 	InstanceID    string `json:"instance_id"`

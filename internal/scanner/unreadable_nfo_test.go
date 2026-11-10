@@ -31,7 +31,7 @@ func TestScanPreservesIndexedMetadataWhenNFOUnreadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := s.MovieIDByPath(source)
@@ -49,7 +49,9 @@ func TestScanPreservesIndexedMetadataWhenNFOUnreadable(t *testing.T) {
 		{"incremental", func() (Result, error) {
 			return ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 		}},
-		{"full", func() (Result, error) { return Scan(s, lib) }},
+		{"full", func() (Result, error) {
+			return ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
+		}},
 	}
 	for _, mode := range modes {
 		t.Run(mode.name, func(t *testing.T) {
@@ -123,7 +125,7 @@ func TestScanIndexesNewSourceWithUnreadableNFOAsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

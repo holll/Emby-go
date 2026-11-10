@@ -27,7 +27,7 @@ func TestIncrementalDetectsContentChangeWithSameStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(source)
@@ -71,7 +71,7 @@ func TestIncrementalCDGroupMergeAndSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	movies := visible(t, s)
@@ -133,7 +133,7 @@ func TestIncrementalRebuildsAfterExternalIndexWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: source, Title: "External", Status: "success"}, 1, time.Unix(1, 0), nil); err != nil {

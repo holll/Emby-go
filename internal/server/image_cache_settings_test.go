@@ -42,11 +42,11 @@ func imageCacheSnapshotOf(t *testing.T, a *App, token string) imageCacheSettings
 func TestImageCacheSettingsAuthorizationValidationAndPersistence(t *testing.T) {
 	f := newAdminDeleteFixture(t)
 	f.a.startupWG.Wait()
-	reader, err := f.a.db.CreateUser("cache-reader", "test-password", false)
+	reader, err := createFixtureUser(t, f.a, "cache-reader", "test-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("cache-reader", reader.ID, time.Now().Add(time.Hour)); err != nil {
+	if err = saveFixtureSession(t, f.a, "cache-reader", reader.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, method := range []string{"GET", "POST"} {
@@ -118,7 +118,7 @@ func TestImageCacheSettingsUsageAndTrim(t *testing.T) {
 	f := newAdminDeleteFixture(t)
 	f.a.startupWG.Wait()
 	for _, key := range []string{"usage-a", "usage-b", "usage-c"} {
-		path := f.a.imgDisk.PathFor(key)
+		path := filepath.Join(f.a.imgDisk.Dir(), "fixture", key+".webp")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -156,10 +156,10 @@ func TestImageCacheSettingsDisabledAndCorruptFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer disabled.Close()
-	if err := disabled.db.InitializeAdministrator("admin", "fixture-pass-123"); err != nil {
+	if err := initializeFixtureAdministrator(t, disabled, "admin", "fixture-pass-123"); err != nil {
 		t.Fatal(err)
 	}
-	if err := disabled.db.SaveAccessToken("fixture-admin-delete"); err != nil {
+	if err := saveFixtureSession(t, disabled, "fixture-admin-delete", 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := imageCacheSnapshotOf(t, disabled, "fixture-admin-delete"); got.Enabled || got.Dir != "" {
@@ -179,10 +179,10 @@ func TestImageCacheSettingsDisabledAndCorruptFallback(t *testing.T) {
 		t.Fatalf("corrupt setting blocked startup: %v", err)
 	}
 	defer reopened.Close()
-	if err := reopened.db.InitializeAdministrator("admin", "fixture-pass-123"); err != nil {
+	if err := initializeFixtureAdministrator(t, reopened, "admin", "fixture-pass-123"); err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.db.SaveAccessToken("fixture-admin-delete"); err != nil {
+	if err := saveFixtureSession(t, reopened, "fixture-admin-delete", 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := imageCacheSnapshotOf(t, reopened, "fixture-admin-delete"); got.MaxBytes != int64(2)<<30 {

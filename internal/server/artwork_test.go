@@ -42,11 +42,11 @@ func artworkBody(id int64) string { return fmt.Sprintf(`{"mode":"screenshot","mo
 
 func TestArtworkPermissionsAndParameterPresence(t *testing.T) {
 	f := artworkFixture(t)
-	user, err := f.a.db.CreateUser("artwork-user", "password-123", false)
+	user, err := createFixtureUser(t, f.a, "artwork-user", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("artwork-ordinary", user.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "artwork-ordinary", user.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, route := range []struct{ method, path string }{{"POST", "run"}, {"GET", "status"}, {"POST", "cancel"}, {"GET", "capabilities"}, {"GET", "candidates"}} {

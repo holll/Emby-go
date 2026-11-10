@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func TestWriteStackedNFOAndRescan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanner.Scan(db, lib); err != nil {
+	if _, err := scanner.ScanWithOptions(context.Background(), db, lib, scanner.ScanOptions{Mode: scanner.ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.MovieIDByPath(source)

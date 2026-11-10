@@ -63,7 +63,7 @@ func TestAvatarBreakerThresholdResetAndCancellationIdentity(t *testing.T) {
 			defer cancel()
 			var last Progress
 			var items []AvatarResult
-			progress, err := s.RunAvatarsFor(ctx, names, func(p Progress) { last = p }, func(item AvatarResult) {
+			progress, err := s.runAvatars(ctx, names, func(p Progress) { last = p }, func(item AvatarResult) {
 				items = append(items, item)
 				if (mode == "cancel" || mode == "partial_cancel") && last.Consecutive == MaxConsecutiveFailures {
 					cancel()

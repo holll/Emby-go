@@ -44,7 +44,9 @@ func TestIndexedPlayedValuesAndDomains(t *testing.T) {
 				other, _ := f.s.DataUser(1, f.survivor)
 				for _, played := range []bool{true, true, false, false} {
 					versions := indexedDeleteVersions(t, f)
-					if err := f.s.SetIndexedPlayed(f.victim, played); err != nil {
+					if err := snapshotError(f.s.SetIndexedPlayedDataForUser(1,
+
+						f.victim, played)); err != nil {
 						t.Fatal(err)
 					}
 					expected.Played = played
@@ -78,7 +80,9 @@ func TestIndexedPlayedRejectsMissingOrHidden(t *testing.T) {
 			}
 			before := indexSnapshot(t, f.s)
 			versions := indexedDeleteVersions(t, f)
-			if err := f.s.SetIndexedPlayed(id, true); !errors.Is(err, sql.ErrNoRows) {
+			if err := snapshotError(f.s.SetIndexedPlayedDataForUser(1,
+
+				id, true)); !errors.Is(err, sql.ErrNoRows) {
 				t.Fatalf("error=%v", err)
 			}
 			if indexSnapshot(t, f.s) != before {
@@ -108,7 +112,9 @@ CREATE TRIGGER fail_played AFTER UPDATE ON userdata BEGIN INSERT INTO played_chi
 			}
 			before := indexSnapshot(t, f.s)
 			versions := indexedDeleteVersions(t, f)
-			if err := f.s.SetIndexedPlayed(f.victim, true); err == nil {
+			if err := snapshotError(f.s.SetIndexedPlayedDataForUser(1,
+
+				f.victim, true)); err == nil {
 				t.Fatal("injected failure accepted")
 			}
 			if indexSnapshot(t, f.s) != before {
@@ -130,7 +136,9 @@ CREATE TRIGGER fail_played AFTER UPDATE ON userdata BEGIN INSERT INTO played_chi
 			if _, err := f.s.db.Exec("DROP TRIGGER fail_played"); err != nil {
 				t.Fatal(err)
 			}
-			if err := f.s.SetIndexedPlayed(f.victim, true); err != nil {
+			if err := snapshotError(f.s.SetIndexedPlayedDataForUser(1,
+
+				f.victim, true)); err != nil {
 				t.Fatal(err)
 			}
 			assertIndexedDeleteVersions(t, f, versions, true)

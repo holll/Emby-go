@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -50,7 +51,7 @@ func TestManualEditCreatesSharedStackedNFO(t *testing.T) {
 				wantPath = filepath.Join(media, "GOPJ-559-CD1.nfo")
 				writeFile(t, wantPath, `<movie><title>Legacy</title></movie>`)
 			}
-			if _, err := scanner.Scan(app.db, lib); err != nil {
+			if _, err := scanner.ScanWithOptions(context.Background(), app.db, lib, scanner.ScanOptions{}, nil); err != nil {
 				t.Fatal(err)
 			}
 			id, err := app.db.MovieIDByPath(source)

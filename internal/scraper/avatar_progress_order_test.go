@@ -80,7 +80,7 @@ func TestAvatarConcurrentProgressDeliveryIsOrdered(t *testing.T) {
 	var resultErr error
 	go func() {
 		defer close(finished)
-		progress, resultErr = s.RunAvatarsFor(ctx, names, func(p Progress) {
+		progress, resultErr = s.runAvatars(ctx, names, func(p Progress) {
 			enter()
 			defer active.Add(-1)
 			if calls.Add(1) == 1 {
@@ -173,7 +173,7 @@ func TestAvatarConcurrentProgressDeliveryIsOrdered(t *testing.T) {
 
 func TestAvatarConcurrentPartialAggregationWithoutCallbacks(t *testing.T) {
 	s, _, names := concurrentAvatarFixture(t, 32, 32)
-	p, err := s.RunAvatarsFor(context.Background(), names, nil, nil)
+	p, err := s.runAvatars(context.Background(), names, nil, nil)
 	if !errors.Is(err, ErrAvatarWriteIncomplete) || p.Done != 32 || p.Total != 32 || p.Failed != 32 || p.Success != 0 || p.Consecutive != 0 {
 		t.Fatalf("progress=%+v err=%v", p, err)
 	}

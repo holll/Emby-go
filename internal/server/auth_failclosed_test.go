@@ -1,6 +1,7 @@
 package server
 
 import (
+	"emby-go/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,14 +23,14 @@ func TestAuthFailsClosedWhenTokenUserIsGone(t *testing.T) {
 	defer a.Close()
 	seedOwner(t, a)
 	const token = "orphan-session"
-	u, err := a.db.CreateUser("deleted-viewer", "viewer-password-1", false)
+	u, err := createFixtureUser(t, a, "deleted-viewer", "viewer-password-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.SaveAccessTokenForUser(token, u.ID, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, a, token, u.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.DeleteUser(u.ID); err != nil {
+	if err := a.db.AdminDeleteUser(1, u.ID, fixtureAdminProof(t, a, 1)); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
@@ -48,14 +49,14 @@ func TestAuthDoesNotFallBackToLegacyAdministratorPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if err := a.db.InitializeAdministrator("admin", "old-password-123"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "admin", "old-password-123"); err != nil {
 		t.Fatal(err)
 	}
 	u, err := a.db.UserByID(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.SetUserPassword(u.ID, "new-password-456"); err != nil {
+	if err := updateFixtureUser(t, a, u.ID, store.AdminUserUpdate{Password: fixtureValue("new-password-456")}); err != nil {
 		t.Fatal(err)
 	}
 	login := func(pw string) int {

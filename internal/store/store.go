@@ -42,10 +42,6 @@ type Store struct {
 	// It is a FIFO, context-aware channel semaphore (writerGate) rather than a
 	// sync.Mutex so waiters queue fairly and abandon the wait on ctx.Done (P2-13).
 	writeMu writerGate
-	// testDeleteMissingSourcesHook 仅测试使用（生产恒为 nil）：在
-	// DeleteMissingSources 的写事务内、清点 missing 之后、删除之前执行，用来
-	// 确定性地注入"并发 IndexMovie 刚好落在清点与删除之间"的时序。
-	testDeleteMissingSourcesHook func() error
 }
 
 // visibleCountSnapshot 是 visibleMovieCount 的发布单元：version 与 count 同属
@@ -151,7 +147,7 @@ func Open(path string) (*Store, error) {
 	if n, err := strconv.ParseInt(version, 10, 64); err == nil {
 		s.gversion.Store(n)
 	}
-	// 存量库回填相似度倒排特征（此后由 UpsertMovie / ReplaceActors 增量维护）。
+	// 存量库回填相似度倒排特征（此后由 IndexMovie 增量维护）。
 	// 放后台跑：两万部的库回填要十几秒，不能让启动卡在这里；回填期间相似推荐
 	// 只是结果偏少，不会报错。测试用 waitFeaturesReady 等它结束。
 	s.featuresReady = make(chan struct{})
@@ -272,53 +268,10 @@ func (s *Store) InitializeAdministrator(username, password string) error {
 	})
 }
 
-func (s *Store) AuthenticateAdministrator(username, password string) (bool, error) {
-	u, ok, err := s.AuthenticateUser(username, password)
-	if err != nil {
-		return false, err
-	}
-	return ok && u.IsAdmin, nil
-}
-
 func (s *Store) AdministratorName() (string, error) {
 	var username string
 	err := s.db.QueryRow("SELECT name FROM users WHERE id=1").Scan(&username)
 	return username, err
-}
-
-func (s *Store) SaveAccessToken(token string) error {
-	return s.SaveAccessTokenForUser(token, 1, time.Time{})
-}
-
-// SaveAccessTokenExpiring 保存登录会话并写入过期时间；expiresAt 为零值时不过期。
-// 与 SaveAccessToken 共存：后者服务于历史/测试夹具（NULL=不过期）。
-func (s *Store) SaveAccessTokenExpiring(token string, expiresAt time.Time) error {
-	return s.SaveAccessTokenForUser(token, 1, expiresAt)
-}
-
-// ValidateAccessToken 校验会话是否有效：无行=false；过期=删除并 false；
-// 剩余不足 ttl-24h 时滑动续期（写失败不影响本次认证，避免把续期故障放大成 401）。
-// expires_at 为 NULL（TTL=0 或无法回填的旧行）时视为不过期。
-func (s *Store) ValidateAccessToken(token string, now time.Time, ttl time.Duration) (bool, error) {
-	_, valid, err := s.ValidateAccessTokenUser(token, now, ttl)
-	return valid, err
-}
-
-// RevokeAllAccessTokens 让所有登录会话立即失效；API 密钥不在删除范围内。
-func (s *Store) RevokeAllAccessTokens() (int64, error) {
-	var count int64
-	err := s.writeTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec("UPDATE users SET auth_generation=auth_generation+1"); err != nil {
-			return err
-		}
-		result, err := tx.Exec("DELETE FROM access_tokens")
-		if err != nil {
-			return err
-		}
-		count, err = result.RowsAffected()
-		return err
-	})
-	return count, err
 }
 
 // DeleteAccessToken revokes only the supplied login session. It is idempotent
@@ -346,14 +299,6 @@ func isTokenHash(v string) bool {
 		}
 	}
 	return true
-}
-
-func (s *Store) HasAccessToken(token string) (bool, error) {
-	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM access_tokens WHERE token=?", tokenHash(token)).Scan(&count); err != nil {
-		return false, err
-	}
-	return count == 1, nil
 }
 
 // apiKeyHash 是 API 密钥的摘要（密钥本身为 192 位随机值，SHA-256 足够）。
@@ -391,45 +336,6 @@ func (s *Store) APIKeys() ([]APIKey, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) CreateAPIKey(name string) (APIKey, error) {
-	return s.CreateAPIKeyForUser(name, 1)
-}
-
-func (s *Store) CreateAPIKeyForUser(name string, userID int64) (APIKey, error) {
-	key, hash, prefix, err := newAPIKeyCredential()
-	if err != nil {
-		return APIKey{}, err
-	}
-	stable, err := newAPIKeyStableID()
-	if err != nil {
-		return APIKey{}, err
-	}
-	v := APIKey{ID: APIKeyPublicID(stable), Key: key, KeyPrefix: prefix, Name: strings.TrimSpace(name),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339), Version: 1}
-	_, err = s.db.Exec("INSERT INTO api_keys(key,key_hash,key_prefix,name,created_at,user_id,stable_id,version) VALUES(?,?,?,?,?,?,?,1)",
-		hash, hash, v.KeyPrefix, v.Name, v.CreatedAt, userID, stable)
-	return v, err
-}
-
-func (s *Store) DeleteAPIKey(id string) error {
-	// 同时接受稳定 ID、摘要 ID 与旧明文，便于升级前已打开的页面继续工作。
-	if err := s.DeleteAPIKeyByVersion(id, 0); err != nil {
-		if errors.Is(err, ErrAPIKeyNotFound) {
-			return sql.ErrNoRows
-		}
-		return err
-	}
-	return nil
-}
-
-func (s *Store) HasAPIKey(key string) (bool, error) {
-	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM api_keys WHERE key_hash=? OR key=?", apiKeyHash(key), key).Scan(&count); err != nil {
-		return false, err
-	}
-	return count == 1, nil
 }
 
 func (s *Store) AddLibrary(name, path string) (Library, error) {
@@ -636,25 +542,6 @@ func (s *Store) SetKV(key, value string) error {
 	return err
 }
 
-func (s *Store) UpsertMovie(m Movie, size int64, mtime time.Time) (int64, error) {
-	var id int64
-	err := s.writeTx(func(tx *sql.Tx) error {
-		var err error
-		id, err = upsertMovieTx(tx, m, size, mtime)
-		if err != nil {
-			return err
-		}
-		if err := invalidateMovieScanStateTx(tx, m); err != nil {
-			return err
-		}
-		return refreshFeaturesTx(tx, id)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
-}
-
 // upsertMovieTx only writes metadata. The caller refreshes features after all
 // related actor changes, and owns commit/rollback and version publication.
 func upsertMovieTx(tx *sql.Tx, m Movie, size int64, mtime time.Time) (int64, error) {
@@ -777,7 +664,7 @@ func (s *Store) ensureFeatures() error {
 		return errFeaturesBackfillCanceled
 	}
 	// 标记落库：中途失败时下次启动会重跑，部分完成也不会让特征表半死不活
-	//（未标记时 UpsertMovie 仍会增量维护）。
+	//（未标记时 IndexMovie 仍会增量维护）。
 	return s.SetKV("features:ready", featureBuildVersion)
 }
 
@@ -843,7 +730,7 @@ func refreshFeaturesTx(tx *sql.Tx, movieID int64) error {
 	}
 
 	// 去重后与现有特征比对：一致就什么都不写。
-	// 扫库会对每部影片都走一遍 UpsertMovie，逐部无脑重写特征会让一次全库扫描多出
+	// 扫库会对每部影片都走一遍 IndexMovie，逐部无脑重写特征会让一次全库扫描多出
 	// 几十万条写语句；比对只需一次读。
 	next := make(map[string]int, len(features))
 	for _, item := range features {
@@ -1075,26 +962,6 @@ func (s *Store) MovieIDByPath(path string) (int64, error) {
 	return id, err
 }
 
-func (s *Store) DeleteMovie(id int64) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		if err := invalidateMovieScanStateByIDTx(tx, id); err != nil {
-			return err
-		}
-		result, err := tx.Exec("DELETE FROM movies WHERE id=?", id)
-		if err != nil {
-			return err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if count == 0 {
-			return sql.ErrNoRows
-		}
-		return nil
-	})
-}
-
 // DeleteLibrary 删除媒体库及其影片索引（仅删库内记录，不触碰磁盘文件）。
 // userdata / movie_actors 通过外键 ON DELETE CASCADE 随影片一并清理。
 //
@@ -1119,30 +986,6 @@ func (s *Store) DeleteLibrary(id int64) error {
 			return sql.ErrNoRows
 		}
 		return nil
-	})
-}
-
-// DeleteMissingSources retains the legacy no-version contract (it never bumps
-// versions). Scan uses ReconcileMissingSources to atomically publish the
-// authoritative inventory.
-//
-// P2-8：清点 missing 与删除必须在同一个 writeTx 内完成（照 ReconcileMissingSources
-// / index_delete.go 的写法）。此前先在事务外用 s.db 无锁读一份 missing 列表，
-// 再开事务按路径删除：并发的 IndexMovie 落在两者之间时，会把刚重建的行（连同
-// userdata / movie_actors）一起删掉。代价是空 inventory 也要占一次写事务（与
-// ReconcileMissingSources 一致），换来清点与删除共享同一快照 + busy 重试重算。
-func (s *Store) DeleteMissingSources(libraryID int64, paths map[string]struct{}) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		missing, err := missingSourcePaths(tx, libraryID, paths)
-		if err != nil {
-			return err
-		}
-		if s.testDeleteMissingSourcesHook != nil {
-			if err := s.testDeleteMissingSourcesHook(); err != nil {
-				return err
-			}
-		}
-		return deleteSourcePathsTx(tx, libraryID, missing)
 	})
 }
 
@@ -1176,23 +1019,9 @@ func (s *Store) Movie(id int64) (Movie, error) {
 	return movieScan(row)
 }
 
-func (s *Store) SearchFiltered(userID, libraryID int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.SearchFilteredVisible(userID, libraryID, nil, term, years, genre, unplayed, sortBy, desc, limit, offset)
-}
-
 // SearchFilteredVisible 与 SearchFiltered 相同，并按用户可见媒体库集合过滤（nil=不限制）。
 func (s *Store) SearchFilteredVisible(userID, libraryID int64, visible []int64, term, years, genre string, unplayed bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
 	return s.search(userID, libraryID, visible, term, "", years, genre, "", "", "", "", "", unplayed, false, sortBy, desc, limit, offset, "")
-}
-
-// SearchScoped 供合集上下文检索：collection="*" 限定“属于任一合集”，
-// 非空串限定为某个具体合集，空串表示不限合集。
-func (s *Store) SearchScoped(userID, libraryID int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(userID, libraryID, nil, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset, "")
-}
-
-func (s *Store) SearchAll(libraryID int64, term, status, sortBy string, desc bool, limit, offset int) ([]Movie, int, error) {
-	return s.search(1, libraryID, nil, term, status, "", "", "", "", "", "", "", false, false, sortBy, desc, limit, offset, "")
 }
 
 // AdminQuery 管理端列表（媒体墙）的查询条件。
@@ -1605,57 +1434,12 @@ func (s *Store) ActorAvatar(name string) (ActorRef, error) {
 	return actor, err
 }
 
-// SetActorAvatar 只更新头像索引（供头像任务写入，不动影片-演员关系）。
-// tag 为空表示暂无本地副本，此时保留原有标识不变。
-func (s *Store) SetActorAvatar(name, url, tag string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	return s.writeTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(actorAvatarUpsertSQL, name, url, tag, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			return err
-		}
-		return invalidateActorScanStateTx(tx, name)
-	})
-}
-
 // b2i 把布尔值转成 SQLite 的 0/1。
 func b2i(v bool) int {
 	if v {
 		return 1
 	}
 	return 0
-}
-
-// SavePlaybackForUser 只写指定账户的播放相关列。播放上报与各 setter 各写各的列，
-// 避免「读整行→改一列→写回整行」时用旧值覆盖并发的收藏/评分变更。
-// 服务端播放上报走 RecordPlaybackEvent 的会话/事件事务；此方法供导入与测试播种。
-func (s *Store) SavePlaybackForUser(userID, id, positionTicks, playCount int64, lastPlayedAt string, stoppedTicks int64) error {
-	if userID <= 0 {
-		userID = 1
-	}
-	_, err := s.db.Exec(`INSERT INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks)
-		VALUES(?,?,?,?,?,?)
-		ON CONFLICT(user_id,movie_id) DO UPDATE SET position_ticks=excluded.position_ticks,play_count=excluded.play_count,
-		last_played_at=excluded.last_played_at,last_stopped_ticks=excluded.last_stopped_ticks`,
-		userID, id, positionTicks, playCount, lastPlayedAt, stoppedTicks)
-	return err
-}
-
-// ReplaceActors 覆盖一部影片的演员关系，并把 NFO 带来的头像地址同步进 actors 表。
-// 传入 avatar 为空时不清空已有头像——扫库多数时候只读到姓名，
-// 不能让一次扫描把头像任务已写入的索引抹掉。
-func (s *Store) ReplaceActors(movieID int64, actors []ActorRef) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		if err := invalidateMovieScanStateByIDTx(tx, movieID); err != nil {
-			return err
-		}
-		if err := replaceActorsTx(tx, movieID, actors); err != nil {
-			return err
-		}
-		return refreshFeaturesTx(tx, movieID)
-	})
 }
 
 func replaceActorsTx(tx *sql.Tx, movieID int64, actors []ActorRef) error {
@@ -1700,11 +1484,6 @@ func (s *Store) Actors(movieID int64) ([]ActorRef, error) {
 		out = append(out, actor)
 	}
 	return out, rows.Err()
-}
-
-// Latest 返回库内最近入库的可见影片（按入库倒序）。
-func (s *Store) Latest(libraryID int64, limit, offset int) ([]Movie, error) {
-	return s.LatestVisible(libraryID, nil, "", limit, offset)
 }
 
 // LatestVisible 按可见库与合集范围过滤后，再取最近入库页（visible=nil 不限库）。
@@ -1752,12 +1531,6 @@ func (s *Store) LatestVisible(libraryID int64, visible []int64, collection strin
 		out = append(out, m)
 	}
 	return out, rows.Err()
-}
-
-// Resumed 返回有播放进度且未隐藏续播的可见影片（按标题排序，与列表口径一致），
-// 供「继续观看」直接分页，避免全量载入后在内存里过滤。
-func (s *Store) Resumed(userID int64, limit, offset int) ([]Movie, int, error) {
-	return s.ResumedVisible(userID, 0, nil, "", limit, offset)
 }
 
 // ResumedVisible 在计数和分页前限定父级及可见库（visible=nil 不限库）。
@@ -1821,28 +1594,6 @@ func (s *Store) CountByStatus(status string) (int, error) {
 	return count, err
 }
 
-// MarkManual 把一条影片标记为人工录入，并记录 NFO 路径。
-//
-// 与 UpsertMovie 的区别：只改这两列，不动其它索引字段——调用方（元数据编辑）
-// 紧接着会用 scanner.RescanOne 从 NFO 重建其余字段，重扫会因这条记录已是 manual 而保留分类。
-func (s *Store) MarkManual(sourcePath, nfoPath string) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		var libraryID sql.NullInt64
-		err := tx.QueryRow("UPDATE movies SET status='manual', nfo_path=?, updated_at=? WHERE source_path=? RETURNING library_id",
-			nfoPath, time.Now().UTC().Format(time.RFC3339), sourcePath).Scan(&libraryID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return sql.ErrNoRows
-		}
-		if err != nil {
-			return err
-		}
-		if libraryID.Valid {
-			return InvalidateScanGroupsForPathsTx(tx, libraryID.Int64, []string{sourcePath})
-		}
-		return nil
-	})
-}
-
 // 扫描器据此在重建索引时保留人工录入分类：一次扫描只查一次，
 // 避免逐文件回查（两万部的库逐条 SELECT 会明显拖慢扫库）。
 func (s *Store) ManualSourcePaths(libraryID int64) (map[string]bool, error) {
@@ -1875,96 +1626,6 @@ func splitTerms(value string) []string {
 		}
 	}
 	return out
-}
-
-// distinctStrings 对可见影片某 JSON 列（genres/tags/studios）做去重。
-// collection："" 不限；"*" 限定“属于任一合集”；其它值限定具体合集。
-func (s *Store) distinctStrings(libraryID int64, collection, column string) ([]string, error) {
-	query := "SELECT COALESCE(" + column + ",'') FROM movies WHERE status IN ('success','manual')"
-	args := []any{}
-	if libraryID > 0 {
-		query += " AND library_id=?"
-		args = append(args, libraryID)
-	}
-	if collection == "*" {
-		query += " AND COALESCE(collection,'') <> ''"
-	} else if collection != "" {
-		query += " AND collection=?"
-		args = append(args, collection)
-	}
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	seen := make(map[string]struct{})
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, err
-		}
-		for _, v := range parseStrings(raw) {
-			if v = strings.TrimSpace(v); v != "" {
-				seen[v] = struct{}{}
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(seen))
-	for name := range seen {
-		out = append(out, name)
-	}
-	return out, nil
-}
-
-// Genres 返回可见影片的流派名集合（可按媒体库/合集范围过滤）。
-func (s *Store) Genres(libraryID int64, collection string) ([]string, error) {
-	return s.distinctStrings(libraryID, collection, "genres")
-}
-
-// Tags 返回可见影片的标签名集合（可按媒体库/合集范围过滤）。
-func (s *Store) Tags(libraryID int64, collection string) ([]string, error) {
-	return s.distinctStrings(libraryID, collection, "tags")
-}
-
-// Studios 返回可见影片的制片商集合（可按媒体库/合集范围过滤）。
-func (s *Store) Studios(libraryID int64, collection string) ([]string, error) {
-	return s.distinctStrings(libraryID, collection, "studios")
-}
-
-// Persons 返回可见影片涉及的演员名集合（可按媒体库/合集范围过滤）。
-func (s *Store) Persons(libraryID int64, collection string) ([]string, error) {
-	query := `SELECT DISTINCT ma.actor_name FROM movie_actors ma
-		JOIN movies ON movies.id=ma.movie_id
-		WHERE movies.status IN ('success','manual')`
-	args := []any{}
-	if libraryID > 0 {
-		query += " AND movies.library_id=?"
-		args = append(args, libraryID)
-	}
-	if collection == "*" {
-		query += " AND COALESCE(movies.collection,'') <> ''"
-	} else if collection != "" {
-		query += " AND movies.collection=?"
-		args = append(args, collection)
-	}
-	query += " ORDER BY ma.actor_name"
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out = append(out, name)
-	}
-	return out, rows.Err()
 }
 
 // Collections 返回可见影片去重后的合集名（来自 NFO <set><name>）。
@@ -2077,76 +1738,6 @@ type CollectionStat struct {
 	Genres []string
 }
 
-// CollectionStats 批量返回各合集的聚合信息，供合集列表一次取回，
-// 避免逐项调 CollectionSummary/CollectionPoster 造成的 N+1 查询。
-// minMovies 与 Collections 同义：低于该影片数的合集不返回。
-func (s *Store) CollectionStats(minMovies int) (map[string]CollectionStat, error) {
-	if minMovies < 1 {
-		minMovies = 1
-	}
-	rows, err := s.db.Query(`SELECT m1.collection, COUNT(*),
-		COALESCE((SELECT m2.poster_path FROM movies m2
-			WHERE m2.collection=m1.collection AND m2.status IN ('success','manual') AND m2.poster_path<>''
-			ORDER BY m2.id DESC LIMIT 1),'')
-		FROM movies m1
-		WHERE m1.status IN ('success','manual') AND COALESCE(m1.collection,'')<>''
-		GROUP BY m1.collection HAVING COUNT(*) >= ?`, minMovies)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[string]CollectionStat)
-	for rows.Next() {
-		var name, poster string
-		var count int
-		if err := rows.Scan(&name, &count, &poster); err != nil {
-			return nil, err
-		}
-		out[name] = CollectionStat{Count: count, Poster: poster}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 流派存在每行的 JSON 列里，单独取两列后在内存聚合去重。
-	rows2, err := s.db.Query(`SELECT collection, COALESCE(genres,'') FROM movies
-		WHERE status IN ('success','manual') AND COALESCE(collection,'')<>''`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows2.Close()
-	genres := make(map[string]map[string]struct{})
-	for rows2.Next() {
-		var name, raw string
-		if err := rows2.Scan(&name, &raw); err != nil {
-			return nil, err
-		}
-		for _, g := range parseStrings(raw) {
-			if g = strings.TrimSpace(g); g != "" {
-				if genres[name] == nil {
-					genres[name] = make(map[string]struct{})
-				}
-				genres[name][g] = struct{}{}
-			}
-		}
-	}
-	if err := rows2.Err(); err != nil {
-		return nil, err
-	}
-	for name, set := range genres {
-		stat, ok := out[name]
-		if !ok {
-			// 影片数不足最低阈值的合集已被上面的 HAVING 过滤掉，
-			// 这里不能再以零值补回 map（否则列表里会冒出 Count=0 的合集）。
-			continue
-		}
-		for g := range set {
-			stat.Genres = append(stat.Genres, g)
-		}
-		out[name] = stat
-	}
-	return out, nil
-}
-
 // CollectionStatsVisible aggregates only granted libraries. nil means unrestricted;
 // a non-nil empty slice means no access. Apply the threshold after scoping so
 // private members cannot make an otherwise absent collection appear.
@@ -2212,44 +1803,6 @@ func (s *Store) CollectionStatsVisible(minMovies int, libraryID int64, visible [
 		out[name] = stat
 	}
 	return out, nil
-}
-
-// CollectionSummary 返回合集内可见影片数与该合集聚合出的流派（去重）。
-func (s *Store) CollectionSummary(collection string) (count int, genres []string, err error) {
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM movies
-		WHERE collection=? AND status IN ('success','manual')`, collection).Scan(&count); err != nil {
-		return 0, nil, err
-	}
-	rows, err := s.db.Query(`SELECT COALESCE(genres,'') FROM movies
-		WHERE collection=? AND status IN ('success','manual')`, collection)
-	if err != nil {
-		return count, nil, err
-	}
-	defer rows.Close()
-	seen := make(map[string]struct{})
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return count, nil, err
-		}
-		for _, g := range parseStrings(raw) {
-			if g = strings.TrimSpace(g); g != "" {
-				seen[g] = struct{}{}
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return count, nil, err
-	}
-	for g := range seen {
-		genres = append(genres, g)
-	}
-	return count, genres, nil
-}
-
-// UnplayedInLibrary 统计库内可见且未标记已播的影片数。
-func (s *Store) UnplayedInLibrary(libraryID int64) (int, error) {
-	return s.UnplayedInLibraryUser(1, libraryID)
 }
 
 // UnplayedInLibraryUser 统计指定账户未看的影片数。

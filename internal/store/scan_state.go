@@ -127,34 +127,16 @@ func decodeAdditionalParts(text string) []string {
 	return parts
 }
 
-// CommitScanGroup writes every movie of one logical group, removes records that
-// the new grouping retired, and atomically replaces the baseline. Movies are
-// upserted with the caller's already-read input; no file I/O happens here.
-func (s *Store) CommitScanGroup(libraryID int64, groupKey, fingerprint string, fingerprintVersion int64, outcome string, movies []ScanGroupMovie, sources []ScanGroupSource) (ScanGroupCommitResult, error) {
-	return s.commitScanGroup(context.Background(), Library{ID: libraryID}, false, groupKey, fingerprint, fingerprintVersion, outcome, movies, sources)
-}
-
 // ErrScanLibraryChanged rejects inputs read for a deleted or relocated library.
 var ErrScanLibraryChanged = errors.New("scan library configuration changed")
 
 // ErrScanInventoryChanged rejects stale or incomplete index evidence at cleanup.
 var ErrScanInventoryChanged = errors.New("scan index inventory changed")
 
-func (s *Store) CommitScanGroupChecked(lib Library, groupKey, fingerprint string, fingerprintVersion int64, outcome string, movies []ScanGroupMovie, sources []ScanGroupSource) (ScanGroupCommitResult, error) {
-	return s.CommitScanGroupCheckedContext(context.Background(), lib, groupKey, fingerprint, fingerprintVersion, outcome, movies, sources)
-}
-
 // CommitScanGroupCheckedContext checks cancellation after obtaining the writer
 // and before any irreversible commit; all tentative work rolls back on cancel.
 func (s *Store) CommitScanGroupCheckedContext(ctx context.Context, lib Library, groupKey, fingerprint string, fingerprintVersion int64, outcome string, movies []ScanGroupMovie, sources []ScanGroupSource) (ScanGroupCommitResult, error) {
-	return s.commitScanGroup(ctx, lib, true, groupKey, fingerprint, fingerprintVersion, outcome, movies, sources)
-}
-
-// reserveScanWriterTx acquires SQLite's writer reservation without changing any
-// row, firing row triggers, or advancing business versions. Unlike a version
-// bump, this is also safe for state-only commits and unchanged reconciliation.
-func reserveScanWriterTx(tx *sql.Tx) error {
-	return reserveScanWriterTxContext(context.Background(), tx)
+	return s.commitScanGroup(ctx, lib, groupKey, fingerprint, fingerprintVersion, outcome, movies, sources)
 }
 
 func reserveScanWriterTxContext(ctx context.Context, tx *sql.Tx) error {
@@ -162,16 +144,16 @@ func reserveScanWriterTxContext(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
-func validateScanLibraryTx(tx *sql.Tx, lib Library, checkPath bool) error {
+func validateScanLibraryTx(tx *sql.Tx, lib Library) error {
 	var path string
 	err := tx.QueryRow(`SELECT path FROM libraries WHERE id = ?`, lib.ID).Scan(&path)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && checkPath && path != lib.Path) {
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && path != lib.Path) {
 		return ErrScanLibraryChanged
 	}
 	return err
 }
 
-func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool, groupKey, fingerprint string, fingerprintVersion int64, outcome string, movies []ScanGroupMovie, sources []ScanGroupSource) (ScanGroupCommitResult, error) {
+func (s *Store) commitScanGroup(ctx context.Context, lib Library, groupKey, fingerprint string, fingerprintVersion int64, outcome string, movies []ScanGroupMovie, sources []ScanGroupSource) (ScanGroupCommitResult, error) {
 	libraryID := lib.ID
 	if groupKey == "" || fingerprint == "" || fingerprintVersion <= 0 || len(sources) == 0 {
 		return ScanGroupCommitResult{}, ErrScanInventoryChanged
@@ -209,7 +191,7 @@ func (s *Store) commitScanGroup(ctx context.Context, lib Library, checkPath bool
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := validateScanLibraryTx(tx, lib, checkPath); err != nil {
+		if err := validateScanLibraryTx(tx, lib); err != nil {
 			return err
 		}
 		// A source changing groups retires every overlapping old baseline before
@@ -447,24 +429,11 @@ type ScanReconcileResult struct {
 	DeletedGroups int
 }
 
-// ReconcileScanInventory removes movie rows that the complete group inventory
-// no longer expects, and stale group baselines. Callers must have proved the
-// inventory complete; expected maps every primary source path to its committed
-// movie ID, including preserved manual parts. A zero-change pass obtains a
-// writer reservation but performs no row changes and no version bump.
-func (s *Store) ReconcileScanInventory(libraryID int64, expected map[string]int64, groupKeys []string) (ScanReconcileResult, error) {
-	return s.reconcileScanInventory(context.Background(), Library{ID: libraryID}, false, expected, groupKeys)
-}
-
-func (s *Store) ReconcileScanInventoryChecked(lib Library, expected map[string]int64, groupKeys []string) (ScanReconcileResult, error) {
-	return s.ReconcileScanInventoryCheckedContext(context.Background(), lib, expected, groupKeys)
-}
-
 func (s *Store) ReconcileScanInventoryCheckedContext(ctx context.Context, lib Library, expected map[string]int64, groupKeys []string) (ScanReconcileResult, error) {
-	return s.reconcileScanInventory(ctx, lib, true, expected, groupKeys)
+	return s.reconcileScanInventory(ctx, lib, expected, groupKeys)
 }
 
-func (s *Store) reconcileScanInventory(ctx context.Context, lib Library, checkPath bool, expected map[string]int64, groupKeys []string) (ScanReconcileResult, error) {
+func (s *Store) reconcileScanInventory(ctx context.Context, lib Library, expected map[string]int64, groupKeys []string) (ScanReconcileResult, error) {
 	libraryID := lib.ID
 	if expected == nil {
 		return ScanReconcileResult{}, ErrScanInventoryChanged
@@ -494,7 +463,7 @@ func (s *Store) reconcileScanInventory(ctx context.Context, lib Library, checkPa
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := validateScanLibraryTx(tx, lib, checkPath); err != nil {
+		if err := validateScanLibraryTx(tx, lib); err != nil {
 			return err
 		}
 		staleGroups := make([]string, 0)

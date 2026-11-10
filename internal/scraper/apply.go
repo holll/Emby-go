@@ -69,11 +69,6 @@ type ApplyResult struct {
 	AutoMarksError string
 }
 
-// MovieInfo 取详情（单条手动确认后按 provider:id 重新取，预览不落中间态）。
-func (s *Scraper) MovieInfo(ctx context.Context, provider, id string) (metatube.MovieInfo, error) {
-	return s.client.MovieInfo(ctx, provider, id, true)
-}
-
 // Apply 把指定候选写入 NFO 与图片。
 //
 // 顺序刻意是「先图片后 NFO」：图片尽力而为（失败只记 warn），

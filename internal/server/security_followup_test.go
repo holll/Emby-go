@@ -23,15 +23,15 @@ func TestAdminUserMutationRejectsInFlightRevocation(t *testing.T) {
 		for _, action := range []string{"create", "update", "libraries"} {
 			t.Run(action+strconv.FormatBool(deleted), func(t *testing.T) {
 				a, _, _ := asyncScanFixture(t)
-				actor, err := a.db.CreateUser("secondary-admin", "password-1234", true)
+				actor, err := createFixtureUser(t, a, "secondary-admin", "password-1234", true)
 				if err != nil {
 					t.Fatal(err)
 				}
-				target, err := a.db.CreateUser("target-user", "password-1234", false)
+				target, err := createFixtureUser(t, a, "target-user", "password-1234", false)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := a.db.SaveAccessTokenForUser("parked-session", actor.ID, time.Now().Add(time.Hour)); err != nil {
+				if err := saveFixtureSession(t, a, "parked-session", actor.ID, time.Now().Add(time.Hour)); err != nil {
 					t.Fatal(err)
 				}
 				method, path, body := "PUT", "/api/admin/users/"+strconv.FormatInt(actor.ID, 10), `{"name":"restored-admin","password":"new-password-1234","is_admin":true,"library_ids":[]}`
@@ -46,9 +46,9 @@ func TestAdminUserMutationRejectsInFlightRevocation(t *testing.T) {
 				reader := &passwordIdentityReader{Reader: strings.NewReader(body), beforeRead: func() {
 					var err error
 					if deleted {
-						err = a.db.DeleteUser(actor.ID)
+						err = a.db.AdminDeleteUser(1, actor.ID, fixtureAdminProof(t, a, 1))
 					} else {
-						err = a.db.SetUserAdmin(actor.ID, false)
+						err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(false)})
 					}
 					if err != nil {
 						t.Fatal(err)
@@ -80,18 +80,18 @@ func TestAdminUserMutationRejectsInFlightRevocation(t *testing.T) {
 func TestAdminDeleteUserRejectsStaleContext(t *testing.T) {
 	for _, deleted := range []bool{false, true} {
 		a, _, _ := asyncScanFixture(t)
-		actor, err := a.db.CreateUser("stale-delete-admin", "password-1234", true)
+		actor, err := createFixtureUser(t, a, "stale-delete-admin", "password-1234", true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		victim, err := a.db.CreateUser("delete-victim", "password-1234", false)
+		victim, err := createFixtureUser(t, a, "delete-victim", "password-1234", false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if deleted {
-			err = a.db.DeleteUser(actor.ID)
+			err = a.db.AdminDeleteUser(1, actor.ID, fixtureAdminProof(t, a, 1))
 		} else {
-			err = a.db.SetUserAdmin(actor.ID, false)
+			err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(false)})
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -143,12 +143,12 @@ func TestSimilarUsesOneGrantSnapshot(t *testing.T) {
 	}
 	source := index(public, "snapshot-source")
 	index(secret, "PRIVATE-CANDIDATE")
-	viewer, err := a.db.CreateUser("snapshot-viewer", "password-1234", false)
+	viewer, err := createFixtureUser(t, a, "snapshot-viewer", "password-1234", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	grant := func(ids ...int64) {
-		if err := a.db.SetUserLibraries(viewer.ID, ids); err != nil {
+		if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue(ids)}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -143,7 +143,7 @@ func TestScanExtraBackdropsRebuildAndIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(rebuilt, rebuiltLib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), rebuilt, rebuiltLib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertPaths(rebuilt, []string{tenth})
@@ -165,7 +165,7 @@ func TestScanExtraBackdropsPreservesMetadata(t *testing.T) {
 					t.Fatal(err)
 				}
 				if state == "manual" {
-					if err := s.MarkManual(source, filepath.Join(root, "A.nfo")); err != nil {
+					if err := s.MarkIndexedManual(source, filepath.Join(root, "A.nfo")); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -177,9 +177,7 @@ func TestScanExtraBackdropsPreservesMetadata(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := s.SavePlaybackForUser(1, id, 123, 3, "2026-11-04T01:00:00Z", -1); err != nil {
-					t.Fatal(err)
-				}
+				seedStoppedPlaybacks(t, s, 1, id, 123, 3, "2026-11-04T01:00:00Z")
 				userdata, err := s.DataUser(1, id)
 				if err != nil {
 					t.Fatal(err)
@@ -202,7 +200,7 @@ func TestScanExtraBackdropsPreservesMetadata(t *testing.T) {
 					var err error
 					switch mode {
 					case "full":
-						_, err = Scan(s, lib)
+						_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 					case "incremental":
 						_, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 					case "rescan":

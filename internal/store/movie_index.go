@@ -136,12 +136,6 @@ func invalidateMovieScanStateTx(tx *sql.Tx, m Movie) error {
 	return nil
 }
 
-func invalidateMovieScanStateByIDTx(tx *sql.Tx, movieID int64) error {
-	_, err := tx.Exec(`DELETE FROM scan_groups WHERE (library_id, group_key) IN (
-		SELECT sg.library_id, sg.group_key FROM scan_group_sources sg JOIN movies m ON m.source_path = sg.source_path WHERE m.id = ?)`, movieID)
-	return err
-}
-
 func invalidateActorScanStateTx(tx *sql.Tx, name string) error {
 	_, err := tx.Exec(`DELETE FROM scan_groups WHERE (library_id, group_key) IN (
 		SELECT sg.library_id, sg.group_key FROM scan_group_sources sg

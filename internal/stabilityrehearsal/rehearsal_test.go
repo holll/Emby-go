@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -300,8 +301,10 @@ func TestIncrementalBaselineAndInterruptedRerun(t *testing.T) {
 				}
 				ids[name] = id
 			}
-			if err := s.SavePlaybackForUser(1, ids["A"], 123, 2, "t0", 122); err != nil {
-				t.Fatal(err)
+			for i := range 2 {
+				if _, err := s.RecordPlaybackEvent(store.PlaybackEvent{UserID: 1, MovieID: ids["A"], SessionKey: fmt.Sprintf("rehearsal-fixture-%d", i), Kind: store.PlaybackStopped, PositionTicks: 123}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			unchanged := func() {
 				t.Helper()

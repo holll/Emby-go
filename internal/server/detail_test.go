@@ -59,6 +59,7 @@ func detailServer(t *testing.T, app *App) (*httptest.Server, string) {
 	if token == "" {
 		t.Fatal("未取得令牌")
 	}
+	rememberFixturePassword(t, app, 1, "password-1234")
 	return ts, token
 }
 
@@ -112,7 +113,7 @@ func TestAdminItemDetail(t *testing.T) {
 	if err := os.WriteFile(avatar.Path(app.avatarsDir(), "有头像"), imgBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.db.SetActorAvatar("有头像", "https://metatube.test/a.jpg", avatar.Tag(imgBytes)); err != nil {
+	if err := app.db.SetIndexedActorAvatar("有头像", "https://metatube.test/a.jpg", avatar.Tag(imgBytes)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -253,7 +254,7 @@ func TestAdminItemDetailMetatubeID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			movie.ProviderID = tc.raw
-			if _, err := app.db.UpsertMovie(movie, 0, time.Now()); err != nil {
+			if _, err := indexFixtureMovie(t, app, movie, 0, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			resp, detail := embyCall(t, ts, "GET", "/api/admin/items/1/detail", token, "")

@@ -82,7 +82,7 @@ func TestAvatarTaskUsesAtomicVersionedActorIndex(t *testing.T) {
 			dir := filepath.Join(root, "avatars")
 			s := New(Config{BaseURL: backend.URL, Token: "fixture", Concurrency: 1, AvatarsDir: dir}, db)
 			var item AvatarResult
-			progress, err := s.RunAvatarsFor(context.Background(), []string{name}, nil, func(result AvatarResult) { item = result })
+			progress, err := s.RunAvatars(context.Background(), lib.ID, 0, nil, func(result AvatarResult) { item = result })
 			if err != nil {
 				t.Fatal(err)
 			} // Batch-level error semantics are unchanged.
@@ -101,7 +101,7 @@ func TestAvatarTaskUsesAtomicVersionedActorIndex(t *testing.T) {
 				if _, err = raw.Exec("DROP TRIGGER fail_final_avatar"); err != nil {
 					t.Fatal(err)
 				}
-				progress, err = s.RunAvatarsFor(context.Background(), []string{name}, nil, func(result AvatarResult) { item = result })
+				progress, err = s.RunAvatars(context.Background(), lib.ID, 0, nil, func(result AvatarResult) { item = result })
 				if err != nil {
 					t.Fatal(err)
 				}

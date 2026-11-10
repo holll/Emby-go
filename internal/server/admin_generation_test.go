@@ -17,7 +17,7 @@ import (
 // A middleware barrier runs after the real authentication/admin gates and before
 // each handler. No sleeps: every revocation commits before the write transaction.
 func TestAdminRequestGenerationBarrier(t *testing.T) {
-	for _, mode := range []string{"password", "revoke-user", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "unchanged"} {
+	for _, mode := range []string{"password", "self-password-revoke", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "unchanged"} {
 		for _, action := range []string{"create", "update", "libraries", "delete"} {
 			t.Run(mode+"/"+action, func(t *testing.T) {
 				// This matrix tests request/transaction re-admission, not app
@@ -37,10 +37,10 @@ func TestAdminRequestGenerationBarrier(t *testing.T) {
 				seedFixtureUser(t, a, "admin", "password-1234", true)
 				actor := seedFixtureUser(t, a, "generation-admin", "password-1234", true)
 				target := seedFixtureUser(t, a, "generation-target", "password-1234", false)
-				if err := a.db.SaveAccessTokenForUser("generation-session", actor.ID, time.Now().Add(time.Hour)); err != nil {
+				if err := saveFixtureSession(t, a, "generation-session", actor.ID, time.Now().Add(time.Hour)); err != nil {
 					t.Fatal(err)
 				}
-				if err := a.db.SaveAccessTokenForUser("owner-proof", 1, time.Time{}); err != nil {
+				if err := saveFixtureSession(t, a, "owner-proof", 1, time.Time{}); err != nil {
 					t.Fatal(err)
 				}
 				owner, err := a.db.RequestCredentialUser("owner-proof", 1, true)
@@ -54,17 +54,19 @@ func TestAdminRequestGenerationBarrier(t *testing.T) {
 					var err error
 					switch mode {
 					case "password":
-						err = a.db.SetUserPassword(actor.ID, "changed-password-1234")
-					case "revoke-user":
-						err = a.db.RevokeUserAccessTokens(actor.ID)
+						err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{Password: fixtureValue("changed-password-1234")})
+					case "self-password-revoke":
+						// The current self-service password API revokes this user's
+						// sessions even when the replacement password is unchanged.
+						err = a.db.SetAuthenticatedUserPassword(authenticatedFixtureUser(t, a, actor.ID), "password-1234")
 					case "revoke-all":
-						_, err = a.db.RevokeAllAccessTokens()
+						_, err = a.db.AdminRevokeAllAccessTokens(fixtureAdminProof(t, a, 1))
 					case "logout":
 						err = a.db.DeleteAccessToken("generation-session")
 					case "role-ABA":
-						err = a.db.SetUserAdmin(actor.ID, false)
+						err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(false)})
 						if err == nil {
-							err = a.db.SetUserAdmin(actor.ID, true)
+							err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(true)})
 						}
 					case "admin-role-ABA":
 						no, yes := false, true

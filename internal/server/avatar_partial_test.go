@@ -69,7 +69,7 @@ func TestAvatarPartialWriteReachesTaskAndProgress(t *testing.T) {
 	if task.Status != "failed" || !strings.Contains(task.Error, scraper.ErrAvatarWriteIncomplete.Error()) || strings.Contains(task.Error, root) {
 		t.Fatalf("task %+v", task)
 	}
-	if err = a.db.SaveAccessToken("avatar-partial-token"); err != nil {
+	if err = saveFixtureSession(t, a, "avatar-partial-token", 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/scrape/progress", nil)

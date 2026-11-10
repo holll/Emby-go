@@ -120,13 +120,14 @@ func TestFixtureUsersPreserveSetupStateAndIsolation(t *testing.T) {
 					t.Fatalf("legacy rows=%d want=%d", count, wantLegacy)
 				}
 			}
-			if err := stores[0].SaveAccessTokenForUser("fixture-session", 1, time.Now().Add(time.Hour)); err != nil {
+			if err := stores[0].SaveAccessTokenForAuthenticatedUser("fixture-session", fixtureAuthenticatedUser(t, stores[0], 1, "fixture-password"), time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if _, valid, err := stores[1].ValidateAccessTokenUser("fixture-session", time.Now(), 0); err != nil || valid {
 				t.Fatalf("session leaked between databases: valid=%v err=%v", valid, err)
 			}
-			if err := stores[0].RenameUser(2, "changed-viewer"); err != nil {
+			name := "changed-viewer"
+			if err := stores[0].AdminUpdateUser(1, 2, AdminUserUpdate{Name: &name}, fixtureRequestProof(t, stores[0], 1, "fixture-password")); err != nil {
 				t.Fatal(err)
 			}
 			if viewer, err := stores[1].UserByID(2); err != nil || viewer.Name != "viewer" {

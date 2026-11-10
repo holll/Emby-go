@@ -111,7 +111,7 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 		}
 		assertDenied(publicID, public, "ZVisible")
 	}
-	if err := a.db.SetUserLibraries(uid, []int64{public.ID}); err != nil {
+	if err := updateFixtureUser(t, a, uid, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{public.ID})}); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -133,7 +133,7 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 	}
 	// Revoke after successful requests have warmed response and metadata caches.
 	version := a.db.Version("g:version")
-	if err := a.db.SetUserLibraries(uid, nil); err != nil {
+	if err := updateFixtureUser(t, a, uid, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64(nil))}); err != nil {
 		t.Fatal(err)
 	}
 	if a.db.Version("g:version") != version {
@@ -144,7 +144,7 @@ func TestObjectScopeAuthorizationAndCache(t *testing.T) {
 		assertEmpty(p, token)
 	}
 	assertDenied(publicID, public, "ZVisible")
-	if err := a.db.SetUserLibraries(uid, []int64{private.ID}); err != nil {
+	if err := updateFixtureUser(t, a, uid, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{private.ID})}); err != nil {
 		t.Fatal(err)
 	}
 	s, b := embyDo(t, ts, "GET", "/Genres?Limit=1", token, "")
@@ -181,7 +181,7 @@ func TestObjectScopeHelpersFailClosed(t *testing.T) {
 	check() // stale/deleted account in middleware context
 	c.Set(currentUserKey, store.User{ID: 0, IsAdmin: true})
 	check()
-	u, err := a.db.CreateUser("scope-stale", "password-1234", false)
+	u, err := createFixtureUser(t, a, "scope-stale", "password-1234", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestObjectScopeHelpersFailClosed(t *testing.T) {
 	if a.canViewLibrary(c, libs[0].ID) {
 		t.Fatal("stale admin flag authorized library")
 	}
-	if err := a.db.DeleteUser(u.ID); err != nil {
+	if err := a.db.AdminDeleteUser(1, u.ID, fixtureAdminProof(t, a, 1)); err != nil {
 		t.Fatal(err)
 	}
 	check()

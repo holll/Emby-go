@@ -3,9 +3,11 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"emby-go/internal/store"
 )
@@ -21,9 +23,28 @@ func newStore(t *testing.T, root string) *store.Store {
 	return s
 }
 
+// seedStoppedPlaybacks creates real distinct playback sessions so preservation
+// tests exercise userdata produced by the same transaction as client reports.
+func seedStoppedPlaybacks(t *testing.T, s *store.Store, userID, id, position, count int64, stamp string) {
+	t.Helper()
+	now, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range count {
+		if _, err := s.RecordPlaybackEvent(store.PlaybackEvent{
+			SessionKey: fmt.Sprintf("fixture:%d:%d:%d", userID, id, i),
+			UserID:     userID, MovieID: id, Kind: store.PlaybackStopped,
+			PositionTicks: position, Now: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func visible(t *testing.T, s *store.Store) []store.Movie {
 	t.Helper()
-	movies, _, err := s.SearchAll(0, "", "", "title", false, 50, 0)
+	movies, _, err := s.SearchFilteredVisible(1, 0, nil, "", "", "", false, "title", false, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +64,7 @@ func TestScanStacksAllCDParts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	movies := visible(t, s)
@@ -69,11 +90,15 @@ func TestScanPurgesStalePartRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "Movie-CD3.strm"), OutputDir: root, Status: "success", Title: "stale CD3"}
-	_, staleMTime := SourceStat(stale.SourcePath)
-	if _, err := s.UpsertMovie(stale, 0, staleMTime); err != nil {
+	sourceInfo, err := os.Stat(stale.SourcePath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	staleMTime := sourceInfo.ModTime()
+	if _, err := s.IndexMovie(stale, 0, staleMTime, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if movies := visible(t, s); len(movies) != 1 {
@@ -99,7 +124,7 @@ func TestScanSkipsNonHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,11 +162,11 @@ func TestScanKeepsManual(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 模拟「在媒体墙编辑元数据」：标记为 manual。
-	if err := s.MarkManual(filepath.Join(root, "a.strm"), filepath.Join(root, "a.nfo")); err != nil {
+	if err := s.MarkIndexedManual(filepath.Join(root, "a.strm"), filepath.Join(root, "a.nfo")); err != nil {
 		t.Fatal(err)
 	}
 	if count, _ := s.CountByStatus("manual"); count != 1 {
@@ -149,7 +174,7 @@ func TestScanKeepsManual(t *testing.T) {
 	}
 
 	// 整库扫描不得把它降级成 success。
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if count, _ := s.CountByStatus("manual"); count != 1 {
@@ -177,7 +202,7 @@ func TestScanReconcilesAddDeleteMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(visible(t, s)) != 1 {
@@ -189,7 +214,7 @@ func TestScanReconcilesAddDeleteMove(t *testing.T) {
 	os.MkdirAll(dst, 0755)
 	os.Rename(filepath.Join(src, "ABC.strm"), filepath.Join(dst, "ABC.strm"))
 	os.Rename(filepath.Join(src, "ABC.nfo"), filepath.Join(dst, "ABC.nfo"))
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	movies := visible(t, s)
@@ -200,7 +225,7 @@ func TestScanReconcilesAddDeleteMove(t *testing.T) {
 	// 删除源文件：默认扫描必须拒绝清空整库（防挂载点失效误删）。
 	os.Remove(filepath.Join(dst, "ABC.strm"))
 	os.Remove(filepath.Join(dst, "ABC.nfo"))
-	if _, err := Scan(s, lib); !errors.Is(err, ErrReconcileBlocked) {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); !errors.Is(err, ErrReconcileBlocked) {
 		t.Fatalf("empty inventory must be blocked by default, got %v", err)
 	}
 	if movies := visible(t, s); len(movies) != 1 {
@@ -237,7 +262,7 @@ func TestRescanOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(visible(t, s)); got != 2 {
@@ -270,7 +295,7 @@ func TestRescanOne(t *testing.T) {
 		t.Errorf("单文件重扫后影片数 = %d，期望 2（不带 DeleteMissingSources）", got)
 	}
 	// 而整库 Scan 才会清掉 b。
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(visible(t, s)); got != 1 {
@@ -296,7 +321,7 @@ func TestRescanOneKeepsCDGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	movies := visible(t, s)

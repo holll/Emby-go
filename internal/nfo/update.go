@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,7 +13,7 @@ import (
 
 // 标签级更新器：刮削器与手动编辑都走这条路写入 NFO。
 //
-// 为什么不用 Save/SaveAtomic：那是「读成结构体 → 整体重写」，会把 MovieMeta 未建模的
+// 为什么不用 Save：那是「读成结构体 → 整体重写」，会把 MovieMeta 未建模的
 // 元素（其它刮削器写的扩展标签、注释、属性）静默丢掉。NFO 是元数据真源，
 // 外部工具随时可能往里写东西，本服务只能动自己要动的那几个标签。
 //
@@ -91,7 +89,7 @@ func UpdateScrapedWithAutoMarks(path string, f ScrapeFields, previous, current [
 
 func updateScraped(path string, f ScrapeFields, previous, current []string, mergeMarks bool) ([]string, error) {
 	// 与 SetActorThumb / SaveFileInfo 共用同一把路径锁：整段读-改-写期间独占，
-	// 新建分支走 saveAtomicLocked（本函数已持锁，不能再进 SaveAtomic）。
+	// 新建分支走 saveAtomicLocked，复用本函数已持有的路径锁。
 	defer lockNFOPath(path)()
 	raw, err := ReadFile(path)
 	missing := errors.Is(err, os.ErrNotExist)
@@ -455,21 +453,9 @@ func upsertScalarIn(text, tag, value, indent, beforeClose string) string {
 	return insertBeforeTag(text, beforeClose, indent+replacement)
 }
 
-// scalarLinePattern 在 scalarPattern 基础上捕获行首缩进（$1），供替换时保留缩进风格。
-func scalarLinePattern(tag string) *regexp.Regexp {
-	name := regexp.QuoteMeta(tag)
-	return regexp.MustCompile(`(?m)^([ \t]*)(?:<` + name + `(?:\s[^>]*)?>.*?</` + name + `\s*>|<` + name + `(?:\s[^>]*)?/>)`)
-}
-
 // hasAnyBlock 判断原文里是否至少有一个该标签块。
 func hasAnyBlock(text, tag string) bool {
 	return len(elementsNamed(text, tag)) > 0
-}
-
-// blockPattern 匹配成对标签块（不匹配自闭合，标签块都带子元素）。
-func blockPattern(tag string) *regexp.Regexp {
-	name := regexp.QuoteMeta(tag)
-	return regexp.MustCompile(`(?s)<` + name + `(?:\s[^>]*)?>.*?</` + name + `\s*>`)
 }
 
 // replaceBlocks 删除根元素的同名直系块（包括紧凑 XML 与自闭合标签）。
@@ -684,72 +670,4 @@ func TagPreview(path string, tags []string) (map[string]string, error) {
 		out[tag] = ScrapedTagValue(text, tag)
 	}
 	return out, nil
-}
-
-// ListPreview 返回多个列表标签的当前值与演员名清单，供预览 diff。
-func ListPreview(path string) (map[string][]string, []Actor, error) {
-	raw, err := ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string][]string{}, nil, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	text := string(raw)
-	out := make(map[string][]string, len(listTags))
-	for _, tag := range listTags {
-		for _, element := range elementsNamed(text, tag) {
-			var value string
-			if err := xml.Unmarshal([]byte(text[element.start:element.end]), &value); err == nil && strings.TrimSpace(value) != "" {
-				out[tag] = append(out[tag], strings.TrimSpace(value))
-			}
-		}
-	}
-	actors, err := LoadActors(text)
-	if err != nil {
-		return out, nil, err
-	}
-	return out, actors, nil
-}
-
-// LoadActors 解析原文里的 <actor> 块（含 <thumb>），用于头像真源的回读。
-func LoadActors(text string) ([]Actor, error) {
-	var out []Actor
-	for _, element := range elementsNamed(text, "actor") {
-		var actor Actor
-		if err := xml.Unmarshal([]byte(text[element.start:element.end]), &actor); err != nil {
-			// 单个 actor 块解析失败不该让整次读取失败，跳过即可。
-			continue
-		}
-		if strings.TrimSpace(actor.Name) != "" {
-			out = append(out, actor)
-		}
-	}
-	return out, nil
-}
-
-// FormatScrapeDiff 生成「字段：旧值 → 新值」的文本 diff，供单条手动刮削预览。
-// 只在值确实变化时输出一行；旧值为空记为「（空）」。
-func FormatScrapeDiff(old map[string]string, f ScrapeFields) []string {
-	out := make([]string, 0, len(scalarTags))
-	for _, tag := range scalarTags {
-		current := strings.TrimSpace(old[tag])
-		next := scalarValue(f, tag)
-		if next == "" || next == current {
-			continue
-		}
-		label := current
-		if label == "" {
-			label = "（空）"
-		}
-		out = append(out, fmt.Sprintf("%s: %s → %s", tag, label, next))
-	}
-	for _, tag := range listTags {
-		values := listValue(f, tag)
-		if len(values) == 0 {
-			continue
-		}
-		out = append(out, fmt.Sprintf("%s: %s", tag, strings.Join(values, " / ")))
-	}
-	return out
 }

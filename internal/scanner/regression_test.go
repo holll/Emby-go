@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,7 +25,7 @@ func TestScanUnavailableRootPreservesUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := s.MovieIDByPath(source)
@@ -34,13 +35,11 @@ func TestScanUnavailableRootPreservesUserData(t *testing.T) {
 	if _, err := s.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePlaybackForUser(1, id, 123, 2, "2026-10-16T00:00:00Z", 123); err != nil {
-		t.Fatal(err)
-	}
+	seedStoppedPlaybacks(t, s, 1, id, 123, 2, "2026-10-16T00:00:00Z")
 	if err := os.Rename(media, media+"-offline"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err == nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err == nil {
 		t.Fatal("根目录不可用时扫描必须失败")
 	}
 	if _, err := s.Movie(id); err != nil {
@@ -68,7 +67,7 @@ func TestScanChangedProtocolRemovesOldIndex(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Scan(s, lib); err != nil {
+			if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(source, []byte("ed2k://|file|a.mp4|1|abc|/"), 0o644); err != nil {
@@ -78,7 +77,7 @@ func TestScanChangedProtocolRemovesOldIndex(t *testing.T) {
 			if single {
 				result, err = RescanOne(s, lib, source)
 			} else {
-				result, err = Scan(s, lib)
+				result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 			}
 			if err != nil || result.Skipped != 1 {
 				t.Fatalf("重扫结果: %+v, %v", result, err)

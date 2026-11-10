@@ -22,7 +22,7 @@ var casTxBeginHook func()
 //
 //   - Prepare runs before the writer lock is taken. Every filesystem read --
 //     symlink walks, fstat, fingerprint hashing, decoding -- belongs here, so
-//     the possibly multi-megabyte work can never queue UpsertMovie,
+//     the possibly multi-megabyte work can never queue IndexMovie,
 //     RecordPlaybackEvent or scan commits behind it.
 //   - Commit runs inside the write transaction and may only perform
 //     constant-time metadata operations (os.Rename/os.Link). A read there pins
@@ -121,12 +121,4 @@ func (s *Store) CompareAndSwapArtworkFiles(ctx context.Context, expected Movie, 
 		s.publishVersion(version)
 	}
 	return err
-}
-
-// CompareAndSwapArtwork is the single-phase form, kept for callers that need no
-// Prepare phase. install runs inside the write transaction, so it must stay
-// constant-time (os.Rename/os.Link); filesystem reads belong in
-// CompareAndSwapArtworkFiles' Prepare phase.
-func (s *Store) CompareAndSwapArtwork(ctx context.Context, expected Movie, libraryRoot, posterPath string, install func() error) error {
-	return s.CompareAndSwapArtworkFiles(ctx, expected, libraryRoot, posterPath, ArtworkFiles{Commit: install})
 }

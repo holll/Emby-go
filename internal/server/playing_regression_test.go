@@ -37,7 +37,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				id, err := a.db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success", AdditionalParts: []string{filepath.Join(root, "b.strm")}}, 1, time.Now())
+				id, err := indexFixtureMovie(t, a, store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success", AdditionalParts: []string{filepath.Join(root, "b.strm")}}, 1, time.Now())
 				if err != nil {
 					t.Fatal(err)
 				}

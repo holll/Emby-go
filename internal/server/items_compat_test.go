@@ -41,7 +41,7 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 || i == 4 {
-			if err := a.db.SetIndexedFavorite(id, true); err != nil {
+			if _, err := a.db.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -170,7 +170,7 @@ func TestFolderFavoriteCompatibility(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := a.db.SetIndexedFavorite(id, true); err != nil {
+		if _, err := a.db.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -105,7 +105,7 @@ func TestScrapeIndexRefreshFailureIsNotSuccess(t *testing.T) {
 			a.taskMu.Lock()
 			task := a.tasks[0]
 			a.taskMu.Unlock()
-			if e := a.db.SaveAccessToken("scrape-index-fixture-token"); e != nil {
+			if e := saveFixtureSession(t, a, "scrape-index-fixture-token", 1, time.Time{}); e != nil {
 				t.Fatal(e)
 			}
 			request := httptest.NewRequest(http.MethodGet, "/api/admin/scrape/progress", nil)

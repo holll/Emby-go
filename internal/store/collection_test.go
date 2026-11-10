@@ -84,7 +84,7 @@ func TestCollectionsMinMovies(t *testing.T) {
 				break
 			}
 		}
-		stats, err := s.CollectionStats(tc.min)
+		stats, err := s.CollectionStatsVisible(tc.min, 0, nil)
 		if err != nil {
 			t.Fatalf("CollectionStats(%d): %v", tc.min, err)
 		}
@@ -93,7 +93,7 @@ func TestCollectionsMinMovies(t *testing.T) {
 		}
 	}
 	// 统计里的影片数也要与实际一致（系列A 两部；pending 的那部不计入）。
-	stats, err := s.CollectionStats(2)
+	stats, err := s.CollectionStatsVisible(2, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ func TestArtworkOnlyPosterAndCAS(t *testing.T) {
 	}
 	versions := indexedDeleteVersions(t, f)
 	called := 0
-	if err = f.s.CompareAndSwapArtwork(context.Background(), before, lib.Path, "/new/poster.jpg", func() error { called++; return nil }); err != nil {
+	if err = f.s.CompareAndSwapArtworkFiles(context.Background(), before, lib.Path, "/new/poster.jpg", ArtworkFiles{Commit: func() error { called++; return nil }}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := f.s.Movie(f.victim)
@@ -34,7 +34,7 @@ func TestArtworkOnlyPosterAndCAS(t *testing.T) {
 	}
 	assertIndexedDeleteVersions(t, f, versions, true)
 	versions = indexedDeleteVersions(t, f)
-	if err = f.s.CompareAndSwapArtwork(context.Background(), before, lib.Path, "/other", func() error { t.Fatal("stale CAS installed image"); return nil }); !errors.Is(err, ErrArtworkChanged) {
+	if err = f.s.CompareAndSwapArtworkFiles(context.Background(), before, lib.Path, "/other", ArtworkFiles{Commit: func() error { t.Fatal("stale CAS installed image"); return nil }}); !errors.Is(err, ErrArtworkChanged) {
 		t.Fatal(err)
 	}
 	assertIndexedDeleteVersions(t, f, versions, false)
@@ -69,13 +69,13 @@ func TestArtworkRollbackAndSingleInstall(t *testing.T) {
 				cancel()
 			}
 			calls := 0
-			err := f.s.CompareAndSwapArtwork(ctx, m, lib.Path, "new", func() error {
+			err := f.s.CompareAndSwapArtworkFiles(ctx, m, lib.Path, "new", ArtworkFiles{Commit: func() error {
 				calls++
 				if fault == "callback" {
 					return errors.New("fail callback")
 				}
 				return nil
-			})
+			}})
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -101,7 +101,7 @@ func TestArtworkCancelledWhileWriterBusy(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	f.s.writeMu.Lock()
+	f.s.writeMu.LockContext(context.Background())
 	locked := true
 	defer func() {
 		if locked {
@@ -110,10 +110,10 @@ func TestArtworkCancelledWhileWriterBusy(t *testing.T) {
 	}()
 	done := make(chan error, 1)
 	go func() {
-		done <- f.s.CompareAndSwapArtwork(ctx, m, lib.Path, "new", func() error {
+		done <- f.s.CompareAndSwapArtworkFiles(ctx, m, lib.Path, "new", ArtworkFiles{Commit: func() error {
 			t.Error("cancelled artwork installed image")
 			return nil
-		})
+		}})
 	}()
 	cancel()
 	select {
@@ -133,12 +133,12 @@ func TestArtworkLibraryMoveAndCancellationAfterInstall(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
 	m, _ := f.s.Movie(f.victim)
 	lib, _ := f.s.Library(m.LibraryID)
-	if err := f.s.CompareAndSwapArtwork(context.Background(), m, lib.Path+"-changed", "new", func() error { t.Fatal("wrong root installed"); return nil }); !errors.Is(err, ErrArtworkChanged) {
+	if err := f.s.CompareAndSwapArtworkFiles(context.Background(), m, lib.Path+"-changed", "new", ArtworkFiles{Commit: func() error { t.Fatal("wrong root installed"); return nil }}); !errors.Is(err, ErrArtworkChanged) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := f.s.CompareAndSwapArtwork(ctx, m, lib.Path, "new", func() error { cancel(); return nil }); err != nil {
+	if err := f.s.CompareAndSwapArtworkFiles(ctx, m, lib.Path, "new", ArtworkFiles{Commit: func() error { cancel(); return nil }}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := f.s.Movie(m.ID)

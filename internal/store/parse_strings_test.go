@@ -56,7 +56,7 @@ func TestMovieScanParsesAllJSONColumns(t *testing.T) {
 		Taglines:        []string{"一句话"},
 		AdditionalParts: []string{},
 	}
-	id, err := s.UpsertMovie(want, 1, time.Now())
+	id, err := s.IndexMovie(want, 1, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

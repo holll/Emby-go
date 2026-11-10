@@ -27,14 +27,15 @@ func TestUsersCRUDAndAuthentication(t *testing.T) {
 	if err != nil || admin.Name != "admin" || !admin.IsAdmin {
 		t.Fatalf("admin=%+v err=%v", admin, err)
 	}
-	u, err := s.CreateUser("viewer", "viewer-password-1", false)
+	proof := fixtureRequestProof(t, s, 1, "admin-password-1")
+	u, err := s.AdminCreateUser(1, "viewer", "viewer-password-1", false, nil, proof)
 	if err != nil || u.ID == 0 || u.IsAdmin {
 		t.Fatalf("user=%+v err=%v", u, err)
 	}
-	if _, err := s.CreateUser("viewer", "another-password", false); !errors.Is(err, ErrUserExists) {
+	if _, err := s.AdminCreateUser(1, "viewer", "another-password", false, nil, proof); !errors.Is(err, ErrUserExists) {
 		t.Fatalf("duplicate err=%v", err)
 	}
-	if _, err := s.CreateUser("  ", "another-password", false); !errors.Is(err, ErrInvalidUserName) {
+	if _, err := s.AdminCreateUser(1, "  ", "another-password", false, nil, proof); !errors.Is(err, ErrInvalidUserName) {
 		t.Fatalf("invalid name err=%v", err)
 	}
 	got, ok, err := s.AuthenticateUser("viewer", "viewer-password-1")
@@ -47,13 +48,15 @@ func TestUsersCRUDAndAuthentication(t *testing.T) {
 	if _, ok, err := s.AuthenticateUser("missing", "whatever"); err != nil || ok {
 		t.Fatalf("unknown user ok=%v err=%v", ok, err)
 	}
-	if err := s.SetUserPassword(u.ID, "viewer-password-2"); err != nil {
+	password := "viewer-password-2"
+	if err := s.AdminUpdateUser(1, u.ID, AdminUserUpdate{Password: &password}, proof); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.AuthenticateUser("viewer", "viewer-password-2"); !ok {
 		t.Fatal("new password rejected")
 	}
-	if err := s.RenameUser(u.ID, "viewer2"); err != nil {
+	name := "viewer2"
+	if err := s.AdminUpdateUser(1, u.ID, AdminUserUpdate{Name: &name}, proof); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.AuthenticateUser("viewer2", "viewer-password-2"); !ok {
@@ -70,20 +73,19 @@ func TestDeleteUserGuardsAndCleanup(t *testing.T) {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteUser(1); !errors.Is(err, ErrProtectedUser) {
+	proof := fixtureRequestProof(t, s, 1, "admin-password-1")
+	if err := s.AdminDeleteUser(1, 1, proof); !errors.Is(err, ErrProtectedUser) {
 		t.Fatalf("delete initial admin err=%v", err)
 	}
-	viewer, err := s.CreateUser("viewer", "viewer-password-1", false)
+	viewer, err := s.AdminCreateUser(1, "viewer", "viewer-password-1", false, nil, fixtureRequestProof(t, s, 1, "admin-password-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("viewer-token", viewer.ID, zeroTime()); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("viewer-token", fixtureAuthenticatedUser(t, s, viewer.ID, "viewer-password-1"), zeroTime()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateAPIKeyForUser("viewer-key", viewer.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteUser(viewer.ID); err != nil {
+	seedLegacyAPIKey(t, s, viewer.ID, "viewer-key")
+	if err := s.AdminDeleteUser(1, viewer.ID, proof); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.UserByID(viewer.ID); !errors.Is(err, ErrUserNotFound) {
@@ -95,23 +97,25 @@ func TestDeleteUserGuardsAndCleanup(t *testing.T) {
 	}
 
 	// 唯一的另一名管理员不能被降级或删除。
-	second, err := s.CreateUser("second", "second-password-1", true)
+	second, err := s.AdminCreateUser(1, "second", "second-password-1", true, nil, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetUserAdmin(1, false); err != nil {
+	secondProof := fixtureRequestProof(t, s, second.ID, "second-password-1")
+	no, yes := false, true
+	if err := s.AdminUpdateUser(1, 1, AdminUserUpdate{IsAdmin: &no}, proof); err != nil {
 		t.Fatalf("demote id=1 err=%v", err)
 	}
-	if err := s.SetUserAdmin(second.ID, false); !errors.Is(err, ErrLastAdmin) {
+	if err := s.AdminUpdateUser(second.ID, second.ID, AdminUserUpdate{IsAdmin: &no}, secondProof); !errors.Is(err, ErrLastAdmin) {
 		t.Fatalf("demote last admin err=%v", err)
 	}
-	if err := s.DeleteUser(second.ID); !errors.Is(err, ErrLastAdmin) {
+	if err := s.AdminDeleteUser(second.ID, second.ID, secondProof); !errors.Is(err, ErrLastAdmin) {
 		t.Fatalf("delete last admin err=%v", err)
 	}
-	if err := s.SetUserAdmin(1, true); err != nil {
+	if err := s.AdminUpdateUser(second.ID, 1, AdminUserUpdate{IsAdmin: &yes}, secondProof); err != nil {
 		t.Fatalf("restore admin err=%v", err)
 	}
-	if err := s.DeleteUser(second.ID); err != nil {
+	if err := s.AdminDeleteUser(1, second.ID, fixtureRequestProof(t, s, 1, "admin-password-1")); err != nil {
 		t.Fatalf("delete second admin err=%v", err)
 	}
 }
@@ -121,28 +125,25 @@ func TestTokensAndAPIKeysBindUsers(t *testing.T) {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := s.CreateUser("viewer", "viewer-password-1", false)
+	viewer, err := s.AdminCreateUser(1, "viewer", "viewer-password-1", false, nil, fixtureRequestProof(t, s, 1, "admin-password-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("viewer-token", viewer.ID, zeroTime()); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("viewer-token", fixtureAuthenticatedUser(t, s, viewer.ID, "viewer-password-1"), zeroTime()); err != nil {
 		t.Fatal(err)
 	}
 	uid, valid, err := s.ValidateAccessTokenUser("viewer-token", zeroTime(), 0)
 	if err != nil || !valid || uid != viewer.ID {
 		t.Fatalf("uid=%d valid=%v err=%v", uid, valid, err)
 	}
-	if err := s.SaveAccessToken("legacy-token"); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("owner-token", fixtureAuthenticatedUser(t, s, 1, "admin-password-1"), zeroTime()); err != nil {
 		t.Fatal(err)
 	}
-	uid, valid, err = s.ValidateAccessTokenUser("legacy-token", zeroTime(), 0)
+	uid, valid, err = s.ValidateAccessTokenUser("owner-token", zeroTime(), 0)
 	if err != nil || !valid || uid != 1 {
 		t.Fatalf("legacy uid=%d valid=%v err=%v", uid, valid, err)
 	}
-	created, err := s.CreateAPIKeyForUser("viewer-key", viewer.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	created := seedLegacyAPIKey(t, s, viewer.ID, "viewer-key")
 	uid, ok, err := s.APIKeyUser(created.Key)
 	if err != nil || !ok || uid != viewer.ID {
 		t.Fatalf("api key uid=%d ok=%v err=%v", uid, ok, err)

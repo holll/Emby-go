@@ -8,7 +8,6 @@ import (
 // MarkIndexedManual records a saved manual NFO and its actual library version
 // together. It does not read/write the file or rebuild metadata/actors/features.
 // Even an already-manual row advances versions: the NFO's locks may have changed.
-// Legacy MarkManual retains its unversioned contract.
 func (s *Store) MarkIndexedManual(sourcePath, nfoPath string) error {
 	var version int64
 	err := s.writeTx(func(tx *sql.Tx) error {

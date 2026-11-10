@@ -44,7 +44,7 @@ func newTranslationFixture(t *testing.T) translationFixture {
 	})
 	seedOwner(t, a)
 	token := "translation-admin"
-	if err := a.db.SaveAccessTokenForUser(token, 1, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{settingTranslateAPIURL: "http://127.0.0.1:1", settingTranslateAPIKey: "test-key"} {
@@ -100,11 +100,11 @@ func awaitTranslation(t *testing.T, a *App) translationStatus {
 
 func TestTranslationAuthorizationAndValidation(t *testing.T) {
 	f := newTranslationFixture(t)
-	u, err := f.a.db.CreateUser("translation-user", "password-123", false)
+	u, err := createFixtureUser(t, f.a, "translation-user", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.a.db.SaveAccessTokenForUser("ordinary", u.ID, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, f.a, "ordinary", u.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, route := range []struct{ method, path string }{{"POST", "/api/admin/translate/run"}, {"GET", "/api/admin/translate/status"}, {"POST", "/api/admin/translate/cancel"}} {

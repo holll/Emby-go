@@ -14,6 +14,13 @@ import (
 	"emby-go/internal/config"
 )
 
+// workerAdmissionOpen is a test-only observation of the production admission gate.
+func (a *App) workerAdmissionOpen() bool {
+	a.workerGate.mu.Lock()
+	defer a.workerGate.mu.Unlock()
+	return !a.workerGate.shuttingDown
+}
+
 func newShutdownApp(t *testing.T) *App {
 	t.Helper()
 	app, err := newApp(config.Config{DBPath: filepath.Join(t.TempDir(), "shutdown.db")}, cache.NewMemory(64))

@@ -49,7 +49,9 @@ func TestSpriteDisabledLibraryGenerationAndReads(t *testing.T) {
 	if out, err := GenerateSprite(ctx, db, SpriteRequest{MovieID: m.ID, Overwrite: true}, opts); err == nil || out.Changed {
 		t.Fatalf("published after library disabled: %+v %v", out, err)
 	}
-	state, err := db.Sprite(m.ID)
+	state, err := db.SpriteContext(context.Background(),
+
+		m.ID)
 	if err != nil || state.Generation != res.Manifest.Generation {
 		t.Fatal("disabled CAS changed old pointer", err)
 	}

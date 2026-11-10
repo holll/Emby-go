@@ -172,8 +172,8 @@ const apiKeyBackfillWaitBudget = 2 * time.Second
 // and a pinned connection.
 //
 // Write frequency (why this is not a hot-path write): every INSERT this program
-// makes already sets stable_id (store.go CreateAPIKeyForUser,
-// admin_credentials.go AdminCreateAPIKey) and migration 15 backfilled all
+// makes already sets stable_id (AdminCreateAPIKey in admin_credentials.go),
+// and migration 15 backfilled all
 // pre-existing rows, so only rows written by external tools reach here, once
 // each — the UPDATE's guard makes that explicit, and the re-read inside the
 // transaction means concurrent resolvers of the same row converge on one ID
@@ -222,22 +222,13 @@ func (s *Store) backfillAPIKeyStableID(rowKey string) (string, error) {
 	return stable, nil
 }
 
-// RotateAPIKey 在同一事务内替换摘要并递增版本。actor 必须来自刚刚的密码
-// 再认证，其 auth_generation 用于阻止再认证后账户被改密/撤权仍提交。
-func (s *Store) RotateAPIKey(actor User, publicID string, expectedVersion int64) (APIKey, error) {
-	return s.rotateAPIKey(actor, publicID, expectedVersion, nil)
-}
-
 // RotateAPIKeyForRequest binds password reauthentication to the still-live
 // interactive session in the same writer transaction as credential replacement.
 func (s *Store) RotateAPIKeyForRequest(actor, proof User, publicID string, expectedVersion int64) (APIKey, error) {
 	if actor.ID != proof.ID || !proof.requestSession {
 		return APIKey{}, ErrAdminGenerationStale
 	}
-	return s.rotateAPIKey(actor, publicID, expectedVersion, &proof)
-}
 
-func (s *Store) rotateAPIKey(actor User, publicID string, expectedVersion int64, proof *User) (APIKey, error) {
 	if actor.ID <= 0 || actor.authGeneration <= 0 || !actor.IsAdmin {
 		return APIKey{}, ErrAdminGenerationStale
 	}
@@ -268,11 +259,7 @@ func (s *Store) rotateAPIKey(actor User, publicID string, expectedVersion int64,
 		}
 		return tx.QueryRow(`SELECT COALESCE(stable_id,''),COALESCE(key_prefix,''),name,created_at,version,COALESCE(rotated_at,'') FROM api_keys WHERE stable_id=?`, stable).Scan(&key.ID, &key.KeyPrefix, &key.Name, &key.CreatedAt, &key.Version, &key.RotatedAt)
 	}
-	if proof != nil {
-		err = s.adminUserTx(actor.ID, write, *proof)
-	} else {
-		err = s.writeTx(write)
-	}
+	err = s.adminUserTx(actor.ID, write, proof)
 	if err != nil {
 		return APIKey{}, err
 	}
@@ -308,36 +295,6 @@ func (s *Store) classifyAPIKeyConflict(tx *sql.Tx, stable string, expectedVersio
 	}
 	// 版本号一致却未更新，只可能是 owner/约束变化；按版本冲突处理，不泄露细节。
 	return ErrAPIKeyVersionStale
-}
-
-// DeleteAPIKeyByVersion 删除稳定 ID 对应记录；expectedVersion 为 0 表示不带
-// If-Match 的旧式删除，>0 时要求版本匹配（删除与轮转以数据库写顺序裁决）。
-func (s *Store) DeleteAPIKeyByVersion(publicID string, expectedVersion int64) error {
-	stable, err := s.ResolveAPIKeyStableID(publicID)
-	if err != nil {
-		return err
-	}
-	query := "DELETE FROM api_keys WHERE stable_id=?"
-	args := []any{stable}
-	if expectedVersion > 0 {
-		query += " AND version=?"
-		args = append(args, expectedVersion)
-	}
-	res, err := s.db.Exec(query, args...)
-	if err != nil {
-		return err
-	}
-	changed, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if changed != 1 {
-		if expectedVersion > 0 {
-			return ErrAPIKeyVersionStale
-		}
-		return ErrAPIKeyNotFound
-	}
-	return nil
 }
 
 func newAPIKeyCredential() (plaintext, digest, prefix string, err error) {

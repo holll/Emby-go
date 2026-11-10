@@ -50,18 +50,3 @@ func (s *Store) EditFailures(now time.Time) ([]EditFailure, error) {
 	}
 	return out, rows.Err()
 }
-
-// EditFailureCounts 返回待恢复总数与超过 7 天的数量，供提示使用。
-func (s *Store) EditFailureCounts(now time.Time, staleAfter time.Duration) (total, stale int, err error) {
-	failures, err := s.EditFailures(now)
-	if err != nil {
-		return 0, 0, err
-	}
-	cutoff := now.Add(-staleAfter)
-	for _, f := range failures {
-		if at, err := time.Parse(time.RFC3339, f.FirstFailedAt); err == nil && at.Before(cutoff) {
-			stale++
-		}
-	}
-	return len(failures), stale, nil
-}

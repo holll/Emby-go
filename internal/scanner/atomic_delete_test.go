@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ func TestScanProtocolDeletionPublishesBeforeLaterIndexFailure(t *testing.T) {
 	if _, err := fixture.Exec(`CREATE TRIGGER fail_after_protocol BEFORE INSERT ON movies WHEN NEW.title='B' BEGIN SELECT RAISE(ABORT,'fixture-after-protocol'); END`); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err == nil || !strings.Contains(err.Error(), "fixture-after-protocol") || result.Skipped != 1 || result.Success != 0 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -82,7 +83,7 @@ func TestScanReconciliationVersionFailurePreservesMissingRows(t *testing.T) {
 	if _, err := fixture.Exec(`CREATE TRIGGER fail_reconcile_version BEFORE UPDATE ON kv WHEN NEW.key='g:version' AND CAST(NEW.value AS INTEGER)=3 BEGIN SELECT RAISE(ABORT,'fixture-reconcile-version'); END`); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err == nil || !strings.Contains(err.Error(), "fixture-reconcile-version") || result.Success != 1 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -95,7 +96,7 @@ func TestScanReconciliationVersionFailurePreservesMissingRows(t *testing.T) {
 	if _, err := fixture.Exec("DROP TRIGGER fail_reconcile_version"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Movie(missing); !store.NotFound(err) {

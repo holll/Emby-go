@@ -109,9 +109,6 @@ func (c Config) Configured() bool {
 	return strings.TrimSpace(c.BaseURL) != "" && strings.TrimSpace(c.Token) != ""
 }
 
-// Client 暴露底层客户端，供管理端「测试连接」使用。
-func (s *Scraper) Client() *metatube.Client { return s.client }
-
 // Translator 暴露翻译客户端，供管理端「测试连接」使用。
 func (s *Scraper) Translator() *translate.Client { return s.tr }
 
@@ -264,16 +261,6 @@ func pickCandidates(results []metatube.MovieSearchResult, expected string, limit
 		out = out[:limit]
 	}
 	return out
-}
-
-// selectExact 在搜索结果里挑出第一条番号精确命中的结果。
-// 批量/定时路径只能取精确命中：没有就跳过（需求 A7 #50），不退回首个结果。
-func selectExact(results []metatube.MovieSearchResult, expected string) (metatube.MovieSearchResult, bool) {
-	matches := selectAllExact(results, expected)
-	if len(matches) == 0 {
-		return metatube.MovieSearchResult{}, false
-	}
-	return matches[0], true
 }
 
 // selectAllExact 返回所有番号精确命中的结果（保持原顺序）。

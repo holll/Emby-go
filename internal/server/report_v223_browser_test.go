@@ -23,11 +23,11 @@ func TestReportFindingsBrowserMobile(t *testing.T) {
 	}
 	t.Logf("browser evidence: %s", root)
 	f := artworkFixture(t)
-	ordinary, err := f.a.db.CreateUser("report-ordinary-user", "password-123", false)
+	ordinary, err := createFixtureUser(t, f.a, "report-ordinary-user", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("report-ordinary", ordinary.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "report-ordinary", ordinary.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(f.a.Handler())

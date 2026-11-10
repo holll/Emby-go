@@ -119,7 +119,7 @@ func TestScanGrowthWindowClassification(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if _, err := Scan(s, lib); err != nil {
+					if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 						t.Fatal(err)
 					}
 					id, err := s.MovieIDByPath(source)
@@ -127,9 +127,7 @@ func TestScanGrowthWindowClassification(t *testing.T) {
 						t.Fatal(err)
 					}
 					if kind != "missing-nfo" {
-						if err := s.SavePlaybackForUser(1, id, 7654321, 3, "2026-11-06T00:00:00Z", 7654321); err != nil {
-							t.Fatal(err)
-						}
+						seedStoppedPlaybacks(t, s, 1, id, 7654321, 3, "2026-11-06T00:00:00Z")
 						data, err := s.SetIndexedFavoriteDataForUser(1, id, true)
 						if err != nil || !data.IsFavorite || data.PositionTicks != 7654321 || data.PlayCount != 3 {
 							t.Fatalf("nonempty personal baseline: %+v %v", data, err)

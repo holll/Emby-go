@@ -135,25 +135,6 @@ func (s *Store) TaskRecordByID(id int64) (TaskRecord, bool, error) {
 	return rec, true, nil
 }
 
-// LatestTaskRecordOfType 返回某类任务最近一条摘要，用于「上次任务结果」这类
-// 只关心最近一次的后台任务；没有记录时 found=false。
-func (s *Store) LatestTaskRecordOfType(kind string) (TaskRecord, bool, error) {
-	var rec TaskRecord
-	var allowEmpty int
-	err := s.db.QueryRow(`SELECT id,type,status,library_id,mode,allow_empty,created_at,started_at,finished_at,error,result_json
-		FROM task_records WHERE type=? ORDER BY id DESC LIMIT 1`, kind).
-		Scan(&rec.ID, &rec.Type, &rec.Status, &rec.LibraryID, &rec.Mode, &allowEmpty,
-			&rec.CreatedAt, &rec.StartedAt, &rec.FinishedAt, &rec.Error, &rec.ResultJSON)
-	if err == sql.ErrNoRows {
-		return TaskRecord{}, false, nil
-	}
-	if err != nil {
-		return TaskRecord{}, false, fmt.Errorf("latest task record: %w", err)
-	}
-	rec.AllowEmpty = allowEmpty != 0
-	return rec, true, nil
-}
-
 func (s *Store) MaxTaskRecordID() (int64, error) {
 	var id int64
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM task_records`).Scan(&id); err != nil {

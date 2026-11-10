@@ -114,28 +114,6 @@ func (s *Scraper) Run(ctx context.Context, opts RunOptions) (Progress, error) {
 	return final, nil
 }
 
-// RunMovies 对给定影片列表执行刮削（单条手动路径复用同一套并发与熔断逻辑）。
-func (s *Scraper) RunMovies(ctx context.Context, movies []store.Movie, opts RunOptions) (Progress, error) {
-	if !s.cfg.Configured() {
-		return Progress{}, errors.New("未配置 MetaTube 地址或 token")
-	}
-	return s.runMovies(ctx, movies, opts)
-}
-
-func (s *Scraper) runMovies(ctx context.Context, movies []store.Movie, opts RunOptions) (Progress, error) {
-	st := &runState{progress: Progress{Total: len(movies)}}
-	s.runMoviesInto(ctx, movies, opts, st)
-	final := st.snapshot()
-	if st.aborted.Load() {
-		return final, errors.Join(ctx.Err(), fmt.Errorf("连续 %d 条刮削失败，疑似 MetaTube 不可达或 token 失效，任务已提前中止（已处理 %d/%d）",
-			MaxConsecutiveFailures, final.Done, final.Total))
-	}
-	if err := ctx.Err(); err != nil {
-		return final, err
-	}
-	return final, nil
-}
-
 // runState 在分批任务中跨批共享进度与熔断状态。
 // 熔断计数必须跨批累计，否则每批都会重新数连续失败，等于没有熔断。
 type runState struct {
@@ -377,6 +355,3 @@ func (s *Scraper) ScrapeOneMovie(ctx context.Context, movie store.Movie, pid met
 func displayTitle(movie store.Movie) string {
 	return movie.DisplayTitle()
 }
-
-// IsNotFound 供上层区分「上游没有这部片」与真正的故障。
-func IsNotFound(err error) bool { return metatube.IsNotFound(err) }

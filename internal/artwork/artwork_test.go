@@ -46,7 +46,7 @@ func fixture(t *testing.T) (*store.Store, store.Movie, string) {
 	if e = os.WriteFile(src, []byte("https://trusted.example/video"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	id, e := db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: src, Status: "pending", Title: "original", Plot: "plot", ProviderID: "keep", Genres: []string{"genre"}}, 1, time.Now())
+	id, e := db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: src, Status: "pending", Title: "original", Plot: "plot", ProviderID: "keep", Genres: []string{"genre"}}, 1, time.Now(), nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -68,7 +68,7 @@ func TestProviderIndependentPendingAndOverwrite(t *testing.T) {
 	os.WriteFile(shared, picture(), 0600)
 	other := filepath.Join(dir, "B.strm")
 	os.WriteFile(other, []byte("https://example/video"), 0600)
-	id, e := db.UpsertMovie(store.Movie{LibraryID: m.LibraryID, SourcePath: other, Status: "pending", PosterPath: shared}, 1, time.Now())
+	id, e := db.IndexMovie(store.Movie{LibraryID: m.LibraryID, SourcePath: other, Status: "pending", PosterPath: shared}, 1, time.Now(), nil)
 	if e != nil {
 		t.Fatal(e)
 	}

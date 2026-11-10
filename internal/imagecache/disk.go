@@ -139,14 +139,6 @@ func (d *Disk) Dir() string {
 	return d.dir
 }
 
-// PathFor 返回 key 对应的变体路径，禁用时为空串；仅供测试断言。
-func (d *Disk) PathFor(key string) string {
-	if !d.Enabled() {
-		return ""
-	}
-	return d.path(key)
-}
-
 // path 把 key 映射成 dir/<两位 hex>/<32 位 hex>.webp。
 // 用哈希而不是把路径拼进来：文件名长度稳定，也不会因为路径里的特殊字符
 // 或超长目录名出问题；分两级是为了避免单目录几万个文件。

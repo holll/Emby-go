@@ -64,7 +64,7 @@ func TestScanSpecialFiles(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := Scan(s, lib); err != nil {
+				if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 					t.Fatal(err)
 				}
 				id, err := s.MovieIDByPath(source)
@@ -200,7 +200,7 @@ func TestScanSpecialFiles(t *testing.T) {
 					source = stackSource
 					scanWrite(t, filepath.Join(root, "A-CD2.strm"), "https://media.test/part2.mp4\n")
 					scanWrite(t, orphan, "https://media.test/orphan.mp4\n")
-					if _, err := Scan(s, lib); err != nil {
+					if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 						t.Fatal(err)
 					}
 					wantSkipped = 2
@@ -221,9 +221,7 @@ func TestScanSpecialFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 				if dependency != "missing-nfo" {
-					if err := s.SavePlaybackForUser(1, id, 123000000, 3, "2026-01-02T03:04:05Z", 123000000); err != nil {
-						t.Fatal(err)
-					}
+					seedStoppedPlaybacks(t, s, 1, id, 123000000, 3, "2026-01-02T03:04:05Z")
 					if _, err := s.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 						t.Fatal(err)
 					}

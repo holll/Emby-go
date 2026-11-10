@@ -221,11 +221,11 @@ func TestWebhookTargetsURLRequiresAdminAndNoStore(t *testing.T) {
 	const url = "https://example.com/admin-url-canary?key=query-canary"
 	body := fmt.Sprintf(`{"targets":[{"id":%q,"name":"admin","enabled":false,"url":%q,"events":["item.updated"],"format":"json","timeout_seconds":5}]}`, initial.Targets[0].ID, url)
 	saved := decodeWebhookTargets(t, webhookTargetsRequest(a, http.MethodPut, token, initial.ETag, body))
-	user, err := a.db.CreateUser("ordinary-webhook", "test-password", false)
+	user, err := createFixtureUser(t, a, "ordinary-webhook", "test-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.SaveAccessTokenForUser("ordinary-webhook-token", user.ID, time.Now().Add(time.Hour)); err != nil {
+	if err := saveFixtureSession(t, a, "ordinary-webhook-token", user.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, method := range []string{http.MethodGet, http.MethodPut} {

@@ -9,7 +9,7 @@ import (
 // A second Store commits changes between credential authentication and mutation.
 // This also exercises API keys (which survive password/session revocation).
 func TestAdminCredentialGenerationAcrossStores(t *testing.T) {
-	for _, mode := range []string{"password", "revoke-user", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "expiry", "key-delete", "key-password", "key-role-ABA"} {
+	for _, mode := range []string{"password", "role-change", "revoke-all", "logout", "role-ABA", "admin-role-ABA", "expiry", "key-delete", "key-password", "key-role-ABA"} {
 		t.Run(mode, func(t *testing.T) {
 			s := openUsersStore(t)
 			// Password creation is setup, not the generation barrier under test.
@@ -17,10 +17,10 @@ func TestAdminCredentialGenerationAcrossStores(t *testing.T) {
 			seedFixtureAdministrator(t, s, "owner", "password-1234")
 			actor := seedFixtureUser(t, s, "actor", "password-1234", true)
 			target := seedFixtureUser(t, s, "target", "password-1234", false)
-			if err := s.SaveAccessTokenForUser("session", actor.ID, time.Now().Add(time.Hour)); err != nil {
+			if err := s.SaveAccessTokenForAuthenticatedUser("session", fixtureAuthenticatedUser(t, s, actor.ID, "password-1234"), time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
-			key, err := s.CreateAPIKeyForUser("actor-key", actor.ID)
+			key, err := s.AdminCreateAPIKey(fixtureRequestProof(t, s, actor.ID, "password-1234"), "actor-key")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,33 +41,24 @@ func TestAdminCredentialGenerationAcrossStores(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer other.Close()
+			owner := fixtureRequestProof(t, other, 1, "password-1234")
+			no, yes := false, true
 			switch mode {
 			case "password", "key-password":
-				err = other.SetUserPassword(actor.ID, "new-password-1234")
-			case "revoke-user":
-				err = other.RevokeUserAccessTokens(actor.ID)
+				password := "new-password-1234"
+				err = other.AdminUpdateUser(1, actor.ID, AdminUserUpdate{Password: &password}, owner)
+			case "role-change":
+				// A real role change advances generation without a test-only revocation API.
+				err = other.AdminUpdateUser(1, actor.ID, AdminUserUpdate{IsAdmin: &no}, owner)
 			case "revoke-all":
-				_, err = other.RevokeAllAccessTokens()
+				_, err = other.AdminRevokeAllAccessTokens(owner)
 			case "logout":
 				err = other.DeleteAccessToken("session")
 			case "expiry":
 				_, err = other.db.Exec("UPDATE access_tokens SET expires_at=? WHERE user_id=?", time.Now().Add(-time.Hour).Unix(), actor.ID)
 			case "key-delete":
-				err = other.DeleteAPIKey(key.ID)
-			case "role-ABA", "key-role-ABA":
-				err = other.SetUserAdmin(actor.ID, false)
-				if err == nil {
-					err = other.SetUserAdmin(actor.ID, true)
-				}
-			case "admin-role-ABA":
-				if err = other.SaveAccessTokenForUser("owner-session", 1, time.Time{}); err != nil {
-					t.Fatal(err)
-				}
-				owner, e := other.RequestCredentialUser("owner-session", 1, true)
-				if e != nil {
-					t.Fatal(e)
-				}
-				no, yes := false, true
+				err = other.AdminDeleteAPIKey(owner, key.ID, key.Version)
+			case "role-ABA", "key-role-ABA", "admin-role-ABA":
 				err = other.AdminUpdateUser(1, actor.ID, AdminUserUpdate{IsAdmin: &no}, owner)
 				if err == nil {
 					err = other.AdminUpdateUser(1, actor.ID, AdminUserUpdate{IsAdmin: &yes}, owner)

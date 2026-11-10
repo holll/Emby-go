@@ -52,8 +52,8 @@ func TestWriterGateCancelledContextNeverAcquiresLock(t *testing.T) {
 // P2-13 回归：取消要在毫秒级退出等待，而不是每 5ms 唤醒一次再检查。
 func TestWriterGateContextCancelExitsQueuedWait(t *testing.T) {
 	s := newGateFixture(t)
-	s.writeMu.Lock()         // 模拟长时间持锁的写者（例如扫描提交）
-	defer s.writeMu.Unlock() // 必须在等待者退出之后再释放
+	s.writeMu.LockContext(context.Background()) // 模拟长时间持锁的写者（例如扫描提交）
+	defer s.writeMu.Unlock()                    // 必须在等待者退出之后再释放
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -86,7 +86,7 @@ func TestWriterGateServesWaitersInFIFOOrder(t *testing.T) {
 	s := newGateFixture(t)
 	const waiters = 8
 
-	s.writeMu.Lock()
+	s.writeMu.LockContext(context.Background())
 	var mu sync.Mutex
 	var order []int
 	var wg sync.WaitGroup
@@ -132,7 +132,7 @@ func TestWriterGateCancelledWaitersDoNotLeak(t *testing.T) {
 	s := newGateFixture(t)
 	baseline := runtime.NumGoroutine()
 
-	s.writeMu.Lock()
+	s.writeMu.LockContext(context.Background())
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)

@@ -64,7 +64,7 @@ func TestNullMetadataWideProjections(t *testing.T) {
 				Genres: []string{"Drama"}, Tags: []string{"Tag"}, Studios: []string{"Studio"}, PosterPath: "poster.jpg",
 				BackdropPath: "backdrop.jpg", RuntimeSeconds: 120,
 			})
-			if err := s.ReplaceActors(id, []ActorRef{{Name: "Actor"}}); err != nil {
+			if err := indexFixtureActors(s, id, []ActorRef{{Name: "Actor"}}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.db.Exec("INSERT INTO userdata(user_id,movie_id,position_ticks) VALUES(1,?,10000000)", id); err != nil {
@@ -89,16 +89,16 @@ func TestNullMetadataWideProjections(t *testing.T) {
 				"Movie": func() ([]Movie, error) { m, e := s.Movie(id); return []Movie{m}, e },
 				"IDs":   func() ([]Movie, error) { m, e := s.MoviesByIDs([]int64{id}); return []Movie{m[id]}, e },
 				"search": func() ([]Movie, error) {
-					m, n, e := s.SearchAll(lib, "", "", "title", false, 10, 0)
+					m, n, e := s.SearchAdmin(AdminQuery{LibraryID: lib, Term: "", Status: "", SortBy: "title", Desc: false, Limit: 10, Offset: 0})
 					if e == nil && n != 1 {
 						t.Errorf("search total=%d", n)
 					}
 					return m, e
 				},
-				"latest":        func() ([]Movie, error) { return s.Latest(lib, 10, 0) },
+				"latest":        func() ([]Movie, error) { return s.LatestVisible(lib, nil, "", 10, 0) },
 				"latestVisible": func() ([]Movie, error) { return s.LatestVisible(0, []int64{lib}, "", 10, 0) },
 				"resumed": func() ([]Movie, error) {
-					m, n, e := s.Resumed(1, 10, 0)
+					m, n, e := s.ResumedVisible(1, 0, nil, "", 10, 0)
 					if e == nil && n != 1 {
 						t.Errorf("resumed total=%d", n)
 					}
@@ -147,23 +147,19 @@ func TestNullMetadataNarrowProjections(t *testing.T) {
 	if err != nil || len(probe) != 1 || probe[0].Title != "" || probe[0].ID != id {
 		t.Fatalf("probe=%+v err=%v", probe, err)
 	}
-	for name, query := range map[string]func(int64, string) ([]string, error){"genres": s.Genres, "tags": s.Tags, "studios": s.Studios} {
-		got, err := query(lib, "Collection")
+	for _, name := range []string{"genre", "tag", "studio"} {
+		got, err := s.EntityNamesVisible(name, lib, nil, "Collection")
 		if err != nil || len(got) != 0 {
 			t.Fatalf("%s=%v err=%v", name, got, err)
 		}
 	}
-	stats, err := s.CollectionStats(1)
+	stats, err := s.CollectionStatsVisible(1, 0, nil)
 	if err != nil || stats["Collection"].Count != 1 || stats["Collection"].Poster != "" || len(stats["Collection"].Genres) != 0 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
 	}
 	visible, err := s.CollectionStatsVisible(1, lib, []int64{lib})
 	if err != nil || visible["Collection"].Count != 1 || visible["Collection"].Poster != "" || len(visible["Collection"].Genres) != 0 {
 		t.Fatalf("visible=%+v err=%v", visible, err)
-	}
-	count, genres, err := s.CollectionSummary("Collection")
-	if err != nil || count != 1 || len(genres) != 0 {
-		t.Fatalf("summary=%d,%v,%v", count, genres, err)
 	}
 	if nullMetadataVersions(t, s) != before {
 		t.Fatal("narrow reads changed versions")
@@ -220,7 +216,7 @@ func TestNullMetadataPreservesRawFilteringOrderingAndJSON(t *testing.T) {
 	}
 	before := nullMetadataVersions(t, s)
 	for _, desc := range []bool{false, true} {
-		movies, count, err := s.SearchAll(lib, "", "", "title", desc, 10, 0)
+		movies, count, err := s.SearchAdmin(AdminQuery{LibraryID: lib, Term: "", Status: "", SortBy: "title", Desc: desc, Limit: 10, Offset: 0})
 		if err != nil || count != 2 {
 			t.Fatalf("search count=%d err=%v", count, err)
 		}
@@ -230,7 +226,7 @@ func TestNullMetadataPreservesRawFilteringOrderingAndJSON(t *testing.T) {
 		}
 		assertScrapeMovieIDs(t, movies, want, "raw title order")
 	}
-	movies, count, err := s.SearchFiltered(1, lib, "", "0", "", false, "title", false, 10, 0)
+	movies, count, err := s.SearchFilteredVisible(1, lib, nil, "", "0", "", false, "title", false, 10, 0)
 	if err != nil || count != 1 {
 		t.Fatalf("year=0 filter count=%d err=%v", count, err)
 	}
@@ -263,9 +259,21 @@ func TestNullRuntimeIndexedUserSnapshots(t *testing.T) {
 		name  string
 		write func(*Store, int64) (UserData, error)
 	}{
-		{"favorite", func(s *Store, id int64) (UserData, error) { return s.SetIndexedFavoriteData(id, true) }},
-		{"likes", func(s *Store, id int64) (UserData, error) { return s.SetIndexedLikesData(id, -1) }},
-		{"hidden", func(s *Store, id int64) (UserData, error) { return s.SetIndexedHideFromResumeData(id, true) }},
+		{"favorite", func(s *Store, id int64) (UserData, error) {
+			return s.SetIndexedFavoriteDataForUser(1,
+
+				id, true)
+		}},
+		{"likes", func(s *Store, id int64) (UserData, error) {
+			return s.SetIndexedLikesDataForUser(1,
+
+				id, -1)
+		}},
+		{"hidden", func(s *Store, id int64) (UserData, error) {
+			return s.SetIndexedHideFromResumeDataForUser(1,
+
+				id, true)
+		}},
 	}
 	for _, op := range operations {
 		t.Run(op.name, func(t *testing.T) {

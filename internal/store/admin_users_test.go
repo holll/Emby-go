@@ -11,18 +11,19 @@ func TestAdminUserTransactionsAuthorityAndRollback(t *testing.T) {
 	if err := s.InitializeAdministrator("owner", "password-1234"); err != nil {
 		t.Fatal(err)
 	}
-	actor, err := s.CreateUser("actor", "password-1234", true)
+	ownerProof := fixtureRequestProof(t, s, 1, "password-1234")
+	actor, err := s.AdminCreateUser(1, "actor", "password-1234", true, nil, ownerProof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("actor-proof", actor.ID, time.Time{}); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("actor-proof", fixtureAuthenticatedUser(t, s, actor.ID, "password-1234"), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	proof, err := s.RequestCredentialUser("actor-proof", actor.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("owner-proof", 1, time.Time{}); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("owner-proof", fixtureAuthenticatedUser(t, s, 1, "password-1234"), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	owner, err := s.RequestCredentialUser("owner-proof", 1, true)
@@ -33,7 +34,7 @@ func TestAdminUserTransactionsAuthorityAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("target-session", target.ID, time.Time{}); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("target-session", fixtureAuthenticatedUser(t, s, target.ID, "password-1234"), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	name, password, admin, libs := "changed-target", "new-password-1234", true, []int64{-123}
@@ -72,7 +73,8 @@ func TestAdminUserTransactionsAuthorityAndRollback(t *testing.T) {
 	}
 	for _, actorID := range []int64{0, actor.ID} {
 		if actorID == actor.ID {
-			if err := s.SetUserAdmin(actor.ID, false); err != nil {
+			no := false
+			if err := s.AdminUpdateUser(1, actor.ID, AdminUserUpdate{IsAdmin: &no}, owner); err != nil {
 				t.Fatal(err)
 			}
 		}

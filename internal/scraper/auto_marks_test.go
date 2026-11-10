@@ -27,7 +27,7 @@ func autoMarksStore(t *testing.T, source string) (*store.Store, store.Movie) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanner.Scan(db, lib); err != nil {
+	if _, err := scanner.ScanWithOptions(context.Background(), db, lib, scanner.ScanOptions{Mode: scanner.ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.MovieIDByPath(source)
@@ -158,10 +158,11 @@ func TestApplyAutoMarksBatchDiagnostic(t *testing.T) {
 	cfg.BaseURL, cfg.Token = backend.URL, "token"
 	cfg.DownloadImages = false
 	cfg.Translate = translate.Config{}
-	var item ItemResult
-	progress, err := New(cfg, nil).RunMovies(context.Background(), []store.Movie{movie}, RunOptions{Overwrite: true, OnItem: func(result ItemResult) { item = result }})
-	if err != nil || progress.Done != 1 || progress.Success != 1 || progress.Failed != 0 || progress.Skipped != 0 || item.Status != StatusSuccess || item.Reason != autoMarksReviewMessage || item.Fatal {
-		t.Fatalf("progress=%+v item=%+v err=%v", progress, item, err)
+	// Exercise the production per-movie path without an ownership store: NFO
+	// changes succeed, but the caller must still receive the review diagnostic.
+	item := New(cfg, nil).scrapeOne(context.Background(), movie, RunOptions{Overwrite: true})
+	if item.Status != StatusSuccess || item.Reason != autoMarksReviewMessage || item.Fatal {
+		t.Fatalf("item=%+v", item)
 	}
 	meta, err := nfo.Read(path)
 	if err != nil || !slices.Contains(meta.Tags, "中文字幕") || !slices.Contains(meta.Tags, "手工") {

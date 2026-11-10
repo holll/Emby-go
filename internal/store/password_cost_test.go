@@ -36,19 +36,21 @@ func TestProductionPasswordWorkFactor(t *testing.T) {
 	if err := db.db.QueryRow("SELECT password_hash FROM administrators WHERE id=1").Scan(&legacyHash); err != nil || legacyHash != ownerHash {
 		t.Fatalf("legacy administrator password compatibility: %v", err)
 	}
-	user, err := db.CreateUser("created", "created-policy-password", false)
+	proof := fixtureRequestProof(t, db, 1, "owner-policy-password")
+	user, err := db.AdminCreateUser(1, "created", "created-policy-password", false, nil, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	check(user.ID)
-	if err := db.SetUserPassword(user.ID, "reset-policy-password"); err != nil {
+	reset := "reset-policy-password"
+	if err := db.AdminUpdateUser(1, user.ID, AdminUserUpdate{Password: &reset}, proof); err != nil {
 		t.Fatal(err)
 	}
 	check(user.ID)
-	if err := db.SaveAccessTokenForUser("policy-owner-proof", 1, time.Time{}); err != nil {
+	if err := db.SaveAccessTokenForAuthenticatedUser("policy-owner-proof", fixtureAuthenticatedUser(t, db, 1, "owner-policy-password"), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	proof, err := db.RequestCredentialUser("policy-owner-proof", 1, true)
+	proof, err = db.RequestCredentialUser("policy-owner-proof", 1, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -69,7 +69,7 @@ func TestTrustedSTRMProbeFailureKeepsPlaybackAndRedactsResponse(t *testing.T) {
 				part := filepath.Join(filepath.Dir(movie.SourcePath), "part2.strm")
 				writeFile(t, part, media.URL+"/valid.mp4\n")
 				movie.AdditionalParts = []string{part}
-				if _, err := app.db.UpsertMovie(movie, 0, time.Now()); err != nil {
+				if _, err := indexFixtureMovie(t, app, movie, 0, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 				movie, err = app.db.Movie(1)

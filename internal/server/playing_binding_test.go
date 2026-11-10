@@ -21,7 +21,7 @@ func TestPlaybackMovieConflictAPI(t *testing.T) {
 			}
 			movie.ID = 0
 			movie.SourcePath += ".other"
-			other, err := a.db.UpsertMovie(movie, 1, time.Now())
+			other, err := indexFixtureMovie(t, a, movie, 1, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}

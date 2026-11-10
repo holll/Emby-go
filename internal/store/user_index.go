@@ -2,46 +2,15 @@ package store
 
 import "database/sql"
 
-// Explicit settings preserve legacy values and publish their actual movie's
-// library version together. Playback counters and session semantics are unchanged.
-func (s *Store) SetIndexedFavorite(id int64, favorite bool) error {
-	_, err := s.SetIndexedFavoriteData(id, favorite)
-	return err
-}
-
-func (s *Store) SetIndexedLikes(id int64, likes int) error {
-	_, err := s.SetIndexedLikesData(id, likes)
-	return err
-}
-
-func (s *Store) SetIndexedHideFromResume(id int64, hidden bool) error {
-	_, err := s.SetIndexedHideFromResumeData(id, hidden)
-	return err
-}
-
-// The Data variants return the snapshot read inside the write transaction, but
-// only after COMMIT succeeds. A response-read failure rolls back the whole write.
-func (s *Store) SetIndexedFavoriteData(id int64, favorite bool) (UserData, error) {
-	return s.SetIndexedFavoriteDataForUser(1, id, favorite)
-}
-
 // SetIndexedFavoriteDataForUser 按账户写收藏，并返回同事务内读到的该用户快照。
 func (s *Store) SetIndexedFavoriteDataForUser(userID, id int64, favorite bool) (UserData, error) {
 	return s.writeIndexedUserData(userID, id, `INSERT INTO userdata(user_id,movie_id,is_favorite) VALUES(?,?,?)
 		ON CONFLICT(user_id,movie_id) DO UPDATE SET is_favorite=excluded.is_favorite`, b2i(favorite))
 }
 
-func (s *Store) SetIndexedLikesData(id int64, likes int) (UserData, error) {
-	return s.SetIndexedLikesDataForUser(1, id, likes)
-}
-
 func (s *Store) SetIndexedLikesDataForUser(userID, id int64, likes int) (UserData, error) {
 	return s.writeIndexedUserData(userID, id, `INSERT INTO userdata(user_id,movie_id,likes) VALUES(?,?,?)
 		ON CONFLICT(user_id,movie_id) DO UPDATE SET likes=excluded.likes`, likes)
-}
-
-func (s *Store) SetIndexedHideFromResumeData(id int64, hidden bool) (UserData, error) {
-	return s.SetIndexedHideFromResumeDataForUser(1, id, hidden)
 }
 
 func (s *Store) SetIndexedHideFromResumeDataForUser(userID, id int64, hidden bool) (UserData, error) {

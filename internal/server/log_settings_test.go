@@ -23,11 +23,11 @@ func logSettingsCall(a *App, method, token, tag, body string) *httptest.Response
 }
 func TestLogSettingsAuthorizationValidationAndPersistence(t *testing.T) {
 	f := newAdminDeleteFixture(t)
-	u, err := f.a.db.CreateUser("logs-reader", "test-password", false)
+	u, err := createFixtureUser(t, f.a, "logs-reader", "test-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("logs-reader", u.ID, time.Now().Add(time.Hour)); err != nil {
+	if err = saveFixtureSession(t, f.a, "logs-reader", u.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	calls := []int{}

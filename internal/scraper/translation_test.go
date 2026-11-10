@@ -190,7 +190,7 @@ func TestTranslateExistingStackedRefreshAndNoScrapeChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanner.Scan(db, lib); err != nil {
+	if _, err := scanner.ScanWithOptions(context.Background(), db, lib, scanner.ScanOptions{Mode: scanner.ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.MovieIDByPath(first)
@@ -305,7 +305,7 @@ func translationRealIndexFixture(t *testing.T, legacy bool) (*store.Store, store
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scanner.Scan(db, lib); err != nil {
+	if _, err := scanner.ScanWithOptions(context.Background(), db, lib, scanner.ScanOptions{Mode: scanner.ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.MovieIDByPath(first)

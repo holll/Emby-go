@@ -70,7 +70,7 @@ func asyncScanFixture(t *testing.T) (*App, *httptest.Server, string) {
 	}
 	owner := seedFixtureUser(t, app, "admin", "password-1234", true)
 	const token = "async-scan-fixture-session"
-	if err := app.db.SaveAccessTokenForUser(token, owner.ID, app.sessionExpiry(time.Now())); err != nil {
+	if err := saveFixtureSession(t, app, token, owner.ID, app.sessionExpiry(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	libBody := `{"Name":"Async","Path":"` + root + `"}`

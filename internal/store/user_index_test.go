@@ -18,9 +18,21 @@ type indexedUserOperation struct {
 
 func indexedUserOperations() []indexedUserOperation {
 	return []indexedUserOperation{
-		{"favorite", func(s *Store, id int64) error { return s.SetIndexedFavorite(id, true) }},
-		{"likes", func(s *Store, id int64) error { return s.SetIndexedLikes(id, -1) }},
-		{"hidden", func(s *Store, id int64) error { return s.SetIndexedHideFromResume(id, true) }},
+		{"favorite", func(s *Store, id int64) error {
+			return snapshotError(s.SetIndexedFavoriteDataForUser(1,
+
+				id, true))
+		}},
+		{"likes", func(s *Store, id int64) error {
+			return snapshotError(s.SetIndexedLikesDataForUser(1,
+
+				id, -1))
+		}},
+		{"hidden", func(s *Store, id int64) error {
+			return snapshotError(s.SetIndexedHideFromResumeDataForUser(1,
+
+				id, true))
+		}},
 	}
 }
 
@@ -44,14 +56,46 @@ func TestIndexedUserSettingsValuesAndProtection(t *testing.T) {
 				write  func() error
 				change func(*UserData)
 			}{
-				{func() error { return f.s.SetIndexedFavorite(f.victim, true) }, func(d *UserData) { d.IsFavorite = true }},
-				{func() error { return f.s.SetIndexedFavorite(f.victim, true) }, func(d *UserData) { d.IsFavorite = true }},
-				{func() error { return f.s.SetIndexedFavorite(f.victim, false) }, func(d *UserData) { d.IsFavorite = false }},
-				{func() error { return f.s.SetIndexedLikes(f.victim, 1) }, func(d *UserData) { d.Likes = 1 }},
-				{func() error { return f.s.SetIndexedLikes(f.victim, -1) }, func(d *UserData) { d.Likes = -1 }},
-				{func() error { return f.s.SetIndexedLikes(f.victim, 0) }, func(d *UserData) { d.Likes = 0 }},
-				{func() error { return f.s.SetIndexedHideFromResume(f.victim, true) }, func(d *UserData) { d.HideFromResume = true }},
-				{func() error { return f.s.SetIndexedHideFromResume(f.victim, false) }, func(d *UserData) { d.HideFromResume = false }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedFavoriteDataForUser(1,
+
+						f.victim, true))
+				}, func(d *UserData) { d.IsFavorite = true }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedFavoriteDataForUser(1,
+
+						f.victim, true))
+				}, func(d *UserData) { d.IsFavorite = true }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedFavoriteDataForUser(1,
+
+						f.victim, false))
+				}, func(d *UserData) { d.IsFavorite = false }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedLikesDataForUser(1,
+
+						f.victim, 1))
+				}, func(d *UserData) { d.Likes = 1 }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedLikesDataForUser(1,
+
+						f.victim, -1))
+				}, func(d *UserData) { d.Likes = -1 }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedLikesDataForUser(1,
+
+						f.victim, 0))
+				}, func(d *UserData) { d.Likes = 0 }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedHideFromResumeDataForUser(1,
+
+						f.victim, true))
+				}, func(d *UserData) { d.HideFromResume = true }},
+				{func() error {
+					return snapshotError(f.s.SetIndexedHideFromResumeDataForUser(1,
+
+						f.victim, false))
+				}, func(d *UserData) { d.HideFromResume = false }},
 			}
 			for i, step := range steps {
 				before := indexedDeleteVersions(t, f)
@@ -197,7 +241,9 @@ func TestIndexedUserSettingsActualLibrary(t *testing.T) {
 			f.lib = target
 			f.other = oldLib
 			before := indexedDeleteVersions(t, f)
-			if err := f.s.SetIndexedFavorite(f.victim, true); err != nil {
+			if err := snapshotError(f.s.SetIndexedFavoriteDataForUser(1,
+
+				f.victim, true)); err != nil {
 				t.Fatal(err)
 			}
 			assertIndexedDeleteVersions(t, f, before, true)

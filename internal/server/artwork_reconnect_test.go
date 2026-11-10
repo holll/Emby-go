@@ -125,7 +125,7 @@ func TestArtworkCacheRefreshKeepsUnrelatedEntries(t *testing.T) {
 		if err != nil {
 			return artwork.Result{}, err
 		}
-		err = db.CompareAndSwapArtwork(ctx, m, lib.Path, "new-poster", nil)
+		err = db.CompareAndSwapArtworkFiles(ctx, m, lib.Path, "new-poster", store.ArtworkFiles{})
 		return artwork.Result{Changed: err == nil, PosterPath: "new-poster"}, err
 	}
 	w := translationCall(f.a, f.token, "POST", "/api/admin/artwork/run", artworkBody(f.movie))

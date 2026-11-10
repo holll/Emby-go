@@ -189,7 +189,7 @@ type FileInfoMeta struct {
 	ProbeURL     string
 }
 
-// MovieMeta 既是 NFO 的解析目标，也是整体重写（Save/SaveAtomic）的输出源。
+// MovieMeta 既是 NFO 的解析目标，也是整体重写（Save）的输出源。
 //
 // 可选字段一律带 omitempty：整体重写新文件时不应写出 `<outline></outline>` 这类空标签——
 // 空 <lockdata>、空 <outline> 会被其它工具当成「显式写了空值」，也让文件难以人工核对。
@@ -357,10 +357,6 @@ func Save(path string, m MovieMeta) error {
 		return err
 	}
 	return os.WriteFile(path, append([]byte(xml.Header), b...), 0644)
-}
-func SaveAtomic(path string, m MovieMeta) error {
-	defer lockNFOPath(path)()
-	return saveAtomicLocked(path, m)
 }
 
 // saveAtomicLocked 是不持锁的原子写内核，供已持锁的调用方复用

@@ -29,11 +29,11 @@ func startBlocker(t *testing.T, db *store.Store, movie store.Movie, root string)
 	t.Helper()
 	b := &blocker{locked: make(chan struct{}), release: make(chan struct{}), done: make(chan error, 1)}
 	go func() {
-		err := db.CompareAndSwapArtwork(context.Background(), movie, root, "/blocked.jpg", func() error {
+		err := db.CompareAndSwapArtworkFiles(context.Background(), movie, root, "/blocked.jpg", store.ArtworkFiles{Commit: func() error {
 			close(b.locked)
 			<-b.release
 			return nil
-		})
+		}})
 		b.done <- err
 	}()
 	select {
@@ -64,7 +64,7 @@ func siblingMovie(t *testing.T, db *store.Store, libraryID int64, dir, name stri
 	if err := os.WriteFile(src, []byte("https://blocker.example/video"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.UpsertMovie(store.Movie{LibraryID: libraryID, SourcePath: src, Status: "pending", Title: "blocker"}, 1, time.Now())
+	id, err := db.IndexMovie(store.Movie{LibraryID: libraryID, SourcePath: src, Status: "pending", Title: "blocker"}, 1, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,9 @@ func TestSpriteValidationFinishesBeforeWriterLock(t *testing.T) {
 	// Sheets and BIF were read while the blocker held the write transaction, yet
 	// the pointer must still be unset: the publish is the in-transaction UPDATE.
 	// No pointer row exists yet: publication is the in-transaction kv UPDATE.
-	if state, err := db.Sprite(m.ID); state.Generation != "" || (err != nil && !errors.Is(err, sql.ErrNoRows)) {
+	if state, err := db.SpriteContext(context.Background(),
+
+		m.ID); state.Generation != "" || (err != nil && !errors.Is(err, sql.ErrNoRows)) {
 		t.Fatalf("sprite published before the writer lock was free: %+v %v", state, err)
 	}
 	select {
@@ -197,7 +199,9 @@ func TestSpriteValidationFinishesBeforeWriterLock(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("GenerateSprite did not finish after the writer lock was released")
 	}
-	if state, err := db.Sprite(m.ID); err != nil || state.Generation == "" {
+	if state, err := db.SpriteContext(context.Background(),
+
+		m.ID); err != nil || state.Generation == "" {
 		t.Fatalf("sprite not published: %+v %v", state, err)
 	}
 }

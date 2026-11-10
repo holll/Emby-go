@@ -14,7 +14,7 @@ func identityUser(t *testing.T, s *Store) User {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.CreateUser("viewer", "old-password-1", false)
+	u, err := s.AdminCreateUser(1, "viewer", "old-password-1", false, nil, fixtureRequestProof(t, s, 1, "admin-password-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func authenticatedIdentity(t *testing.T, s *Store, u User) User {
 }
 
 func TestIdentityRejectsLatePasswordTokens(t *testing.T) {
-	for _, mode := range []string{"password", "revoke-user", "revoke-all", "delete"} {
+	for _, mode := range []string{"password", "role-change", "revoke-all", "delete"} {
 		t.Run(mode, func(t *testing.T) {
 			s := openUsersStore(t)
 			u := identityUser(t, s)
@@ -42,13 +42,15 @@ func TestIdentityRejectsLatePasswordTokens(t *testing.T) {
 			var err error
 			switch mode {
 			case "password":
-				err = s.SetUserPassword(u.ID, "new-password-1")
-			case "revoke-user":
-				err = s.RevokeUserAccessTokens(u.ID)
+				password := "new-password-1"
+				err = s.AdminUpdateUser(1, u.ID, AdminUserUpdate{Password: &password}, fixtureRequestProof(t, s, 1, "admin-password-1"))
+			case "role-change":
+				admin := true
+				err = s.AdminUpdateUser(1, u.ID, AdminUserUpdate{IsAdmin: &admin}, fixtureRequestProof(t, s, 1, "admin-password-1"))
 			case "revoke-all":
-				_, err = s.RevokeAllAccessTokens()
+				_, err = s.AdminRevokeAllAccessTokens(fixtureRequestProof(t, s, 1, "admin-password-1"))
 			case "delete":
-				err = s.DeleteUser(u.ID)
+				err = s.AdminDeleteUser(1, u.ID, fixtureRequestProof(t, s, 1, "admin-password-1"))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -88,13 +90,13 @@ func TestIdentityNeverReusesDeletedAccount(t *testing.T) {
 	if err := s.RecordLoginEvent(u.ID, u.Name, "127.0.0.1", true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteUser(u.ID); err != nil {
+	if err := s.AdminDeleteUser(1, u.ID, fixtureRequestProof(t, s, 1, "admin-password-1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveAccessTokenForUser("orphan", u.ID, time.Time{}); !errors.Is(err, ErrAuthenticationChanged) {
+	if err := s.SaveAccessTokenForAuthenticatedUser("orphan", authenticated, time.Time{}); !errors.Is(err, ErrAuthenticationChanged) {
 		t.Fatalf("orphan issuance err=%v", err)
 	}
-	next, err := s.CreateUser("replacement-admin", "new-password-1", true)
+	next, err := s.AdminCreateUser(1, "replacement-admin", "new-password-1", true, nil, fixtureRequestProof(t, s, 1, "admin-password-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +113,7 @@ func TestIdentityNeverReusesDeletedAccount(t *testing.T) {
 	if last[next.ID] != "" {
 		t.Fatal("replacement inherited login history")
 	}
-	if err := s.DeleteUser(next.ID); err != nil {
+	if err := s.AdminDeleteUser(1, next.ID, fixtureRequestProof(t, s, 1, "admin-password-1")); err != nil {
 		t.Fatal(err)
 	}
 	path := ""
@@ -126,7 +128,7 @@ func TestIdentityNeverReusesDeletedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	newest, err := reopened.CreateUser("newest", "newest-password", false)
+	newest, err := reopened.AdminCreateUser(1, "newest", "newest-password", false, nil, fixtureRequestProof(t, reopened, 1, "admin-password-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,8 @@ func TestIdentityPasswordAndRevocationRollbackTogether(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER reject_identity_revoke BEFORE DELETE ON access_tokens BEGIN SELECT RAISE(ABORT,'injected revoke failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetUserPassword(u.ID, "new-password-1"); err == nil {
+	password := "new-password-1"
+	if err := s.AdminUpdateUser(1, u.ID, AdminUserUpdate{Password: &password}, fixtureRequestProof(t, s, 1, "admin-password-1")); err == nil {
 		t.Fatal("injected failure ignored")
 	}
 	if _, ok, err := s.AuthenticateUser(u.Name, "old-password-1"); err != nil || !ok {
@@ -157,7 +160,8 @@ func TestIdentityPasswordAndRevocationRollbackTogether(t *testing.T) {
 	if _, err := s.db.Exec("DROP TRIGGER reject_identity_revoke"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetUserPassword(u.ID, "reset-password-1"); err != nil {
+	password = "reset-password-1"
+	if err := s.AdminUpdateUser(1, u.ID, AdminUserUpdate{Password: &password}, fixtureRequestProof(t, s, 1, "admin-password-1")); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetAuthenticatedUserPassword(authenticated, "stale-password-1"); !errors.Is(err, ErrAuthenticationChanged) {
@@ -172,18 +176,21 @@ func TestIdentityConcurrentLastAdminProtection(t *testing.T) {
 			if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 				t.Fatal(err)
 			}
-			other, err := s.CreateUser("second", "second-password-1", true)
+			other, err := s.AdminCreateUser(1, "second", "second-password-1", true, nil, fixtureRequestProof(t, s, 1, "admin-password-1"))
 			if err != nil {
 				t.Fatal(err)
 			}
+			ownerProof := fixtureRequestProof(t, s, 1, "admin-password-1")
+			otherProof := fixtureRequestProof(t, s, other.ID, "second-password-1")
+			no := false
 			start := make(chan struct{})
 			results := make(chan error, 2)
 			var wg sync.WaitGroup
-			for _, op := range []func() error{func() error { return s.SetUserAdmin(1, false) }, func() error {
+			for _, op := range []func() error{func() error { return s.AdminUpdateUser(1, 1, AdminUserUpdate{IsAdmin: &no}, ownerProof) }, func() error {
 				if mode == "delete" {
-					return s.DeleteUser(other.ID)
+					return s.AdminDeleteUser(other.ID, other.ID, otherProof)
 				}
-				return s.SetUserAdmin(other.ID, false)
+				return s.AdminUpdateUser(other.ID, other.ID, AdminUserUpdate{IsAdmin: &no}, otherProof)
 			}} {
 				wg.Add(1)
 				go func(op func() error) { defer wg.Done(); <-start; results <- op() }(op)
@@ -216,10 +223,7 @@ func TestIdentityTokenGenerationAndLogoutIsolation(t *testing.T) {
 	s := openUsersStore(t)
 	u := identityUser(t, s)
 	authenticated := authenticatedIdentity(t, s, u)
-	key, err := s.CreateAPIKeyForUser("keep-key", u.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := seedLegacyAPIKey(t, s, u.ID, "keep-key")
 	for _, token := range []string{"one", "two"} {
 		if err := s.SaveAccessTokenForAuthenticatedUser(token, authenticated, time.Time{}); err != nil {
 			t.Fatal(err)
@@ -308,10 +312,7 @@ func TestIdentityMigrationPreservesGrantsAndHistoricalIDs(t *testing.T) {
 	if _, valid, err := s.ValidateAccessTokenUser("orphan", time.Now(), 0); err != nil || valid {
 		t.Fatalf("orphan token valid=%v err=%v", valid, err)
 	}
-	u, err := s.CreateUser("new-user", "new-password-1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	u := seedFixtureUser(t, s, "new-user", "new-password-1", false)
 	if u.ID <= 30 {
 		t.Fatalf("historical id reused: %d", u.ID)
 	}

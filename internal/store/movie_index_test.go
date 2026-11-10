@@ -75,7 +75,9 @@ func TestIndexMovieRollsBackEveryStage(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := s.SavePlaybackForUser(1, id, 120, 3, "fixture-time", 99); err != nil {
+					if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+						1, id, 120, 3, "fixture-time", 99)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -110,7 +112,9 @@ func TestIndexMoviePreservesIdentityPlaybackAndActorRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePlaybackForUser(1, id, 120, 3, "fixture-time", 99); err != nil {
+	if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+		1, id, 120, 3, "fixture-time", 99)); err != nil {
 		t.Fatal(err)
 	}
 	m.Title, m.Genres = "New", []string{"NewGenre"}

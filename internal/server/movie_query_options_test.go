@@ -76,12 +76,12 @@ func TestMovieQueryOptionsBothScopes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 || i == 3 {
-			if err := a.db.SetIndexedFavorite(id, true); err != nil {
+			if _, err := a.db.SetIndexedFavoriteDataForUser(1, id, true); err != nil {
 				t.Fatal(err)
 			}
 		}
 		if i == 1 {
-			if err := a.db.SetIndexedPlayed(id, true); err != nil {
+			if _, err := a.db.SetIndexedPlayedDataForUser(1, id, true); err != nil {
 				t.Fatal(err)
 			}
 		}

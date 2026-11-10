@@ -26,11 +26,11 @@ func TestMovieIdsAndExcludeItemTypesCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	viewer := seedFixtureUser(t, a, "ids-viewer", "password-1234", false)
-	if err := a.db.SetUserLibraries(viewer.ID, []int64{first.ID}); err != nil {
+	if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{first.ID})}); err != nil {
 		t.Fatal(err)
 	}
 	const viewerToken = "movie-ids-viewer"
-	if err := a.db.SaveAccessTokenForUser(viewerToken, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
+	if err := saveFixtureSession(t, a, viewerToken, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	ids := make(map[string]int64)
@@ -108,7 +108,7 @@ func TestMovieIdsAndExcludeItemTypesCompatibility(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("cross user => %d %s", status, raw)
 	}
-	if err := a.db.SetUserLibraries(viewer.ID, []int64{}); err != nil {
+	if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{})}); err != nil {
 		t.Fatal(err)
 	}
 	_, names, total := get("/Items?IncludeItemTypes=Movie", viewerToken)

@@ -174,7 +174,9 @@ func TestSpriteGenerationFailurePreservesOldAndAllowsReads(t *testing.T) {
 			if failure != "dimensions" && !seen {
 				t.Fatal("did not reach frame")
 			}
-			state, _ := db.Sprite(m.ID)
+			state, _ := db.SpriteContext(context.Background(),
+
+				m.ID)
 			if state.Generation != old {
 				t.Fatal("failed replacement changed pointer")
 			}

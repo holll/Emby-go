@@ -1,6 +1,7 @@
 package server
 
 import (
+	"emby-go/internal/store"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,16 +34,16 @@ func TestUsersPasswordRejectsRenamedReplacementIdentity(t *testing.T) {
 	const originalName = "password-original"
 	const originalPassword = "shared-current-password"
 	const changedPassword = "must-not-be-applied-password"
-	original, err := a.db.CreateUser(originalName, originalPassword, false)
+	original, err := createFixtureUser(t, a, originalName, originalPassword, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	replacement, err := a.db.CreateUser("password-replacement", originalPassword, false)
+	replacement, err := createFixtureUser(t, a, "password-replacement", originalPassword, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for token, id := range map[string]int64{"original-session": original.ID, "replacement-session": replacement.ID} {
-		if err := a.db.SaveAccessTokenForUser(token, id, time.Time{}); err != nil {
+		if err := saveFixtureSession(t, a, token, id, time.Time{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,10 +51,10 @@ func TestUsersPasswordRejectsRenamedReplacementIdentity(t *testing.T) {
 	body := &passwordIdentityReader{
 		Reader: strings.NewReader(`{"current_password":"` + originalPassword + `","new_password":"` + changedPassword + `"}`),
 		beforeRead: func() {
-			if err := a.db.RenameUser(original.ID, "password-renamed-original"); err != nil {
+			if err := updateFixtureUser(t, a, original.ID, store.AdminUserUpdate{Name: fixtureValue("password-renamed-original")}); err != nil {
 				t.Fatal(err)
 			}
-			if err := a.db.RenameUser(replacement.ID, originalName); err != nil {
+			if err := updateFixtureUser(t, a, replacement.ID, store.AdminUserUpdate{Name: fixtureValue(originalName)}); err != nil {
 				t.Fatal(err)
 			}
 			renamed = true

@@ -39,7 +39,7 @@ func TestAutoMarksRoundTripAndScanPreservation(t *testing.T) {
 	entry.Movie.AutoMarks = []string{"stale scanner ownership"}
 	entry.Movie.Title = "rescanned"
 	commitScan(t, s, lib, "g", []ScanGroupMovie{entry}, []ScanGroupSource{{Path: entry.Movie.SourcePath}})
-	if _, err := s.UpsertMovie(entry.Movie, entry.Size, entry.Mtime); err != nil {
+	if _, err := s.IndexMovie(entry.Movie, entry.Size, entry.Mtime, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.Movie(id)
@@ -61,7 +61,7 @@ func TestAutoMarksRoundTripAndScanPreservation(t *testing.T) {
 	}
 	// Ordinary inserts ignore provenance even when a caller supplies tag-like marks.
 	entry.Movie.SourcePath = "/fixture/B.strm"
-	newID, err := s.UpsertMovie(entry.Movie, entry.Size, entry.Mtime)
+	newID, err := s.IndexMovie(entry.Movie, entry.Size, entry.Mtime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestAutoMarksRollbackAndMissingMovie(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			s, lib := scanFixture(t)
 			entry := scanMovie(lib, "/fixture/A.strm")
-			id, err := s.UpsertMovie(entry.Movie, entry.Size, entry.Mtime)
+			id, err := s.IndexMovie(entry.Movie, entry.Size, entry.Mtime, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestAutoMarksMigrationUpgradeRollbackAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.UpsertMovie(Movie{LibraryID: lib.ID, SourcePath: "/fixture/A.strm", Status: "success", Title: "keep", Tags: []string{"高清"}, ExtraBackdrops: []string{"extra.jpg"}}, 10, time.Unix(1234, 0))
+	id, err := s.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/fixture/A.strm", Status: "success", Title: "keep", Tags: []string{"高清"}, ExtraBackdrops: []string{"extra.jpg"}}, 10, time.Unix(1234, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

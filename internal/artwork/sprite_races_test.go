@@ -40,7 +40,9 @@ func TestSpriteRootAndNamespaceSubstitution(t *testing.T) {
 			if err == nil || res.Changed {
 				t.Fatalf("substituted %s published: %+v %v", which, res, err)
 			}
-			state, e := db.Sprite(m.ID)
+			state, e := db.SpriteContext(context.Background(),
+
+				m.ID)
 			if e != nil || state.Generation != original.Manifest.Generation {
 				t.Fatal("old pointer changed", e)
 			}

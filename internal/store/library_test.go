@@ -96,21 +96,23 @@ func TestLibraryCounts(t *testing.T) {
 	}
 
 	for _, name := range []string{"a", "b", "c"} {
-		if _, err := s.UpsertMovie(Movie{
+		if _, err := s.IndexMovie(Movie{
 			LibraryID:  l1.ID,
 			Title:      name,
 			SourcePath: filepath.Join("/tmp/c1", name+".strm"),
 			Status:     "success",
-		}, 0, time.Time{}); err != nil {
+		}, 0, time.Time{}, nil,
+		); err != nil {
 			t.Fatalf("写入 %s: %v", name, err)
 		}
 	}
-	if _, err := s.UpsertMovie(Movie{
+	if _, err := s.IndexMovie(Movie{
 		LibraryID:  l2.ID,
 		Title:      "x",
 		SourcePath: "/tmp/c2/x.strm",
 		Status:     "success",
-	}, 0, time.Time{}); err != nil {
+	}, 0, time.Time{}, nil,
+	); err != nil {
 		t.Fatal(err)
 	}
 

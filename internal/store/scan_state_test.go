@@ -27,7 +27,9 @@ func scanMovie(lib Library, path string) ScanGroupMovie {
 }
 func commitScan(t *testing.T, s *Store, lib Library, key string, movies []ScanGroupMovie, sources []ScanGroupSource) ScanGroupCommitResult {
 	t.Helper()
-	r, err := s.CommitScanGroupChecked(lib, key, "fingerprint", 1, "success", movies, sources)
+	r, err := s.CommitScanGroupCheckedContext(context.Background(),
+
+		lib, key, "fingerprint", 1, "success", movies, sources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +57,9 @@ func TestScanGroupRollbackEveryStage(t *testing.T) {
 			s, lib := scanFixture(t)
 			a, b := scanMovie(lib, "/a.strm"), scanMovie(lib, "/b.strm")
 			first := commitScan(t, s, lib, "g", []ScanGroupMovie{a, b}, []ScanGroupSource{{Path: a.Movie.SourcePath}, {Path: b.Movie.SourcePath}})
-			if err := s.SavePlaybackForUser(1, first.MovieIDs[a.Movie.SourcePath], 12, 2, "date", 9); err != nil {
+			if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+				1, first.MovieIDs[a.Movie.SourcePath], 12, 2, "date", 9)); err != nil {
 				t.Fatal(err)
 			}
 			before := scanSnapshot(t, s)
@@ -71,7 +75,9 @@ func TestScanGroupRollbackEveryStage(t *testing.T) {
 			}
 			a.Movie.Title = "Changed"
 			a.Movie.Genres = []string{"ChangedGenre"}
-			r, err := s.CommitScanGroupChecked(lib, "g", "next", 1, "success", []ScanGroupMovie{a}, []ScanGroupSource{{Path: a.Movie.SourcePath}, {Path: b.Movie.SourcePath}})
+			r, err := s.CommitScanGroupCheckedContext(context.Background(),
+
+				lib, "g", "next", 1, "success", []ScanGroupMovie{a}, []ScanGroupSource{{Path: a.Movie.SourcePath}, {Path: b.Movie.SourcePath}})
 			if err == nil || len(r.MovieIDs) != 0 || r.Added+r.Updated+r.Deleted != 0 {
 				t.Fatalf("result=%+v err=%v", r, err)
 			}
@@ -95,7 +101,9 @@ func TestScanGroupManualIdentityAndMerge(t *testing.T) {
 	part.Movie.Status = "manual"
 	original := commitScan(t, s, lib, "cd2", []ScanGroupMovie{part}, []ScanGroupSource{{Path: part.Movie.SourcePath, Role: "standalone"}})
 	id := original.MovieIDs[part.Movie.SourcePath]
-	if err := s.SavePlaybackForUser(1, id, 12, 3, "date", 9); err != nil {
+	if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+		1, id, 12, 3, "date", 9)); err != nil {
 		t.Fatal(err)
 	}
 	var created string
@@ -137,7 +145,9 @@ func TestScanGroupManualIdentityAndMerge(t *testing.T) {
 			t.Fatalf("manual evidence lost: %+v", source)
 		}
 	}
-	cleanup, err := s.ReconcileScanInventoryChecked(lib, merged.MovieIDs, []string{"merged"})
+	cleanup, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+		lib, merged.MovieIDs, []string{"merged"})
 	if err != nil || cleanup.DeletedMovies != 0 {
 		t.Fatalf("cleanup=%+v %v", cleanup, err)
 	}
@@ -146,7 +156,9 @@ func TestScanGroupManualIdentityAndMerge(t *testing.T) {
 		t.Fatalf("userdata=%d %v", plays, err)
 	}
 	// A complete inventory that proves the manual source absent may delete it.
-	_, err = s.ReconcileScanInventoryChecked(lib, map[string]int64{primary.Movie.SourcePath: merged.MovieIDs[primary.Movie.SourcePath]}, []string{"merged"})
+	_, err = s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+		lib, map[string]int64{primary.Movie.SourcePath: merged.MovieIDs[primary.Movie.SourcePath]}, []string{"merged"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +170,7 @@ func TestScanGroupManualIdentityAndMerge(t *testing.T) {
 func TestScanGroupLegacyRowsAndSkippedEvidence(t *testing.T) {
 	s, lib := scanFixture(t)
 	a, b := scanMovie(lib, "/CD1.strm"), scanMovie(lib, "/CD2.strm")
-	if _, err := s.UpsertMovie(b.Movie, b.Size, b.Mtime); err != nil {
+	if _, err := s.IndexMovie(b.Movie, b.Size, b.Mtime, nil); err != nil {
 		t.Fatal(err)
 	}
 	a.Movie.AdditionalParts = []string{b.Movie.SourcePath}
@@ -186,7 +198,9 @@ func TestScanCheckedLibraryAndInventoryCAS(t *testing.T) {
 	r := commitScan(t, s, lib, "g", []ScanGroupMovie{a}, []ScanGroupSource{{Path: a.Movie.SourcePath}})
 	before := scanSnapshot(t, s)
 	for _, expected := range []map[string]int64{nil, {a.Movie.SourcePath: r.MovieIDs[a.Movie.SourcePath] + 1}, {"/missing": 99}, {a.Movie.SourcePath: 0}} {
-		if _, err := s.ReconcileScanInventoryChecked(lib, expected, nil); !errors.Is(err, ErrScanInventoryChanged) {
+		if _, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+			lib, expected, nil); !errors.Is(err, ErrScanInventoryChanged) {
 			t.Fatalf("expected=%v err=%v", expected, err)
 		}
 		if scanSnapshot(t, s) != before {
@@ -196,17 +210,23 @@ func TestScanCheckedLibraryAndInventoryCAS(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE libraries SET path=? WHERE id=?", lib.Path+"/moved", lib.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CommitScanGroupChecked(lib, "g", "next", 1, "success", []ScanGroupMovie{a}, []ScanGroupSource{{Path: a.Movie.SourcePath}}); !errors.Is(err, ErrScanLibraryChanged) {
+	if _, err := s.CommitScanGroupCheckedContext(context.Background(),
+
+		lib, "g", "next", 1, "success", []ScanGroupMovie{a}, []ScanGroupSource{{Path: a.Movie.SourcePath}}); !errors.Is(err, ErrScanLibraryChanged) {
 		t.Fatalf("commit=%v", err)
 	}
-	if _, err := s.ReconcileScanInventoryChecked(lib, r.MovieIDs, []string{"g"}); !errors.Is(err, ErrScanLibraryChanged) {
+	if _, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+		lib, r.MovieIDs, []string{"g"}); !errors.Is(err, ErrScanLibraryChanged) {
 		t.Fatalf("reconcile=%v", err)
 	}
 	if scanSnapshot(t, s) != before {
 		t.Fatal("relocated library changed index/state")
 	}
 	for _, invalid := range [][]ScanGroupMovie{{scanMovie(Library{ID: lib.ID + 100}, "/a.strm")}, {a, a}} {
-		if _, err := s.CommitScanGroupChecked(lib, "g", "next", 1, "success", invalid, []ScanGroupSource{{Path: a.Movie.SourcePath}}); !errors.Is(err, ErrScanInventoryChanged) {
+		if _, err := s.CommitScanGroupCheckedContext(context.Background(),
+
+			lib, "g", "next", 1, "success", invalid, []ScanGroupSource{{Path: a.Movie.SourcePath}}); !errors.Is(err, ErrScanInventoryChanged) {
 			t.Fatalf("invalid=%v", err)
 		}
 	}
@@ -225,7 +245,9 @@ func TestScanUnchangedReconcileNoActualDML(t *testing.T) {
 			}
 		}
 	}
-	result, err := s.ReconcileScanInventoryChecked(lib, r.MovieIDs, []string{"g"})
+	result, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+		lib, r.MovieIDs, []string{"g"})
 	if err != nil || result != (ScanReconcileResult{}) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -240,7 +262,7 @@ func TestScanBaselineInvalidationEntrypoints(t *testing.T) {
 		run  func(*Store, Library, ScanGroupMovie, int64) error
 	}{
 		{"UpsertMovie", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			_, e := s.UpsertMovie(m.Movie, m.Size, m.Mtime)
+			_, e := s.IndexMovie(m.Movie, m.Size, m.Mtime, nil)
 			return e
 		}},
 		{"IndexMovie", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
@@ -248,16 +270,16 @@ func TestScanBaselineInvalidationEntrypoints(t *testing.T) {
 			return e
 		}},
 		{"ReplaceActors", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			return s.ReplaceActors(id, []ActorRef{{Name: "Changed"}})
+			return indexFixtureActors(s, id, []ActorRef{{Name: "Changed"}})
 		}},
 		{"SetActorAvatar", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			return s.SetActorAvatar("Actor", "avatar", "")
+			return s.SetIndexedActorAvatar("Actor", "avatar", "")
 		}},
 		{"SetIndexedActorAvatar", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
 			return s.SetIndexedActorAvatar("Actor", "avatar", "")
 		}},
 		{"MarkManual", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			return s.MarkManual(m.Movie.SourcePath, "file.nfo")
+			return s.MarkIndexedManual(m.Movie.SourcePath, "file.nfo")
 		}},
 		{"SetIndexedImage", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
 			return s.SetIndexedImage(id, "poster", "new.jpg")
@@ -269,11 +291,11 @@ func TestScanBaselineInvalidationEntrypoints(t *testing.T) {
 		{"DeleteLibrary", func(s *Store, l Library, m ScanGroupMovie, id int64) error { return s.DeleteLibrary(l.ID) }},
 		{"DeleteIndexedLibrary", func(s *Store, l Library, m ScanGroupMovie, id int64) error { return s.DeleteIndexedLibrary(l.ID) }},
 		{"ReconcileMissingSources", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			return s.ReconcileMissingSources(l.ID, map[string]struct{}{})
+			return reconcileFixtureInventory(s, l.ID, map[string]struct{}{})
 		}},
-		{"DeleteMovie", func(s *Store, l Library, m ScanGroupMovie, id int64) error { return s.DeleteMovie(id) }},
+		{"DeleteMovie", func(s *Store, l Library, m ScanGroupMovie, id int64) error { return s.DeleteIndexedMovie(id) }},
 		{"DeleteMissingSources", func(s *Store, l Library, m ScanGroupMovie, id int64) error {
-			return s.DeleteMissingSources(l.ID, map[string]struct{}{})
+			return reconcileFixtureInventory(s, l.ID, map[string]struct{}{})
 		}},
 	}
 	for _, op := range operations {
@@ -311,7 +333,9 @@ func TestScanBaselineInvalidationEntrypoints(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if e := s.SavePlaybackForUser(1, r.MovieIDs[m.Movie.SourcePath], 1, 2, "date", 0); e != nil {
+		if e := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+			1, r.MovieIDs[m.Movie.SourcePath], 1, 2, "date", 0)); e != nil {
 			t.Fatal(e)
 		}
 		after, e := s.LoadScanGroups(l.ID)
@@ -331,7 +355,9 @@ func TestScanSplitGroupPreservesRetainedIdentity(t *testing.T) {
 			}
 			first := commitScan(t, s, lib, "old", []ScanGroupMovie{a, b}, []ScanGroupSource{{Path: a.Movie.SourcePath}, {Path: b.Movie.SourcePath}})
 			id := first.MovieIDs[b.Movie.SourcePath]
-			if err := s.SavePlaybackForUser(1, id, 42, 7, "date", 9); err != nil {
+			if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+				1, id, 42, 7, "date", 9)); err != nil {
 				t.Fatal(err)
 			}
 			var created string
@@ -369,7 +395,9 @@ func TestScanCancelledWhileWaitingWriterDoesNotDelete(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := reserveScanWriterTx(tx); err != nil {
+					if err := reserveScanWriterTxContext(context.Background(),
+
+						tx); err != nil {
 						tx.Rollback()
 						t.Fatal(err)
 					}
@@ -379,7 +407,7 @@ func TestScanCancelledWhileWaitingWriterDoesNotDelete(t *testing.T) {
 						}
 					}
 				} else {
-					s.writeMu.Lock()
+					s.writeMu.LockContext(context.Background())
 					release = s.writeMu.Unlock
 				}
 				ctx, cancel := context.WithCancel(context.Background())
@@ -432,7 +460,9 @@ func TestScanManualPendingUpdatesStructurePreservesMetadata(t *testing.T) {
 	m.Movie.SourceContainer = "mp4"
 	first := commitScan(t, s, lib, "g", []ScanGroupMovie{m}, []ScanGroupSource{{Path: m.Movie.SourcePath, Role: "primary"}})
 	id := first.MovieIDs[m.Movie.SourcePath]
-	if err := s.SavePlaybackForUser(1, id, 42, 7, "date", 9); err != nil {
+	if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+		1, id, 42, 7, "date", 9)); err != nil {
 		t.Fatal(err)
 	}
 	protected := func() string {
@@ -493,7 +523,9 @@ func TestScanManualPendingUpdatesStructurePreservesMetadata(t *testing.T) {
 		if err != nil || len(groups["g"].Sources) != len(sources) {
 			t.Fatalf("group=%+v err=%v", groups, err)
 		}
-		cleanup, err := s.ReconcileScanInventoryChecked(lib, r.MovieIDs, []string{"g"})
+		cleanup, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+			lib, r.MovieIDs, []string{"g"})
 		if err != nil || cleanup != (ScanReconcileResult{}) {
 			t.Fatalf("unchanged cleanup=%+v %v", cleanup, err)
 		}
@@ -520,7 +552,9 @@ func TestScanLargeBatches(t *testing.T) {
 	if r.Added != len(movies) || len(r.MovieIDs) != len(movies) {
 		t.Fatalf("group=%+v", r)
 	}
-	cleaned, err := s.ReconcileScanInventoryChecked(lib, map[string]int64{}, []string{})
+	cleaned, err := s.ReconcileScanInventoryCheckedContext(context.Background(),
+
+		lib, map[string]int64{}, []string{})
 	if err != nil || cleaned.DeletedMovies != len(movies) || cleaned.DeletedGroups != 1 {
 		t.Fatalf("cleanup=%+v err=%v", cleaned, err)
 	}
@@ -545,7 +579,7 @@ func TestScanCrossLibraryMoveInvalidatesPreviousBaseline(t *testing.T) {
 			if indexed {
 				id, err = s.IndexMovie(m.Movie, m.Size, m.Mtime, m.Actors)
 			} else {
-				id, err = s.UpsertMovie(m.Movie, m.Size, m.Mtime)
+				id, err = s.IndexMovie(m.Movie, m.Size, m.Mtime, nil)
 			}
 			if err != nil || id != r.MovieIDs[m.Movie.SourcePath] {
 				t.Fatalf("move=%d %v", id, err)
@@ -566,7 +600,9 @@ func TestScanWriterReservationWithoutRowMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if err := reserveScanWriterTx(tx); err != nil {
+	if err := reserveScanWriterTxContext(context.Background(),
+
+		tx); err != nil {
 		t.Fatal(err)
 	}
 	competitor, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1)")

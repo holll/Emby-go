@@ -79,7 +79,6 @@ func TestOversizedNFOReadersAndWriters(t *testing.T) {
 	}{
 		{"Read", func() error { _, err := Read(path); return err }},
 		{"TagPreview", func() error { _, err := TagPreview(path, []string{"title"}); return err }},
-		{"ListPreview", func() error { _, _, err := ListPreview(path); return err }},
 		{"ReadTranslationSnapshot", func() error { _, err := ReadTranslationSnapshot(path); return err }},
 		{"UpdateScraped", func() error { return UpdateScraped(path, ScrapeFields{Title: "new", Overwrite: true}) }},
 		{"UpdateScrapedWithAutoMarks", func() error {

@@ -9,7 +9,7 @@ import (
 func TestBatchReadsLargeAndDuplicateIDs(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
 	f.s.db.SetMaxOpenConns(1)
-	if err := f.s.ReplaceActors(f.victim, []ActorRef{{Name: "Z"}, {Name: "A"}}); err != nil {
+	if err := indexFixtureActors(f.s, f.victim, []ActorRef{{Name: "Z"}, {Name: "A"}}); err != nil {
 		t.Fatal(err)
 	}
 	before := indexSnapshot(t, f.s)

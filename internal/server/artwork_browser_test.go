@@ -62,11 +62,11 @@ func TestArtworkBrowserMobile(t *testing.T) {
 		<-ctx.Done()
 		return artwork.Result{}, ctx.Err()
 	}
-	ordinary, err := f.a.db.CreateUser("mobile-viewer", "password-123", false)
+	ordinary, err := createFixtureUser(t, f.a, "mobile-viewer", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("browser-ordinary", ordinary.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "browser-ordinary", ordinary.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(f.a.Handler())

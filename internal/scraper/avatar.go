@@ -66,15 +66,6 @@ func (s *Scraper) RunAvatars(ctx context.Context, libraryID int64, limit int,
 	return s.runAvatars(ctx, names, onProgress, onItem)
 }
 
-// RunAvatarsFor 只处理指定的演员名（单条路径与测试用）。
-func (s *Scraper) RunAvatarsFor(ctx context.Context, names []string,
-	onProgress func(Progress), onItem func(AvatarResult)) (Progress, error) {
-	if !s.cfg.Configured() {
-		return Progress{}, errors.New("未配置 MetaTube 地址或 token")
-	}
-	return s.runAvatars(ctx, names, onProgress, onItem)
-}
-
 func (s *Scraper) runAvatars(ctx context.Context, names []string,
 	onProgress func(Progress), onItem func(AvatarResult)) (Progress, error) {
 	progress := Progress{Total: len(names)}

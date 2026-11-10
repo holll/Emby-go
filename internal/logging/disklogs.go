@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -89,34 +88,8 @@ var cursorKey = func() []byte {
 	return key
 }()
 
-var (
-	overrideDirMu sync.RWMutex
-	overrideDir   string
-)
-
-// SetAppLogDir 固定日志读取根目录（仅供测试/嵌入式场景）；传空串恢复默认。
-func SetAppLogDir(dir string) {
-	overrideDirMu.Lock()
-	defer overrideDirMu.Unlock()
-	if dir == "" {
-		overrideDir = ""
-		return
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		abs = dir
-	}
-	overrideDir = abs
-}
-
 // AppLogDir 返回当前 app 日志目录的绝对路径；未 Setup 时固定为 cwd/log。
 func AppLogDir() string {
-	overrideDirMu.RLock()
-	override := overrideDir
-	overrideDirMu.RUnlock()
-	if override != "" {
-		return override
-	}
 	currentMu.RLock()
 	defer currentMu.RUnlock()
 	if current != nil && current.app != nil {

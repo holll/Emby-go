@@ -76,7 +76,7 @@ func TestPendingStatusFiltersCoverAllHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"new", "succeeded", "failed"} {
-		id, err := s.UpsertMovie(Movie{LibraryID: lib.ID, SourcePath: "/library/" + name + ".strm", Status: "pending", Title: name}, 0, time.Time{})
+		id, err := s.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/library/" + name + ".strm", Status: "pending", Title: name}, 0, time.Time{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

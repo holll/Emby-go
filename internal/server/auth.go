@@ -452,19 +452,8 @@ func (a *App) authenticate(c *gin.Context) {
 	})
 }
 
-// userDto 组装 Emby 的 UserDto。
-//
-// Policy 不能给空对象：tsukimi 用 serde 严格反序列化，`Policy { IsAdministrator: bool }`
-// 是**非 Option** 字段——返回 {} 会让整个登录响应解析失败（登录直接不可用）。
-// 这里按真实 Emby 的形状给一份完整策略，本服务是单管理员，故 IsAdministrator 恒为 true。
-func (a *App) userDto() gin.H {
-	u, err := a.db.UserByID(1)
-	if err != nil {
-		u = store.User{ID: 1, Name: a.currentAdminName(), IsAdmin: true}
-	}
-	return a.userDtoFor(u)
-}
-
+// userDtoFor 按真实账户组装 Emby UserDto。Policy 必须包含 IsAdministrator：
+// tsukimi 将它作为非 Option 字段严格反序列化，空策略会导致登录失败。
 func (a *App) userDtoFor(u store.User) gin.H {
 	return gin.H{
 		"Id": strconv.FormatInt(u.ID, 10), "Name": u.Name, "ServerName": a.serverName,

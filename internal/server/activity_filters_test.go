@@ -51,11 +51,11 @@ func TestActivityLoginFiltersValidationAndQueries(t *testing.T) {
 	if w := translationCall(f.a, "", "GET", "/api/admin/login-events?result=all", ""); w.Code != 401 {
 		t.Fatalf("unauthenticated %d", w.Code)
 	}
-	reader, err := f.a.db.CreateUser("activity-reader", "password-123", false)
+	reader, err := createFixtureUser(t, f.a, "activity-reader", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("activity-reader", reader.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "activity-reader", reader.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if w := translationCall(f.a, "activity-reader", "GET", "/api/admin/login-events?result=failed", ""); w.Code != 403 {

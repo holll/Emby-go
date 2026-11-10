@@ -25,10 +25,6 @@ var ErrSpriteChanged = errors.New("sprite source or generation changed; retry")
 
 func spriteKey(movieID int64) string { return fmt.Sprintf("sprite:%d", movieID) }
 
-func (s *Store) Sprite(movieID int64) (SpriteState, error) {
-	return s.SpriteContext(context.Background(), movieID)
-}
-
 func (s *Store) SpriteContext(ctx context.Context, movieID int64) (SpriteState, error) {
 	var raw string
 	var state SpriteState
@@ -214,12 +210,4 @@ func (s *Store) CompareAndSwapSpriteFiles(ctx context.Context, expected Movie, l
 		_, err = tx.ExecContext(ctx, "UPDATE kv SET value=? WHERE key=?", string(payload), spriteKey(expected.ID))
 		return err
 	})
-}
-
-// CompareAndSwapSprite is the single-phase form, kept for callers that need no
-// Prepare phase. verify runs inside the write transaction, so it must stay
-// constant-time; filesystem reads belong in CompareAndSwapSpriteFiles' Prepare
-// phase.
-func (s *Store) CompareAndSwapSprite(ctx context.Context, expected Movie, libraryRoot string, old, next SpriteState, verify func() error) error {
-	return s.CompareAndSwapSpriteFiles(ctx, expected, libraryRoot, old, next, SpriteFiles{Commit: verify})
 }

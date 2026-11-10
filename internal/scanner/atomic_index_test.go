@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ func TestScanPublishesCommittedItemsBeforeLaterFailure(t *testing.T) {
 	if _, err := fixture.Exec(`CREATE TRIGGER fail_second_index BEFORE INSERT ON movies WHEN NEW.title='B' BEGIN SELECT RAISE(ABORT,'fixture-second-index'); END`); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err == nil || !strings.Contains(err.Error(), "fixture-second-index") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -66,7 +67,7 @@ func TestScanPublishesCommittedItemsBeforeLaterFailure(t *testing.T) {
 	if _, err := fixture.Exec("DROP TRIGGER fail_second_index"); err != nil {
 		t.Fatal(err)
 	}
-	result, err = Scan(s, lib)
+	result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err != nil || result.Success != 2 {
 		t.Fatalf("retry result=%+v err=%v", result, err)
 	}
@@ -98,11 +99,11 @@ func TestScanReadFailureDoesNotDeleteMissingSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	protocol, err := s.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "aa.strm"), Status: "success", Title: "Old protocol"}, 0, time.Unix(1, 0))
+	protocol, err := s.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "aa.strm"), Status: "success", Title: "Old protocol"}, 0, time.Unix(1, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Scan(s, lib)
+	result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 	if err == nil || result.Failed != 1 || result.Success != 1 || result.Skipped != 1 {
 		t.Fatalf("read failure reported complete: %+v %v", result, err)
 	}
@@ -112,14 +113,15 @@ func TestScanReadFailureDoesNotDeleteMissingSources(t *testing.T) {
 	if _, err := s.Movie(protocol); !store.NotFound(err) {
 		t.Fatalf("protocol change not reconciled: %v", err)
 	}
-	if s.Version("g:version") != "3" {
+	// Two fixture IndexMovie commits, then the healthy group and protocol removal.
+	if s.Version("g:version") != "4" {
 		t.Fatalf("committed protocol removal not published despite later read failure: %s", s.Version("g:version"))
 	}
 	// Make the symlink readable without deleting/replacing it, then retry.
 	if err := os.WriteFile(missingTarget, []byte("https://media.test/b.mp4"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := Scan(s, lib); err != nil || result.Failed != 0 {
+	if result, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil || result.Failed != 0 {
 		t.Fatalf("read retry failed: %+v %v", result, err)
 	}
 	if _, err := s.Movie(stale); !store.NotFound(err) {

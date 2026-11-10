@@ -65,6 +65,7 @@ func seedFixtureUser(t *testing.T, a *App, name, password string, admin bool) st
 	if err != nil {
 		t.Fatal(err)
 	}
+	rememberFixturePassword(t, a, id, password)
 	return user
 }
 
@@ -116,13 +117,13 @@ func TestFixtureUserSetupMaintainsIsolationAndCredentials(t *testing.T) {
 			t.Fatalf("fixture-only bcrypt cost=%d err=%v", cost, err)
 		}
 	}
-	if err := apps[0].db.SaveAccessTokenForUser("isolated-fixture-token", 1, time.Now().Add(time.Hour)); err != nil {
+	if err := saveFixtureSession(t, apps[0], "isolated-fixture-token", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, valid, err := apps[1].db.ValidateAccessTokenUser("isolated-fixture-token", time.Now(), 0); err != nil || valid {
 		t.Fatalf("session leaked between fixture databases: valid=%v err=%v", valid, err)
 	}
-	if err := apps[0].db.RenameUser(2, "changed-fixture-viewer"); err != nil {
+	if err := updateFixtureUser(t, apps[0], 2, store.AdminUserUpdate{Name: fixtureValue("changed-fixture-viewer")}); err != nil {
 		t.Fatal(err)
 	}
 	if viewer, err := apps[1].db.UserByID(2); err != nil || viewer.Name != "fixture-viewer" {

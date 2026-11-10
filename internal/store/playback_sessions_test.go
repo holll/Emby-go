@@ -18,7 +18,7 @@ func newPlaybackFixture(t *testing.T) (*Store, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.UpsertMovie(Movie{LibraryID: lib.ID, SourcePath: t.TempDir() + "/a.strm", SourceProtocol: "https", Status: "success"}, 1, time.Now())
+	id, err := s.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: t.TempDir() + "/a.strm", SourceProtocol: "https", Status: "success"}, 1, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestRecordPlaybackIdempotentAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.UpsertMovie(Movie{LibraryID: lib.ID, SourcePath: t.TempDir() + "/a.strm", SourceProtocol: "https", Status: "success"}, 1, time.Now())
+	id, err := s.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: t.TempDir() + "/a.strm", SourceProtocol: "https", Status: "success"}, 1, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,9 +210,7 @@ func recordAs(t *testing.T, s *Store, userID, id int64, key string, kind Playbac
 // 不同用户使用同一客户端 PlaySessionId 时不得互相停止/覆盖计数（批次 90 P0）。
 func TestPlaybackSessionsIsolatedByUser(t *testing.T) {
 	s, id := newPlaybackFixture(t)
-	if _, err := s.CreateUser("viewer", "password123", false); err != nil {
-		t.Fatal(err)
-	}
+	seedFixtureUser(t, s, "viewer", "password123", false)
 	first := recordAs(t, s, 1, id, "shared-session", PlaybackStopped, 100)
 	if !first.Counted || first.PlayCount != 1 {
 		t.Fatalf("user1 stop: %+v", first)

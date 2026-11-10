@@ -21,7 +21,7 @@ func TestIncrementalRestoredDirectoryTimestampCannotAuthorizeCleanup(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Scan(s, lib); err != nil {
+	if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var added bool

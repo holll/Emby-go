@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestIncrementalRetainsManualIdentityAndUserData(t *testing.T) {
@@ -23,16 +24,28 @@ func TestIncrementalRetainsManualIdentityAndUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := s.CreateUser("viewer", "viewer-password", false)
+	if err := s.InitializeAdministrator("owner", "owner-password"); err != nil {
+		t.Fatal(err)
+	}
+	owner, ok, err := s.AuthenticateUser("owner", "owner-password")
+	if err != nil || !ok {
+		t.Fatalf("authenticate owner: ok=%v err=%v", ok, err)
+	}
+	if err := s.SaveAccessTokenForAuthenticatedUser("retention-session", owner, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := s.RequestCredentialUser("retention-session", owner.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.AdminCreateUser(owner.ID, "viewer", "viewer-password", false, nil, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ids := []int64{1, user.ID}
 	snapshots := make(map[int64]any)
 	for index, userID := range ids {
-		if err := s.SavePlaybackForUser(userID, id, int64(index+1)*100, 3, "2026-10-23T01:00:00Z", -1); err != nil {
-			t.Fatal(err)
-		}
+		seedStoppedPlaybacks(t, s, userID, id, int64(index+1)*100, 3, "2026-10-23T01:00:00Z")
 		data, err := s.DataUser(userID, id)
 		if err != nil {
 			t.Fatal(err)

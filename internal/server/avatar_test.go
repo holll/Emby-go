@@ -94,7 +94,7 @@ func TestActorAvatarChain(t *testing.T) {
 	if err := os.WriteFile(avatar.Path(avatarsDir, "有头像"), imgBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.db.SetActorAvatar("有头像", "https://metatube.test/actors/a.jpg", avatar.Tag(imgBytes)); err != nil {
+	if err := app.db.SetIndexedActorAvatar("有头像", "https://metatube.test/actors/a.jpg", avatar.Tag(imgBytes)); err != nil {
 		t.Fatal(err)
 	}
 

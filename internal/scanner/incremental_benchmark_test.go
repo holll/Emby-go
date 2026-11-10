@@ -45,7 +45,7 @@ func BenchmarkScanComparison(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					if _, err := Scan(s, lib); err != nil {
+					if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 						b.Fatal(err)
 					}
 					db, err := sql.Open("sqlite", filepath.Join(root, "bench.db")+"?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)")

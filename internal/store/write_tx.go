@@ -37,13 +37,6 @@ func (g *writerGate) init() {
 	g.once.Do(func() { g.ch = make(chan struct{}, 1) })
 }
 
-// Lock blocks until the gate is free. It cannot be cancelled; callers that own a
-// deadline use LockContext.
-func (g *writerGate) Lock() {
-	g.init()
-	g.ch <- struct{}{}
-}
-
 // LockContext blocks until the gate is free or ctx is done. The returned error
 // means the caller never held the gate. A token acquired in the same instant the
 // context was cancelled is handed back before returning, so a cancelled caller
@@ -62,19 +55,6 @@ func (g *writerGate) LockContext(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	}
-}
-
-// TryLock reports whether the gate was free and takes it without blocking. Tests
-// use it as an "is a writer holding the lock right now" probe, so it must stay
-// non-blocking and side-effect free when it returns false.
-func (g *writerGate) TryLock() bool {
-	g.init()
-	select {
-	case g.ch <- struct{}{}:
-		return true
-	default:
-		return false
 	}
 }
 

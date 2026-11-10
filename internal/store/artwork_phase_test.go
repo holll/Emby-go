@@ -119,7 +119,9 @@ func TestSpritePrepareRunsOutsideWriterLock(t *testing.T) {
 	if got := strings.Join(order.events, ","); got != "prepare,tx" {
 		t.Fatalf("phase order %q", got)
 	}
-	if state, err := f.s.Sprite(m.ID); err != nil || state != next {
+	if state, err := f.s.SpriteContext(context.Background(),
+
+		m.ID); err != nil || state != next {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
 }

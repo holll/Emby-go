@@ -53,16 +53,14 @@ func newAdminDeleteFixture(t *testing.T) adminDeleteFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := a.db.SavePlaybackForUser(1, id, 120, 3, "fixture", 99); err != nil {
-			t.Fatal(err)
-		}
+		seedFixturePlayback(t, a, id, 120, 3, "fixture", 99)
 		if target {
 			f.lib, f.victim = lib.ID, id
 		} else {
 			f.other, f.survivor = lib.ID, id
 		}
 	}
-	if err := a.db.SaveAccessToken("fixture-admin-delete"); err != nil {
+	if err := saveFixtureSession(t, a, "fixture-admin-delete", 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	return f

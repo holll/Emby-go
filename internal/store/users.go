@@ -90,35 +90,6 @@ func (s *Store) CountUsers() (int, error) {
 	return n, err
 }
 
-// CreateUser 新建账户；密码使用 bcrypt 摘要，用户名唯一。
-func (s *Store) CreateUser(name, password string, isAdmin bool) (User, error) {
-	n, err := normalizeUserName(name)
-	if err != nil {
-		return User{}, err
-	}
-	hash, err := passwordHash(password)
-	if err != nil {
-		return User{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	admin := 0
-	if isAdmin {
-		admin = 1
-	}
-	result, err := s.db.Exec("INSERT INTO users(name,password_hash,is_admin,created_at,updated_at) VALUES(?,?,?,?,?)", n, hash, admin, now, now)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return User{}, ErrUserExists
-		}
-		return User{}, err
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return User{}, err
-	}
-	return User{ID: id, Name: n, IsAdmin: isAdmin, CreatedAt: now}, nil
-}
-
 // AuthenticateUser 校验用户名密码，返回账户；未知用户也执行一次 bcrypt 以减小枚举时序差。
 func (s *Store) AuthenticateUser(name, password string) (User, bool, error) {
 	var u User
@@ -139,79 +110,25 @@ func (s *Store) AuthenticateUser(name, password string) (User, bool, error) {
 	return u, true, nil
 }
 
-func (s *Store) SetUserPassword(id int64, password string) error {
-	return s.setUserPassword(id, 0, false, password)
-}
-
 // SetAuthenticatedUserPassword prevents a stale old-password check from
 // overwriting a concurrent password reset.
 func (s *Store) SetAuthenticatedUserPassword(user User, password string) error {
-	return s.setUserPassword(user.ID, user.authGeneration, true, password)
-}
-
-func (s *Store) setUserPassword(id, generation int64, checked bool, password string) error {
+	id, generation := user.ID, user.authGeneration
 	hash, err := passwordHash(password)
 	if err != nil {
 		return err
 	}
 	return s.writeTx(func(tx *sql.Tx) error {
-		query := "UPDATE users SET password_hash=?, auth_generation=auth_generation+1, updated_at=? WHERE id=?"
-		args := []any{hash, time.Now().UTC().Format(time.RFC3339), id}
-		if checked {
-			query += " AND auth_generation=?"
-			args = append(args, generation)
-		}
-		result, err := tx.Exec(query, args...)
+		result, err := tx.Exec("UPDATE users SET password_hash=?, auth_generation=auth_generation+1, updated_at=? WHERE id=? AND auth_generation=?", hash, time.Now().UTC().Format(time.RFC3339), id, generation)
 		if err != nil {
 			return err
 		}
 		if n, err := result.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			if checked {
-				return ErrAuthenticationChanged
-			}
-			return ErrUserNotFound
+			return ErrAuthenticationChanged
 		}
 		_, err = tx.Exec("DELETE FROM access_tokens WHERE user_id=?", id)
-		return err
-	})
-}
-
-func (s *Store) RenameUser(id int64, name string) error {
-	n, err := normalizeUserName(name)
-	if err != nil {
-		return err
-	}
-	result, err := s.db.Exec("UPDATE users SET name=?, updated_at=? WHERE id=?", n, time.Now().UTC().Format(time.RFC3339), id)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return ErrUserExists
-		}
-		return err
-	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		return ErrUserNotFound
-	}
-	return nil
-}
-
-func (s *Store) SetUserAdmin(id int64, admin bool) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		current, err := lockUserTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if current && !admin {
-			if err := ensureAnotherAdminTx(tx, id); err != nil {
-				return err
-			}
-		}
-		flag := 0
-		if admin {
-			flag = 1
-		}
-		_, err = tx.Exec("UPDATE users SET auth_generation=auth_generation+CASE WHEN is_admin<>? THEN 1 ELSE 0 END,is_admin=?, updated_at=? WHERE id=?", flag, flag, time.Now().UTC().Format(time.RFC3339), id)
 		return err
 	})
 }
@@ -238,65 +155,17 @@ func ensureAnotherAdminTx(tx *sql.Tx, id int64) error {
 	return nil
 }
 
-// DeleteUser 删除账户及其会话/API 密钥；初始管理员与最后一名管理员不可删除。
-func (s *Store) DeleteUser(id int64) error {
-	if id == 1 {
-		return ErrProtectedUser
-	}
-	return s.writeTx(func(tx *sql.Tx) error {
-		admin, err := lockUserTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if admin {
-			if err := ensureAnotherAdminTx(tx, id); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec("DELETE FROM access_tokens WHERE user_id=?", id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("DELETE FROM api_keys WHERE user_id=?", id); err != nil {
-			return err
-		}
-		// 播放/登录审计保留（含用户 id 快照）；个人播放数据随账户删除。
-		if _, err := tx.Exec("DELETE FROM userdata WHERE user_id=?", id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("DELETE FROM user_libraries WHERE user_id=?", id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("DELETE FROM users WHERE id=?", id); err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
-// SaveAccessTokenForUser is a trusted issuance API (setup/tests). Password login
-// must use SaveAccessTokenForAuthenticatedUser to bind the verified generation.
-func (s *Store) SaveAccessTokenForUser(token string, userID int64, expiresAt time.Time) error {
-	return s.saveAccessToken(token, userID, 0, false, expiresAt)
-}
-
 // SaveAccessTokenForAuthenticatedUser atomically rejects authentications made
 // stale by a password change, revocation or deletion, including in-flight bcrypt.
 func (s *Store) SaveAccessTokenForAuthenticatedUser(token string, user User, expiresAt time.Time) error {
-	return s.saveAccessToken(token, user.ID, user.authGeneration, true, expiresAt)
-}
-
-func (s *Store) saveAccessToken(token string, userID, generation int64, checked bool, expiresAt time.Time) error {
+	userID, generation := user.ID, user.authGeneration
 	var expiry any
 	if !expiresAt.IsZero() {
 		expiry = expiresAt.Unix()
 	}
 	query := `INSERT INTO access_tokens(token,created_at,expires_at,user_id,auth_generation)
-	 SELECT ?,?,?,id,auth_generation FROM users WHERE id=?`
-	args := []any{tokenHash(token), time.Now().UTC().Format(time.RFC3339), expiry, userID}
-	if checked {
-		query += " AND auth_generation=?"
-		args = append(args, generation)
-	}
+	 SELECT ?,?,?,id,auth_generation FROM users WHERE id=? AND auth_generation=?`
+	args := []any{tokenHash(token), time.Now().UTC().Format(time.RFC3339), expiry, userID, generation}
 	// Duplicate tokens are not reassigned to another account.
 	query += " ON CONFLICT(token) DO NOTHING"
 	result, err := s.db.Exec(query, args...)
@@ -313,7 +182,7 @@ func (s *Store) saveAccessToken(token string, userID, generation int64, checked 
 	return nil
 }
 
-// ValidateAccessTokenUser 与 ValidateAccessToken 相同，但返回会话绑定的账户 id。
+// ValidateAccessTokenUser validates a session and returns its bound account ID.
 func (s *Store) ValidateAccessTokenUser(token string, now time.Time, ttl time.Duration) (int64, bool, error) {
 	var expires sql.NullInt64
 	var userID int64
@@ -354,17 +223,6 @@ func (s *Store) APIKeyUser(key string) (int64, bool, error) {
 		return 0, false, err
 	}
 	return userID, true, nil
-}
-
-// RevokeUserAccessTokens 撤销某账户的全部登录会话（改密后强制重新登录）。
-func (s *Store) RevokeUserAccessTokens(userID int64) error {
-	return s.writeTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec("UPDATE users SET auth_generation=auth_generation+1 WHERE id=?", userID); err != nil {
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM access_tokens WHERE user_id=?", userID)
-		return err
-	})
 }
 
 // UserLastLogin 返回每个账户最近一次成功登录时间。

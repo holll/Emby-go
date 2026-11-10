@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"emby-go/internal/logging"
 	"emby-go/internal/store"
 	"emby-go/internal/webhook"
 )
@@ -67,9 +66,7 @@ func TestDeleteWebhookFailureDiagnosticsVisibleInDiskLogs(t *testing.T) {
 			// Freeze the captured log before querying the API (whose request logger
 			// may produce additional lines). No production files are opened.
 			raw := output.String()
-			dir := t.TempDir()
-			logging.SetAppLogDir(dir)
-			defer logging.SetAppLogDir("")
+			dir := diskLogsFixtureDir(t)
 			day := time.Now().Format("2006-01-02")
 			if err := os.WriteFile(filepath.Join(dir, "app-"+day+".log"), []byte(raw), 0600); err != nil {
 				t.Fatal(err)

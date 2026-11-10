@@ -97,7 +97,7 @@ func TestScanSkipsOversizedFilesPreservingIndex(t *testing.T) {
 				var result Result
 				switch mode {
 				case "full":
-					result, err = Scan(s, lib)
+					result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 				case "incremental":
 					result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 				case "rescan":
@@ -149,7 +149,7 @@ func TestScanOversizedStackDependency(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := Scan(s, lib); err != nil {
+				if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 					t.Fatal(err)
 				}
 				source := filepath.Join(root, "Film-CD1.strm")
@@ -177,7 +177,7 @@ func TestScanOversizedStackDependency(t *testing.T) {
 				var result Result
 				switch mode {
 				case "full":
-					result, err = Scan(s, lib)
+					result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil)
 				case "incremental":
 					result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeIncremental}, nil)
 				case "rescan":
@@ -255,7 +255,7 @@ func TestSingleScanOversizedIndependentCDMember(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if _, err := Scan(s, lib); err != nil {
+					if _, err := ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, nil); err != nil {
 						t.Fatal(err)
 					}
 					first := filepath.Join(root, "Film-CD2.strm")

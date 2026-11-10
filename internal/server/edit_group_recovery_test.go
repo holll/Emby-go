@@ -95,7 +95,7 @@ func TestEditedNFORecoveryKeepsConfirmedDigestBaseline(t *testing.T) {
 	if err != nil || indexed.Status != m.Status || indexed.Title != m.Title {
 		t.Fatalf("modified index: %+v %v", indexed, err)
 	}
-	if err := app.db.MarkManual("/nonexistent/fixture.strm", "/nonexistent/fixture.nfo"); !errors.Is(err, sql.ErrNoRows) {
+	if err := app.db.MarkIndexedManual("/nonexistent/fixture.strm", "/nonexistent/fixture.nfo"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("zero-row mark=%v", err)
 	}
 }

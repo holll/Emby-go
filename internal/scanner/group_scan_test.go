@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,13 +42,13 @@ func TestScanGroupEntryPoints(t *testing.T) {
 					}
 				}
 				stalePath := filepath.Join(root, "missing.strm")
-				if _, err := s.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: stalePath, OutputDir: root, Title: "Missing", Status: "success"}, 0, time.Time{}); err != nil {
+				if _, err := s.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: stalePath, OutputDir: root, Title: "Missing", Status: "success"}, 0, time.Time{}, nil); err != nil {
 					t.Fatal(err)
 				}
 				var result Result
 				var progress []Progress
 				if mode == "library" {
-					result, err = ScanWithProgress(s, lib, func(p Progress) { progress = append(progress, p) })
+					result, err = ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, func(p Progress) { progress = append(progress, p) })
 				} else if mode == "reindex" {
 					result, err = ReindexOne(s, lib, filepath.Join(root, tc.target))
 				} else {

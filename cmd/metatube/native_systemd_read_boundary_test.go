@@ -126,8 +126,10 @@ func assertNativeSystemdReadBoundary(t *testing.T, base, state, token, mode, nam
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SavePlaybackForUser(1, id, 7654321, 3, "2026-11-06T00:00:00Z", 7654321); err != nil {
-		t.Fatal(err)
+	for i := range 3 {
+		if _, err := db.RecordPlaybackEvent(store.PlaybackEvent{UserID: 1, MovieID: id, SessionKey: fmt.Sprintf("read-fixture-%d", i), Kind: store.PlaybackStopped, PositionTicks: 7654321, Now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	userData, err := db.SetIndexedFavoriteDataForUser(1, id, true)
 	if err != nil || !userData.IsFavorite || userData.PositionTicks != 7654321 || userData.PlayCount != 3 {

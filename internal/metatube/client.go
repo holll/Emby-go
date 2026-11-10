@@ -69,9 +69,6 @@ func newClientOptions(timeout time.Duration, allowHosts []string) outbound.Optio
 	}
 }
 
-// BaseURL 返回服务地址（供管理端展示与连通性测试）。
-func (c *Client) BaseURL() string { return c.baseURL }
-
 // MovieSearchResult 搜索结果（MetaTube 的 MovieSearchResult 子集）。
 type MovieSearchResult struct {
 	ID          string   `json:"id"`

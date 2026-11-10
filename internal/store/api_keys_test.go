@@ -13,7 +13,9 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 
-	created, err := s.CreateAPIKey("script")
+	seedFixtureAdministrator(t, s, "owner", "fixture-password")
+	proof := fixtureRequestProof(t, s, 1, "fixture-password")
+	created, err := s.AdminCreateAPIKey(proof, "script")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +35,7 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	if items[0].Key != "" || items[0].ID != created.ID || items[0].KeyPrefix != created.KeyPrefix {
 		t.Fatalf("list leaked or lost fields: %+v", items[0])
 	}
-	if ok, err := s.HasAPIKey(created.Key); err != nil || !ok {
+	if _, ok, err := s.APIKeyUser(created.Key); err != nil || !ok {
 		t.Fatalf("plaintext credential rejected: ok=%v err=%v", ok, err)
 	}
 	// 首字符随机，固定换成 "0" 有 1/16 概率与原值相同；换成确定不同的字符。
@@ -41,7 +43,7 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	if created.Key[0] == '0' {
 		wrong = "1" + created.Key[1:]
 	}
-	if ok, err := s.HasAPIKey(wrong); err != nil || ok {
+	if _, ok, err := s.APIKeyUser(wrong); err != nil || ok {
 		t.Fatalf("wrong credential accepted: ok=%v err=%v", ok, err)
 	}
 	var stored string
@@ -51,10 +53,10 @@ func TestAPIKeyHashingAndListing(t *testing.T) {
 	if stored == created.Key {
 		t.Fatal("plaintext key still stored")
 	}
-	if err := s.DeleteAPIKey(created.ID); err != nil {
+	if err := s.AdminDeleteAPIKey(proof, created.ID, 0); err != nil {
 		t.Fatalf("delete by stable id: %v", err)
 	}
-	if ok, _ := s.HasAPIKey(created.Key); ok {
+	if _, ok, _ := s.APIKeyUser(created.Key); ok {
 		t.Fatal("deleted key still valid")
 	}
 }
@@ -93,7 +95,7 @@ func TestMigrationBackfillsLegacyAPIKeys(t *testing.T) {
 	if key != want || hash != want || prefix != "legacy-plain" {
 		t.Fatalf("backfill key=%q hash=%q prefix=%q", key, hash, prefix)
 	}
-	if ok, err := s.HasAPIKey("legacy-plain-credential"); err != nil || !ok {
+	if _, ok, err := s.APIKeyUser("legacy-plain-credential"); err != nil || !ok {
 		t.Fatalf("legacy credential rejected after migration: ok=%v err=%v", ok, err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"emby-go/internal/cache"
 	"emby-go/internal/config"
@@ -137,7 +138,7 @@ func TestDiagnosticAPIKeyBusinessEvents(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO api_keys(key,name,created_at) VALUES('canary','fixture','2026-10-17T00:00:00Z')"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.SaveAccessToken("fixture-log-auth"); err != nil {
+	if err := saveFixtureSession(t, a, "fixture-log-auth", 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	h := a.Handler()
@@ -161,7 +162,7 @@ func TestDiagnosticAPIKeyBusinessEvents(t *testing.T) {
 			t.Fatalf("delete status=%d", w.Code)
 		}
 	}
-	if valid, err := a.db.HasAPIKey(created.Key); err != nil || valid {
+	if _, valid, err := a.db.APIKeyUser(created.Key); err != nil || valid {
 		t.Fatalf("delete did not revoke: %t %v", valid, err)
 	}
 	if got := output.String(); strings.Contains(got, "canary") || strings.Contains(got, created.Key[:min(8, len(created.Key))]) || !strings.Contains(got, "创建 API 密钥") || !strings.Contains(got, "删除 API 密钥") {

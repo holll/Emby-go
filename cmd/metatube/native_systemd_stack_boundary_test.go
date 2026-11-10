@@ -149,8 +149,10 @@ func assertNativeSystemdStackBoundary(t *testing.T, base, state, token, mode, de
 		t.Fatalf("baseline groups: %+v err=%v", groups, err)
 	}
 	// Seed genuine per-user state through existing store APIs, not test SQL.
-	if err := db.SavePlaybackForUser(userID, id, 120000000, 3, "2026-01-02T03:04:05Z", 120000000); err != nil {
-		t.Fatal(err)
+	for i := range 3 {
+		if _, err := db.RecordPlaybackEvent(store.PlaybackEvent{UserID: userID, MovieID: id, SessionKey: fmt.Sprintf("stack-fixture-%d", i), Kind: store.PlaybackStopped, PositionTicks: 120000000, Now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := db.SetIndexedFavoriteDataForUser(userID, id, true); err != nil {
 		t.Fatal(err)

@@ -161,7 +161,7 @@ func TestDownloadAndHealth(t *testing.T) {
 	if err := client.Health(context.Background()); err != nil {
 		t.Fatalf("Health: %v", err)
 	}
-	data, err := client.Download(context.Background(), client.BaseURL()+"/v1/images/primary/p/i", 0)
+	data, err := client.Download(context.Background(), client.baseURL+"/v1/images/primary/p/i", 0)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestDownloadAndHealth(t *testing.T) {
 		t.Errorf("内容 = %q", string(data))
 	}
 	// 图片端点不带鉴权头（后端把它归为公开端点）。
-	if data, err := client.Download(context.Background(), client.BaseURL()+"/x", 0); err != nil || len(data) == 0 {
+	if data, err := client.Download(context.Background(), client.baseURL+"/x", 0); err != nil || len(data) == 0 {
 		t.Fatalf("Download 失败: %v", err)
 	}
 }

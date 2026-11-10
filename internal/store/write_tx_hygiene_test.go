@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,7 +19,7 @@ func TestScanContextCancellationAbandonsWriterWait(t *testing.T) {
 	t.Run("commit", func(t *testing.T) {
 		s, lib := scanFixture(t)
 		// 占住进程内写者，模拟一次长提交。
-		s.writeMu.Lock()
+		s.writeMu.LockContext(context.Background())
 		defer s.writeMu.Unlock()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -35,7 +34,7 @@ func TestScanContextCancellationAbandonsWriterWait(t *testing.T) {
 	})
 	t.Run("reconcile", func(t *testing.T) {
 		s, lib := scanFixture(t)
-		s.writeMu.Lock()
+		s.writeMu.LockContext(context.Background())
 		defer s.writeMu.Unlock()
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
@@ -136,62 +135,42 @@ func movieIDsByID(t *testing.T, s *Store) []int64 {
 	return ids
 }
 
-// P2-8：清点 inventory 与删除必须在同一个事务里。此前先无锁读一份 missing，
-// 再开事务按路径删；两次写入之间并发 IndexMovie 新建的行会被当垃圾删掉。
-// 用测试钩子在"清点后、删除前"由第二个 Store（独立连接池与 writeMu）提交一条
-// 新行，旧写法里钩子根本不存在（attempts==0）且新行存活；新写法必须整回调重跑。
-func TestDeleteMissingSourcesEnumeratesInsideTransaction(t *testing.T) {
-	path := t.TempDir() + "/dms.db"
-	a, err := Open(path)
+// A second connection can replace a retained movie after scanner reads its ID.
+// The current checked cleanup must reject that evidence before deleting anything.
+func TestScanReconcileRejectsReplacedIdentityAcrossStores(t *testing.T) {
+	path := t.TempDir() + "/reconcile.db"
+	a := versionStore(t, path)
+	b := versionStore(t, path)
+	lib, err := a.AddLibrary("reconcile", "/reconcile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { a.Close() })
-	a.waitFeaturesReady()
-	b, err := Open(path)
+	retained := Movie{LibraryID: lib.ID, SourcePath: "/reconcile/retained.strm", Status: "success", Title: "retained"}
+	id, err := a.IndexMovie(retained, 1, time.Unix(1, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { b.Close() })
-	b.waitFeaturesReady()
-	lib, err := a.AddLibrary("dms", "/dms")
-	if err != nil {
+	if _, err := a.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/reconcile/missing.strm", Status: "success"}, 1, time.Unix(1, 0), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/dms/stale.strm", Status: "success", Title: "stale"}, 1, time.Unix(1, 0), nil); err != nil {
+	if err := b.DeleteIndexedMovie(id); err != nil {
 		t.Fatal(err)
 	}
-	var attempts atomic.Int32
-	a.testDeleteMissingSourcesHook = func() error {
-		if attempts.Add(1) > 1 {
-			return nil
-		}
-		// 第一次尝试：别人在清点之后提交了一条新行。
-		_, err := b.IndexMovie(Movie{LibraryID: lib.ID, SourcePath: "/dms/late.strm", Status: "success", Title: "late"}, 1, time.Unix(1, 0), nil)
-		return err
+	replacement, err := b.IndexMovie(retained, 1, time.Unix(1, 0), nil)
+	if err != nil || replacement == id {
+		t.Fatalf("replacement=%d old=%d err=%v", replacement, id, err)
 	}
-	t.Cleanup(func() { a.testDeleteMissingSourcesHook = nil })
-	if err := a.DeleteMissingSources(lib.ID, map[string]struct{}{}); err != nil {
-		t.Fatalf("DeleteMissingSources: %v", err)
+	before := indexSnapshot(t, a)
+	result, err := a.ReconcileScanInventoryCheckedContext(context.Background(), lib, map[string]int64{retained.SourcePath: id}, nil)
+	if !errors.Is(err, ErrScanInventoryChanged) || result != (ScanReconcileResult{}) {
+		t.Fatalf("stale reconciliation=%+v err=%v", result, err)
 	}
-	if got := attempts.Load(); got < 2 {
-		t.Fatalf("attempts=%d want >=2：清点必须和删除一起重跑（旧写法在事务外清点）", got)
+	if indexSnapshot(t, a) != before {
+		t.Fatal("stale evidence deleted rows or changed versions")
 	}
-	for _, source := range []string{"/dms/stale.strm", "/dms/late.strm"} {
-		if n := indexedDeleteCount(t, a, "SELECT COUNT(*) FROM movies WHERE source_path=?", source); n != 0 {
-			t.Errorf("%s survived: %d", source, n)
-		}
-	}
-	// legacy 契约：这条路径仍不发布版本（钩子那侧的 IndexMovie 会 bump，所以
-	// 摘掉钩子后再调一次，专门看本路径自己的版本副作用）。
-	a.testDeleteMissingSourcesHook = nil
-	versions := [2]string{storedVersion(t, a, "g:version"), storedVersion(t, a, fmt.Sprintf("lib:%d:version", lib.ID))}
-	if err := a.DeleteMissingSources(lib.ID, map[string]struct{}{}); err != nil {
-		t.Fatalf("DeleteMissingSources (no hook): %v", err)
-	}
-	after := [2]string{storedVersion(t, a, "g:version"), storedVersion(t, a, fmt.Sprintf("lib:%d:version", lib.ID))}
-	if after != versions {
-		t.Fatalf("versions=%v want %v", after, versions)
+	result, err = a.ReconcileScanInventoryCheckedContext(context.Background(), lib, map[string]int64{retained.SourcePath: replacement}, nil)
+	if err != nil || result.DeletedMovies != 1 {
+		t.Fatalf("fresh reconciliation=%+v err=%v", result, err)
 	}
 }
 
@@ -201,8 +180,7 @@ func TestDeleteMissingSourcesEnumeratesInsideTransaction(t *testing.T) {
 func TestVisibleMovieCountSnapshotPublishesPairAtomically(t *testing.T) {
 	s, libID := newFeatureStore(t)
 	s.waitFeaturesReady()
-	// 用 IndexMovie（writeVersioned）而不是 UpsertMovie：后者不 bump 全局版本，
-	// 计数变化不会被缓存失效，测不出发布/失效的配对关系。
+	// 用真实 IndexMovie 写者发布全局版本，检测计数缓存与版本失效的配对关系。
 	indexVisible := func(path, title string) int64 {
 		t.Helper()
 		id, err := s.IndexMovie(Movie{LibraryID: libID, SourcePath: path, Status: "success", Title: title}, 1, time.Unix(1, 0), nil)

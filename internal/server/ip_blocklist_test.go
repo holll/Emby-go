@@ -34,7 +34,7 @@ func blocklistFixture(t *testing.T) (*App, string) {
 	a := contractTestApp(t)
 	seedOwner(t, a)
 	token := "ip-admin"
-	if err := a.db.SaveAccessTokenForUser(token, 1, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	return a, token
@@ -43,7 +43,7 @@ func blocklistFixture(t *testing.T) (*App, string) {
 func TestIPBlocklistAdminValidationAndRevocation(t *testing.T) {
 	a, token := blocklistFixture(t)
 	user := seedFixtureUser(t, a, "ordinary-ip", "password-123", false)
-	if err := a.db.SaveAccessTokenForUser("ordinary-ip", user.ID, time.Time{}); err != nil {
+	if err := saveFixtureSession(t, a, "ordinary-ip", user.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, method := range []string{"GET", "POST", "DELETE"} {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -72,7 +73,7 @@ func TestEmbyAuthorizationTokenFirstUsesAuthoritativeStore(t *testing.T) {
 	a, legacy, _ := authorityApp(t)
 	seedOwner(t, a)
 	token := "fixture-token-first"
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	router := authorityRouter(a)

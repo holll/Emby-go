@@ -45,7 +45,7 @@ func TestResolveAPIKeyStableIDQueuesBehindWriterGate(t *testing.T) {
 	}
 	done := make(chan result, 1)
 
-	s.writeMu.Lock()
+	s.writeMu.LockContext(context.Background())
 	go func() {
 		stable, err := s.ResolveAPIKeyStableID(plain)
 		done <- result{stable, err}
@@ -87,7 +87,7 @@ func TestResolveAPIKeyStableIDBackfillWaitIsBounded(t *testing.T) {
 	const plain = "legacy-plain-api-key-0002"
 	insertLegacyAPIKeyRow(t, s, plain)
 
-	s.writeMu.Lock()
+	s.writeMu.LockContext(context.Background())
 	begin := time.Now()
 	stable, err := s.ResolveAPIKeyStableID(plain)
 	elapsed := time.Since(begin)

@@ -52,16 +52,6 @@ func (a *App) canViewMovie(c *gin.Context, movie store.Movie) bool {
 	return a.canViewLibrary(c, movie.LibraryID)
 }
 
-// viewerCacheKey 返回缓存键里的账户授权段：管理员固定 "all"，普通用户为已授权
-// 媒体库 id 列表（可能为空串）。与 viewerLibraries 口径一致。
-func (a *App) viewerCacheKey(c *gin.Context) (string, bool) {
-	libs, admin, ok := a.viewerLibraries(c)
-	if !ok {
-		return "", false
-	}
-	return libraryScopeCacheKey(libs, admin), true
-}
-
 // libraryScopeCacheKey uses the same grant snapshot as the associated query.
 func libraryScopeCacheKey(libs []int64, admin bool) string {
 	if admin {

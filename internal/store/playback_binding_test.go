@@ -19,7 +19,7 @@ func TestPlaybackSessionMovieConflictZeroWrites(t *testing.T) {
 				}
 				movie.ID = 0
 				movie.SourcePath += ".other"
-				b, err := s.UpsertMovie(movie, 1, time.Now())
+				b, err := s.IndexMovie(movie, 1, time.Now(), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -67,13 +67,8 @@ func TestPlaybackSessionMovieConflictZeroWrites(t *testing.T) {
 				}
 				// Same movie remains usable; a different user may reuse the same key.
 				record(t, s, a, "bound", PlaybackStart, 30)
-				if _, err := s.CreateUser("owner", "hash", true); err != nil {
-					t.Fatal(err)
-				}
-				u, err := s.CreateUser("other", "hash", false)
-				if err != nil {
-					t.Fatal(err)
-				}
+				seedFixtureUser(t, s, "owner", "hash", true)
+				u := seedFixtureUser(t, s, "other", "hash", false)
 				if _, err := s.RecordPlaybackEvent(PlaybackEvent{UserID: u.ID, MovieID: b, SessionKey: "bound", Kind: PlaybackStart}); err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +85,7 @@ func TestPlaybackConcurrentFirstEventsBindOneMovie(t *testing.T) {
 	}
 	movie.ID = 0
 	movie.SourcePath += ".other"
-	b, err := s.UpsertMovie(movie, 1, time.Now())
+	b, err := s.IndexMovie(movie, 1, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,7 +24,7 @@ func TestEntityVisibleScopesNamesAndArt(t *testing.T) {
 		if i == 2 {
 			name = "Pending"
 		}
-		if err := s.ReplaceActors(id, []ActorRef{{Name: name}, {Name: "Common"}}); err != nil {
+		if err := indexFixtureActors(s, id, []ActorRef{{Name: name}, {Name: "Common"}}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -15,36 +15,37 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
+	authenticated := fixtureAuthenticatedUser(t, s, 1, "admin-password-1")
 	now := time.Now()
 	const ttl = 30 * 24 * time.Hour
 
-	if err := s.SaveAccessTokenExpiring("exp-soon", now.Add(2*time.Hour)); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("exp-soon", authenticated, now.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	// ttl=0：只校验绝对过期，不触发滑动续期（续期单独测）。
-	if ok, err := s.ValidateAccessToken("exp-soon", now, 0); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser("exp-soon", now, 0); err != nil || !ok {
 		t.Fatalf("valid session rejected: ok=%v err=%v", ok, err)
 	}
-	if ok, err := s.ValidateAccessToken("exp-soon", now.Add(3*time.Hour), 0); err != nil || ok {
+	if _, ok, err := s.ValidateAccessTokenUser("exp-soon", now.Add(3*time.Hour), 0); err != nil || ok {
 		t.Fatalf("expired session accepted: ok=%v err=%v", ok, err)
 	}
-	if ok, err := s.HasAccessToken("exp-soon"); err != nil || ok {
+	if _, ok, err := s.ValidateAccessTokenUser("exp-soon", time.Now(), 0); err != nil || ok {
 		t.Fatalf("expired session not deleted: ok=%v err=%v", ok, err)
 	}
 
 	// 未写 expires_at 的历史/夹具行视为不过期。
-	if err := s.SaveAccessToken("legacy"); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("legacy", authenticated, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.ValidateAccessToken("legacy", now.Add(100000*time.Hour), ttl); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser("legacy", now.Add(100000*time.Hour), ttl); err != nil || !ok {
 		t.Fatalf("legacy session rejected: ok=%v err=%v", ok, err)
 	}
 
 	// 剩余不足 TTL-24h 时滑动续期。
-	if err := s.SaveAccessTokenExpiring("renew", now.Add(10*24*time.Hour)); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("renew", authenticated, now.Add(10*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.ValidateAccessToken("renew", now, ttl); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser("renew", now, ttl); err != nil || !ok {
 		t.Fatalf("renew session rejected: ok=%v err=%v", ok, err)
 	}
 	var renewed int64
@@ -57,10 +58,10 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 
 	// 剩余时间充足时不写库。
 	stableExpiry := now.Add(29*24*time.Hour + time.Hour)
-	if err := s.SaveAccessTokenExpiring("stable", stableExpiry); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("stable", authenticated, stableExpiry); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.ValidateAccessToken("stable", now, ttl); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser("stable", now, ttl); err != nil || !ok {
 		t.Fatalf("stable session rejected: ok=%v err=%v", ok, err)
 	}
 	var stable int64
@@ -71,10 +72,10 @@ func TestAccessTokenExpiryValidation(t *testing.T) {
 		t.Fatalf("stable session rewritten: got=%d want=%d", stable, stableExpiry.Unix())
 	}
 
-	if err := s.SaveAccessTokenExpiring("zero-ttl", time.Time{}); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser("zero-ttl", authenticated, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.ValidateAccessToken("zero-ttl", now.Add(100000*time.Hour), 0); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser("zero-ttl", now.Add(100000*time.Hour), 0); err != nil || !ok {
 		t.Fatalf("zero ttl session rejected: ok=%v err=%v", ok, err)
 	}
 }
@@ -88,17 +89,22 @@ func TestRevokeAllAccessTokens(t *testing.T) {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
+	authenticated := fixtureAuthenticatedUser(t, s, 1, "admin-password-1")
 	for _, token := range []string{"a", "b", "c"} {
-		if err := s.SaveAccessToken(token); err != nil {
+		if err := s.SaveAccessTokenForAuthenticatedUser(token, authenticated, time.Time{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	revoked, err := s.RevokeAllAccessTokens()
+	proof, err := s.RequestCredentialUser("a", 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := s.AdminRevokeAllAccessTokens(proof)
 	if err != nil || revoked != 3 {
 		t.Fatalf("revoke all: revoked=%d err=%v", revoked, err)
 	}
 	for _, token := range []string{"a", "b", "c"} {
-		if ok, err := s.HasAccessToken(token); err != nil || ok {
+		if _, ok, err := s.ValidateAccessTokenUser(token, time.Now(), 0); err != nil || ok {
 			t.Fatalf("token %s survived revoke: ok=%v err=%v", token, ok, err)
 		}
 	}
@@ -145,8 +151,9 @@ func TestAccessTokensStoredAsDigest(t *testing.T) {
 	if err := s.InitializeAdministrator("admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
+	authenticated := fixtureAuthenticatedUser(t, s, 1, "admin-password-1")
 	const token = "plain-session-token"
-	if err := s.SaveAccessToken(token); err != nil {
+	if err := s.SaveAccessTokenForAuthenticatedUser(token, authenticated, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
@@ -156,13 +163,13 @@ func TestAccessTokensStoredAsDigest(t *testing.T) {
 	if stored == token || !isTokenHash(stored) || stored != tokenHash(token) {
 		t.Fatalf("session not hashed: %q", stored)
 	}
-	if ok, err := s.ValidateAccessToken(token, time.Now(), 0); err != nil || !ok {
+	if _, ok, err := s.ValidateAccessTokenUser(token, time.Now(), 0); err != nil || !ok {
 		t.Fatalf("hashed session rejected: %v %v", ok, err)
 	}
 	if err := s.DeleteAccessToken(token); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.HasAccessToken(token); ok {
+	if _, ok, _ := s.ValidateAccessTokenUser(token, time.Now(), 0); ok {
 		t.Fatal("session not revoked")
 	}
 }
@@ -197,7 +204,7 @@ func TestMigration12HashesLegacySessions(t *testing.T) {
 	if stored != tokenHash(legacy) {
 		t.Fatalf("legacy session not hashed: %q", stored)
 	}
-	if ok, err := reopened.ValidateAccessToken(legacy, time.Now(), 0); err != nil || !ok {
+	if _, ok, err := reopened.ValidateAccessTokenUser(legacy, time.Now(), 0); err != nil || !ok {
 		t.Fatalf("legacy session unusable after migration: %v %v", ok, err)
 	}
 }

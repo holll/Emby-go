@@ -27,7 +27,7 @@ func playbackFixture(t *testing.T) (*App, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := a.db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success"}, 1, time.Now())
+	id, err := indexFixtureMovie(t, a, store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success"}, 1, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

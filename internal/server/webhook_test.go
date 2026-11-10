@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -192,8 +193,15 @@ func TestDeleteWebhookNeverForLibraryOrInventoryCleanup(t *testing.T) {
 				if w := adminDeleteRequest(f, "libraries", "fixture-admin-delete"); w.Code != 204 {
 					t.Fatal(w.Code)
 				}
-			} else if err := f.a.db.ReconcileMissingSources(f.lib, nil); err != nil {
-				t.Fatal(err)
+			} else {
+				lib, err := f.a.db.Library(f.lib)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := f.a.db.ReconcileScanInventoryCheckedContext(context.Background(), lib, map[string]int64{}, nil)
+				if err != nil || result.DeletedMovies != 1 {
+					t.Fatalf("inventory cleanup: %+v %v", result, err)
+				}
 			}
 			if calls.Load() != 0 {
 				t.Fatal("bulk/automatic deletion emitted destructive event")

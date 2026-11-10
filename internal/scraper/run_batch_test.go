@@ -18,10 +18,10 @@ func TestRunStreamsCandidatesAcrossBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 250 {
-		if _, err := sc.store.UpsertMovie(store.Movie{
+		if _, err := sc.store.IndexMovie(store.Movie{
 			LibraryID: lib.ID, SourcePath: fmt.Sprintf("/tmp/av/x%03d.strm", i),
 			Status: "pending",
-		}, 0, time.Now()); err != nil {
+		}, 0, time.Now(), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -46,10 +46,10 @@ func TestRunStreamsHonorsLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 5 {
-		if _, err := sc.store.UpsertMovie(store.Movie{
+		if _, err := sc.store.IndexMovie(store.Movie{
 			LibraryID: lib.ID, SourcePath: fmt.Sprintf("/tmp/av/y%d.strm", i),
 			Status: "pending",
-		}, 0, time.Now()); err != nil {
+		}, 0, time.Now(), nil); err != nil {
 			t.Fatal(err)
 		}
 	}

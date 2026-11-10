@@ -40,7 +40,9 @@ func newIndexedDeleteFixture(t *testing.T) indexedDeleteFixture {
 			t.Fatal(err)
 		}
 		*item.id = id
-		if err := s.SavePlaybackForUser(1, id, 120, 3, "fixture-time", 99); err != nil {
+		if err := snapshotError(s.db.Exec(`INSERT OR REPLACE INTO userdata(user_id,movie_id,position_ticks,play_count,last_played_at,last_stopped_ticks) VALUES(?,?,?,?,?,?)`,
+
+			1, id, 120, 3, "fixture-time", 99)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -142,7 +144,7 @@ func TestDeleteIndexedAndReconcileTriggerRollback(t *testing.T) {
 				}
 				run := func() error {
 					if reconcile {
-						return f.s.ReconcileMissingSources(f.lib, nil)
+						return reconcileFixtureInventory(f.s, f.lib, nil)
 					}
 					return f.s.DeleteIndexedMovie(f.victim)
 				}
@@ -166,7 +168,7 @@ func TestDeleteIndexedAndReconcileTriggerRollback(t *testing.T) {
 }
 
 func TestDeleteIndexedAndReconcileDeferredCommitFailure(t *testing.T) {
-	for _, mode := range []string{"indexed", "reconcile", "legacy-missing"} {
+	for _, mode := range []string{"indexed", "reconcile"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newIndexedDeleteFixture(t)
 			f.s.db.SetMaxOpenConns(1)
@@ -180,14 +182,10 @@ BEGIN INSERT INTO fixture_delete_child(parent_id) VALUES(999); END`); err != nil
 				t.Fatal(err)
 			}
 			run := func() error {
-				switch mode {
-				case "indexed":
+				if mode == "indexed" {
 					return f.s.DeleteIndexedMovie(f.victim)
-				case "reconcile":
-					return f.s.ReconcileMissingSources(f.lib, nil)
-				default:
-					return f.s.DeleteMissingSources(f.lib, nil)
 				}
+				return reconcileFixtureInventory(f.s, f.lib, nil)
 			}
 			if err := run(); err == nil || !strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
 				t.Fatalf("expected deferred commit failure: %v", err)
@@ -219,7 +217,7 @@ BEGIN INSERT INTO fixture_delete_child(parent_id) VALUES(999); END`); err != nil
 				t.Fatalf("retry after commit failure: %v", err)
 			}
 			assertIndexedDeleteCascades(t, f)
-			assertIndexedDeleteVersions(t, f, versions, mode != "legacy-missing")
+			assertIndexedDeleteVersions(t, f, versions, true)
 		})
 	}
 }
@@ -259,7 +257,7 @@ END`); err != nil {
 		t.Fatal(err)
 	}
 	inventory := map[string]struct{}{"/fixture/delete/keep.strm": {}}
-	if err := f.s.ReconcileMissingSources(f.lib, inventory); err == nil || !strings.Contains(err.Error(), "fixture-second-chunk") {
+	if err := reconcileFixtureInventory(f.s, f.lib, inventory); err == nil || !strings.Contains(err.Error(), "fixture-second-chunk") {
 		t.Fatalf("expected second chunk failure: %v", err)
 	}
 	if after := indexSnapshot(t, f.s); after != before {
@@ -271,7 +269,7 @@ END`); err != nil {
 	if _, err := f.s.db.Exec("DROP TRIGGER fail_second_delete_chunk"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.s.ReconcileMissingSources(f.lib, inventory); err != nil {
+	if err := reconcileFixtureInventory(f.s, f.lib, inventory); err != nil {
 		t.Fatal(err)
 	}
 	assertIndexedDeleteCascades(t, f)
@@ -282,19 +280,19 @@ END`); err != nil {
 	if n := indexedDeleteCount(t, f.s, "SELECT COUNT(*) FROM movies WHERE library_id=? AND source_path=?", f.lib, "/fixture/delete/keep.strm"); n != 1 {
 		t.Fatal("complete inventory keeper was deleted")
 	}
-	// No missing records still publishes scan completion.
+	// The current checked API leaves versions unchanged for a no-op cleanup.
 	versions = indexedDeleteVersions(t, f)
-	if err := f.s.ReconcileMissingSources(f.lib, inventory); err != nil {
+	if err := reconcileFixtureInventory(f.s, f.lib, inventory); err != nil {
 		t.Fatal(err)
 	}
-	assertIndexedDeleteVersions(t, f, versions, true)
+	assertIndexedDeleteVersions(t, f, versions, false)
 	// Explicitly empty and nil complete inventories both mean delete all.
-	for _, empty := range []map[string]struct{}{{}, nil} {
+	for i, empty := range []map[string]struct{}{{}, nil} {
 		versions = indexedDeleteVersions(t, f)
-		if err := f.s.ReconcileMissingSources(f.lib, empty); err != nil {
+		if err := reconcileFixtureInventory(f.s, f.lib, empty); err != nil {
 			t.Fatal(err)
 		}
-		assertIndexedDeleteVersions(t, f, versions, true)
+		assertIndexedDeleteVersions(t, f, versions, i == 0)
 		if n := indexedDeleteCount(t, f.s, "SELECT COUNT(*) FROM movies WHERE library_id=?", f.lib); n != 0 {
 			t.Fatalf("empty complete inventory retained %d target movies", n)
 		}

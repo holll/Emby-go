@@ -8,7 +8,7 @@ import (
 // upsertFixtureMovie 建库 + 写一部影片，返回影片 id。
 func upsertFixtureMovie(t *testing.T, s *Store, libraryID int64, movie Movie) int64 {
 	t.Helper()
-	id, err := s.UpsertMovie(movie, 0, time.Now())
+	id, err := s.IndexMovie(movie, 0, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("UpsertMovie(%s): %v", movie.Title, err)
 	}
@@ -113,10 +113,10 @@ func TestSimilarCandidatesRanksByFeatureOverlap(t *testing.T) {
 	})
 	// 只有同演员（+3）
 	shared := ActorRef{Name: "Actor One"}
-	if err := s.ReplaceActors(src, []ActorRef{shared}); err != nil {
+	if err := indexFixtureActors(s, src, []ActorRef{shared}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceActors(sameGenre, []ActorRef{shared}); err != nil {
+	if err := indexFixtureActors(s, sameGenre, []ActorRef{shared}); err != nil {
 		t.Fatal(err)
 	}
 	// 毫不相关（且是 pending，本就不该出现）

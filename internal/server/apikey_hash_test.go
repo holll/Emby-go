@@ -6,13 +6,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAPIKeyListHidesPlaintext(t *testing.T) {
 	a, _, _ := authorityApp(t)
 	seedOwner(t, a)
 	const token = "fixture-session"
-	if err := a.db.SaveAccessToken(token); err != nil {
+	if err := saveFixtureSession(t, a, token, 1, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	create := httptest.NewRequest(http.MethodPost, "/api/admin/apikeys", strings.NewReader(`{"name":"script"}`))

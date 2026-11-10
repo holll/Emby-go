@@ -42,10 +42,8 @@ func TestSubtitleMarksLocalPreviewCommitAndRemove(t *testing.T) {
 	path := "/api/admin/items/" + strconv.FormatInt(movie.ID, 10) + "/subtitle-marks"
 	writeFile(t, filepath.Join(media, "ABF-018.zh.srt"), "subtitle bytes")
 	writeFile(t, filepath.Join(media, "poster.jpg"), "image bytes")
-	if err := app.db.SavePlaybackForUser(1, movie.ID, 1234567, 3, "2026-11-06T00:00:00Z", 1234567); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.db.SetIndexedFavorite(movie.ID, true); err != nil {
+	seedFixturePlayback(t, app, movie.ID, 1234567, 3, "2026-11-06T00:00:00Z", 1234567)
+	if _, err := app.db.SetIndexedFavoriteDataForUser(1, movie.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	userBefore, err := app.db.DataUser(1, movie.ID)

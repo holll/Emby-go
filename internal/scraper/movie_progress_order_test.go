@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,12 +17,25 @@ import (
 	"emby-go/internal/store"
 )
 
-func movieProgressCandidates(n int) []store.Movie {
-	movies := make([]store.Movie, n)
-	for i := range movies {
-		movies[i] = store.Movie{ID: int64(i + 1), Number: fmt.Sprintf("ABC-%03d", 100+i), Title: fmt.Sprintf("Movie %03d", i)}
+func seedMovieProgressCandidates(t *testing.T, s *Scraper, n int) {
+	t.Helper()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "progress.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return movies
+	t.Cleanup(func() { db.Close() })
+	lib, err := db.AddLibrary("Progress", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		movie := store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, fmt.Sprintf("ABC-%03d.strm", 100+i)), Number: fmt.Sprintf("ABC-%03d", 100+i), Title: fmt.Sprintf("Movie %03d", i), Status: "pending"}
+		if _, err := db.IndexMovie(movie, 0, time.Time{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.store = db
 }
 
 func TestMovieConcurrentProgressDeliveryIsOrdered(t *testing.T) {
@@ -48,6 +62,7 @@ func TestMovieConcurrentProgressDeliveryIsOrdered(t *testing.T) {
 	}))
 	defer backend.Close()
 	s := New(Config{BaseURL: backend.URL, Token: "fixture", Concurrency: 8}, nil)
+	seedMovieProgressCandidates(t, s, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -67,7 +82,7 @@ func TestMovieConcurrentProgressDeliveryIsOrdered(t *testing.T) {
 	var resultErr error
 	go func() {
 		defer close(finished)
-		progress, resultErr = s.RunMovies(ctx, movieProgressCandidates(16), RunOptions{
+		progress, resultErr = s.Run(ctx, RunOptions{
 			OnProgress: func(p Progress) {
 				enter()
 				defer active.Add(-1)
@@ -169,11 +184,12 @@ func TestMovieBreakerThresholdResetAndCancellationIdentity(t *testing.T) {
 			}))
 			defer backend.Close()
 			s := New(Config{BaseURL: backend.URL, Token: "fixture", Concurrency: 1}, nil)
+			seedMovieProgressCandidates(t, s, total)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var last Progress
 			var items []ItemResult
-			p, err := s.RunMovies(ctx, movieProgressCandidates(total), RunOptions{
+			p, err := s.Run(ctx, RunOptions{
 				OnProgress: func(p Progress) { last = p },
 				OnItem: func(item ItemResult) {
 					items = append(items, item)

@@ -26,11 +26,11 @@ func TestResumeParentScopeCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	viewer := seedFixtureUser(t, a, "resume-viewer", "password-1234", false)
-	if err := a.db.SetUserLibraries(viewer.ID, []int64{public.ID}); err != nil {
+	if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{public.ID})}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "resume-scope-viewer"
-	if err := a.db.SaveAccessTokenForUser(token, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
+	if err := saveFixtureSession(t, a, token, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	for i, name := range []string{"Alpha", "Beta", "Solo", "Private", "Uncollected", "Hidden", "NoProgress", "OtherUser"} {
@@ -123,7 +123,7 @@ func TestResumeParentScopeCompatibility(t *testing.T) {
 			t.Fatalf("cross-user: %d", status)
 		}
 	}
-	if err := a.db.SetUserLibraries(viewer.ID, []int64{}); err != nil {
+	if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{})}); err != nil {
 		t.Fatal(err)
 	}
 	status, raw := embyDo(t, ts, http.MethodGet, fmt.Sprintf("/Users/%d/Items/Resume?ParentId=%s", viewer.ID, url.QueryEscape(boxsetID("Pair"))), token, "")

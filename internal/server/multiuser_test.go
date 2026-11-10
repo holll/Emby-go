@@ -33,10 +33,10 @@ func TestMultiUserLoginAndAdminBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
-	if err := a.db.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := a.db.CreateUser("viewer", "viewer-password-1", false)
+	viewer, err := createFixtureUser(t, a, "viewer", "viewer-password-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +99,14 @@ func TestUserDataIsolationByUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
-	if err := a.db.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := a.db.CreateUser("viewer", "viewer-password-1", false)
+	viewer, err := createFixtureUser(t, a, "viewer", "viewer-password-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := a.db.CreateUser("other", "other-password-1", false)
+	other, err := createFixtureUser(t, a, "other", "other-password-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestUserDataIsolationByUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	movieID, err := a.db.UpsertMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success"}, 1, time.Now())
+	movieID, err := indexFixtureMovie(t, a, store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(root, "a.strm"), SourceProtocol: "https", Status: "success"}, 1, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestLoginAuditRecordsSuccessAndFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Close)
-	if err := a.db.InitializeAdministrator("admin", "admin-password-1"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "admin", "admin-password-1"); err != nil {
 		t.Fatal(err)
 	}
 	h := a.Handler()
@@ -163,7 +163,7 @@ func TestLoginAuditRecordsSuccessAndFailure(t *testing.T) {
 	if status, _ := multiuserLogin(t, h, "admin", "admin-password-1"); status != http.StatusOK {
 		t.Fatalf("login status=%d", status)
 	}
-	events, err := a.db.LoginEvents(0, 10)
+	events, _, err := a.db.LoginEventsFiltered(0, 0, 10, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

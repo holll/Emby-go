@@ -73,11 +73,11 @@ func TestSpritesBrowserMobile(t *testing.T) {
 		req.IntervalMs = 1000
 		return artwork.GenerateSprite(ctx, db, req, o)
 	}
-	ordinary, err := f.a.db.CreateUser("sprites-mobile-viewer", "password-123", false)
+	ordinary, err := createFixtureUser(t, f.a, "sprites-mobile-viewer", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("sprites-browser-ordinary", ordinary.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "sprites-browser-ordinary", ordinary.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(f.a.Handler())

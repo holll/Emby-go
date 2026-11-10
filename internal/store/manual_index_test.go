@@ -255,17 +255,17 @@ BEGIN INSERT INTO fixture_manual_child(parent_id) VALUES(999); END`); err != nil
 	}
 }
 
-func TestMarkIndexedManualLegacyMarkManualRemainsUnversioned(t *testing.T) {
+func TestMarkIndexedManualPreservesProtectedMetadata(t *testing.T) {
 	f := newIndexedDeleteFixture(t)
 	versions := indexedDeleteVersions(t, f)
 	protected := manualIndexProtectedSnapshot(t, f)
 	started := time.Now()
-	if err := f.s.MarkManual(manualIndexSource, manualIndexNFO); err != nil {
+	if err := f.s.MarkIndexedManual(manualIndexSource, manualIndexNFO); err != nil {
 		t.Fatal(err)
 	}
 	assertManualIndexSaved(t, f, started)
-	assertIndexedDeleteVersions(t, f, versions, false)
+	assertIndexedDeleteVersions(t, f, versions, true)
 	if after := manualIndexProtectedSnapshot(t, f); after != protected {
-		t.Fatal("legacy mark changed protected index")
+		t.Fatal("manual mark changed protected index")
 	}
 }

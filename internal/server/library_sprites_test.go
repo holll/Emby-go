@@ -17,11 +17,11 @@ import (
 func TestLibrarySpritesSettingsPermissionsAndValidation(t *testing.T) {
 	f := artworkFixture(t)
 	path := fmt.Sprintf("/api/admin/libraries/%d/sprites", f.lib)
-	user, err := f.a.db.CreateUser("sprite-library-user", "password-123", false)
+	user, err := createFixtureUser(t, f.a, "sprite-library-user", "password-123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("sprite-library-user", user.ID, time.Time{}); err != nil {
+	if err = saveFixtureSession(t, f.a, "sprite-library-user", user.ID, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	for token, want := range map[string]int{"": 401, "sprite-library-user": 403} {
@@ -88,7 +88,7 @@ func TestLibrarySpritesBatchInheritsEachLibraryAndPreservesPreview(t *testing.T)
 		}
 	}
 	// Saving density does not touch the published preview pointer.
-	state, err := f.a.db.Sprite(f.movie)
+	state, err := f.a.db.SpriteContext(context.Background(), f.movie)
 	if err != nil || state.Generation != prior.Generation {
 		t.Fatalf("preview changed %v", err)
 	}

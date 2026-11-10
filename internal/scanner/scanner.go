@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"net/url"
@@ -10,7 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"emby-go/internal/imageutil"
 	"emby-go/internal/nfo"
@@ -73,17 +71,6 @@ type Progress struct {
 }
 
 var cdPartPattern = regexp.MustCompile(`(?i)^(.*?)[ ._-]+CD([1-9][0-9]*)$`)
-
-// Scan 按 Emby 的 stacking 语义处理末尾 -CDn 文件：CD1 为逻辑影片，CD2..CDn 作为 AdditionalParts。
-func Scan(s *store.Store, lib store.Library) (Result, error) {
-	return ScanWithProgress(s, lib, nil)
-}
-
-// ScanWithProgress 与 Scan 相同，但在每个分组处理完后回调进度（可为 nil）。
-// 默认 full：旧调用者行为不变，但会记录组基线供后续 incremental 使用。
-func ScanWithProgress(s *store.Store, lib store.Library, onProgress func(Progress)) (Result, error) {
-	return ScanWithOptions(context.Background(), s, lib, ScanOptions{Mode: ScanModeFull}, onProgress)
-}
 
 // RescanOne 只重扫一个 .strm，用于单条刮削/编辑后立即刷新索引。
 //
@@ -407,14 +394,4 @@ func container(path string) string {
 func ValidHTTP(raw string) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
-}
-
-// SourceStat 返回 strm 源文件的大小与修改时间；文件不可读（外部库被移动/删除）时
-// 返回零值，让索引里的元数据仍可更新而不至于 panic。
-func SourceStat(path string) (int64, time.Time) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, time.Time{}
-	}
-	return info.Size(), info.ModTime()
 }

@@ -42,11 +42,11 @@ func TestQueryUserAndParentScopeCompatibility(t *testing.T) {
 		}
 	}
 	viewer := seedFixtureUser(t, a, "scoped-viewer", "password-1234", false)
-	if err := a.db.SetUserLibraries(viewer.ID, []int64{first.ID}); err != nil {
+	if err := updateFixtureUser(t, a, viewer.ID, store.AdminUserUpdate{LibraryIDs: fixtureValue([]int64{first.ID})}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "query-scope-viewer"
-	if err := a.db.SaveAccessTokenForUser(token, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
+	if err := saveFixtureSession(t, a, token, viewer.ID, a.sessionExpiry(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	uid := strconv.FormatInt(viewer.ID, 10)

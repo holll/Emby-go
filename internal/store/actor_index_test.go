@@ -15,7 +15,7 @@ const indexedAvatarActor = "Victim actor"
 func actorIndexFixture(t *testing.T) indexedDeleteFixture {
 	t.Helper()
 	f := newIndexedDeleteFixture(t)
-	if err := f.s.ReplaceActors(f.survivor, []ActorRef{{Name: indexedAvatarActor}, {Name: "Other actor"}}); err != nil {
+	if err := indexFixtureActors(f.s, f.survivor, []ActorRef{{Name: indexedAvatarActor}, {Name: "Other actor"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.s.IndexMovie(Movie{LibraryID: f.lib, SourcePath: "/fixture/delete/second.strm", Title: "second", Status: "pending"}, 1, time.Unix(2, 0), []ActorRef{{Name: indexedAvatarActor}}); err != nil {
@@ -146,12 +146,10 @@ func TestIndexedActorAvatarMultiLibraryAndCompatibility(t *testing.T) {
 		t.Fatalf("insert timestamp not UTC RFC3339: %q %v", insertedAt, err)
 	}
 	before = actorIndexVersions(t, f)
-	if err = f.s.SetActorAvatar(indexedAvatarActor, "legacy-url", "legacy-tag"); err != nil {
+	if err = f.s.SetIndexedActorAvatar(indexedAvatarActor, "legacy-url", "legacy-tag"); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(actorIndexVersions(t, f)) != fmt.Sprint(before) || f.s.Version("g:version") != before["g:version"] {
-		t.Fatal("legacy setter changed version")
-	}
+	assertActorIndexBumps(t, f, before, f.lib, f.other, 0)
 }
 
 func TestIndexedActorAvatarRollbackAndPoolHealth(t *testing.T) {

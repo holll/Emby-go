@@ -34,10 +34,6 @@ INSERT INTO movies(id,library_id,source_path,status,title,created_at,updated_at)
 	if got.FirstFailedAt != failures[0].FirstFailedAt || got.AgeDays != 8 {
 		t.Fatalf("first failed at lost: %+v", got)
 	}
-	total, stale, err := s.EditFailureCounts(now, 7*24*time.Hour)
-	if err != nil || total != 1 || stale != 1 {
-		t.Fatalf("counts=%d/%d err=%v", total, stale, err)
-	}
 	if err := s.ClearEditFailure(7); err != nil {
 		t.Fatal(err)
 	}

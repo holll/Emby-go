@@ -47,7 +47,7 @@ func TestStabilityPermissionsAdmissionMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			token := "admission-" + tc.name
-			if err := a.db.SaveAccessTokenForUser(token, 1, time.Now().Add(time.Hour)); err != nil {
+			if err := saveFixtureSession(t, a, token, 1, time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			ran := false
@@ -123,15 +123,15 @@ func TestStabilityPermissionsSensitiveWriteMatrix(t *testing.T) {
 	for _, mode := range []string{"logout", "role-ABA", "key-rotation", "unchanged"} {
 		t.Run(mode, func(t *testing.T) {
 			a, _, _ := asyncScanFixture(t)
-			actor, err := a.db.CreateUser("sensitive-admin", "password-1234", true)
+			actor, err := createFixtureUser(t, a, "sensitive-admin", "password-1234", true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			source, err := a.db.CreateAPIKeyForUser("source", actor.ID)
+			source, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, actor.ID), "source")
 			if err != nil {
 				t.Fatal(err)
 			}
-			target, err := a.db.CreateAPIKeyForUser("target", 1)
+			target, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "target")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -140,7 +140,7 @@ func TestStabilityPermissionsSensitiveWriteMatrix(t *testing.T) {
 			if mode == "key-rotation" {
 				token = source.Key
 				session = false
-			} else if err := a.db.SaveAccessTokenForUser(token, actor.ID, time.Now().Add(time.Hour)); err != nil {
+			} else if err := saveFixtureSession(t, a, token, actor.ID, time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			proof, err := a.db.RequestCredentialUser(token, actor.ID, session)
@@ -151,16 +151,16 @@ func TestStabilityPermissionsSensitiveWriteMatrix(t *testing.T) {
 			case "logout":
 				err = a.db.DeleteAccessToken(token)
 			case "role-ABA":
-				err = a.db.SetUserAdmin(actor.ID, false)
+				err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(false)})
 				if err == nil {
-					err = a.db.SetUserAdmin(actor.ID, true)
+					err = updateFixtureUser(t, a, actor.ID, store.AdminUserUpdate{IsAdmin: fixtureValue(true)})
 				}
 			case "key-rotation":
 				authenticated, ok, e := a.db.AuthenticateUser(actor.Name, "password-1234")
 				if e != nil || !ok {
 					t.Fatal(e)
 				}
-				_, err = a.db.RotateAPIKey(authenticated, source.ID, 1)
+				_, err = a.db.RotateAPIKeyForRequest(authenticated, fixtureAdminProof(t, a, actor.ID), source.ID, 1)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -194,7 +194,7 @@ func TestStabilityPermissionsSensitiveWriteMatrix(t *testing.T) {
 				}
 			}
 			if mode != "unchanged" {
-				if valid, err := a.db.HasAPIKey(target.Key); err != nil || !valid {
+				if _, valid, err := a.db.APIKeyUser(target.Key); err != nil || !valid {
 					t.Fatalf("target changed: %v %v", valid, err)
 				}
 			}
@@ -206,7 +206,7 @@ func TestStabilityPermissionsSensitiveWriteMatrix(t *testing.T) {
 // password reauthentication sufficient to commit rotation with a dead session.
 func TestStabilityPermissionsRotationRequiresOriginalSession(t *testing.T) {
 	a, _, token := asyncScanFixture(t)
-	key, err := a.db.CreateAPIKeyForUser("rotation-target", 1)
+	key, err := a.db.AdminCreateAPIKey(fixtureAdminProof(t, a, 1), "rotation-target")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestStabilityPermissionsRotationRequiresOriginalSession(t *testing.T) {
 	if !ran || w.Code != http.StatusUnauthorized {
 		t.Fatalf("read=%v status=%d body=%s", ran, w.Code, w.Body.String())
 	}
-	if valid, err := a.db.HasAPIKey(key.Key); err != nil || !valid {
+	if _, valid, err := a.db.APIKeyUser(key.Key); err != nil || !valid {
 		t.Fatalf("revoked session rotated key: %v %v", valid, err)
 	}
 	keys, err := a.db.APIKeys()

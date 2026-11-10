@@ -20,7 +20,7 @@ func ttlApp(t *testing.T, days int) *App {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
-	if err := a.db.InitializeAdministrator("admin", "password-1234"); err != nil {
+	if err := initializeFixtureAdministrator(t, a, "admin", "password-1234"); err != nil {
 		t.Fatal(err)
 	}
 	return a
@@ -60,24 +60,24 @@ func TestLoginStoresSessionExpiry(t *testing.T) {
 		t.Fatalf("fresh token rejected status=%d", w.Code)
 	}
 	// ttl=0 只校验绝对过期：会话 23 小时后仍有效、25 小时后失效（校验会删除过期行）。
-	if ok, err := a.db.ValidateAccessToken(token, now, 0); err != nil || !ok {
+	if _, ok, err := a.db.ValidateAccessTokenUser(token, now, 0); err != nil || !ok {
 		t.Fatalf("fresh session rejected: ok=%v err=%v", ok, err)
 	}
-	if ok, err := a.db.ValidateAccessToken(token, now.Add(23*time.Hour), 0); err != nil || !ok {
+	if _, ok, err := a.db.ValidateAccessTokenUser(token, now.Add(23*time.Hour), 0); err != nil || !ok {
 		t.Fatalf("session expired too early: ok=%v err=%v", ok, err)
 	}
-	if ok, err := a.db.ValidateAccessToken(token, now.Add(25*time.Hour), 0); err != nil || ok {
+	if _, ok, err := a.db.ValidateAccessTokenUser(token, now.Add(25*time.Hour), 0); err != nil || ok {
 		t.Fatalf("session outlived its TTL: ok=%v err=%v", ok, err)
 	}
 
 	// 过期会话：请求 401 且行被删除。
-	if err := a.db.SaveAccessTokenExpiring("expired-session", now.Add(-time.Hour)); err != nil {
+	if err := saveFixtureSession(t, a, "expired-session", 1, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if w := tokenRequest(a, http.MethodGet, "/api/admin/settings", "expired-session"); w.Code != http.StatusUnauthorized {
 		t.Fatalf("expired token status=%d", w.Code)
 	}
-	if ok, err := a.db.HasAccessToken("expired-session"); err != nil || ok {
+	if _, ok, err := a.db.ValidateAccessTokenUser("expired-session", time.Now(), 0); err != nil || ok {
 		t.Fatalf("expired token not deleted: ok=%v err=%v", ok, err)
 	}
 }
@@ -85,7 +85,7 @@ func TestLoginStoresSessionExpiry(t *testing.T) {
 func TestSessionTTLZeroKeepsToken(t *testing.T) {
 	a := ttlApp(t, 0)
 	token := loginForToken(t, a)
-	if ok, err := a.db.ValidateAccessToken(token, time.Now().Add(10*365*24*time.Hour), 0); err != nil || !ok {
+	if _, ok, err := a.db.ValidateAccessTokenUser(token, time.Now().Add(10*365*24*time.Hour), 0); err != nil || !ok {
 		t.Fatalf("ttl=0 session expired: ok=%v err=%v", ok, err)
 	}
 	if w := tokenRequest(a, http.MethodGet, "/api/admin/settings", token); w.Code != http.StatusOK {

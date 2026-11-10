@@ -72,7 +72,7 @@ func TestArtworkOnlyInvalidatesDependentScanGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	versions := indexedDeleteVersions(t, f)
-	if err := f.s.CompareAndSwapArtwork(context.Background(), m, lib.Path, "/new/private.jpg", func() error { return nil }); err != nil {
+	if err := f.s.CompareAndSwapArtworkFiles(context.Background(), m, lib.Path, "/new/private.jpg", ArtworkFiles{Commit: func() error { return nil }}); err != nil {
 		t.Fatal(err)
 	}
 	if artworkRelatedSnapshot(t, f.s) != beforeRelated {

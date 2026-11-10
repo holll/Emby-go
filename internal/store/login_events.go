@@ -47,12 +47,6 @@ func (s *Store) pruneLoginEvents(now time.Time) error {
 	return err
 }
 
-// LoginEvents 按时间倒序返回最近 limit 条登录记录；userID=0 表示全部账户。
-func (s *Store) LoginEvents(userID int64, limit int) ([]LoginEvent, error) {
-	events, _, err := s.LoginEventsFiltered(userID, 0, limit, "", nil)
-	return events, err
-}
-
 // LoginEventsFiltered applies predicates before LIMIT/OFFSET, so older matching
 // events are not silently hidden by unrelated recent attempts. IP is an exact
 // match. It returns the page and the total matching rows.

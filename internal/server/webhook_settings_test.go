@@ -59,11 +59,11 @@ func TestWebhookSettingsAuthorizationPersistenceAndImmediateDelivery(t *testing.
 	}))
 	defer receiver.Close()
 	secretURL := receiver.URL + "/webhook/secret-url-canary?key=query-canary"
-	user, err := f.a.db.CreateUser("ordinary", "test-password", false)
+	user, err := createFixtureUser(t, f.a, "ordinary", "test-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.a.db.SaveAccessTokenForUser("ordinary-token", user.ID, time.Now().Add(time.Hour)); err != nil {
+	if err = saveFixtureSession(t, f.a, "ordinary-token", user.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, method := range []string{"GET", "PUT"} {
