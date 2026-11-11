@@ -50,25 +50,32 @@
     }).join('');
     return `<svg viewBox="0 0 ${size} 210" role="img" aria-label="${escape(label)}"><title>${escape(label)}；横轴为分钟，纵轴单位${escape(unit)}。完整数值见下方数据表。</title>${grid}${paths}<text class="dash-axis" x="${left}" y="199">${escape(clock(points[0]?.start))}</text><text class="dash-axis" x="${left + width}" y="199" text-anchor="end">${escape(clock(points[points.length - 1]?.start))}</text></svg>`;
   }
-  const kinds = { scan: '媒体扫描', reindex: '重建索引', probe: '媒体探测', scrape: '元数据刮削', scrape_avatars: '补演员头像', avatars: '补演员头像', translate: '独立翻译', analyze: '媒体分析', webhook: '通知投递', edit: '元数据编辑', other: '其他任务' };
-  const states = { running: '执行中', queued: '排队中', succeeded: '已完成', success: '已完成', failed: '失败', skipped: '已跳过', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
   function mountDashboard(host, options) {
     const { apiRequest, isCurrent } = options;
     let active = true, paused = false, wide = false, fullscreenPending = false, reading = false, timer = null, request = null, cancelDeadline = null, serial = 0, minutes = 15, snapshot = null, failures = 0;
     let mediaSnapshot = null, mediaInstance = null;
     const doc = host.ownerDocument || global.document;
     host.innerHTML = `<section id="overview-dashboard" class="dashboard" aria-label="运行监控首页" aria-live="off">
-      <header class="dash-heading"><div><p class="dash-kicker">EMBY-GO / CONTROL PLANE</p><h2>运行观测<span>每一帧数据，都有据可查。</span></h2></div><div class="dash-update"><span class="dash-state" data-dash="state" role="status" aria-live="polite">正在获取运行快照…</span><span data-dash="updated">尚未收到数据</span></div></header>
-      <div class="dash-toolbar"><div class="dash-windows" role="group" aria-label="统计窗口">${[5, 15, 60].map(value => `<button type="button" class="btn" data-window="${value}" aria-pressed="${value === 15}">${value} 分钟</button>`).join('')}</div><details class="dash-options"><summary>更新与视图</summary><div class="dash-controls"><button type="button" class="btn" data-dash="pause" aria-pressed="false">暂停更新</button><button type="button" class="btn" data-dash="refresh">立即刷新</button><button type="button" class="btn" data-dash="wide" aria-pressed="false">大屏视图</button></div></details></div>
-      <p class="dash-feedback" data-dash="feedback" role="status" aria-live="polite"></p>
-      <div class="dash-kpis" aria-label="核心运行指标">${[['p95', 'P95 请求延迟', 'ms', '直方图桶上界估计'], ['requests', '窗口请求量', '次', 'JSON 控制面请求'], ['errors', '服务端错误', '次 / 5xx', '不含媒体流与图片'], ['heap', 'Go 堆已分配', 'MiB', '非进程 RSS / 内存上限']].map(([key, name, unit, note]) => `<article class="dash-kpi dash-kpi-${key}"><h3>${name}</h3><p><strong data-dash="${key}">—</strong><span>${unit}</span></p><small data-dash="${key}-note">${note}</small></article>`).join('')}</div>
-      <div class="dash-charts"><section class="dash-panel" aria-labelledby="dash-traffic-title"><div class="dash-panel-head"><div><p class="dash-kicker">TRAFFIC</p><h3 id="dash-traffic-title">请求与服务端错误</h3></div><span>次 / 分钟</span></div><div class="dash-legend"><span class="dash-key dash-key-blue">请求</span><span class="dash-key dash-key-amber">5xx 错误</span></div><div class="dash-chart" data-dash="traffic">尚未收到数据</div></section>
-      <section class="dash-panel" aria-labelledby="dash-latency-title"><div class="dash-panel-head"><div><p class="dash-kicker">LATENCY</p><h3 id="dash-latency-title">请求耗时分位数</h3></div><span>毫秒 / 桶上界</span></div><div class="dash-legend"><span class="dash-key dash-key-cyan">P95</span><span class="dash-key dash-key-muted">P50 · 虚线</span></div><div class="dash-chart" data-dash="latency">尚未收到数据</div></section></div>
-      <details class="dash-data disclosure"><summary class="disclosure-summary">查看逐分钟数据表与统计口径</summary><div class="disclosure-body"><p class="dash-note">统计仅覆盖 JSON 控制面；流媒体、图片、静态资源、健康检查与监控自身请求不参与统计。P95 表示约 95% 请求落在该桶上界内，不是平均耗时。启动前无观测、无延迟样本显示“—”；超过 60 秒的分位数显示 &gt;60,000 ms。进程重启后历史清空，最多保留 60 分钟。</p><p data-dash="window-info" class="dash-note">等待服务端窗口信息。</p><div class="table-wrap"><table class="dash-table"><caption class="sr-only">所选窗口逐分钟监控样本</caption><thead><tr><th>分钟</th><th>请求</th><th>4xx</th><th>5xx</th><th>P50 ms</th><th>P95 ms</th></tr></thead><tbody data-dash="samples"><tr><td colspan="6">尚未收到数据</td></tr></tbody></table></div></div></details>
-      <div class="dash-bottom"><section class="dash-panel"><div class="dash-panel-head"><div><p class="dash-kicker">ARCHIVE</p><h3>媒体档案</h3></div><a href="#items">查看媒体墙 →</a></div><div class="dash-media" data-dash="media">尚未收到数据</div><p class="dash-note" data-dash="media-updated">媒体摘要最多缓存 15 秒；NFO 是元数据真源。</p></section>
-      <section class="dash-panel"><div class="dash-panel-head"><div><p class="dash-kicker">RUNTIME</p><h3>Go 运行时</h3></div><span data-dash="uptime">—</span></div><dl class="dash-runtime" data-dash="runtime"><dt>运行指标</dt><dd>—</dd></dl></section>
-      <section class="dash-panel dash-tasks"><div class="dash-panel-head"><div><p class="dash-kicker">JOBS</p><h3>任务摘要 <span data-dash="running">—</span></h3></div><a href="#scheduled">计划与执行记录 →</a></div><div data-dash="tasks">尚未收到数据</div><p class="dash-note">仅展示最近最多 10 项；任务失败不代表整个服务不可用。</p></section></div>
-      <footer class="dash-footer"><nav aria-label="监控快捷入口"><a href="#libraries">媒体库</a><a href="#scrape">刮削</a><a href="#translate">独立翻译</a><a href="#logs">运行日志</a><a href="#settings">服务设置</a><a href="#scheduled">计划与执行记录 →</a></nav></footer>
+      <section class="dash-card dash-span dash-priority" aria-labelledby="overview-libraries-title">
+        <div class="dash-panel-head"><div><p class="dash-kicker">LIBRARIES</p><h2 id="overview-libraries-title">媒体库状态</h2></div><a href="#libraries">管理媒体库 →</a></div>
+        <div id="overview-library-list" aria-live="polite">正在读取媒体库…</div>
+        <div class="dash-library-foot"><p id="overview-scan" class="dash-note" role="status"></p><button type="button" id="overview-library-refresh" class="btn">刷新库状态</button></div>
+      </section>
+      <section class="dash-card dash-span dash-priority dash-archive"><div class="dash-panel-head"><div><p class="dash-kicker">ARCHIVE</p><h3>媒体档案</h3></div><a href="#items">查看媒体墙 →</a></div><div class="dash-media" data-dash="media">尚未收到数据</div><p class="dash-note" data-dash="media-updated">媒体摘要最多缓存 15 秒；NFO 是元数据真源。</p></section>
+      <header class="dash-section-head dash-full">
+        <div><h2>运行观测</h2><p class="dash-update"><span class="dash-state" data-dash="state" role="status" aria-live="polite">正在获取运行快照…</span><span data-dash="updated">尚未收到数据</span></p></div>
+        <div class="dash-toolbar"><details class="dash-options"><summary data-dash="window-label">15 分钟</summary><div class="dash-controls" role="group" aria-label="统计窗口">${[5, 15, 60].map(value => `<button type="button" class="btn" data-window="${value}" aria-pressed="${value === 15}">${value} 分钟</button>`).join('')}</div></details><button type="button" class="btn" data-dash="refresh">刷新</button><details class="dash-options"><summary>更多</summary><div class="dash-controls"><button type="button" class="btn" data-dash="pause" aria-pressed="false">暂停更新</button><button type="button" class="btn" data-dash="wide" aria-pressed="false">大屏视图</button></div></details></div>
+        <p class="dash-feedback" data-dash="feedback" role="status" aria-live="polite"></p>
+      </header>
+      ${[['p95', 'P95 请求延迟', 'ms'], ['requests', '窗口请求量', '次'], ['errors', '服务端错误', '次 / 5xx'], ['heap', 'Go 堆已分配', 'MiB']].map(([key, name, unit]) => `<article class="dash-card dash-kpi dash-kpi-${key}"><h3>${name}</h3><p><strong data-dash="${key}">—</strong><span>${unit}</span></p></article>`).join('')}
+      <section class="dash-card dash-span dash-main" aria-labelledby="dash-traffic-title"><div class="dash-panel-head"><div><p class="dash-kicker">TRAFFIC</p><h3 id="dash-traffic-title">请求与服务端错误</h3></div><span>次 / 分钟</span></div><div class="dash-legend"><span class="dash-key dash-key-blue">请求</span><span class="dash-key dash-key-amber">5xx 错误</span></div><div class="dash-chart" data-dash="traffic">尚未收到数据</div>
+      </section>
+      <section class="dash-card dash-span" aria-labelledby="dash-latency-title"><div class="dash-panel-head"><div><p class="dash-kicker">LATENCY</p><h3 id="dash-latency-title">请求耗时分位数</h3></div><span>毫秒 / 桶上界</span></div><div class="dash-legend"><span class="dash-key dash-key-cyan">P95</span><span class="dash-key dash-key-muted">P50 · 虚线</span></div><div class="dash-chart" data-dash="latency">尚未收到数据</div></section>
+      <details class="dash-card dash-full dash-data disclosure"><summary class="disclosure-summary">查看逐分钟数据表与统计口径</summary><div class="disclosure-body"><p class="dash-note">统计仅覆盖 JSON 控制面；流媒体、图片、静态资源、健康检查与监控自身请求不参与统计。P95 表示约 95% 请求落在该桶上界内，不是平均耗时。启动前无观测、无延迟样本显示“—”；超过 60 秒的分位数显示 &gt;60,000 ms。进程重启后历史清空，最多保留 60 分钟。</p><p data-dash="window-info" class="dash-note">等待服务端窗口信息。</p><p class="dash-note">Go 堆已分配 · 非进程 RSS / 内存上限。</p><p class="dash-note" data-dash="p95-note"></p><p class="dash-note" data-dash="requests-note"></p><p class="dash-note" data-dash="errors-note"></p><div class="table-wrap"><table class="dash-table"><caption class="sr-only">所选窗口逐分钟监控样本</caption><thead><tr><th>分钟</th><th>请求</th><th>4xx</th><th>5xx</th><th>P50 ms</th><th>P95 ms</th></tr></thead><tbody data-dash="samples"><tr><td colspan="6">尚未收到数据</td></tr></tbody></table></div></div></details>
+      <section class="dash-card dash-full dash-runtime-card"><div class="dash-panel-head"><div><p class="dash-kicker">RUNTIME</p><h3>Go 运行时</h3></div><span data-dash="uptime">—</span></div><dl class="dash-runtime" data-dash="runtime"><div><dt>运行指标</dt><dd>—</dd></div></dl></section>
+      <header class="dash-section-head dash-full"><div><h2>服务状态</h2><p id="service-status-note" class="dash-note" role="status">正在读取服务快照…</p></div><button type="button" id="service-status-refresh" class="btn">刷新服务状态</button></header>
+      <div id="overview-service-cards" class="dash-service-cards"></div>
+      <footer class="dash-card dash-full dash-footer"><nav aria-label="监控快捷入口"><a href="#libraries">媒体库</a><a href="#scrape">刮削</a><a href="#translate">独立翻译</a><a href="#logs">运行日志</a><a href="#settings">服务设置</a><a href="#scheduled">计划与执行记录 →</a></nav></footer>
     </section>`;
     const root = host.querySelector('.dashboard');
     const node = name => root.querySelector(`[data-dash="${name}"]`);
@@ -102,9 +109,7 @@
       }
       node('media-updated').classList.toggle('dash-warning', staleMedia);
       text('uptime', `运行 ${duration(data.runtime.uptime_seconds)}`);
-      html('runtime', [['Goroutines', count(data.runtime.goroutines)], ['Go 堆使用', `${decimal(data.runtime.heap_inuse_bytes / 1048576)} MiB`], ['Go 向系统申请', `${decimal(data.runtime.go_sys_bytes / 1048576)} MiB`], ['GC 次数', count(data.runtime.num_gc)]].map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join(''));
-      text('running', `· ${count(data.tasks.running)} 项执行中`);
-      html('tasks', data.tasks.recent.length ? `<ul class="dash-task-list">${data.tasks.recent.slice(0, 10).map(task => `<li><div><strong>${escape(kinds[task.kind] || task.kind || '任务')}</strong><small>${escape(clock(task.started_at))} · ${task.ended_at ? escape(clock(task.ended_at)) : '尚未结束'}</small></div><span class="dash-task-state" data-state="${escape(task.status)}">${escape(states[task.status] || task.status || '未知')}</span></li>`).join('')}</ul>` : '<p class="dash-note">暂无任务记录</p>');
+      html('runtime', [['Goroutines', count(data.runtime.goroutines)], ['Go 堆使用', `${decimal(data.runtime.heap_inuse_bytes / 1048576)} MiB`], ['Go 向系统申请', `${decimal(data.runtime.go_sys_bytes / 1048576)} MiB`], ['GC 次数', count(data.runtime.num_gc)]].map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join(''));
     }
     function cancelRead() {
       serial++; reading = false;
@@ -179,6 +184,7 @@
     root.querySelectorAll('[data-window]').forEach(button => button.addEventListener('click', () => {
       if (!current() || minutes === Number(button.dataset.window)) return;
       minutes = Number(button.dataset.window); cancelRead();
+      text('window-label', `${minutes} 分钟`);
       root.querySelectorAll('[data-window]').forEach(item => item.setAttribute('aria-pressed', String(Number(item.dataset.window) === minutes)));
       status(snapshot ? '统计窗口已切换 · 暂留上一窗口快照' : '正在读取所选统计窗口…');
       void read(true);

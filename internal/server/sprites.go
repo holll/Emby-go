@@ -52,6 +52,10 @@ type spriteState struct {
 	cancel  context.CancelFunc
 	run     func(context.Context, *store.Store, artwork.SpriteRequest, artwork.SpriteOptions) (artwork.SpriteResult, error)
 	readSem chan struct{}
+	// linkClient resolves the STRM redirect chain once per generation so every
+	// frame reuses one signed direct link. nil (the zero value, and what local
+	// test fixtures keep) leaves every frame on the STRM URL.
+	linkClient *http.Client
 }
 
 func decodeSpriteRequest(c *gin.Context) (spriteRequest, error) {
@@ -83,7 +87,7 @@ func (a *App) spriteRootDir() string {
 }
 func (a *App) spriteOptions() (artwork.SpriteOptions, error) {
 	opts, err := a.artworkOptions("screenshot")
-	return artwork.SpriteOptions{RootDir: a.spriteRootDir(), FFmpegPath: opts.FFmpegPath, FFprobePath: opts.FFprobePath, Timeout: 5 * time.Minute}, err
+	return artwork.SpriteOptions{RootDir: a.spriteRootDir(), FFmpegPath: opts.FFmpegPath, FFprobePath: opts.FFprobePath, Timeout: artwork.SpriteTimeoutDefault, LinkClient: a.sprites.linkClient}, err
 }
 func (a *App) adminSpriteCapabilities(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
@@ -331,7 +335,12 @@ func (a *App) executeSprites(ctx context.Context, id int64, req spriteRequest, o
 			if err == nil {
 				msg = "视频预览生成未产生新版本"
 			}
-			slog.Warn(msg, "task_id", id, "movie_id", movieID, "interval_seconds", interval, "error", cause)
+			attrs := []any{"task_id", id, "movie_id", movieID, "interval_seconds", interval, "error", cause}
+			var processErr *artwork.MediaProcessError
+			if errors.As(cause, &processErr) {
+				attrs = append(attrs, "media_process", processErr)
+			}
+			slog.Warn(msg, attrs...)
 		}
 	}
 	return nil

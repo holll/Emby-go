@@ -42,7 +42,7 @@ func TestParseMovieQueryOptions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodGet, "/Items?"+tc.query.Encode(), nil)
-			if got := parseMovieQueryOptions(c); got != tc.want {
+			if got, ok := parseMovieQueryOptions(c); !ok || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})

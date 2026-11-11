@@ -42,11 +42,7 @@
         <h2 class="nav-group-label">资料处理</h2>
       <button class="nav-item" data-page="scrape">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3"/><path d="M12 18v3"/><circle cx="12" cy="12" r="4"/><path d="M3 12h3M18 12h3"/></svg>
-        <span>刮削</span>
-      </button>
-      <button class="nav-item" data-page="translate">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c1 5 4 8 8 10M13 5c-1 5-4 8-8 10M14 21l4-11 4 11M16 17h4"/></svg>
-        <span>独立翻译</span>
+        <span>刮削与翻译</span>
       </button>
       </section>
       <section class="nav-group" aria-label="自动化">
@@ -126,15 +122,19 @@
   </div>
 </div>
 
-<div id="scan-progress" class="scan-progress" hidden aria-live="polite">
-  <div class="scan-progress-head">
-    <strong id="scan-progress-title">扫描中…</strong>
-    <span id="scan-progress-count"></span>
-    <button id="scan-progress-close" class="icon-btn" title="关闭" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+<section id="scan-progress" class="scan-progress" hidden aria-label="媒体库扫描任务">
+  <div class="scan-progress-top">
+    <span class="scan-progress-label">媒体库扫描</span>
+    <button id="scan-progress-close" class="icon-btn" type="button" aria-label="收起扫描结果" title="收起扫描结果（不会取消任务）" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
   </div>
-  <div class="scan-progress-bar"><i id="scan-progress-fill"></i></div>
+  <strong id="scan-progress-title" role="status" aria-live="polite" aria-atomic="true">正在准备扫描…</strong>
+  <progress id="scan-progress-fill" max="100" aria-labelledby="scan-progress-title" aria-describedby="scan-progress-count">扫描进度</progress>
+  <div class="scan-progress-meta">
+    <span id="scan-progress-count">总量待确认</span>
+    <span>后台运行，可继续浏览</span>
+  </div>
   <small id="scan-progress-detail"></small>
-</div>
+</section>
 
 <div id="update-overlay" class="scrape-overlay" role="dialog" aria-modal="true" aria-labelledby="update-title" hidden tabindex="-1">
   <div class="scrape-modal update-modal">

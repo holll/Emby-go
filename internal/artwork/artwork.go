@@ -17,7 +17,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -568,37 +567,24 @@ type cappedBuffer struct {
 	// Write, silently defeating the subprocess output cap.
 	buffer     bytes.Buffer
 	limit      int
+	total      int
+	overflow   bool
 	onOverflow context.CancelFunc
 }
 
 func (b *cappedBuffer) Bytes() []byte { return b.buffer.Bytes() }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.total += len(p)
 	if len(p) > b.limit-b.buffer.Len() {
+		b.overflow = true
+		n, _ := b.buffer.Write(p[:b.limit-b.buffer.Len()])
 		if b.onOverflow != nil {
 			b.onOverflow()
 		}
-		return 0, errors.New("process output limit exceeded")
+		return n, errors.New("process output limit exceeded")
 	}
 	return b.buffer.Write(p)
-}
-func command(ctx context.Context, path string, args []string, limit int) ([]byte, error) {
-	processCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	cmd := exec.CommandContext(processCtx, path, args...)
-	containProcess(cmd)
-	out := &cappedBuffer{limit: limit, onOverflow: stop}
-	diagnostic := &cappedBuffer{limit: 32 << 10, onOverflow: stop}
-	cmd.Stdout = out
-	cmd.Stderr = diagnostic
-	cmd.WaitDelay = 2 * time.Second
-	if e := cmd.Run(); e != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, errors.New("media subprocess failed (check executable and trusted HTTP stream)")
-	}
-	return out.Bytes(), nil
 }
 func screenshot(ctx context.Context, raw string, req Request, opts Options) ([]byte, error) {
 	if e := trustedStreamURL(raw); e != nil {

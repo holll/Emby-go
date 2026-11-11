@@ -14,7 +14,7 @@
 .artwork-fields .artwork-check { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
 .artwork-check input { flex: 0 0 auto; width: 20px; height: 20px; }
 .artwork-panel .btn { min-width: 44px; min-height: 44px; white-space: normal; }
-.artwork-panel :focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+.artwork-panel :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .artwork-panel .hint { margin: 0; }
 .artwork-state, .artwork-error { margin: 12px 0; overflow-wrap: anywhere; }
 .artwork-error { color: var(--text); padding: 12px; border-left: 3px solid var(--danger); background: var(--danger-soft); }

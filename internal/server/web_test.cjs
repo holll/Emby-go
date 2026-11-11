@@ -17,7 +17,7 @@ function sandbox(values = {}) {
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
-    stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, scanClose: { hidden: true, addEventListener() {} },
+    stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, stopTranslationPolling() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
@@ -320,7 +320,8 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
     'id="entity-clear" title="清除该筛选" aria-label="清除筛选"',
     'id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit"',
     "editToggle.setAttribute('aria-expanded', String(!editSection.hidden))",
-    'aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || \'其他任务\')}"'
+    'role="switch" data-role="toggle"',
+    'aria-label="启用计划任务：${esc(item.name || types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || \'未知任务\')}"'
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
@@ -590,7 +591,7 @@ test('412后其他行切换成功或失败、删除均不重绘表单或替换�
   for (const [role, fail] of [['toggle', false], ['toggle', true], ['del', false]]) {
     const env = scheduledSubmitFixture({ failure: 412 }); await env.submit();
     let refreshed = 0, removed = 0;
-    const el = { dataset: { id: '99', role }, checked: true, addEventListener(_, fn) { this.action = fn; }, closest: () => ({ remove() { removed++; } }) };
+    const el = { dataset: { id: '99', role }, checked: true, attributes: {}, setAttribute(k, v) { this.attributes[k] = v; }, removeAttribute(k) { delete this.attributes[k]; }, addEventListener(_, fn) { this.action = fn; }, closest: () => ({ remove() { removed++; } }) };
     env.box.document.querySelectorAll = () => [el]; env.box.pageGen = 1;
     env.box.api = async () => { if (fail) throw Error('fixture unavailable'); };
     env.box.refreshPage = () => { refreshed++; }; env.box.confirm = () => true;
@@ -848,7 +849,8 @@ test('刮削观察错误可见且切页停止，旧代回调不能更改当前�
   let callbacks, stops = 0, renders = 0;
   const detail = { textContent: '', setAttribute(name, value) { this[name] = value; } };
   const panel = { hidden: true };
-  const box = sandbox({ pageGen: 1, scrapeTimer: null,
+  const controls = Object.fromEntries(['#scrape-start', '#avatar-start', '#scrape-cancel'].map(id => [id, { disabled: false }]));
+  const box = sandbox({ pageGen: 1, scrapeTimer: null, document: { querySelector: id => controls[id] },
     startProgressPolling: (path, progress, unavailable) => { callbacks = { path, progress, unavailable }; return () => { stops++; }; },
     renderScrapeProgress: () => { renders++; }, scrapeEls: () => ({ panel, detail }),
     stopProbePolling() {}, cancelProbeHide() {}, cancelScanHide() {}, setMeta() {}, content: {},
@@ -859,6 +861,7 @@ test('刮削观察错误可见且切页停止，旧代回调不能更改当前�
   callbacks.unavailable(3000);
   assert.equal(panel.hidden, false); assert.equal(detail.role, 'status');
   assert.match(detail.textContent, /未确认.*3秒后自动重试/);
+  assert.ok(Object.values(controls).every(control => control.disabled));
   callbacks.progress({ running: true }); assert.equal(renders, 1);
   vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
   await box.page('fixture');
@@ -878,31 +881,37 @@ test('通用API在401保留稳定状态供观察器停止，仍执行原登出�
   assert.equal(removed, 1); assert.equal(redirects, 1);
 });
 
-async function scrapePageFixture(progress, post = async () => ({})) {
+async function scrapePageFixture(progress, post = async () => ({}), { translationRead, admin = true } = {}) {
   const timers = new Map(), nodes = new Map(), calls = [];
   let next = 0;
   function node(id) {
-    if (!nodes.has(id)) nodes.set(id, { value: '0', checked: false, hidden: true,
+    if (!nodes.has(id)) nodes.set(id, { value: '0', checked: id.includes('data-translate-field="title"'), hidden: true,
       textContent: '', innerHTML: '', style: {}, classList: { toggle() {} }, handlers: {},
+      querySelector: selector => node(id + ' ' + selector),
       setAttribute(name, value) { this[name] = value; },
       addEventListener(type, callback) { this.handlers[type] = callback; } });
     return nodes.get(id);
   }
   const content = node('content');
-  const box = sandbox({ pageGen: 1, AbortController, content,
-    document: { querySelector: node }, esc: String, icon: () => '', toast() {},
+  const confirmations = [];
+  const box = sandbox({ pageGen: 1, AbortController, content, me: { is_admin: admin },
+    document: { querySelector: node }, esc: String, icon: () => '', toast() {}, empty: String,
+    translationWidget: () => '', mountTranslation() {},
+    confirm: message => { confirmations.push(message); return true; },
     setTimeout(fn, delay) { timers.set(++next, { fn, delay }); return next; },
     clearTimeout(id) { timers.delete(id); },
     api: async (path, options = {}) => {
       calls.push({ path, options });
       if (path === '/scrape/progress') return progress(path, options);
+      if (path.startsWith('/translate/status')) return translationRead(path, options);
       if (options.method === 'POST') return post(path, options);
-      if (path === '/libraries') return [];
+      if (path === '/libraries') return { items: [{ Id: 11, Name: '刮削库' }, { Id: 22, Name: '头像库' }, { Id: 33, Name: '翻译库' }] };
       if (path === '/scrape/settings') return {};
       if (path.startsWith('/scrape/candidates?')) return { total: 0 };
       throw Error('unexpected API ' + path);
     }, stopProbePolling() {}, cancelProbeHide() {}, cancelScanHide() {}, setMeta() {}, skeletonPanel: () => '',
     pages: { fixture: async () => {} } });
+  if (translationRead) vm.runInContext(section('const TRANSLATE_HINT =', '/* ------------------------------------------------------------ 计划任务 */'), box);
   vm.runInContext(section('async function pageScrape()', '/* ------------------------------------------------------------ 单条刮削预览'), box);
   vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
   // 初始化不得等待一条裸 progress Promise；有限微任务后应已渲染 shell。
@@ -911,7 +920,7 @@ async function scrapePageFixture(progress, post = async () => ({})) {
   for (let i = 0; i < 12; i++) await Promise.resolve();
   assert.equal(ready, true, 'page initialization blocked on progress GET');
   assert.ifError(failure); await initial;
-  return { box, calls, node, content, timers,
+  return { box, calls, node, content, timers, confirmations,
     fire(delay) {
       const entry = [...timers].find(([, timer]) => timer.delay === delay);
       assert.ok(entry, `missing timer ${delay}`); timers.delete(entry[0]); return entry[1].fn();
@@ -930,6 +939,7 @@ test('真实刮削页先渲染未知状态，首次503、网络或畸形进度�
     assert.match(env.node('#scrape-progress-detail').textContent, /正在读取.*未确认/);
     await env.fire(0);
     assert.match(env.node('#scrape-progress-detail').textContent, /未确认.*3秒/);
+    for (const id of ['#scrape-start', '#avatar-start', '#scrape-cancel']) assert.equal(env.node(id).disabled, true);
     assert.ok(env.calls.find(c => c.path === '/scrape/progress').options.signal);
     await env.fire(3000);
     assert.equal(env.node('#scrape-progress-title').textContent, '刮削结束');
@@ -942,6 +952,7 @@ test('真实刮削页首次401或403停止观察而非吞错再开一轮', async
     const env = await scrapePageFixture(async () => { throw Object.assign(new Error('denied'), { status }); });
     await env.fire(0);
     assert.match(env.node('#scrape-progress-detail').textContent, /读取受限.*未确认/);
+    for (const id of ['#scrape-start', '#avatar-start', '#scrape-cancel']) assert.equal(env.node(id).disabled, true);
     assert.equal(env.calls.filter(c => c.path === '/scrape/progress').length, 1);
     assert.equal(env.timers.size, 0);
   }
@@ -977,21 +988,182 @@ test('真实刮削页切走或同页刷新停止旧首读，晚回不渲染或�
 });
 
 test('真实刮削页两个启动POST晚回不跨导航重启，当前页启动只替换一个观察器', async () => {
-  for (const button of ['#scrape-start', '#avatar-start']) {
+  for (const [selector, event] of [['#scrape-start', 'click'], ['#avatar-form', 'submit']]) {
     let finish;
     const env = await scrapePageFixture(async () => ({ running: true }), () => new Promise(resolve => { finish = resolve; }));
-    const pending = env.node(button).handlers.click();
+    const submit = () => env.node(selector).handlers[event]({ preventDefault() {} });
+    const pending = submit();
     await env.box.page('fixture'); await env.box.pageScrape();
     const timersBefore = [...env.timers.keys()];
     finish({}); await pending;
     assert.deepEqual([...env.timers.keys()], timersBefore, 'old POST replaced new observer');
-    const current = env.node(button).handlers.click(); finish({}); await current;
+    const current = submit(); finish({}); await current;
     assert.equal(env.timers.size, 1);
     assert.ok([...env.timers.values()].every(t => t.delay === 0));
     env.box.stopScrapePolling(); assert.equal(env.timers.size, 0);
   }
 });
 
+
+test('刮削整合页三个执行卡和共享进度各自独立，管理员只读进入不启动或保存任务', async () => {
+  const env = await scrapePageFixture(async () => ({ running: false }), undefined, { translationRead: async () => ({ running: false }) });
+  const markup = env.content.innerHTML;
+  for (const id of ['scrape-run-card', 'avatar-card', 'translation-card', 'scrape-progress', 'scrape-configuration']) {
+    assert.equal([...markup.matchAll(new RegExp(`id="${id}"`, 'g'))].length, 1, id);
+  }
+  assert.match(markup, /scrape-tools-grid[\s\S]*scrape-operation-stack/);
+  const scrape = markup.match(/<section[^>]*id="scrape-run-card"[\s\S]*?<\/section>/)[0];
+  const avatar = markup.match(/<section[^>]*id="avatar-card"[\s\S]*?<\/section>/)[0];
+  const translation = markup.match(/<section[^>]*id="translation-card"[\s\S]*?<\/section>/)[0];
+  assert.match(scrape, /id="sc-lib"/); assert.doesNotMatch(scrape, /avatar-library|translate-library|scrape-progress/);
+  assert.match(avatar, /<form id="avatar-form"/); assert.match(avatar, /type="submit" id="avatar-start"/);
+  assert.match(avatar, /id="avatar-library"/); assert.match(avatar, /id="avatar-limit"/);
+  assert.doesNotMatch(avatar, /id="sc-lib"|translate-library|avatar-cancel|scrape-progress/);
+  for (const id of ['translate-task', 'translate-library', 'translate-limit']) assert.ok(translation.includes(`id="${id}"`));
+  assert.doesNotMatch(translation, /id="sc-lib"|avatar-library|scrape-progress/);
+  assert.match(markup, /<section id="scrape-progress"[^>]*aria-label="刮削与头像共用任务进度"[\s\S]*id="scrape-cancel"/);
+  assert.equal(env.calls.some(call => ['POST', 'PUT', 'PATCH'].includes(call.options.method)), false);
+  env.box.stopScrapePolling(); env.box.stopTranslationPolling(); assert.equal(env.timers.size, 0);
+
+  const denied = await scrapePageFixture(async () => ({ running: false }), undefined, { admin: false });
+  assert.match(denied.content.innerHTML, /仅管理员/); assert.deepEqual(denied.calls, []); assert.equal(denied.timers.size, 0);
+});
+
+test('刮削与头像共用已确认进度门：未知禁操作、运行互斥、终态同步恢复并展示头像类型', async () => {
+  for (const kind of ['scrape', 'scrape_avatars']) {
+    let state = { running: true, kind, total: 3, done: 1 };
+    const env = await scrapePageFixture(async () => state);
+    for (const id of ['scrape-start', 'avatar-start', 'scrape-cancel']) assert.match(env.content.innerHTML, new RegExp(`id="${id}"[^>]* disabled`));
+    await env.fire(0);
+    assert.equal(env.node('#scrape-start').disabled, true); assert.equal(env.node('#avatar-start').disabled, true);
+    assert.equal(env.node('#scrape-cancel').disabled, false);
+    assert.equal(env.node('#scrape-progress-title').textContent, kind === 'scrape_avatars' ? '正在补演员头像' : '正在刮削');
+    state = { running: false, kind, total: 3, done: 3, finished_at: 1 };
+    await env.fire(1500);
+    assert.equal(env.node('#scrape-start').disabled, false); assert.equal(env.node('#avatar-start').disabled, false);
+    assert.equal(env.node('#scrape-cancel').disabled, true);
+    assert.equal(env.node('#scrape-progress-title').textContent, kind === 'scrape_avatars' ? '头像补全结束' : '刮削结束');
+    env.box.renderScrapeProgress(null);
+    for (const id of ['#scrape-start', '#avatar-start', '#scrape-cancel']) assert.equal(env.node(id).disabled, true);
+    assert.equal(env.timers.size, 0);
+  }
+});
+
+test('刮削整合页三种范围互不泄漏，头像submit传独立limit，翻译不读取刮削开关', async () => {
+  const env = await scrapePageFixture(async () => ({ running: false }), async () => ({ total: 1, task_id: 7 }), { translationRead: async () => ({ running: false }) });
+  env.node('#sc-lib').value = '11'; env.node('#sc-only-missing').checked = true; env.node('#sc-force').checked = true;
+  env.node('#avatar-library').value = '22'; env.node('#avatar-limit').value = '17';
+  env.node('#translate-library').value = '33'; env.node('#translate-limit').value = '9';
+  env.node('#tr-title').checked = false; env.node('#tr-summary').checked = false;
+  env.node('#translate-task [data-translate-field="plot"]').checked = true;
+  await env.fire(0); await env.fire(0);
+  await env.node('#scrape-start').handlers.click();
+  let prevented = 0;
+  await env.node('#avatar-form').handlers.submit({ preventDefault() { prevented++; } });
+  assert.equal(prevented, 1);
+  await env.node('#translate-task [data-translate-start]').handlers.click();
+  const posts = env.calls.filter(call => call.options.method === 'POST');
+  assert.deepEqual(posts.map(call => [call.path, JSON.parse(call.options.body)]), [
+    ['/scrape/run', { library_id: 11, only_missing: true, overwrite: true }],
+    ['/scrape/avatars', { library_id: 22, limit: 17 }],
+    ['/translate/run', { fields: ['title', 'plot'], limit: 9, library_id: 33 }]
+  ]);
+  assert.match(env.confirmations[0], /媒体库 33/); assert.match(env.confirmations[0], /最多 9/);
+  assert.match(env.confirmations[0], /不重新刮削、不取图/);
+  await env.node('#scrape-cancel').handlers.click();
+  assert.equal(env.calls.at(-1).path, '/scrape/cancel'); assert.equal(env.calls.at(-1).options.body, undefined);
+  assert.equal(env.calls.some(call => call.path === '/translate/cancel'), false);
+  env.box.stopScrapePolling(); env.box.stopTranslationPolling(); assert.equal(env.timers.size, 0);
+});
+
+test('刮削整合页同页重建或切走中止真实翻译首读，晚回不覆盖新页面也不取消后台任务', async () => {
+  for (const refresh of [true, false]) {
+    let resolve, signal;
+    const env = await scrapePageFixture(async () => ({ running: false }), undefined, { translationRead: (_, options) => {
+      signal = options.signal; return new Promise(done => { resolve = done; });
+    } });
+    const pending = env.fire(0);
+    await new Promise(setImmediate);
+    assert.equal(signal.aborted, false);
+    if (refresh) await env.box.pageScrape(); else await env.box.page('fixture');
+    assert.equal(signal.aborted, true);
+    const text = env.node('#translate-task [data-translate-progress]').textContent;
+    const timers = [...env.timers.keys()];
+    resolve({ running: false, task_id: 7, success: 2, done: 2 }); await pending;
+    assert.equal(env.node('#translate-task [data-translate-progress]').textContent, text);
+    assert.deepEqual([...env.timers.keys()], timers);
+    assert.equal(env.calls.some(call => call.options.method === 'POST'), false);
+    assert.equal(env.timers.size, refresh ? 2 : 0);
+    env.box.stopTranslationPolling(); env.box.stopScrapePolling(); assert.equal(env.timers.size, 0);
+  }
+});
+
+test('旧翻译入口和书签归并刮削整合页，导航只有一个入口', async () => {
+  let renders = 0, selected;
+  const box = sandbox({ pageScrape: async () => { renders++; }, content: {},
+    stopScrapePolling() {}, stopProbePolling() {}, cancelProbeHide() {}, cancelScanHide() {},
+    setMeta: name => { selected = name; }, skeletonPanel: () => '' });
+  box.pages = { scrape: box.pageScrape, translate: async () => { throw Error('legacy page dispatched'); } };
+  vm.runInContext(section('async function pageTranslate()', '/* ------------------------------------------------------------ 计划任务 */'), box);
+  vm.runInContext(section('async function page(name)', '/* ------------------------------------------------------------ 媒体信息探测'), box);
+  await box.pageTranslate(); await box.page('translate');
+  assert.equal(renders, 2); assert.equal(selected, 'scrape');
+  assert.equal([...html.matchAll(/data-page="scrape"/g)].length, 1);
+  assert.doesNotMatch(html, /data-page="translate"/); assert.match(html, /刮削与翻译/);
+});
+
+test('任务中心新增五类执行器中文名称，未知type保留并转义原文，筛选仍按原type匹配', async () => {
+  const expected = { scrape: '元数据刮削', scrape_avatars: '补演员头像', artwork_screenshot: '视频截图', artwork_provider: '上游图片获取', video_sprites: '视频预览生成' };
+  const unknown = 'future_<img src=x onerror=alert(1)>';
+  const items = [...Object.keys(expected), unknown].map((type, i) => ({ id: i + 1, type, status: 'succeeded' }));
+  const nodes = new Map();
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, { value: '', innerHTML: '', handlers: {}, addEventListener(event, fn) { this.handlers[event] = fn; } });
+    return nodes.get(id);
+  };
+  const content = {};
+  const box = sandbox({ content, document: { querySelector: node }, icon: () => '', fmtTime: String, empty: String,
+    api: async () => ({ items, running: false }) });
+  vm.runInContext(section('const esc =', 'const icon ='), box);
+  vm.runInContext(section('const TASK_TYPE_TEXT =', 'let scheduledFocus ='), box);
+  vm.runInContext(section('function taskResultText(', '/* ---------------------------------------------------------------- 刮削 */'), box);
+  await box.pageTasks();
+  for (const [type, label] of Object.entries(expected)) {
+    assert.ok(content.innerHTML.includes(`<option value="${type}">${label}</option>`));
+    assert.ok(node('#task-table').innerHTML.includes(`<td>${label}</td>`));
+  }
+  assert.ok(node('#task-table').innerHTML.includes('future_&lt;img src=x onerror=alert(1)&gt;'));
+  assert.equal(node('#task-table').innerHTML.includes(unknown), false);
+  assert.doesNotMatch(node('#task-table').innerHTML, /其他任务/);
+  node('#task-type').value = 'scrape_avatars'; node('#task-type').handlers.change();
+  assert.match(node('#task-table').innerHTML, /补演员头像/);
+  assert.doesNotMatch(node('#task-table').innerHTML, /元数据刮削|视频截图|上游图片获取|视频预览生成|future_/);
+});
+
+test('计划创建类型只接受后端supported types，运行时展示字典不扩容下拉且列表优先后端名称', async () => {
+  // 与scheduledTypes协议一致：video_sprites/artwork_*只是运行记录类型，不是可创建计划类型。
+  const supported = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', scrape: '内置刮削', scrape_avatars: '演员头像补全', translate: '独立翻译', sprites: '雪碧图生成' };
+  const unknown = 'future_<svg onload=alert(1)>';
+  for (const types of [supported, undefined]) {
+    const content = {};
+    const items = [{ id: 1, name: '', type: 'scrape', enabled: false }, { id: 2, name: '', type: unknown, enabled: false }];
+    const box = sandbox({ content, scheduledWatchStop: null, scheduledEditId: null, icon: () => '', fmtTime: String, runBadge: () => '', empty: String,
+      api: async path => path === '/libraries' ? { items: [] } : { items, types } });
+    vm.runInContext(section('const esc =', 'const icon ='), box);
+    vm.runInContext(section('const CRON_PRESETS =', 'let scheduledFocus ='), box);
+    // 执行真实pageScheduled的读接口/模板阶段，不挂载与类型呈现无关的编辑器和轮询。
+    vm.runInContext(section('async function pageScheduled()', '  const typeEl =') + '\n}', box);
+    await box.pageScheduled();
+    const select = content.innerHTML.match(/<select id="s-type">([\s\S]*?)<\/select>/)[1];
+    assert.deepEqual([...select.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]), Object.keys(types || {}));
+    assert.doesNotMatch(select, /video_sprites|artwork_screenshot|artwork_provider|future_/);
+    assert.ok(content.innerHTML.includes(`<span class="protocol">${types ? '内置刮削' : '元数据刮削'}</span>`));
+    assert.ok(content.innerHTML.includes(`aria-label="启用计划任务：${types ? '内置刮削' : '元数据刮削'}"`));
+    assert.ok(content.innerHTML.includes('<span class="protocol">future_&lt;svg onload=alert(1)&gt;</span>'));
+    assert.equal(content.innerHTML.includes(unknown), false);
+    assert.doesNotMatch(content.innerHTML, /其他任务/);
+  }
+});
 
 // 第22批：只运行真实函数的VM，不启动服务/浏览器；时钟与第19批串行轮询共用。
 function probePageFixture(progress = async () => ({ running: false }), post = async () => ({ total: 2 })) {
@@ -1000,6 +1172,7 @@ function probePageFixture(progress = async () => ({ running: false }), post = as
     if (!nodes.has(id)) nodes.set(id, { value: '', disabled: false, hidden: true, textContent: '', innerHTML: '',
       style: {}, handlers: {}, dataset: {}, classList: { toggle() {} },
       querySelector: () => node(id + ':span'), setAttribute(name, value) { this[name] = value; },
+      removeAttribute(name) { delete this[name]; },
       addEventListener(type, fn) { this.handlers[type] = fn; } });
     return nodes.get(id);
   }
@@ -1274,6 +1447,7 @@ function scanFixture(progress = async () => ({ running: false }), post = async (
     if (!nodes.has(id)) nodes.set(id, { hidden: true, disabled: false, textContent: '', innerHTML: '',
       style: {}, handlers: {}, dataset: {}, classList: { toggle() {} },
       querySelector: () => node(id + ':span'), setAttribute(name, value) { this[name] = value; },
+      removeAttribute(name) { delete this[name]; },
       addEventListener(type, fn) { this.handlers[type] = fn; } });
     return nodes.get(id);
   }
@@ -1333,7 +1507,10 @@ test('扫描实际wrapper首GET失败退避恢复，仅明确终态释放且历�
     assert.equal(env.node('#scan-progress').hidden, false);
     assert.match(env.node('#scan-progress-title').textContent, /状态未确认/);
     assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
-    assert.equal(env.node('#scan-progress-detail').role, 'status');
+    assert.match(html, /id="scan-progress-title"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.equal(env.node('#scan-progress-fill').hidden, true);
+    assert.equal(env.node('#scan-progress-fill').value, undefined);
+    assert.equal(env.node('#scan-progress-count').textContent, '等待状态确认');
     assert.equal(env.box.scanBlocked, true); assert.equal(env.posts().length, 0);
     await env.fire(3000); assert.equal(env.box.scanBlocked, false);
     // R2：没有观察到运行身份的历史终态不算本轮完成，不通知、不排自动收起。
@@ -2765,7 +2942,7 @@ test('计划列表与刮削执行先于收起配置，墙和详情维护为原�
   assert.match(scheduled, /<details class="panel disclosure" id="scheduled-editor"\$\{editing \? ' open' : ''\}/);
   const scrape = section('async function pageScrape(', 'function progressCounts(');
   assert.ok(scrape.indexOf('id="scrape-start"') < scrape.indexOf('id="scrape-form"'));
-  assert.match(scrape, /<details class="panel disclosure" id="scrape-configuration">/);
+  assert.match(scrape, /<details class="panel disclosure scrape-configuration" id="scrape-configuration">/);
   assert.match(scrape, /共享翻译服务/);
   const items = section('async function pageItems(', 'function reloadWall(');
   assert.ok(items.indexOf('id="item-search"') < items.indexOf('id="probe-media"'));

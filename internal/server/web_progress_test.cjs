@@ -15,14 +15,15 @@ function functionSource(name) {
 
 function element() {
   return {
-    hidden: true, textContent: '', innerHTML: '', style: {}, attributes: {}, classes: {},
+    hidden: true, textContent: '', innerHTML: '', style: {}, dataset: {}, attributes: {}, classes: {},
     setAttribute(name, value) { this.attributes[name] = value; },
+    removeAttribute(name) { delete this.attributes[name]; },
     classList: { toggle(name, value) { this.owner.classes[name] = !!value; } }
   };
 }
 
 function harness(kind) {
-  const els = Object.fromEntries(['panel', 'title', 'count', 'fill', 'detail', 'failures'].map(key => {
+  const els = Object.fromEntries(['panel', 'title', 'count', 'fill', 'detail', 'failures', 'start', 'avatars', 'cancel'].map(key => {
     const el = element();
     el.classList.owner = el;
     return [key, el];
@@ -30,6 +31,9 @@ function harness(kind) {
   const context = vm.createContext({
     document: {
       querySelector(selector) {
+        if (selector === '#scrape-start') return els.start;
+        if (selector === '#avatar-start') return els.avatars;
+        if (selector === '#scrape-cancel') return els.cancel;
         if (selector === `#${kind}-progress`) return els.panel;
         if (selector === `#${kind}-failures`) return els.failures;
         return els[selector.slice(`#${kind}-progress-`.length)];
@@ -40,7 +44,7 @@ function harness(kind) {
     esc: value => String(value)
   });
   vm.runInContext(['progressCounts', 'scrapeEls', 'probeEls', 'baseName',
-    'renderScrapeProgress', 'renderProbeProgress', 'renderScanProgress']
+    'renderScrapeProgress', 'renderProbeProgress', 'setScanIndicator', 'renderScanProgress']
     .map(functionSource).join('\n'), context);
   return { els, counts: context.progressCounts, render: context[`render${kind[0].toUpperCase() + kind.slice(1)}Progress`] };
 }
@@ -81,9 +85,17 @@ for (const kind of ['scrape', 'probe', 'scan']) {
       for (const running of [true, false]) {
         render({ ...c.p, running, finished_at: running ? '' : 'finished' });
         assert.equal(els.panel.hidden, false, c.name);
-        assert.equal(els.count.textContent, c.count, c.name);
-        assert.equal(els.fill.style.width, `${c.percent}%`, c.name);
-        assert.equal(els.fill.classes['is-indeterminate'], !c.total && running, c.name);
+        if (kind === 'scan') {
+          const measured = Number.isFinite(Number(c.total)) && Number(c.total) > 0 && Number.isFinite(Number(c.done)) && Number(c.done) >= 0;
+          const processed = Number.isFinite(Number(c.done)) && Number(c.done) >= 0 ? c.done : '—';
+          assert.equal(els.count.textContent, measured ? c.count : `${processed} 已处理${running ? ' · 总量待确认' : ''}`, c.name);
+          assert.equal(els.fill.attributes.value, measured ? String(Math.max(0, Math.min(100, c.percent))) : (running ? undefined : '100'), c.name);
+          assert.equal(els.panel.dataset.state, running ? 'running' : 'complete');
+        } else {
+          assert.equal(els.count.textContent, c.count, c.name);
+          assert.equal(els.fill.style.width, `${c.percent}%`, c.name);
+          assert.equal(els.fill.classes['is-indeterminate'], !c.total && running, c.name);
+        }
       }
     }
     render(null);
@@ -99,10 +111,10 @@ test('scan groups are independent from movie counters; zero changes and cleanup 
     render({ running: false, finished_at: 'now', mode, groups_total: 5, groups_done: 2,
       total: 20, done: 17, success: 10, failed: 1, unchanged_groups: 1, added: 0, updated: 2, deleted: 0,
       incomplete: true, cleanup_performed: false });
-    assert.equal(els.count.textContent, '2/5 组'); assert.equal(els.fill.style.width, '40%');
+    assert.equal(els.count.textContent, '2/5 组'); assert.equal(els.fill.attributes.value, '40');
     assert.match(els.title.textContent, /存在错误/); assert.match(els.detail.textContent, /未变化 1 · 新增 0 · 更新 2 · 删除 0/);
     assert.match(els.detail.textContent, /未执行缺失索引清理（保留原索引）/); assert.match(els.detail.textContent, /部分成果已保留/);
-    assert.equal(els.detail.attributes.role, 'status');
+    assert.equal(els.panel.dataset.state, 'error'); // Terminal failures are not presented as success.
   }
   render({ running: false, finished_at: 'now', mode: 'incremental', groups_total: 3, groups_done: 3,
     unchanged_groups: 3, cleanup_performed: true });
@@ -128,4 +140,21 @@ test('task-specific titles and details remain distinct', () => {
     render({ running: false, finished_at: 'finished', cancelled: true, error: 'oops' });
     assert.equal(els.title.textContent, { scrape: '刮削结束', probe: '探测已中止', scan: '扫描结束（存在错误） 媒体库' }[kind]);
   }
+});
+
+
+test('scrape and avatar cards share one observed execution channel', () => {
+  const { els, render } = harness('scrape');
+  for (const kind of ['scrape', 'scrape_avatars']) {
+    render({ running: true, kind });
+    assert.equal(els.start.disabled, true); assert.equal(els.avatars.disabled, true);
+    assert.equal(els.cancel.disabled, false);
+  }
+  render({ running: false, kind: 'scrape_avatars', finished_at: 'now' });
+  assert.equal(els.title.textContent, '头像补全结束');
+  assert.equal(els.start.disabled, false); assert.equal(els.avatars.disabled, false);
+  assert.equal(els.cancel.disabled, true);
+  render(null);
+  assert.equal(els.start.disabled, true); assert.equal(els.avatars.disabled, true);
+  assert.equal(els.cancel.disabled, true);
 });

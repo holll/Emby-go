@@ -2,7 +2,7 @@
 
 > 范围：本服务对 Emby 客户端与脚本暴露的 HTTP 接口。v2 的目标是**只增不改**：
 > 已发布的路径、状态码、JSON 字段语义不破坏；新增字段/端点/可选参数不视为破坏性变更。
-> 设计边界见 [开发计划](<dev-plan.md>)，历史实施与部署验收见 [施工台账](<PLAN-STATUS.md>)。
+> 架构、实现定位与验证入口见 [项目速读](<PROJECT-GUIDE.md>)。
 > 本文件由契约测试 `internal/server/api_contract_test.go` 守门；改路由/错误信封必须同批更新本文件。
 
 ## 1. 基路径
@@ -120,6 +120,15 @@
 
 - `GET /Items`、`GET /Users/:uid/Items` 的影片分支支持 `Ids`：逗号分隔或重复参数均可，空白、重复及非法值不阻止合法正数匹配；显式出现但无合法 ID 时返回空结果，省略时不增加该过滤。过滤在计数和分页前与父级、可见库、状态及既有影片条件相交；响应顺序继续遵循现有排序与分页。
 - 影片分支支持大小写不敏感的 `ExcludeItemTypes=Movie` 或 `Video` 排除存储的影片。BoxSet、Folder 和实体分支的既有类型排除行为不变，不把未支持类型伪装为影片。
+
+首页合集及请求日志兼容补齐（2026-11-11）：
+
+- `Users/:uid/Items/Latest?ParentId=boxsets&GroupItems=true` 返回真实去重的 `BoxSet` 裸数组（`IsFolder=true`、稳定合集 ID、可见成员 `ChildCount`）。先按当前用户可见的成功/手动成员聚合并应用合集最低影片数，再按最新成员入库 ID 倒序排序，最后应用 `Limit`；新成员无海报不影响排序。省略或关闭 `GroupItems` 时仍返回包含单片合集成员的 Movie 裸数组；不改变递归影片查询。`GroupItems` 在此范围内必须为单个合法布尔值，非法/空值返回 400。
+- `Items` 影片分支（含具体合集和递归合集成员）增加 `PremiereDate` 首映日期排序别名，以及在计数/分页之前执行的 `ImageTypes` 过滤：类型间 OR；`Primary` 对应已索引海报路径，`Thumb` 对应宽图并回退海报，`Backdrop` 对应主背景或额外背景路径。只检查索引元数据，不检查磁盘；`Banner` 和未知类型不匹配。不与只裁剪响应元数据的 `EnableImageTypes` 混淆。
+- `HasTmdbId` 是单个可选布尔值，非法/空值返回 400。目前没有真实 TMDB ID 存储来源，因此 `true` 无匹配、`false` 不增加过滤；绝不把 MetaTube ID 当成 TMDB ID。这不等于已实现 TMDB 元数据导入。
+- 条目响应支持单个布尔参数 `EnableUserData`、`EnableTotalRecordCount`：省略/true 保留既有字段，false 分别省略条目 `UserData` / QueryResult `TotalRecordCount`，不改变数组包装、`StartIndex` 或筛选结果。非法/空值返回 400。仅修改响应副本，不污染缓存；省略计数字段不承诺跳过底层计数查询。
+- `Similar` 支持与影片列表相同的可选 `Fields`，缓存区分 Fields，流 URL 凭据在发送响应时附加；无真实探测数据时不伪造 `Size`。`Similar` / `PlaybackInfo` 的可选查询 `UserId`、POST PlaybackInfo JSON 的可选字符串 `UserId` 必须是当前认证用户本人，否则 404。POST 允许空 body；畸形 JSON、错误字段类型及多段 JSON 返回 400。仍仅支持直放/直流，不承诺按 `DeviceProfile`、码率或转码请求协商媒体源。
+- PlaybackInfo 成功响应保持 `MediaSources` / `PlaySessionId`，不虚构 BIF URL 或 `Has...` 标记。预览由独立鉴权的 `GET /Items/:id/ThumbnailSet?Width=320` 和 `GET|HEAD /Videos/:id/index.bif?Width=320` 提供；无产物时预览 404 不妨碍 PlaybackInfo 成功。回归测试验证有产物时 ThumbnailSet 非空后可获取有效 BIF，但不代表所有客户端平台/版本都会发起该发现序列。
 
 影片搜索的 FTS 与实体索引（批次 114）：
 

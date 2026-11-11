@@ -259,3 +259,32 @@ func TestSpriteBIFInvalidIndexAndManifestBounds(t *testing.T) {
 		t.Fatal("accepted offset beyond EOF")
 	}
 }
+
+// TestSpriteFramesExtractOneAtATime proves the frame loop stays serial: the
+// remote source rejects concurrent requests, so overlapping subprocesses would
+// turn every frame into a timeout.
+func TestSpriteFramesExtractOneAtATime(t *testing.T) {
+	db, m, dir := fixture(t)
+	opts := spriteTestOptions(t, dir, "2.5")
+	active := filepath.Join(dir, "active")
+	body := `mkdir -p '` + active + `'
+n=$(ls -1 '` + active + `' | wc -l)
+if [ "$n" -gt 0 ]; then
+	: > '` + filepath.Join(dir, "overlap") + `'
+fi
+mkdir '` + active + `/run-$$'
+sleep 0.15
+rmdir '` + active + `/run-$$'
+exec /bin/cat '` + filepath.Join(dir, "red.jpg") + `'`
+	opts.FFmpegPath = spriteScript(t, dir, "serial-ffmpeg", body)
+	res, err := GenerateSprite(context.Background(), db, SpriteRequest{MovieID: m.ID, IntervalMs: 1000}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Manifest.Count != 3 || res.Manifest.SheetCount != 1 {
+		t.Fatalf("%+v", res.Manifest)
+	}
+	if _, err = os.Stat(filepath.Join(dir, "overlap")); !os.IsNotExist(err) {
+		t.Fatal("frame subprocesses overlapped")
+	}
+}

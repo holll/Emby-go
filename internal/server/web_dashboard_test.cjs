@@ -42,7 +42,7 @@ function fixture(api, { hidden = false, requestFullscreen } = {}) {
     setTimeout(fn, ms) { const id = nextTimer++; timers.set(id, { at: now + ms, fn }); return id; }, clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(source, box);
   const stop = box.mountDashboard(host, { isCurrent: () => identity, apiRequest: (...args) => { calls.push(args); return api(...args); } });
-  return { box, root, host, doc, node, windows, stop, calls, timers, events,
+  return { box, root, host, doc, node, nodes, windows, stop, calls, timers, events,
     click: name => node(name).listeners.get('click')(),
     select: value => windows.find(button => button.dataset.window === String(value)).listeners.get('click')(),
     async visible(value) { doc.hidden = !value; events.get('visibilitychange')?.(); await flush(); },
@@ -113,15 +113,20 @@ test('权限拒绝停止自动读取；畸形响应不是成功零快照', async
   const env = fixture(async () => ({})); await flush(); assert.match(env.node('state').textContent, /尚无数据/); assert.equal(env.node('p95').textContent, ''); env.stop();
 });
 
-test('溢出/启动前/无请求零桶如实展示，任务与实例文本不可注入DOM', async () => {
+test('溢出/启动前/无请求零桶如实展示，实例文本只能写入文本节点', async () => {
   const data = snapshot(); data.requests.p95_ms = null; data.requests.p95_overflow = true;
   Object.assign(data.series[0], { observed: false, requests: null, errors_4xx: null, errors_5xx: null, p50_ms: null, p95_ms: null });
   Object.assign(data.series[1], { requests: 0, errors_4xx: 0, errors_5xx: 0, p50_ms: null, p95_ms: null });
+  data.instance_id = '<img src=x onerror=alert(1)><svg onload=alert(1)>';
   data.tasks.recent[0].kind = '<img src=x onerror=alert(1)>'; data.tasks.recent[0].status = '<svg onload=alert(1)>';
   const env = fixture(async () => data); await flush();
   assert.equal(env.node('p95').textContent, '>60,000'); assert.match(env.node('samples').innerHTML, /无观测<\/th><td>—<\/td>/);
   assert.match(env.node('samples').innerHTML, /<td>0<\/td><td>0<\/td><td>0<\/td><td>—/);
-  assert.doesNotMatch(env.node('tasks').innerHTML, /<img|<svg/); assert.match(env.node('tasks').innerHTML, /&lt;img/); env.stop();
+  assert.ok(env.node('window-info').textContent.includes(data.instance_id), 'instance is preserved literally in textContent');
+  for (const node of env.nodes.values()) assert.doesNotMatch(node.innerHTML, /<img|onerror=|onload=/, 'untrusted API text never reaches an HTML sink');
+  assert.doesNotMatch(env.host.innerHTML, /data-dash="(?:tasks|running)"/, 'task summary is intentionally absent');
+  assert.equal(env.nodes.has('tasks'), false); assert.equal(env.nodes.has('running'), false);
+  env.stop();
 });
 
 test('大屏显式进入，Fullscreen拒绝有CSS fallback；Esc/销毁清理，迟到授权不复活', async () => {
@@ -159,14 +164,23 @@ test('服务端available=true/stale=true保留旧媒体时间，恢复成功才�
   stale = false; await env.tick(5000); assert.doesNotMatch(env.node('media-updated').textContent, /已过期/); assert.equal(env.node('media-updated').textContent.split('摘要 ')[1], oldTime); env.stop();
 });
 
-test('任务摘要完整中文映射及头像兼容别名，不把unknown伪装成功', async () => {
-  const entries = [['scrape_avatars', '补演员头像'], ['avatars', '补演员头像'], ['analyze', '媒体分析'], ['webhook', '通知投递'], ['edit', '元数据编辑'], ['other', '其他任务']];
+test('首页不再渲染任务摘要，未知延迟与媒体摘要不伪装零值或完成', async () => {
   const data = snapshot();
-  data.tasks.recent = entries.map(([kind], index) => ({ id: 'task-' + index, kind, status: 'unknown', started_at: data.started_at, ended_at: '' }));
+  data.tasks.recent[0].status = 'unknown';
+  Object.assign(data.requests, { total: 0, rate_per_second: null, p50_ms: null, p95_ms: null });
+  data.media = { available: false, stale: true, total: null, success: null, manual: null, pending: null, libraries: null };
   const env = fixture(async () => data); await flush();
-  for (const [, label] of entries) assert.ok(env.node('tasks').innerHTML.includes(label));
-  assert.equal((env.node('tasks').innerHTML.match(/状态未知/g) || []).length, entries.length);
-  assert.doesNotMatch(env.node('tasks').innerHTML, /已完成/); env.stop();
+  assert.doesNotMatch(env.host.innerHTML, /任务摘要|data-dash="(?:tasks|running)"/);
+  assert.equal(env.nodes.has('tasks'), false); assert.equal(env.nodes.has('running'), false);
+  assert.equal(env.node('p95').textContent, '—', 'unknown latency is not zero');
+  assert.match(env.node('p95-note').textContent, /暂无延迟样本/);
+  assert.match(env.node('requests-note').textContent, /— 次 \/ 秒/, 'unknown rate stays unknown');
+  assert.match(env.node('errors-note').textContent, /不推断健康状态/);
+  assert.match(env.node('media').innerHTML, /暂无可用媒体摘要/);
+  assert.doesNotMatch(env.node('media').innerHTML, /<strong>0|已完成|成功/);
+  assert.match(env.node('media-updated').textContent, /不将未知计数显示为零/);
+  assert.equal(env.node('media-updated').classList.contains('dash-warning'), true);
+  env.stop();
 });
 
 test('首页最小生命周期整合保留图片缓存与其它功能；CSS无CDN且有小屏与减动态', () => {

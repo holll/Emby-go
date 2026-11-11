@@ -1,10 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -218,6 +223,79 @@ func TestScheduledSpritesSetupFailureLogsCause(t *testing.T) {
 
 // TestScheduledSpritesBusyReason 复核跳过路径：上一轮仍在执行与别的媒体维护
 // 任务占用 NFO 锁必须能区分，两者运维处置完全不同。
+// Use actual subprocesses, not a synthetic error, to prove that detailed safe
+// diagnostics reach failure logs but neither source secrets nor argv reach DTOs.
+func TestScheduledSpritesSafeProcessDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	for _, stage := range []string{"probe", "frame"} {
+		t.Run(stage, func(t *testing.T) {
+			f := artworkFixture(t)
+			movie, err := f.a.db.Movie(f.movie)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(movie.SourcePath, []byte("https://secret-host-canary.invalid/private-path-canary?token=query-canary"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			probe, ffmpeg := filepath.Join(dir, "ffprobe"), filepath.Join(dir, "ffmpeg")
+			bad := "#!/bin/sh\nprintf '%s\\n' \"$@\" 'standalone-token-canary HTTP error 403 Forbidden' >&2\nexit 7\n"
+			// Two frames at the 10s interval: extraction is serial, so frame 0
+			// always fails first and the reported position is deterministic.
+			probeScript := "#!/bin/sh\nprintf '20\\n'\n"
+			if stage == "probe" {
+				probeScript = bad
+			}
+			if err := os.WriteFile(probe, []byte(probeScript), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(ffmpeg, []byte(bad), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.a.artwork.lookPath = func(name string) (string, error) {
+				if name == "ffmpeg" {
+					return ffmpeg, nil
+				}
+				return probe, nil
+			}
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			if err := f.a.runScheduledSprites(context.Background(), spriteTaskFor(f.lib, map[string]any{"library_id": f.lib})); err == nil {
+				t.Fatal("expected subprocess failure")
+			}
+			joined := logs.String()
+			for _, want := range []string{"media_process", "argv_template", "$STREAM_URL", "http error 403", "exit_code\":7", "stage=" + stage, "total_budget_ms=" + strconv.Itoa(int(artwork.SpriteTimeoutDefault.Milliseconds())), "stage_budget_ms="} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing %q in %s", want, joined)
+				}
+			}
+			if stage == "frame" && (!strings.Contains(joined, "frame_index=0") || !strings.Contains(joined, "seek_ms=0")) {
+				t.Errorf("missing frame position: %s", joined)
+			}
+			for _, secret := range []string{"secret-host-canary", "private-path-canary", "query-canary", "standalone-token-canary"} {
+				if strings.Contains(joined, secret) {
+					t.Errorf("secret leaked: %q", secret)
+				}
+			}
+			for _, path := range []string{"/api/admin/tasks", "/api/admin/sprites/status"} {
+				response := translationCall(f.a, f.token, "GET", path, "")
+				if response.Code != 200 {
+					t.Fatalf("%s status %d: %s", path, response.Code, response.Body.String())
+				}
+				for _, forbidden := range []string{"canary", "argv", "stderr", "$STREAM_URL", "http error 403"} {
+					if strings.Contains(response.Body.String(), forbidden) {
+						t.Errorf("DTO leaked %s: %s", forbidden, response.Body.String())
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestScheduledSpritesBusyReason(t *testing.T) {
 	t.Run("running", func(t *testing.T) {
 		f := artworkFixture(t)

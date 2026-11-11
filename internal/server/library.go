@@ -673,6 +673,9 @@ func (a *App) nextUp(c *gin.Context) {
 
 // similar 返回与当前影片共享 流派/标签/制片商 的近似影片。
 func (a *App) similar(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		apiError(c, http.StatusNotFound, "not found")
@@ -713,7 +716,8 @@ func (a *App) similar(c *gin.Context) {
 	// 相似度结果按 (版本,账户,授权,影片,limit) 短缓存：候选过滤依赖当前账户的
 	// 媒体库授权，不能跨账户复用。
 	grantKey := libraryScopeCacheKey(visible, admin)
-	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit)
+	fields := requestedFields(c)
+	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit) + ":" + fields.key()
 	if b, ok := a.cachedBody(simKey); ok {
 		respondMediaJSON(c, b)
 		return
@@ -815,7 +819,10 @@ func (a *App) similar(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(results))
 	for _, r := range results {
-		out = append(out, a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true))
+		item := a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true)
+		// Shared cache entries must not contain the requesting session's token.
+		a.applyItemFields(item, r.movie, fields, nil)
+		out = append(out, item)
 	}
 	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
 	a.cachePut(simKey, body, 20*time.Second)
@@ -1192,6 +1199,47 @@ func (a *App) latest(c *gin.Context) {
 		respondItemJSON(c, []gin.H{})
 		return
 	}
+	if strings.TrimSpace(c.Query("ParentId")) == boxsetViewID {
+		grouped := false
+		if values, present := c.Request.URL.Query()["GroupItems"]; present {
+			if len(values) != 1 {
+				apiError(c, http.StatusBadRequest, "invalid GroupItems")
+				return
+			}
+			var err error
+			grouped, err = strconv.ParseBool(values[0])
+			if err != nil {
+				apiError(c, http.StatusBadRequest, "invalid GroupItems")
+				return
+			}
+		}
+		if grouped {
+			stats, err := a.db.CollectionStatsVisible(a.collectionMinMovies(), 0, libs)
+			if err != nil {
+				itemDataUnavailable(c)
+				return
+			}
+			names := make([]string, 0, len(stats))
+			for name := range stats {
+				names = append(names, name)
+			}
+			slices.SortFunc(names, func(x, y string) int {
+				if stats[x].LatestMovieID != stats[y].LatestMovieID {
+					if stats[x].LatestMovieID > stats[y].LatestMovieID {
+						return -1
+					}
+					return 1
+				}
+				return strings.Compare(x, y)
+			})
+			out := make([]gin.H, 0, min(limit, len(names)))
+			for _, name := range names[:min(limit, len(names))] {
+				out = append(out, a.boxsetItemFrom(name, stats[name]))
+			}
+			respondItemJSON(c, out)
+			return
+		}
+	}
 	movies, err := a.db.LatestVisible(libraryID, libs, collection, limit, 0)
 	if err != nil {
 		itemDataUnavailable(c)
@@ -1252,9 +1300,10 @@ type movieQueryOptions struct {
 	term, years                  string
 	ids                          string
 	excludeMovie                 bool
+	filter                       store.MovieListFilter
 }
 
-func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
+func parseMovieQueryOptions(c *gin.Context) (movieQueryOptions, bool) {
 	filters := strings.ToLower(c.Query("Filters"))
 	sortBy := strings.Join(splitQueryTypes(c.Query("SortBy")), ",")
 	if sortBy == "" {
@@ -1273,7 +1322,21 @@ func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
 		// items, unlike omitting Ids entirely.
 		ids = "invalid"
 	}
+	filter := store.MovieListFilter{ImageTypes: splitQueryTypes(c.Query("ImageTypes"))}
+	if values, present := c.Request.URL.Query()["HasTmdbId"]; present {
+		if len(values) != 1 {
+			apiError(c, http.StatusBadRequest, "invalid HasTmdbId")
+			return movieQueryOptions{}, false
+		}
+		value, err := strconv.ParseBool(values[0])
+		if err != nil {
+			apiError(c, http.StatusBadRequest, "invalid HasTmdbId")
+			return movieQueryOptions{}, false
+		}
+		filter.HasTmdbID = &value
+	}
 	return movieQueryOptions{
+		filter:       filter,
 		sortBy:       sortBy,
 		desc:         strings.EqualFold(c.DefaultQuery("SortOrder", "Ascending"), "Descending"),
 		genre:        joinEntityNames(c, "Genres", "Genre", "GenreIds"),
@@ -1286,7 +1349,7 @@ func parseMovieQueryOptions(c *gin.Context) movieQueryOptions {
 		years:        c.Query("Years"),
 		ids:          ids,
 		excludeMovie: movieExcluded,
-	}
+	}, true
 }
 
 // itemsQuery 处理 GET /Users/{uid}/Items 与 GET /Items。
@@ -1417,12 +1480,15 @@ func (a *App) itemsQuery(c *gin.Context) {
 			return
 		}
 		// 具体合集列出成员；合集视图递归查询使用 "*" 列出所有已归集影片。
-		options := parseMovieQueryOptions(c)
+		options, ok := parseMovieQueryOptions(c)
+		if !ok {
+			return
+		}
 		if options.excludeMovie {
 			a.emptyItems(c)
 			return
 		}
-		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids)
+		ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), 0, visible, collection, options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids, options.filter)
 		if e != nil {
 			itemDataUnavailable(c)
 			return
@@ -1452,7 +1518,10 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 	}
 
-	options := parseMovieQueryOptions(c)
+	options, ok := parseMovieQueryOptions(c)
+	if !ok {
+		return
+	}
 	if options.excludeMovie {
 		a.emptyItems(c)
 		return
@@ -1469,12 +1538,12 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 		grantKey = strings.Join(parts, ",")
 	}
-	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), c.Query("ImageTypes"), c.Query("HasTmdbId"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
 	if b, ok := a.cachedBody("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return
 	}
-	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids)
+	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids, options.filter)
 	if e != nil {
 		itemDataUnavailable(c)
 		return

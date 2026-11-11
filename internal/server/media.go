@@ -639,6 +639,31 @@ func (a *App) movieImageInfo(m store.Movie) []gin.H {
 }
 
 func (a *App) playback(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
+	if c.Request.Method == http.MethodPost {
+		var request struct {
+			UserID string `json:"UserId"`
+		}
+		decoder := json.NewDecoder(c.Request.Body)
+		if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+			apiError(c, http.StatusBadRequest, "invalid playback request")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			apiError(c, http.StatusBadRequest, "invalid playback request")
+			return
+		}
+		if request.UserID != "" {
+			userID, err := strconv.ParseInt(request.UserID, 10, 64)
+			if err != nil || userID != a.currentUserID(c) {
+				apiError(c, http.StatusNotFound, "user not found")
+				return
+			}
+		}
+	}
 	movie, sourcePath, id, ok := a.resolvePlaybackTarget(c.Param("id"))
 	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) || (movie.SourceProtocol != "http" && movie.SourceProtocol != "https") {
 		apiError(c, http.StatusNotFound, "not found")
@@ -791,6 +816,24 @@ func respondItemJSON(c *gin.Context, payload any) {
 // respondMediaJSON 的输入是共享缓存中的无凭据 DTO；只在发给当前会话时补凭据。
 // 图片筛选及 token 都只修改响应副本，不写回缓存。
 func respondMediaJSON(c *gin.Context, body []byte) {
+	omitUserData, omitTotal := false, false
+	for _, option := range []struct {
+		name string
+		omit *bool
+	}{{"EnableUserData", &omitUserData}, {"EnableTotalRecordCount", &omitTotal}} {
+		if values, present := c.Request.URL.Query()[option.name]; present {
+			if len(values) != 1 {
+				apiError(c, http.StatusBadRequest, "invalid "+option.name)
+				return
+			}
+			enabled, err := strconv.ParseBool(values[0])
+			if err != nil {
+				apiError(c, http.StatusBadRequest, "invalid "+option.name)
+				return
+			}
+			*option.omit = !enabled
+		}
+	}
 	imageTypes := splitQueryTypes(strings.ToLower(c.Query("EnableImageTypes")))
 	imageLimit := -1
 	if values, present := c.Request.URL.Query()["ImageTypeLimit"]; present {
@@ -801,7 +844,7 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 		}
 		imageLimit = limit
 	}
-	if len(imageTypes) == 0 && imageLimit < 0 && !bytes.Contains(body, []byte(`"MediaSources"`)) {
+	if !omitUserData && !omitTotal && len(imageTypes) == 0 && imageLimit < 0 && !bytes.Contains(body, []byte(`"MediaSources"`)) {
 		c.Data(http.StatusOK, "application/json", body)
 		return
 	}
@@ -814,6 +857,9 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 	}
 	token := requestToken(c)
 	attach := func(item map[string]any) {
+		if omitUserData {
+			delete(item, "UserData")
+		}
 		if len(imageTypes) > 0 || imageLimit >= 0 {
 			filterItemImages(item, imageTypes, imageLimit)
 		}
@@ -837,6 +883,9 @@ func respondMediaJSON(c *gin.Context, body []byte) {
 	switch root := payload.(type) {
 	case map[string]any:
 		attach(root)
+		if omitTotal {
+			delete(root, "TotalRecordCount")
+		}
 		items, _ = root["Items"].([]any)
 	case []any:
 		items = root

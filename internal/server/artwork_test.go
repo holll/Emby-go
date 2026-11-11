@@ -21,6 +21,10 @@ import (
 func artworkFixture(t *testing.T) translationFixture {
 	f := newTranslationFixture(t)
 	f.a.artwork.lookPath = func(s string) (string, error) { return "/mock/" + s, nil }
+	// Fixtures point the STRM at a non-resolvable host and drive fake ffmpeg
+	// scripts directly, so they exercise the unresolved path: every frame uses
+	// the STRM URL exactly as before link resolution existed.
+	f.a.sprites.linkClient = nil
 	return f
 }
 

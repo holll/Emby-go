@@ -14,6 +14,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,6 +36,26 @@ const (
 	spriteMaxSheetBytes    = 8 << 20
 	spriteMaxBytes         = 64 << 20
 	spriteMaxManifestBytes = 1 << 20
+	// A remote source (Alist 302 -> 115) pays connection setup, TTFB and the
+	// open-ended range request per extraction, and that fixed cost measured
+	// ~36s per frame at any position in a 55GiB movie. Sampling is therefore
+	// sparse and serial, so the budget has to cover one frame per sample rather
+	// than the whole file. Both bounds are exported for the scheduler; the
+	// maximum only exists so an explicit request cannot hold the single run
+	// slot indefinitely.
+	SpriteTimeoutDefault = 30 * time.Minute
+	SpriteTimeoutMax     = 6 * time.Hour
+	// One frame measured 34-42s on that remote link, so 30s would fail valid
+	// frames; the margin covers the slowest observed request.
+	spriteFrameBudget = 90 * time.Second
+	// An unpublished generation is only pruning garbage once it is older than
+	// a legitimate run could be. An explicit Timeout above the default (up to
+	// SpriteTimeoutMax) is not covered by this guard.
+	spritePruneGrace = SpriteTimeoutDefault + 2*time.Minute
+	// 115 signs the direct link Alist hands out against the request User-Agent:
+	// the same UA gets 206, any other gets 403. Resolving the link and every
+	// ffmpeg frame therefore have to send this one value.
+	spriteUserAgent = "emby-go-sprite/1"
 )
 
 var ErrSpriteChanged = store.ErrSpriteChanged
@@ -54,6 +75,10 @@ type SpriteOptions struct {
 	RootDir, FFmpegPath, FFprobePath string
 	Timeout                          time.Duration
 	Progress                         func(done, total int)
+	// LinkClient resolves the STRM redirect chain once so every frame reuses
+	// the signed direct link instead of paying a fresh chain setup per frame.
+	// nil keeps the STRM URL in use for every frame.
+	LinkClient *http.Client
 }
 type SpriteSheet struct {
 	File   string `json:"file"`
@@ -115,9 +140,13 @@ func trustedStreamURL(raw string) error {
 type spriteSource struct {
 	movie                                store.Movie
 	libraryRoot, rootPath, relative, raw string
-	root                                 *os.Root
-	rootInfo                             os.FileInfo
-	original                             stamp
+	// direct is what ffmpeg is pointed at: raw unless it was resolved to a
+	// signed direct link. raw stays in place because the source hash is taken
+	// from the STRM file and must not change with link expiry.
+	direct   string
+	root     *os.Root
+	rootInfo os.FileInfo
+	original stamp
 }
 
 func openSpriteSource(ctx context.Context, db *store.Store, id int64) (*spriteSource, error) {
@@ -172,6 +201,7 @@ func openSpriteSource(ctx context.Context, db *store.Store, id int64) (*spriteSo
 		return nil, err
 	}
 	s.raw = strings.TrimSpace(string(raw))
+	s.direct = s.raw
 	if err = trustedStreamURL(s.raw); err != nil {
 		return nil, err
 	}
@@ -307,14 +337,45 @@ func spriteLock(ctx context.Context, id int64) (func(), error) {
 	return lock.Unlock, nil
 }
 
-func spriteProbe(ctx context.Context, raw string, opts SpriteOptions) (int64, error) {
+// resolveSpriteLink follows the STRM redirect chain once and returns the final
+// URL, so every frame can reuse one signed link instead of paying the chain
+// setup again. The response body is dropped, not read: only the address
+// matters. A failed request is reported by status only, because the URL carries
+// the source credentials.
+func resolveSpriteLink(ctx context.Context, client *http.Client, raw string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	if err != nil {
+		return "", errors.New("sprite link request could not be built")
+	}
+	req.Header.Set("User-Agent", spriteUserAgent)
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", errors.New("sprite link could not be resolved")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 399 {
+		return "", fmt.Errorf("sprite link resolution returned status %d", resp.StatusCode)
+	}
+	return resp.Request.URL.String(), nil
+}
+
+func spriteProbe(ctx context.Context, raw string, opts SpriteOptions) (duration int64, err error) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
+	budget := time.Until(deadline).Milliseconds()
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("stage=probe stage_elapsed_ms=%d stage_budget_ms=%d: %w", time.Since(started).Milliseconds(), budget, err)
+		}
+	}()
 	probe := opts.FFprobePath
 	if probe == "" {
 		probe = "ffprobe"
 	}
-	b, err := command(ctx, probe, []string{"-v", "error", "-protocol_whitelist", protocols, "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", raw}, 4096)
+	b, err := command(ctx, probe, []string{"-v", "error", "-protocol_whitelist", protocols, "-user_agent", spriteUserAgent, "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", raw}, 4096)
 	if err != nil {
 		return 0, err
 	}
@@ -329,14 +390,26 @@ func spriteProbe(ctx context.Context, raw string, opts SpriteOptions) (int64, er
 	}
 	return ms, nil
 }
-func spriteFrame(ctx context.Context, raw string, ms int64, opts SpriteOptions) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+
+// spriteFrame extracts one sample. The stage budget covers a single request:
+// on a high-latency remote link the connection setup, TTFB and the seek cost
+// 34-42s, far more than the decode of the handful of frames read.
+func spriteFrame(ctx context.Context, raw string, ms int64, opts SpriteOptions) (frame []byte, err error) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, spriteFrameBudget)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
+	budget := time.Until(deadline).Milliseconds()
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("stage=frame seek_ms=%d stage_elapsed_ms=%d stage_budget_ms=%d: %w", ms, time.Since(started).Milliseconds(), budget, err)
+		}
+	}()
 	ffmpeg := opts.FFmpegPath
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	args := []string{"-nostdin", "-v", "error", "-protocol_whitelist", protocols, "-max_pixels", strconv.Itoa(maxPixels), "-threads", "1", "-ss", strconv.FormatFloat(float64(ms)/1000, 'f', 3, 64), "-i", raw, "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2", "-threads", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"}
+	args := []string{"-nostdin", "-v", "error", "-protocol_whitelist", protocols, "-user_agent", spriteUserAgent, "-max_pixels", strconv.Itoa(maxPixels), "-threads", "1", "-ss", strconv.FormatFloat(float64(ms)/1000, 'f', 3, 64), "-i", raw, "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2", "-threads", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"}
 	b, err := command(ctx, ffmpeg, args, spriteMaxFrameBytes)
 	if err != nil {
 		return nil, err
@@ -385,13 +458,20 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = SpriteTimeoutDefault
 	}
-	if timeout > 15*time.Minute {
-		timeout = 15 * time.Minute
+	if timeout > SpriteTimeoutMax {
+		timeout = SpriteTimeoutMax
 	}
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("sprite generation total_budget_ms=%d total_elapsed_ms=%d remaining_ms=%d: %w", timeout.Milliseconds(), time.Since(started).Milliseconds(), max(0, time.Until(deadline).Milliseconds()), err)
+		}
+	}()
 	select {
 	case spriteRunGate <- struct{}{}:
 		defer func() { <-spriteRunGate }()
@@ -474,7 +554,15 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	}
 	unlock()
 	locked = false
-	duration, err := spriteProbe(ctx, source.raw, opts)
+	if opts.LinkClient != nil {
+		// One resolution per generation: the signed link is reused by the probe
+		// and every frame. Expiry is deliberately not handled; a failed run is
+		// simply retried by the operator.
+		if source.direct, err = resolveSpriteLink(ctx, opts.LinkClient, source.raw); err != nil {
+			return res, err
+		}
+	}
+	duration, err := spriteProbe(ctx, source.direct, opts)
 	if err != nil {
 		return res, err
 	}
@@ -559,9 +647,9 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 			if err = source.verify(ctx); err != nil {
 				return res, err
 			}
-			frame, e := spriteFrame(ctx, source.raw, int64(done)*interval, opts)
+			frame, e := spriteFrame(ctx, source.direct, int64(done)*interval, opts)
 			if e != nil {
-				return res, e
+				return res, fmt.Errorf("frame_index=%d frames_total=%d effective_interval_ms=%d: %w", done, count, interval, e)
 			}
 			img, e := spriteDecode(frame, spriteWidth, spriteHeight)
 			if e != nil {

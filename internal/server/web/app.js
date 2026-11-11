@@ -169,7 +169,7 @@ const META = {
   logs: { title: '运行日志', crumb: 'Archive / Logs' },
   scheduled: { title: '计划任务', crumb: 'Archive / Scheduled' },
   tasks: { title: '任务中心', crumb: 'Archive / Tasks' },
-  scrape: { title: '刮削', crumb: 'Archive / Scrape' },
+  scrape: { title: '刮削与翻译', crumb: 'Archive / Scrape' },
   translate: { title: '独立翻译', crumb: 'Archive / Translate' }
 };
 
@@ -203,13 +203,40 @@ async function pageOverview() {
     content.innerHTML = '<section class="panel" role="alert"><h2>监控资源未加载</h2><p>请刷新页面重试；没有读取到的指标不会显示为零。</p></section>';
     return;
   }
-  dashboardStop = mountDashboard(content, {
-    apiRequest: api,
-    isCurrent: () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity
+  const current = () => gen === pageGen && token === identity && localStorage.getItem('emby_token') === identity;
+  dashboardStop = mountDashboard(content, { apiRequest: api, isCurrent: current });
+  const libraryRefresh = content.querySelector('#overview-library-refresh');
+  const libraryList = content.querySelector('#overview-library-list');
+  const scanNote = content.querySelector('#overview-scan');
+  const serviceRefresh = content.querySelector('#service-status-refresh');
+  const serviceCards = content.querySelector('#overview-service-cards');
+  const serviceNote = content.querySelector('#service-status-note');
+  const refresh = async (button, read) => {
+    if (!current() || button.getAttribute('aria-disabled') === 'true') return;
+    button.setAttribute('aria-disabled', 'true');
+    try { await read(); }
+    finally { button.removeAttribute('aria-disabled'); }
+  };
+  const readLibraries = () => refresh(libraryRefresh, async () => {
+    scanNote.textContent = '正在读取扫描快照…';
+    const [libraries, scan] = await Promise.allSettled([api('/libraries'), api('/scan/progress')]);
+    if (!current()) return;
+    if (libraries.status === 'fulfilled' && Array.isArray(libraries.value.items)) {
+      const { items, total = items.length } = libraries.value;
+      const rows = list => `<ul class="dash-library-list">${list.map(lib => `<li><span>${esc(lib.Name)}</span><strong>${esc(lib.count ?? '—')} 部</strong></li>`).join('')}</ul>`;
+      libraryList.innerHTML = `<p class="dash-note">共 ${esc(total)} 个媒体库</p>${items.length ? rows(items) : '<p>尚未添加媒体库</p>'}`;
+    } else libraryList.textContent = '媒体库列表暂不可用。';
+    if (scan.status !== 'fulfilled' || typeof scan.value?.running !== 'boolean') {
+      scanNote.textContent = '扫描状态暂不可用';
+    } else if (scan.value.running) {
+      const { library_name, total, done } = scan.value;
+      scanNote.textContent = `扫描快照：${library_name || '正在准备扫描'}${total > 0 ? ` · ${done} / ${total}` : ''}`;
+    } else scanNote.textContent = '扫描快照：当前无扫描';
   });
-  const statusHost = document.createElement('div');
-  content.appendChild(statusHost);
-  await renderServiceStatus(statusHost, gen, identity);
+  const readService = () => refresh(serviceRefresh, () => renderServiceStatus(serviceCards, serviceNote, current));
+  libraryRefresh.addEventListener('click', readLibraries);
+  serviceRefresh.addEventListener('click', readService);
+  await Promise.all([readLibraries(), readService()]);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
@@ -265,7 +292,7 @@ async function pageLibraries() {
       <form id="library-form" class="field-grid">
         <div class="field"><label for="lib-name">名称</label><input id="lib-name" name="Name" placeholder="如 AV / FC2" required></div>
         <div class="field"><label for="lib-path">目录路径</label><input id="lib-path" name="Path" placeholder="服务器上的绝对路径" required></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">${icon('plus')}<span>添加</span></button></div>
+        <div class="form-foot" style="grid-column:1/-1"><button class="btn btn-accent">${icon('plus')}<span>添加</span></button></div>
       </form>
     </section>
     <input type="file" id="lib-cover-file" accept="image/*" hidden>`;
@@ -1677,7 +1704,7 @@ async function pageSettings() {
       <form id="pw-form" class="field-grid">
         <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
         <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
+        <div class="form-foot" style="grid-column:1/-1"><button class="btn btn-accent">保存并退出其它会话</button></div>
       </form>
       <p class="hint">修改后当前与其它设备的登录令牌都会失效，需要重新登录。</p>
     </section>
@@ -1747,7 +1774,7 @@ async function pageSettings() {
       <h3 class="apikey-subtitle">新建密钥</h3>
       <form id="apikey-form" class="field-grid">
         <div class="field"><label for="key-name">密钥名称</label><input id="key-name" name="name" placeholder="如 yamby / 脚本" required></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent" id="apikey-submit" type="submit">${icon('plus')}<span>创建</span></button></div>
+        <div class="form-foot" style="grid-column:1/-1"><button class="btn btn-accent" id="apikey-submit" type="submit">${icon('plus')}<span>创建</span></button></div>
       </form>
       <p class="hint">调用示例：<code>curl -H "X-Emby-Token: &lt;密钥&gt;" http://host:18080/Users/1/Views</code>，也可用 <code>?api_key=&lt;密钥&gt;</code>。密钥只对 Emby 兼容接口有效，不能用于管理 API；请勿外泄，删除前先确认使用方。</p>
     </section>
@@ -1939,7 +1966,7 @@ function renderSelfPassword() {
       <form id="pw-form" class="field-grid">
         <div class="field"><label for="pw-current">当前密码</label><input id="pw-current" type="password" required autocomplete="current-password"></div>
         <div class="field"><label for="pw-new">新密码</label><input id="pw-new" type="password" minlength="9" required autocomplete="new-password"></div>
-        <div class="form-foot" style="grid-column:1/-1;margin:2px 0 0"><button class="btn btn-accent">保存并退出其它会话</button></div>
+        <div class="form-foot" style="grid-column:1/-1"><button class="btn btn-accent">保存并退出其它会话</button></div>
       </form>
     </section>`;
   bindPasswordForm();
@@ -1995,7 +2022,7 @@ async function pageTasks() {
           <tbody>${shown.map(item => `
             <tr>
               <td class="mono">${esc(String(item.id))}</td>
-              <td>${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}</td>
+              <td>${esc(TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</td>
               <td><span class="badge ${esc(item.status)}">${esc(RUN_STATUS_TEXT[item.status] || item.status)}</span></td>
               <td class="mono">${esc(fmtTime(item.started_at))}</td>
               <td class="mono">${esc(fmtTime(item.ended_at))}</td>
@@ -2034,6 +2061,8 @@ async function pageTasks() {
 // 配置存 DB（config.yaml 不设 scrape 段）；密钥只写不回显，读取时返回掩码。
 async function pageScrape() {
   stopScrapePolling();
+  stopTranslationPolling();
+  if (!me?.is_admin) { content.innerHTML = empty('仅管理员可运行资料处理任务'); return; }
   const gen = pageGen;
   const [settings, libs] = await Promise.all([api('/scrape/settings'), api('/libraries')]);
   const libraries = libs.items || [];
@@ -2042,28 +2071,41 @@ async function pageScrape() {
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
 
   content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>立即刮削</h2>
+    <div class="scrape-tools-grid">
+    <div class="scrape-operation-stack" role="group" aria-label="刮削与头像">
+    <section class="panel" id="scrape-run-card">
+      <div class="panel-head"><h2>元数据刮削</h2>
         <div class="panel-actions"><span class="hint" id="scrape-count" style="margin:0"></span></div>
       </div>
       <div class="filters">
         <select id="sc-lib" aria-label="媒体库"><option value="0">全部媒体库</option>${libOptions}</select>
         <label class="check"><input id="sc-only-missing" type="checkbox" checked> 仅处理缺失元数据的影片</label>
         <label class="check"><input id="sc-force" type="checkbox"> 本次强制覆盖</label>
-        <button id="scrape-start" class="btn btn-accent btn-sm">${icon('film')}<span>开始刮削</span></button>
-        <button id="scrape-cancel" class="btn btn-sm">中止</button>
-        <button id="avatar-start" class="btn btn-sm">${icon('plus')}<span>补演员头像</span></button>
+        <button id="scrape-start" class="btn btn-accent btn-sm" disabled>${icon('film')}<span>开始刮削</span></button>
       </div>
-      <div id="scrape-progress" class="probe-progress" hidden>
-        <div class="scan-progress-head"><strong id="scrape-progress-title">刮削中…</strong><span id="scrape-progress-count"></span></div>
-        <div class="scan-progress-bar"><i id="scrape-progress-fill"></i></div>
-        <small id="scrape-progress-detail"></small>
-      </div>
-      <div id="scrape-failures"></div>
       <p class="hint">批量与定时为全自动：遇到「非番号精确命中」会跳过并标记「待人工确认」，可在媒体墙按刮削结果筛出后逐条手动处理。</p>
     </section>
 
-    <details class="panel disclosure" id="scrape-configuration">
+    <section class="panel" id="avatar-card" aria-labelledby="avatar-card-title">
+      <div class="panel-head"><h2 id="avatar-card-title">补演员头像</h2></div>
+      <p class="hint">仅补缺失头像，使用 MetaTube。与影片刮削共用执行通道，不能同时运行；进度在下方统一展示。</p>
+      <form id="avatar-form" class="field-grid">
+        <div class="field"><label for="avatar-library">媒体库范围</label><select id="avatar-library"><option value="0">全部媒体库</option>${libOptions}</select></div>
+        <div class="field"><label for="avatar-limit">演员数量上限（0 为不限）</label><input id="avatar-limit" type="number" min="0" max="100000" step="1" value="0"></div>
+        <div class="form-foot"><button type="submit" id="avatar-start" class="btn" disabled>${icon('plus')}<span>补演员头像</span></button></div>
+      </form>
+    </section>
+    </div>
+    <section class="panel" id="translation-card"><h2>独立翻译任务</h2><p class="hint">以下按钮只手动执行一次，不创建自动调度。也可在<a href="#scheduled">计划任务</a>保存独立翻译配置：不勾选参与调度，随后随时点击“执行”；需要定时再明确启用。翻译服务连接在下方配置卡中设置。</p><div class="field-grid">
+    <div class="field"><label for="translate-library">范围</label><select id="translate-library"><option value="0">全部媒体库（启动前需确认）</option>${(libs.items || []).map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('')}</select></div>
+    <div class="field"><label for="translate-limit">数量上限（0 为不限）</label><input id="translate-limit" type="number" min="0" max="100000" step="1" value="0"></div></div>${translationWidget('translate-task')}</section>
+      <section id="scrape-progress" class="panel scrape-shared-progress" aria-label="刮削与头像共用任务进度" hidden>
+        <div class="panel-head"><h2>当前刮削 / 头像任务</h2><button id="scrape-cancel" class="btn btn-sm" disabled>中止当前任务</button></div>
+        <div class="scan-progress-head"><strong id="scrape-progress-title">刮削中…</strong><span id="scrape-progress-count"></span></div>
+        <div class="scan-progress-bar"><i id="scrape-progress-fill"></i></div>
+        <small id="scrape-progress-detail"></small>
+      <div id="scrape-failures"></div></section>
+    <details class="panel disclosure scrape-configuration" id="scrape-configuration">
       <summary class="disclosure-summary">服务连接与刮削策略（含共享翻译服务）</summary>
       <div class="disclosure-body">
       <div class="panel-head"><h2>服务连接与刮削策略</h2>
@@ -2109,7 +2151,9 @@ async function pageScrape() {
           <span class="hint" style="margin:0">保存后无需重启；密钥留空表示不修改。</span>
         </div>
       </form>
-    </div></details>`;
+    </div></details></div>`;
+  const translationRoot = document.querySelector('#translate-task');
+  mountTranslation(translationRoot, () => ({ library_id: Number(document.querySelector('#translate-library').value), limit: Number(document.querySelector('#translate-limit').value) }), () => document.querySelector('#translate-task') === translationRoot);
 
   const num = id => Number(document.querySelector(id).value) || 0;
   document.querySelector('#scrape-form').addEventListener('submit', async event => {
@@ -2168,9 +2212,10 @@ async function pageScrape() {
       if (gen === pageGen) startScrapePolling();
     } catch (e) { toast(e.message, 'error'); }
   });
-  document.querySelector('#avatar-start').addEventListener('click', async () => {
+  document.querySelector('#avatar-form').addEventListener('submit', async event => {
+    event.preventDefault();
     try {
-      const result = await api('/scrape/avatars', { method: 'POST', body: JSON.stringify({ library_id: Number(document.querySelector('#sc-lib').value) || 0 }) });
+      const result = await api('/scrape/avatars', { method: 'POST', body: JSON.stringify({ library_id: Number(document.querySelector('#avatar-library').value) || 0, limit: Number(document.querySelector('#avatar-limit').value) || 0 }) });
       toast(`头像任务已启动（${result.total} 个演员）`);
       if (gen === pageGen) startScrapePolling();
     } catch (e) { toast(e.message, 'error'); }
@@ -2212,9 +2257,12 @@ function progressCounts(p) {
 function renderScrapeProgress(p) {
   const el = scrapeEls();
   if (!el.panel) return;
+  document.querySelector('#scrape-start').disabled = !p || p.running;
+  document.querySelector('#avatar-start').disabled = !p || p.running;
+  document.querySelector('#scrape-cancel').disabled = !p?.running;
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
-  el.title.textContent = p.running ? (p.kind === 'scrape_avatars' ? '正在补演员头像' : '正在刮削') : '刮削结束';
+  el.title.textContent = p.kind === 'scrape_avatars' ? (p.running ? '正在补演员头像' : '头像补全结束') : (p.running ? '正在刮削' : '刮削结束');
   const { total, done, percent } = progressCounts(p);
   el.count.textContent = total ? `${done}/${total}` : String(done);
   el.fill.classList.toggle('is-indeterminate', !total && p.running);
@@ -2287,6 +2335,9 @@ function startScrapePolling() {
     const el = scrapeEls();
     if (!el.panel) return;
     el.panel.hidden = false;
+    document.querySelector('#scrape-start').disabled = true;
+    document.querySelector('#avatar-start').disabled = true;
+    document.querySelector('#scrape-cancel').disabled = true;
     el.detail.setAttribute('role', 'status');
     el.detail.textContent = delay === null
       ? '进度读取受限，任务状态未确认。请检查登录或权限后重新进入此页。'
@@ -2701,16 +2752,7 @@ function mountTranslation(root, getScope, isScopeCurrent, onComplete = () => {})
   return halt;
 }
 async function pageTranslate() {
-  const gen = pageGen;
-  if (!me?.is_admin) { content.innerHTML = empty('仅管理员可运行独立翻译'); return; }
-  const libs = await api('/libraries');
-  if (gen !== pageGen) return;
-  stopTranslationPolling();
-  content.innerHTML = `<section class="panel"><h2>独立翻译任务</h2><p class="hint">以下按钮只手动执行一次，不创建自动调度。也可在<a href="#scheduled">计划任务</a>保存独立翻译配置：不勾选参与调度，随后随时点击“执行”；需要定时再明确启用。翻译服务在<a href="#scrape">刮削设置</a>配置。</p><div class="field-grid">
-    <div class="field"><label for="translate-library">范围</label><select id="translate-library"><option value="0">全部媒体库（启动前需确认）</option>${(libs.items || []).map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('')}</select></div>
-    <div class="field"><label for="translate-limit">数量上限（0 为不限）</label><input id="translate-limit" type="number" min="0" max="100000" step="1" value="0"></div></div>${translationWidget('translate-task')}</section>`;
-  const root = document.querySelector('#translate-task');
-  mountTranslation(root, () => ({ library_id: Number(document.querySelector('#translate-library').value), limit: Number(document.querySelector('#translate-limit').value) }), () => document.querySelector('#translate-task') === root);
+  await pageScrape();
 }
 
 /* ------------------------------------------------------------ 计划任务 */
@@ -2722,7 +2764,7 @@ const CRON_PRESETS = [
   ['每周一 04:00', '0 4 * * 1'],
   ['每月 1 日 05:00', '0 5 1 * *']
 ];
-const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '雪碧图生成' };
+const TASK_TYPE_TEXT = { scan: '扫描媒体库', reindex: '重建索引', probe: '媒体信息探测', translate: '独立翻译', sprites: '视频预览生成', video_sprites: '视频预览生成', scrape: '元数据刮削', scrape_avatars: '补演员头像', artwork_screenshot: '视频截图', artwork_provider: '上游图片获取' };
 const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失败', skipped: '跳过', running: '进行中', queued: '排队中', interrupted: '进程重启中断', cancelled: '已中止', canceled: '已中止', unknown: '状态未知' };
 
 let scheduledFocus = null;
@@ -2776,16 +2818,17 @@ function scheduledFormParams(kind, editing, stored, visible) {
 
 
 /* ---------------------------------------------------------------- 服务状态 */
-// 总览页唯一的状态面板：合并运行证据、数据量与启动配置，只读聚合。
-async function renderServiceStatus(host, gen, identity) {
+// 服务快照拆分展示，仍从同一次读取聚合运行证据和启动配置。
+async function renderServiceStatus(host, note, current) {
+  note.textContent = '正在读取服务快照…';
   let data, service;
   try {
     [data, service] = await Promise.all([api('/diagnostics'), api('/settings')]);
   } catch (error) {
-    if (gen === pageGen) host.innerHTML = `<section class="panel" role="alert"><h2>服务状态读取失败</h2><p>${esc(error.message || String(error))}</p></section>`;
+    if (current()) note.textContent = `服务快照读取失败${host.childElementCount ? ' · 保留上次数据' : ''}：${error.message || error}`;
     return;
   }
-  if (gen !== pageGen || token !== identity) return;
+  if (!current()) return;
   const app = data.app || {}, store = data.store || {}, runtime = data.runtime || {};
   const probe = runtime.probe || {}, scrape = runtime.scrape || {};
   const cache = data.image_cache || {}, hook = data.webhook || {}, ff = data.ffprobe || {};
@@ -2797,43 +2840,50 @@ async function renderServiceStatus(host, gen, identity) {
   const scrapeText = scrape.running
     ? `${esc(scrape.kind || '')} ${esc(scrape.done || 0)} / ${esc(scrape.total || 0)}，失败 ${esc(scrape.failed || 0)}`
     : '空闲';
-  const rows = [
-    ['程序版本', `<span class="mono">${esc(app.version || '')} <span class="sub">${esc(app.commit || '')}</span></span>`],
-    ['构建时间', `<span class="mono">${esc(app.build_time || '')}</span>`],
-    ['启动时间 / 已运行', `${esc(fmtTime(app.started_at))} · ${esc(fmtDuration(app.uptime_seconds || 0))}`],
-    ['运行环境', `<span class="mono">${esc(app.go_version || '')} · ${esc(app.os || '')}/${esc(app.arch || '')}</span>`],
-    ['监听地址', `<span class="mono">${esc(service.listen || '—')}</span>`],
-    ['数据库', `<span class="mono">${esc(store.path || service.db_path || '')} · ${esc(fmtSize(store.size_bytes || 0))} · schema ${esc(store.schema_version ?? '')}</span>`],
-    ['缓存后端', `${esc(service.cache || '—')}${service.redis_addr ? ` · <span class="mono">${esc(service.redis_addr)}/${esc(service.redis_db)}</span>` : ''} · Redis ${service.redis_online ? '在线' : '离线'}`],
-    ['登录会话有效期', service.session_ttl_days > 0 ? `${esc(service.session_ttl_days)} 天（使用中自动续期）` : '永不过期'],
-    ['调试模式', service.debug ? '开启（请求日志含原始 URL）' : '关闭'],
-    ['ffprobe', `<span class="mono">${esc(ff.path || '未配置')}${ff.error ? ` <span class="sub">${esc(ff.error)}</span>` : ''}</span>`],
-    ['影片', `可播放 ${esc(movies.success || 0)} · 待探测 ${esc(movies.pending || 0)} · 手动 ${esc(movies.manual || 0)}`],
-    ['媒体库 / 任务摘要', `${esc(store.libraries ?? 0)} 个库 · ${esc(store.task_records || 0)} 条任务摘要（最多保留 500 条）`],
-    ['计划任务', `${esc(schedTasks.enabled || 0)} 启用 / ${esc(schedTasks.total || 0)} 总数`],
-    ['扫描', running(runtime.scan_running)],
-    ['媒体探测', probeText],
-    ['刮削', scrapeText],
-    ['Webhook', `${esc(hook.enabled_targets || 0)} 启用 / ${esc(hook.targets || 0)} 个目标${hook.multi_target ? ' · 多目标配置' : ' · 旧单目标兼容'}`],
-    ['缩略图磁盘缓存', cache.enabled ? `${esc(cache.files || 0)} 个文件 · ${esc(fmtSize(cache.bytes || 0))} / 上限 ${esc(fmtSize(cache.max_bytes || 0))}` : '未启用'],
-    ['特征回填', service.features_backfill ? `${esc(service.features_backfill.done || 0)} / ${esc(service.features_backfill.total || 0)}` : '无需回填']
+  const groups = [
+    ['程序与环境', [
+      ['程序版本', `<span class="mono">${esc(app.version || '—')}</span>`],
+      ['启动时间 / 已运行', `${esc(fmtTime(app.started_at))} · ${esc(fmtDuration(app.uptime_seconds || 0))}`]
+    ], [
+      ['提交号', `<span class="mono">${esc(app.commit || '—')}</span>`],
+      ['构建时间', `<span class="mono">${esc(app.build_time || '')}</span>`],
+      ['运行环境', `<span class="mono">${esc(app.go_version || '')} · ${esc(app.os || '')}/${esc(app.arch || '')}</span>`]
+    ]],
+    ['存储与缓存', [
+      ['数据库', `${esc(fmtSize(store.size_bytes || 0))} · schema ${esc(store.schema_version ?? '—')}`],
+      ['缓存后端', `${esc(service.cache || '—')}${service.redis_addr ? ` · <span class="mono">${esc(service.redis_addr)}/${esc(service.redis_db)}</span>` : ''} · Redis ${service.redis_online ? '在线' : '离线'}`],
+      ['缩略图磁盘缓存', cache.enabled ? `${esc(cache.files || 0)} 个文件 · ${esc(fmtSize(cache.bytes || 0))} / 上限 ${esc(fmtSize(cache.max_bytes || 0))}` : '未启用']
+    ], [
+      ['数据库路径', `<span class="mono">${esc(store.path || service.db_path || '—')}</span>`],
+      ['影片', `可播放 ${esc(movies.success || 0)} · 待探测 ${esc(movies.pending || 0)} · 手动 ${esc(movies.manual || 0)}`],
+      ['媒体库 / 任务摘要', `${esc(store.libraries ?? 0)} 个库 · ${esc(store.task_records || 0)} 条任务摘要（最多保留 500 条）`]
+    ]],
+    ['后台作业', [
+      ['扫描', running(runtime.scan_running)],
+      ['媒体探测', probeText],
+      ['刮削', scrapeText],
+      ['计划任务', `${esc(schedTasks.enabled || 0)} 启用 / ${esc(schedTasks.total || 0)} 总数`]
+    ], [
+      ['特征回填', service.features_backfill ? `${esc(service.features_backfill.done || 0)} / ${esc(service.features_backfill.total || 0)}` : '无需回填']
+    ]],
+    ['服务配置', [
+      ['监听地址', `<span class="mono">${esc(service.listen || '—')}</span>`],
+      ['Webhook', `${esc(hook.enabled_targets || 0)} 启用 / ${esc(hook.targets || 0)} 个目标${hook.multi_target ? ' · 多目标配置' : ' · 旧单目标兼容'}`]
+    ], [
+      ['登录会话有效期', service.session_ttl_days > 0 ? `${esc(service.session_ttl_days)} 天（使用中自动续期）` : '永不过期'],
+      ['调试模式', service.debug ? '开启（请求日志含原始 URL）' : '关闭'],
+      ['ffprobe', `<span class="mono">${esc(ff.path || '未配置')}${ff.error ? ` <span class="sub">${esc(ff.error)}</span>` : ''}</span>`]
+    ]]
   ];
-  host.innerHTML = `
-    <section class="panel" aria-labelledby="service-status-title">
-      <div class="panel-head"><h2 id="service-status-title">服务状态</h2>
-        <div class="panel-actions">
-          <span class="hint" style="margin:0">生成于 ${esc(fmtTime(data.generated_at))}</span>
-          <button id="service-status-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button>
-        </div>
-      </div>
-      <p class="hint">只读聚合运行证据与启动配置；不会现场执行 ffprobe，也不向外部服务发请求。计划任务、日志与修改入口仍在其各自页面。</p>
-      <div class="table-wrap"><table>
-        <tbody>${rows.map(([k, v]) => `<tr><th scope="row" style="width:220px">${esc(k)}</th><td>${v}</td></tr>`).join('')}</tbody>
-      </table></div>
-    </section>`;
-  host.querySelector('#service-status-refresh').addEventListener('click', () => {
-    renderServiceStatus(host, gen, identity).catch(error => { if (gen === pageGen) toast(error.message || String(error), 'error'); });
-  });
+  const fields = rows => `<dl class="dash-fields">${rows.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`).join('')}</dl>`;
+  const cards = groups.map(([title, summary, details]) => `
+    <section class="dash-card dash-service-card" aria-label="${esc(title)}">
+      <h3>${esc(title)}</h3>
+      ${fields(summary)}
+      <details class="dash-disclosure"><summary>更多${esc(title)}信息</summary>${fields(details)}</details>
+    </section>`);
+  host.innerHTML = `<div class="dash-service-stack" role="group" aria-label="基础环境">${cards.slice(0, 2).join('')}</div><div class="dash-service-stack" role="group" aria-label="作业与服务">${cards.slice(2).join('')}</div>`;
+  note.textContent = `只读快照 · 生成于 ${fmtTime(data.generated_at)}`;
 }
 
 async function pageScheduled() {
@@ -2844,7 +2894,7 @@ async function pageScheduled() {
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   if (render !== scheduledRender) return;
   const items = data.items || [];
-  const types = { ...TASK_TYPE_TEXT, ...(data.types || {}) };
+  const types = data.types || {};
   const libraries = libs.items || [];
   const editing = scheduledEditId ? items.find(item => item.id === scheduledEditId) : null;
   // 编辑时回填参数；参数在库里是 JSON 文本。
@@ -2867,12 +2917,12 @@ async function pageScheduled() {
           <thead><tr><th>名称</th><th>类型</th><th>表达式</th><th>下次执行</th><th>上次结果</th><th>启用</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${items.map(item => `<tr>
             <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
-            <td data-label="类型"><span class="protocol">${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}</span></td>
+            <td data-label="类型"><span class="protocol">${esc(types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</span></td>
             <td data-label="表达式" class="mono">${esc(item.cron)}</td>
             <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
             <td data-label="上次结果" data-scheduled-result="${esc(item.id)}">${runBadge(item.last_status)}
               <small class="hint" style="margin:2px 0 0;display:block">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
-            <td data-label="启用"><label class="switch"><input type="checkbox" data-role="toggle" data-id="${esc(item.id)}" aria-label="计划任务：${esc(TASK_TYPE_TEXT[item.type] || '其他任务')}"${item.enabled ? ' checked' : ''}><i></i></label></td>
+            <td data-label="启用"><label class="switch"><input type="checkbox" role="switch" data-role="toggle" data-id="${esc(item.id)}" aria-label="启用计划任务：${esc(item.name || types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}"${item.enabled ? ' checked' : ''}></label></td>
             <td data-label="操作"><div class="row-actions">
               <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="立即执行一次">${icon('play')}<span>执行</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>
@@ -3098,8 +3148,20 @@ async function pageScheduled() {
     const role = el.dataset.role;
     if (role === 'toggle') {
       el.addEventListener('change', async () => {
-        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); toast(editing ? '状态已更新，当前编辑输入保持；时间信息请保存或取消编辑后刷新' : '状态已更新'); if (!editing) refreshPage(pageScheduled, gen); }
-        catch (e) { toast(e.message, 'error'); if (editing) el.checked = !el.checked; else refreshPage(pageScheduled, gen); }
+        const focused = document.activeElement === el;
+        el.disabled = true; el.setAttribute('aria-busy', 'true');
+        let failure = null;
+        try { await api(`/scheduled/${id}/toggle`, { method: 'POST' }); }
+        catch (e) { failure = e; }
+        if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
+        const restoreFocus = focused && (document.activeElement === document.body || document.activeElement === el);
+        el.disabled = false; el.removeAttribute('aria-busy');
+        if (failure) { toast(failure.message, 'error'); if (editing) el.checked = !el.checked; }
+        else toast(editing ? '状态已更新，当前编辑输入保持；时间信息请保存或取消编辑后刷新' : '状态已更新');
+        if (!editing) {
+          if (restoreFocus) scheduledFocus = `[data-role="toggle"][data-id="${id}"]`;
+          refreshPage(pageScheduled, gen);
+        } else if (restoreFocus) el.focus();
       });
     } else if (role === 'run') {
       const holdKey = `${identity}:${id}`;
@@ -3480,6 +3542,7 @@ let pageGen = 0;
 async function page(name) {
   // 浮层属于来源页上下文，切页/前进后退时先收起（P1-7）。
   if (name === 'activity') name = 'firewall'; // 旧书签/历史记录仍指向防火墙页
+  if (name === 'translate') name = 'scrape'; // 旧翻译书签归并到资料处理页
   createdAPIKey = null; // 导航销毁仅在创建页暂存的 Emby API 密钥原文。
   if (typeof scheduledWatchStop === 'function') { scheduledWatchStop(); scheduledWatchStop = null; }
   if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
@@ -3723,21 +3786,34 @@ function baseName(path) {
   return String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
 }
 
+// Native progress: omitting value means indeterminate; unavailable reads must not
+// retain an old percentage or imply that the server-side task has stopped.
+function setScanIndicator(value, state) {
+  if (scanTitle.title !== scanTitle.textContent) scanTitle.title = scanTitle.textContent;
+  scanPanel.dataset.state = state;
+  scanFill.hidden = state === 'unavailable';
+  if (value === null) scanFill.removeAttribute('value');
+  else scanFill.setAttribute('value', String(value));
+}
+
 function renderScanProgress(p) {
   if (!p || (!p.running && !p.finished_at)) { scanPanel.hidden = true; scanClose.hidden = true; return; }
   scanPanel.hidden = false;
   const hasFailure = p.error || p.failed || p.incomplete;
   scanClose.hidden = p.running || !hasFailure;
   const lib = p.libraries > 1 ? `${p.library_name || '媒体库'}（${p.library_index}/${p.libraries}）` : (p.library_name || '媒体库');
-  scanTitle.textContent = p.running ? `正在扫描 ${lib}`
+  const title = p.running ? `正在扫描 ${lib}`
     : `${hasFailure ? '扫描结束（存在错误）' : '扫描完成'} ${lib}`;
-  scanDetail.setAttribute('role', 'status');
+  if (scanTitle.textContent !== title) scanTitle.textContent = title;
   const groupMode = p.mode === 'incremental' || p.mode === 'full';
   const { total, done, percent } = progressCounts(groupMode && Number.isFinite(p.groups_total) && Number.isFinite(p.groups_done)
     ? { total: p.groups_total, done: p.groups_done } : p);
-  scanCount.textContent = total ? `${done}/${total}${groupMode ? ' 组' : ''}` : String(done);
-  scanFill.classList.toggle('is-indeterminate', !total && p.running);
-  scanFill.style.width = `${percent}%`;
+  const measured = Number.isFinite(Number(total)) && Number(total) > 0 && Number.isFinite(Number(done)) && Number(done) >= 0;
+  const processed = Number.isFinite(Number(done)) && Number(done) >= 0 ? done : '—';
+  scanCount.textContent = measured ? `${done}/${total}${groupMode ? ' 组' : ''}`
+    : `${processed} 已处理${p.running ? ' · 总量待确认' : ''}`;
+  setScanIndicator(measured ? Math.max(0, Math.min(100, percent)) : (p.running ? null : (hasFailure ? 0 : 100)),
+    p.running ? 'running' : (hasFailure ? 'error' : 'complete'));
   const parts = [];
   if (groupMode) {
     parts.push(p.mode === 'incremental' ? '增量扫描' : '全量重建');
@@ -3769,7 +3845,9 @@ function setScanBusy(busy) {
 function scanProgressUnavailable(delay) {
   scanPanel.hidden = false;
   scanTitle.textContent = '扫描状态未确认';
-  scanDetail.setAttribute('role', 'status');
+  scanClose.hidden = true;
+  scanCount.textContent = '等待状态确认';
+  setScanIndicator(null, 'unavailable');
   scanDetail.textContent = delay === null
     ? '进度读取受限，任务状态未确认。请检查登录或权限后刷新页面。'
     : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
@@ -3786,7 +3864,9 @@ function startScanPolling() {
       // 不把在途提交误判为空闲，也不停止后续观察。
       scanPanel.hidden = false;
       scanTitle.textContent = '扫描请求进行中';
-      scanDetail.setAttribute('role', 'status');
+      scanClose.hidden = true;
+      scanCount.textContent = '等待服务器响应';
+      setScanIndicator(null, 'loading');
       scanDetail.textContent = '扫描请求仍在等待响应，当前任务状态尚未确认。';
       setScanBusy(true);
       return;
@@ -3852,8 +3932,10 @@ async function runScan(libraryId) {
   let completed = false, denied = false;
   scanPanel.hidden = false;
   scanTitle.textContent = '正在启动扫描…';
-  scanCount.textContent = '';
-  scanDetail.textContent = '';
+  scanClose.hidden = true;
+  scanCount.textContent = '等待服务器响应';
+  scanDetail.textContent = '任务在后台执行，不必停留在当前页面。';
+  setScanIndicator(null, 'loading');
   startScanPolling();
   try {
     // 异步入口：202 只代表任务已排队，进度与计数由 /scan/progress 观察器呈现。
@@ -3864,7 +3946,7 @@ async function runScan(libraryId) {
     pending.accepted = true;
     pending.taskId = Number.isSafeInteger(accepted?.task_id) && accepted.task_id > 0 ? accepted.task_id : null;
     completed = true;
-    toast('扫描任务已启动，进度见页面顶部面板');
+    toast('扫描任务已启动，可在进度面板中查看状态');
   } catch (e) {
     toast(e.message, 'error');
     denied = e.status === 401 || e.status === 403;

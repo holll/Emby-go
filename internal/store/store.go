@@ -1046,10 +1046,17 @@ type AdminQuery struct {
 	Offset     int
 }
 
+// MovieListFilter 是 Emby 影片列表的附加过滤；图片类型之间按 OR 匹配已索引路径，
+// 不检查磁盘文件。当前没有真实 TMDB ID 来源，HasTmdbID=true 不匹配任何影片，false 不限制。
+type MovieListFilter struct {
+	ImageTypes []string
+	HasTmdbID  *bool
+}
+
 // SearchScopedVisible 与 SearchScoped 相同，但额外限制用户可见媒体库集合
 // （nil=不限制；空切片=无可见库，返回空结果）。用于非管理员的多用户可见性。
-func (s *Store) SearchScopedVisible(userID, libraryID int64, visible []int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string) ([]Movie, int, error) {
-	return s.search(userID, libraryID, visible, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset, ids)
+func (s *Store) SearchScopedVisible(userID, libraryID int64, visible []int64, collection, term, years, genre, tags, studios, person string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string, filter ...MovieListFilter) ([]Movie, int, error) {
+	return s.search(userID, libraryID, visible, term, "", years, genre, tags, studios, person, collection, "", unplayed, favorite, sortBy, desc, limit, offset, ids, filter...)
 }
 
 // SearchAdmin 供管理端列表使用。
@@ -1116,7 +1123,7 @@ func sortColumn(sortBy string) string {
 	switch strings.ToLower(sortBy) {
 	case "year", "productionyear":
 		return "year"
-	case "date":
+	case "date", "premieredate":
 		return "premiered"
 	case "sortname":
 		return "COALESCE(NULLIF(sortname,''),title)"
@@ -1169,7 +1176,7 @@ func searchEntityFilters(where []string, args []any, genre, tags, studios string
 	return where, args
 }
 
-func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string) ([]Movie, int, error) {
+func (s *Store) search(userID, libraryID int64, visible []int64, term, status, years, genre, tags, studios, person, collection, protocol string, unplayed, favorite bool, sortBy string, desc bool, limit, offset int, ids string, filter ...MovieListFilter) ([]Movie, int, error) {
 	where := []string{}
 	args := []any{}
 	switch status {
@@ -1281,6 +1288,33 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 	if favorite {
 		where = append(where, "EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.user_id=? AND userdata.is_favorite=1)")
 		args = append(args, userID)
+	}
+	for _, f := range filter {
+		if f.HasTmdbID != nil && *f.HasTmdbID {
+			// provider_id 是 MetaTube ID，不能当作 TMDB ID。
+			where = append(where, "1=0")
+		}
+		if len(f.ImageTypes) == 0 {
+			continue
+		}
+		images := make([]string, 0, len(f.ImageTypes))
+		for _, kind := range f.ImageTypes {
+			switch strings.ToLower(kind) {
+			case "primary":
+				images = append(images, "COALESCE(poster_path,'')<>''")
+			case "thumb":
+				// 与 DTO 一致：没有 landscape 时 Thumb 回退主海报。
+				images = append(images, "(COALESCE(landscape_path,'')<>'' OR COALESCE(poster_path,'')<>'')")
+			case "backdrop":
+				// DB 中的损坏 JSON 与读取时一样视为没有附加背景。
+				images = append(images, `(COALESCE(backdrop_path,'')<>'' OR CASE WHEN json_valid(extra_backdrops) THEN EXISTS (SELECT 1 FROM json_each(extra_backdrops) WHERE json_type(extra_backdrops)='array' AND type='text' AND value<>'') ELSE 0 END)`)
+			}
+		}
+		if len(images) == 0 {
+			where = append(where, "1=0")
+		} else {
+			where = append(where, "("+strings.Join(images, " OR ")+")")
+		}
 	}
 	// status=StatusAll 时可能一条过滤条件都没有（此时 where 为空），
 	// 必须整段省掉 WHERE，否则会拼出 "SELECT ... FROM movies WHERE " 的残缺 SQL。
@@ -1731,11 +1765,12 @@ func (s *Store) CollectionPoster(collection string) (string, error) {
 	return path, err
 }
 
-// CollectionStat 合集的聚合信息：影片数、代表海报、去重流派。
+// CollectionStat 合集的聚合信息：影片数、代表海报、去重流派和最新入库影片 ID。
 type CollectionStat struct {
-	Count  int
-	Poster string
-	Genres []string
+	Count         int
+	Poster        string
+	Genres        []string
+	LatestMovieID int64
 }
 
 // CollectionStatsVisible aggregates only granted libraries. nil means unrestricted;
@@ -1759,7 +1794,7 @@ func (s *Store) CollectionStatsVisible(minMovies int, libraryID int64, visible [
 		}
 		where += " AND library_id IN (" + strings.Join(marks, ",") + ")"
 	}
-	rows, err := s.db.Query("SELECT collection, COALESCE(poster_path,''), COALESCE(genres,'') FROM movies WHERE "+where+" ORDER BY id DESC", args...)
+	rows, err := s.db.Query("SELECT id, collection, COALESCE(poster_path,''), COALESCE(genres,'') FROM movies WHERE "+where+" ORDER BY id DESC", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1767,11 +1802,15 @@ func (s *Store) CollectionStatsVisible(minMovies int, libraryID int64, visible [
 	out := make(map[string]CollectionStat)
 	genres := make(map[string]map[string]struct{})
 	for rows.Next() {
+		var id int64
 		var name, poster, raw string
-		if err := rows.Scan(&name, &poster, &raw); err != nil {
+		if err := rows.Scan(&id, &name, &poster, &raw); err != nil {
 			return nil, err
 		}
 		stat := out[name]
+		if stat.Count == 0 {
+			stat.LatestMovieID = id
+		}
 		stat.Count++
 		if stat.Poster == "" {
 			stat.Poster = poster

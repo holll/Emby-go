@@ -23,6 +23,7 @@ import (
 	"emby-go/internal/imageutil"
 	"emby-go/internal/logging"
 	"emby-go/internal/metatube"
+	"emby-go/internal/outbound"
 	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
 	"emby-go/internal/upgrade"
@@ -389,6 +390,9 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		scanTasks:    make(map[int64]*asyncScanTask),
 		scanTaskIdem: make(map[string]scanIdemEntry),
 	}
+	// 直链解析沿用 ffmpeg 直接访问 .strm 目标的可达范围（含局域网源），
+	// outbound 内部仍拒绝链路本地与保留网段，重定向 ≤3 跳。
+	a.sprites.linkClient = outbound.NewClient(outbound.Options{Timeout: 30 * time.Second, AllowPrivate: true, ResponseHeaderTimeout: 20 * time.Second})
 	a.ipBlocks.publish(blockRules)
 	a.ready.Store(true)
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())

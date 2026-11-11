@@ -147,7 +147,8 @@ TLS 由 Nginx/Caddy 终止，本服务不内置 TLS。公网前必设 `setup_cod
 ## 开发者与链接
 
 - [API 契约](<API-CONTRACT.md>)：对外端点/字段/错误码，Emby 兼容版本 4.9.5.0
-- [设计边界与计划](<dev-plan.md>)、[施工台账](<PLAN-STATUS.md>)、[配置示例](<config.example.yaml>)
+- [项目速读（面向 Agent）](<PROJECT-GUIDE.md>)：架构、任务定位、正确性边界与验证命令
+- [配置示例](<config.example.yaml>)
 - 核心 CI 只跑 `gofmt/build/vet/全仓测试`；发布由 `v*` tag 触发，同 SHA 过 CI 才构建。手动专项在 Actions `manual-checks` 按需选 race/web/vuln/coverage。
 
 ## 范围与不做

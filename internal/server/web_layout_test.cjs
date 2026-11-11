@@ -20,13 +20,21 @@ async function browser(t) {
       const url=String(input), p=url.split('?')[0]; __calls.push({url,method:options.method||'GET',body:options.body});
       let data={};
       if(p==='/Users/Me')data={Name:'owner',Policy:{IsAdministrator:true}};
-      else if(p.endsWith('/libraries'))data={total:1,items:[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}]};
+      else if(p.endsWith('/libraries')){const items=window.__libraryItems||[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}];data={total:items.length,items};}
       else if(p.endsWith('/items'))data={total:2,items:[{id:1,status:'success',Title:'示例影片：移动端资料管理',Number:'TEST-001',source_path:'/media/测试/TEST-001.strm'},{id:2,status:'pending',Title:'等待处理的影片',source_path:'/media/待处理/TEST-002.strm'}]};
       else if(p.endsWith('/detail')){
         if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
         if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
         data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:[]};
       }
+      else if(p.endsWith('/scan/progress'))data=window.__scanProgress || {running:true,library_name:'测试媒体库',done:42,total:120};
+      else if(p.endsWith('/diagnostics'))data={generated_at:'2026-11-01T08:00:00Z',app:{version:'overview-fixture',commit:'a'.repeat(40)},store:{path:'/data/'+ 'long-path/'.repeat(16),schema_version:22}};
+      else if(p.endsWith('/scrape/settings'))data={metatube_url:'https://metatube.invalid',timeout_seconds:30,concurrency:2,translate:{title:false,summary:false,target_lang:'ZH',api_url:'https://translate.invalid'}};
+      else if(p.endsWith('/scrape/candidates'))data={total:12};
+      else if(p.endsWith('/scrape/progress'))data={running:false,kind:'scrape',done:0,total:0,failed:0,failures:[]};
+      else if(p.endsWith('/scrape/avatars'))data={total:2};
+      else if(p.endsWith('/translate/run')){window.__translationTask=7;data={task_id:7,total:1};}
+      else if(p.endsWith('/translate/status'))data={running:false,task_id:window.__translationTask||0,done:0,total:0,success:0,failed:0,skipped:0,failures:[]};
       else if(p.endsWith('/settings'))data={listen:':18080',cache:'memory',db_path:'/data/emby.db',session_ttl_days:7};
       else if(p.endsWith('/users'))data={users:[{id:1,name:'owner',is_admin:true,library_ids:[1]}]};
       else if(p.endsWith('/apikeys'))data={total:1,items:[{id:'stable',name:'本地脚本',key_prefix:'prefix',version:1}]};
@@ -51,11 +59,16 @@ async function browser(t) {
         }
         data=structuredClone(__webhooks);
       }
-      else if(p.endsWith('/scheduled'))data={items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:true,config_etag:'fixture'}]};
+      else if(p.includes('/scheduled/')&&p.endsWith('/toggle')){
+        if(window.__toggleDelay)await new Promise(r=>window.__resolveToggle=r);
+        if(window.__toggleFail)return {ok:false,status:503,json:async()=>({error:'fixture toggle failure'})};
+        window.__scheduledEnabled=!(window.__scheduledEnabled??true);
+      }
+      else if(p.endsWith('/scheduled'))data={items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:window.__scheduledEnabled??true,config_etag:'fixture'}],types:{scan:'扫描媒体库',reindex:'重建索引',probe:'媒体信息探测',scrape:'内置刮削',scrape_avatars:'演员头像补全',translate:'独立翻译',sprites:'雪碧图生成'}};
       else if(p.endsWith('/dashboard')){
         // Deliberately synthetic layout fixture; real HTTP telemetry is verified by Go/CDP integration.
         const minutes=Number(new URL(url,'http://fixture').searchParams.get('window')?.replace('m','')||15), now=Date.now();
-        data={instance_id:'layout-fixture',started_at:new Date(now-120000).toISOString(),generated_at:new Date(now).toISOString(),retention_minutes:60,window_minutes:minutes,window_start:new Date(now-minutes*60000).toISOString(),window_end:new Date(now).toISOString(),requests:{total:60,errors_4xx:2,errors_5xx:1,rate_per_second:.5,p50_ms:2,p95_ms:20,p50_overflow:false,p95_overflow:false,sampled_seconds:120},latency:{unit:'ms',method:'histogram_upper_bound',max_finite_ms:60000,scope:'json_control_plane'},runtime:{uptime_seconds:120,goroutines:24,heap_alloc_bytes:8388608,heap_inuse_bytes:10485760,go_sys_bytes:16777216,num_gc:3},media:{available:true,stale:false,success:36,manual:4,pending:2,total:42,libraries:1,updated_at:new Date(now).toISOString()},tasks:{running:0,recent:[{id:1,kind:'scan',status:'success',started_at:new Date(now-10000).toISOString(),ended_at:new Date(now-5000).toISOString()}]},series:Array.from({length:minutes},(_,i)=>({start:new Date(now-(minutes-i-1)*60000).toISOString(),observed:i>=minutes-2,requests:i>=minutes-2?30:null,errors_4xx:i>=minutes-2?1:null,errors_5xx:i>=minutes-2?0:null,p50_ms:i>=minutes-2?2:null,p95_ms:i>=minutes-2?20:null,p50_overflow:false,p95_overflow:false}))};
+        data={instance_id:'layout-fixture',started_at:new Date(now-120000).toISOString(),generated_at:new Date(now).toISOString(),retention_minutes:60,window_minutes:minutes,window_start:new Date(now-minutes*60000).toISOString(),window_end:new Date(now).toISOString(),requests:{total:60,errors_4xx:2,errors_5xx:1,rate_per_second:.5,p50_ms:2,p95_ms:20,p50_overflow:false,p95_overflow:false,sampled_seconds:120},latency:{unit:'ms',method:'histogram_upper_bound',max_finite_ms:60000,scope:'json_control_plane'},runtime:{uptime_seconds:120,goroutines:24,heap_alloc_bytes:8388608,heap_inuse_bytes:10485760,go_sys_bytes:16777216,num_gc:3},media:{available:true,stale:false,success:36,manual:4,pending:2,total:42,libraries:window.__libraryItems?.length||1,updated_at:new Date(now).toISOString()},tasks:{running:0,recent:[{id:1,kind:'scan',status:'success',started_at:new Date(now-10000).toISOString(),ended_at:new Date(now-5000).toISOString()}]},series:Array.from({length:minutes},(_,i)=>({start:new Date(now-(minutes-i-1)*60000).toISOString(),observed:i>=minutes-2,requests:i>=minutes-2?30:null,errors_4xx:i>=minutes-2?1:null,errors_5xx:i>=minutes-2?0:null,p50_ms:i>=minutes-2?2:null,p95_ms:i>=minutes-2?20:null,p50_overflow:false,p95_overflow:false}))};
       }
       else if(p.endsWith('/security/ip-blocklist')){
         if(options.method==='POST'){const body=JSON.parse(options.body);if(window.__securityFail)return {ok:false,status:409,json:async()=>({error:'<img src=x onerror=alert(1)>'})};__securityRules.push({...body,created_at:'2026-10-29T12:00:00Z',blocked:3});}
@@ -66,9 +79,8 @@ async function browser(t) {
       else if(p.endsWith('/playback-events'))data={total:0,items:[]};
       else if(p.endsWith('/probe'))data={items:[{method:'GET',path:'/Items/123/[redacted:123456789abc]',created_at:'2026-10-29'}]};
       else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),ts:'2026-10-29T12:00:00Z',level:'info',msg:'auto-log-'+id}],next_after:String(id),next_before:String(id),has_more_before:false};}
-      else if(p.endsWith('/tasks'))data={items:[]};
+      else if(p.endsWith('/tasks'))data={items:window.__taskItems||[]};
       else if(p.endsWith('/logs'))data={items:[]};
-      else if(p.endsWith('/scrape/settings'))data={};
       else if(p.endsWith('/status'))data={running:false};
       else if(p.endsWith('/log/settings'))data={retention_days:7,config_etag:'fixture'};
       return {ok:true,status:200,headers:{get:()=>null},json:async()=>data};
@@ -267,6 +279,91 @@ test('通知设置：测试待处理时防重复和锁定编辑，关闭与导�
   assert.deepEqual(await evaluate('__errors'),[]);
 });
 
+test('首页分组：六库紧凑展示、数据表独立边界与服务自然堆叠', { timeout: 90000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await call('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion', value:'reduce' }] });
+  await evaluate(`window.__libraryItems=Array.from({length:6},(_,i)=>({Id:i+1,Name:i===5?'长媒体库名称'+ 'Archive'.repeat(12):'测试媒体库 '+(i+1),count:100+i,Path:'/media/'+i}))`);
+  for (const width of [320, 390, 768, 1440, 1728]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 960, deviceScaleFactor: 1, mobile: width < 860 });
+    await evaluate(`(async()=>{await page('overview');await new Promise(r=>setTimeout(r,250));})()`);
+    const geometry = await evaluate(`(()=>{
+      const root=document.querySelector('.dashboard'), box=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height,width:r.width};};
+      const cards=[...root.querySelectorAll('.dash-card')], main=root.querySelector('.dash-main'), data=root.querySelector('.dash-data'), list=root.querySelector('.dash-library-list');
+      return {root:box(root),scroll:document.documentElement.scrollWidth,first:cards.slice(0,2).map(e=>e.querySelector('h2,h3').textContent),tasks:!!root.querySelector('[data-dash="tasks"]'),libraries:[...list.children].map(e=>({box:box(e),visible:e.getClientRects().length>0})),libraryColumns:getComputedStyle(list).gridTemplateColumns.split(' ').length,mainRow:getComputedStyle(main).gridRowStart,dataParent:data.parentElement===root,data:box(data),caption:{text:data.querySelector('caption').textContent,position:getComputedStyle(data.querySelector('caption')).position,width:box(data.querySelector('caption')).width},groups:[...root.querySelectorAll('.dash-service-stack')].map(e=>({label:e.getAttribute('aria-label'),titles:[...e.querySelectorAll('h3')].map(h=>h.textContent)})),order:[...root.querySelectorAll('h2,h3')].map(e=>e.textContent),columns:getComputedStyle(root.querySelector('.dash-service-cards')).gridTemplateColumns.split(' ').length};
+    })()`);
+    assert.ok(geometry.scroll <= width + 1, `no page overflow at ${width}`);
+    assert.deepEqual(geometry.first, ['媒体库状态', '媒体档案']);
+    assert.equal(geometry.tasks, false);
+    assert.equal(geometry.libraries.length, 6);
+    assert.ok(geometry.libraries.every(row=>row.visible && row.box.left>=geometry.root.left-1 && row.box.right<=geometry.root.right+1));
+    assert.equal(geometry.libraryColumns, width > 650 ? 2 : 1);
+    assert.equal(geometry.mainRow, 'auto');
+    assert.equal(geometry.dataParent, true, 'table disclosure is not inside either chart');
+    assert.ok(Math.abs(geometry.data.width-geometry.root.width)<1, 'table disclosure occupies its own full row');
+    assert.equal(geometry.caption.text, '所选窗口逐分钟监控样本');
+    assert.equal(geometry.caption.position, 'absolute'); assert.ok(geometry.caption.width<=1, 'caption stays accessible without adding visible height');
+    assert.deepEqual(geometry.groups, [{label:'基础环境',titles:['程序与环境','存储与缓存']},{label:'作业与服务',titles:['后台作业','服务配置']}]);
+    assert.equal(geometry.columns, width > 650 ? 2 : 1);
+    assert.ok(geometry.order.indexOf('请求与服务端错误') < geometry.order.indexOf('请求耗时分位数'));
+    assert.ok(geometry.order.indexOf('请求耗时分位数') < geometry.order.indexOf('Go 运行时'));
+    const opened = await evaluate(`(()=>{
+      const root=document.querySelector('.dashboard'), data=root.querySelector('.dash-data'), rect=e=>e.getBoundingClientRect(), charts=[...root.querySelectorAll('.dash-chart')], before=charts.map(e=>rect(e).height);
+      data.open=true; const wrap=data.querySelector('.table-wrap'), table=data.querySelector('table'), d=rect(data),w=rect(wrap), caption=data.querySelector('caption');
+      return {before,after:charts.map(e=>rect(e).height),inside:w.left>=d.left&&w.right<=d.right&&w.bottom<=d.bottom,margin:getComputedStyle(wrap).margin,rows:table.tBodies[0].rows.length,caption:caption.textContent,scroll:document.documentElement.scrollWidth};
+    })()`);
+    assert.deepEqual(opened.after, opened.before, 'opening data cannot stretch charts');
+    assert.equal(opened.inside,true, `table border remains inside card at ${width}`);
+    assert.equal(opened.margin, '0px'); assert.equal(opened.rows,15); assert.ok(opened.scroll<=width+1);
+    const stack = await evaluate(`(()=>{
+      const groups=[...document.querySelectorAll('.dash-service-stack')], first=groups[0].children[0], next=groups[0].children[1], other=groups[1].children[0], h=e=>e.getBoundingClientRect().height, before=h(other);
+      first.querySelector('details').open=true;
+      return {gap:next.getBoundingClientRect().top-first.getBoundingClientRect().bottom,otherBefore:before,otherAfter:h(other),height:h(first),scroll:document.documentElement.scrollWidth};
+    })()`);
+    assert.ok(Math.abs(stack.gap-16)<1, 'expanded card pushes only its own semantic stack');
+    assert.equal(stack.otherAfter,stack.otherBefore,'neighbor stack is not stretched'); assert.ok(stack.scroll<=width+1);
+    await evaluate(`document.querySelector('.dash-service-stack summary').focus()`);
+    const tabOrder=[];
+    for (let i=0;i<4;i++) {
+      tabOrder.push(await evaluate(`document.activeElement.closest('.dash-service-card')?.getAttribute('aria-label')`));
+      if(i<3){await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});}
+    }
+    assert.deepEqual(tabOrder,['程序与环境','存储与缓存','后台作业','服务配置'],'keyboard follows the fixed semantic groups');
+    if (process.env.EMBY_LAYOUT_ARTIFACT_DIR) {
+      const output=path.resolve(process.env.EMBY_LAYOUT_ARTIFACT_DIR); fs.mkdirSync(output,{recursive:true});
+      const shot=await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});
+      fs.writeFileSync(path.join(output,`overview-groups-${width}.png`),Buffer.from(shot.data,'base64'));
+    }
+    assert.deepEqual(await evaluate('__errors'),[]);
+  }
+});
+
+test('资料处理整合：响应分组、范围独立、旧入口兼容与防火墙首卡间距', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await call('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion', value:'reduce' }] });
+  await evaluate(`window.__libraryItems=Array.from({length:3},(_,i)=>({Id:i+1,Name:'媒体库 '+(i+1),count:10,Path:'/media/'+i}))`);
+  for (const width of [390, 768, 1440]) {
+    await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<860});
+    const layout=await evaluate(`(async()=>{await page('translate');await new Promise(r=>setTimeout(r,150));const grid=document.querySelector('.scrape-tools-grid');return {cards:[...grid.querySelectorAll(':scope > .panel,:scope > .scrape-operation-stack > .panel')].map(e=>e.id),columns:getComputedStyle(grid).gridTemplateColumns.split(' ').length,scope:!!document.querySelector('#translate-library'),candidate:document.querySelector('#scrape-count').textContent,scroll:document.documentElement.scrollWidth};})()`);
+    assert.equal(layout.scope,true,'legacy translate navigation retains translation controls');
+    assert.ok(layout.cards.includes('scrape-run-card')&&layout.cards.includes('avatar-card')&&layout.cards.includes('translation-card'));
+    assert.equal(layout.columns,width>850?2:1); assert.match(layout.candidate,/12/); assert.ok(layout.scroll<=width+1);
+    const scopes=await evaluate(`(async()=>{
+      document.querySelector('#sc-lib').value='1';document.querySelector('#avatar-library').value='2';document.querySelector('#translate-library').value='3';document.querySelector('#avatar-limit').value='9';document.querySelector('#translate-limit').value='5';
+      document.querySelector('#avatar-form').requestSubmit();document.querySelector('[data-translate-start]').click();await new Promise(r=>setTimeout(r,50));
+      const calls=__calls.filter(c=>c.method==='POST'),last=ending=>JSON.parse(calls.filter(c=>c.url.endsWith(ending)).at(-1).body);
+      return {scrape:document.querySelector('#sc-lib').value,avatar:last('/scrape/avatars'),translation:last('/translate/run'),translateState:document.querySelector('[data-translate-progress]').textContent};
+    })()`);
+    assert.equal(scopes.scrape,'1'); assert.deepEqual(scopes.avatar,{library_id:2,limit:9});
+    assert.equal(scopes.translation.library_id,3);assert.equal(scopes.translation.limit,5);assert.deepEqual(scopes.translation.fields,['title']);
+    assert.doesNotMatch(scopes.translateState,/状态未知/);
+    const firewall=await evaluate(`(async()=>{await page('firewall');await new Promise(r=>setTimeout(r,100));const first=document.querySelector('#firewall-blocklist .panel').getBoundingClientRect(),next=document.querySelector('#firewall-login-title').closest('.panel').getBoundingClientRect();return {gap:next.top-first.bottom,scroll:document.documentElement.scrollWidth};})()`);
+    assert.ok(Math.abs(firewall.gap-16)<1,`firewall first-card gap at ${width}: ${firewall.gap}`);assert.ok(firewall.scroll<=width+1);
+    assert.deepEqual(await evaluate('__errors'),[]);
+  }
+});
+
 test('完整前端：桌面与移动端页面布局、渐进表单和触控导航', { timeout: 120000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);
@@ -283,6 +380,12 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
         const metrics = await evaluate(`(()=>{const r=document.querySelector('#overview-dashboard');return {root:!!r,live:r?.getAttribute('aria-live'),sample:document.querySelector('[data-dash="p95"]')?.textContent,charts:r?.querySelectorAll('svg[role="img"]').length,axes:[...r.querySelectorAll('.dash-axis')].map(n=>parseFloat(getComputedStyle(n).fontSize)*n.getScreenCTM().a),controls:[...r.querySelectorAll('.dash-toolbar button')].filter(b=>b.getClientRects().length).map(b=>({h:b.getBoundingClientRect().height}))};})()`);
         assert.equal(metrics.root,true); assert.equal(metrics.live,'off'); assert.equal(metrics.sample,'20'); assert.equal(metrics.charts,2); assert.ok(metrics.axes.every(size=>size>=11.99),'real CSS axis size '+width+': '+metrics.axes);
         assert.ok(metrics.controls.every(b=>b.h>=43.99),`dashboard touch controls at ${width}`);
+        const bento = await evaluate(`(()=>{const r=document.querySelector('#overview-dashboard'), cards=[...r.querySelectorAll('.dash-card')], main=getComputedStyle(r.querySelector('.dash-main'));return {columns:getComputedStyle(r).gridTemplateColumns.split(' ').length,grids:[r,...r.querySelectorAll('*')].filter(e=>getComputedStyle(e).display==='grid').length,first:cards[0].querySelector('h2').textContent,backgrounds:[...new Set(cards.map(e=>getComputedStyle(e).backgroundColor))],radii:[...new Set(cards.map(e=>getComputedStyle(e).borderRadius))],row:main.gridRowStart,col:main.gridColumnStart,service:r.querySelectorAll('.dash-service-card').length,scan:r.querySelector('#overview-scan').textContent};})()`);
+        assert.equal(bento.columns, width > 1100 ? 4 : width > 650 ? 2 : 1);
+        assert.ok(bento.grids >= 5, 'explicit component grids'); assert.equal(bento.first, '媒体库状态');
+        assert.deepEqual(bento.backgrounds, ['rgb(21, 21, 23)']); assert.equal(bento.radii.length, 1);
+        assert.equal(bento.row, 'auto'); assert.equal(bento.col, width > 650 ? 'span 2' : 'auto');
+        assert.equal(bento.service, 4); assert.match(bento.scan, /测试媒体库 · 42 \/ 120/);
         const switched=await evaluate(`(async()=>{document.querySelector('[data-window="5"]').click();document.querySelector('[data-window="60"]').click();await new Promise(r=>setTimeout(r,40));return {selected:document.querySelector('[data-window="60"]').getAttribute('aria-pressed'),rows:document.querySelectorAll('[data-dash="samples"] tr').length,scroll:document.documentElement.scrollWidth};})()`);
         assert.equal(switched.selected,'true');assert.equal(switched.rows,60);assert.ok(switched.scroll<=width+1);
         const pause=await evaluate(`(()=>{const b=document.querySelector('[data-dash="pause"]');b.click();return {pressed:b.getAttribute('aria-pressed'),state:document.querySelector('[data-dash="state"]').textContent};})()`);
@@ -441,5 +544,137 @@ test('实心强调控件：详情保存与媒体库添加在各视口及交互�
     }
     await evaluate('closeDetail()');
     assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'),true,JSON.stringify(viewport));
+  }
+});
+
+test('扫描原生progress：确定/未知/受限/错误与长内容窄屏、键盘收起', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await evaluate('(async()=>{await new Promise(requestAnimationFrame);stopScanPolling();stopDashboardPolling()})()');
+  for (const width of [320,390,768,1440]) {
+    await call('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
+    const result=await evaluate(`(()=>{
+      renderScanProgress({running:true,mode:'incremental',library_name:'长媒体库名称/'.repeat(12),groups_total:120,groups_done:42,current:'/media/'+'long-file-name'.repeat(20)+'.strm'});
+      const p=document.querySelector('#scan-progress-fill'),panel=document.querySelector('#scan-progress');
+      const r=panel.getBoundingClientRect();
+      const known={tag:p.tagName,max:p.max,value:p.value,indeterminate:p.matches(':indeterminate'),label:p.getAttribute('aria-labelledby'),close:scanClose.hidden,closeVisible:!!scanClose.getClientRects().length,fits:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,overflow:panel.scrollWidth>panel.clientWidth,live:panel.hasAttribute('aria-live')};
+      renderScanProgress({running:true,total:0,done:7});
+      const unknown={indeterminate:p.matches(':indeterminate'),count:scanCount.textContent};
+      scanProgressUnavailable(3000);
+      const unavailable={hidden:p.hidden,value:p.hasAttribute('value'),title:scanTitle.textContent};
+      renderScanProgress({running:false,finished_at:'now',groups_total:120,groups_done:42,mode:'incremental',failed:2,incomplete:true,error:'失败的长文件路径/'.repeat(120)});
+      const error={state:panel.dataset.state,value:p.value,close:scanClose.hidden,detail:scanDetail.textContent,scrollable:scanDetail.scrollHeight>scanDetail.clientHeight,buttonHeight:scanClose.getBoundingClientRect().height};
+      scanClose.focus();
+      return {known,unknown,unavailable,error};
+    })()`);
+    assert.deepEqual(result.known,{tag:'PROGRESS',max:100,value:35,indeterminate:false,label:'scan-progress-title',close:true,closeVisible:false,fits:true,overflow:false,live:false},String(width));
+    assert.equal(result.unknown.indeterminate,true); assert.match(result.unknown.count,/7.*总量待确认/);
+    assert.deepEqual(result.unavailable,{hidden:true,value:false,title:'扫描状态未确认'});
+    assert.equal(result.error.state,'error'); assert.equal(result.error.value,35); assert.equal(result.error.close,false);
+    assert.match(result.error.detail,/未执行缺失索引清理/); assert.equal(result.error.scrollable,true); assert.ok(result.error.buttonHeight>=44);
+    assert.equal(await evaluate('document.activeElement.id'),'scan-progress-close','result dismiss remains keyboard focusable');
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+    assert.equal(await evaluate('scanPanel.hidden'),true);
+    assert.equal(await evaluate('__calls.some(c=>c.method==="POST")'),false,'dismissing results never cancels or resubmits a scan');
+    await evaluate('renderScanProgress({running:true,library_name:"电影与剧集",mode:"incremental",groups_total:120,groups_done:42,unchanged_groups:30,added:8,updated:4,current:"/media/示例影片.strm"})');
+    if(process.env.SCAN_PROGRESS_SCREENSHOT_DIR && [390,1440].includes(width)) {
+      fs.mkdirSync(process.env.SCAN_PROGRESS_SCREENSHOT_DIR,{recursive:true});
+      const image=await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      fs.writeFileSync(path.join(process.env.SCAN_PROGRESS_SCREENSHOT_DIR,`scan-${width}.png`),Buffer.from(image.data,'base64'));
+      if(width===1440) {
+        const clip=await evaluate('(()=>{const r=scanPanel.getBoundingClientRect();return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height,scale:1}})()');
+        const control=await call('Page.captureScreenshot',{format:'png',clip});
+        fs.writeFileSync(path.join(process.env.SCAN_PROGRESS_SCREENSHOT_DIR,'scan-control.png'),Buffer.from(control.data,'base64'));
+      }
+    }
+  }
+  await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+  assert.equal(await evaluate(`(()=>{renderScanProgress({running:true});return getComputedStyle(scanFill,'::-webkit-progress-bar').animationName;})()`),'none');
+});
+
+
+test('原生选项与焦点：鼠标/Tab/Space/单选方向键、禁用、长标签和高对比度', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await evaluate(`(async()=>{await page("scheduled");stopScanPolling();stopDashboardPolling();await Promise.all(document.querySelector('#content').getAnimations({subtree:true}).filter(a=>a.effect.getComputedTiming().endTime!==Infinity).map(a=>a.finished))})()`);
+  assert.deepEqual(await evaluate(`(()=>{const s=document.querySelector('.switch input');return {type:s.type,role:s.role,name:s.getAttribute('aria-label'),visible:s.getBoundingClientRect().width>=44}})()`),{type:'checkbox',role:'switch',name:'启用计划任务：夜间扫描',visible:true});
+  await evaluate(`(()=>{window.__toggleDelay=true;document.querySelector('.switch input').focus()})()`);
+  for(const type of ['keyDown','keyUp'])await call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
+  assert.deepEqual(await evaluate(`({disabled:document.querySelector('.switch input').disabled,busy:document.querySelector('.switch input').getAttribute('aria-busy'),posts:__calls.filter(c=>c.method==='POST'&&c.url.endsWith('/toggle')).length})`),{disabled:true,busy:'true',posts:1});
+  for(const type of ['keyDown','keyUp'])await call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
+  assert.equal(await evaluate(`__calls.filter(c=>c.method==='POST'&&c.url.endsWith('/toggle')).length`),1);
+  await evaluate(`(async()=>{__resolveToggle();for(let i=0;i<100;i++){const e=document.querySelector('.switch input');if(e&&!e.disabled&&!e.checked&&document.activeElement===e)return;await new Promise(r=>setTimeout(r,10));}throw Error('switch did not restore focus/state')})()`);
+  await evaluate(`(()=>{window.__toggleFail=true;document.querySelector('.switch input').focus()})()`);
+  for(const type of ['keyDown','keyUp'])await call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
+  await evaluate(`(async()=>{__resolveToggle();for(let i=0;i<100;i++){const e=document.querySelector('.switch input');if(e&&!e.disabled&&!e.checked&&document.activeElement===e)return;await new Promise(r=>setTimeout(r,10));}throw Error('failed switch did not restore focus/state')})()`);
+  // Production has no radio group: exercise the shared styles with real native radios,
+  // not a new business setting or a hand-written keyboard/event implementation.
+  await evaluate(`(()=>{document.querySelector('#content').innerHTML='<section class="panel" id="option-fixture"><h2>键盘焦点与原生选项</h2><button id="focus-start" class="btn">开始</button><label class="check"><input id="native-check" type="checkbox"><span>'+ '很长的复选框标签LongLabel/'.repeat(18) +'</span></label><label class="check"><input id="disabled-check" type="checkbox" disabled>不可用的复选框</label><fieldset><legend>互斥选项</legend><label class="check"><input id="radio-a" type="radio" name="native-group" checked>选项一</label><label class="check"><input id="radio-b" type="radio" name="native-group">选项二</label><label class="check"><input type="radio" name="native-group" disabled>禁用选项</label></fieldset><label class="switch"><input id="native-switch" type="checkbox" role="switch" aria-label="测试即时开关"></label><label class="check"><input id="mixed-check" type="checkbox">部分选中（原生 indeterminate）</label><button class="btn btn-accent" disabled>不可用的按钮</button><p><a href="#fixture" id="focus-link">普通链接</a></p><details><summary>展开更多内容</summary>详情</details></section>';document.querySelector('#mixed-check').indeterminate=true;})()`);
+  await evaluate(`Promise.all(document.querySelector('#content').getAnimations({subtree:true}).filter(a=>a.effect.getComputedTiming().endTime!==Infinity).map(a=>a.finished))`);
+  for(const width of [320,390,1440]) {
+    await call('Emulation.setDeviceMetricsOverride',{width,height:860,deviceScaleFactor:1,mobile:false});
+    await evaluate(`(()=>{document.querySelector('#native-check').checked=false;document.querySelector('#radio-a').checked=true;document.querySelector('#native-switch').disabled=false;document.querySelector('#native-switch').checked=false;document.querySelector('#focus-start').scrollIntoView({block:'center'})})()`);
+    const point=await evaluate(`(()=>{const r=document.querySelector('#focus-start').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
+    await call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point});
+    await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point});
+    assert.equal(await evaluate(`document.querySelector('#focus-start').matches(':focus-visible')`),false,'pointer button has no keyboard ring');
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    assert.deepEqual(await evaluate(`(()=>{const e=document.activeElement,s=getComputedStyle(e);return {id:e.id,ring:s.outlineStyle,width:s.outlineWidth,visible:e.matches(':focus-visible'),shadow:s.boxShadow}})()`),{id:'native-check',ring:'solid',width:'2px',visible:true,shadow:'none'});
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    assert.equal(await evaluate(`document.querySelector('#native-check').checked`),true);
+    assert.equal(await evaluate(`(()=>{const e=document.querySelector('#disabled-check');e.closest('label').click();return e.checked})()`),false);
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    assert.equal(await evaluate('document.activeElement.id'),'radio-a','disabled checkbox skipped');
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    assert.deepEqual(await evaluate(`({id:document.activeElement.id,a:document.querySelector('#radio-a').checked,b:document.querySelector('#radio-b').checked})`),{id:'radio-b',a:false,b:true});
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+    assert.equal(await evaluate('document.activeElement.id'),'native-switch');
+    await call('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    await call('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    assert.equal(await evaluate(`document.querySelector('#native-switch').checked`),true);
+    const layout=await evaluate(`(()=>{const s=document.querySelector('#native-switch'),c=document.querySelector('#native-check'),label=c.closest('label');return {fits:document.documentElement.scrollWidth<=innerWidth,controlWidth:c.getBoundingClientRect().width,labelHeight:label.getBoundingClientRect().height,switchWidth:s.getBoundingClientRect().width,switchOpacity:getComputedStyle(s).opacity,mixed:document.querySelector('#mixed-check').indeterminate};})()`);
+    assert.equal(layout.fits,true,String(width));assert.ok(layout.controlWidth>=18);assert.ok(layout.labelHeight>=44);assert.ok(layout.switchWidth>=44);assert.equal(layout.switchOpacity,'1');assert.equal(layout.mixed,true);
+    assert.equal(await evaluate(`(()=>{const e=document.querySelector('#native-switch');e.disabled=true;e.click();return e.checked})()`),true,'disabled switch cannot toggle');
+  }
+  await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'},{name:'forced-colors',value:'active'}]});
+  assert.deepEqual(await evaluate(`(()=>{const s=getComputedStyle(document.querySelector('#native-switch'));return {appearance:s.appearance,duration:s.transitionDuration}})()`),{appearance:'auto',duration:'0s'});
+  if(process.env.FOCUS_CONTROLS_SCREENSHOT_DIR) {
+    await call('Emulation.setEmulatedMedia',{features:[]});
+    fs.mkdirSync(process.env.FOCUS_CONTROLS_SCREENSHOT_DIR,{recursive:true});
+    await evaluate(`(()=>{document.querySelector('#option-fixture').style.maxWidth='560px';document.querySelector('#native-check').nextElementSibling.textContent='完整保留的长标签，会根据可用空间换行；复选框不压缩，整行都可点击。';const s=document.querySelector('#native-switch');s.disabled=false;s.closest('label').append('即时开关');document.querySelector('#native-check').focus();})()`);
+    for(const width of [390,1440]) {
+      await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate(`(async()=>{scrollTo({top:0,left:0,behavior:'instant'});await Promise.all(document.getAnimations().filter(a=>a.effect.getComputedTiming().endTime!==Infinity).map(a=>a.finished))})()`);
+      const clip=await evaluate(`(()=>{const r=document.querySelector('#option-fixture').getBoundingClientRect();return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height,scale:1}})()`);
+      const image=await call('Page.captureScreenshot',{format:'png',clip,captureBeyondViewport:true});
+      fs.writeFileSync(path.join(process.env.FOCUS_CONTROLS_SCREENSHOT_DIR,`controls-${width}.png`),Buffer.from(image.data,'base64'));
+    }
+  }
+});
+
+
+test('任务徽标：succeeded与success样式一致，窄列进行中不拆行', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  await evaluate(`(async()=>{window.__taskItems=[{id:3,type:'scan',status:'succeeded',result:{added:52,updated:27}},{id:2,type:'translate',status:'success'},{id:1,type:'probe',status:'running'}];await page('tasks');stopTasksPolling();stopScanPolling();stopDashboardPolling();await Promise.all(document.getAnimations().filter(a=>a.effect.getComputedTiming().endTime!==Infinity).map(a=>a.finished))})()`);
+  for(const width of [390,827,1440]) {
+    await call('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
+    const result=await evaluate(`(()=>{const nodes=[...document.querySelectorAll('#task-table .badge')];const style=e=>{const s=getComputedStyle(e),d=getComputedStyle(e,'::before');return {color:s.color,background:s.backgroundColor,border:s.borderColor,radius:s.borderRadius,font:s.font,padding:s.padding,dot:d.color,dotWidth:d.width,dotShrink:d.flexShrink}};const r=document.createRange();r.selectNodeContents(nodes[2]);return {scan:style(nodes[0]),other:style(nodes[1]),labels:nodes.map(e=>e.textContent),nowrap:getComputedStyle(nodes[2]).whiteSpace,lines:r.getClientRects().length,fits:document.documentElement.scrollWidth<=innerWidth}})()`);
+    assert.deepEqual(result.scan,result.other,String(width));
+    assert.notEqual(result.scan.background,'rgba(0, 0, 0, 0)');
+    assert.equal(result.scan.dotShrink,'0');
+    assert.deepEqual(result.labels,['成功','成功','进行中']);
+    assert.equal(result.nowrap,'nowrap');assert.equal(result.lines,1);assert.equal(result.fits,true);
+    if(width===827&&process.env.TASK_BADGE_SCREENSHOT) {
+      await evaluate(`(async()=>{scrollTo({top:0,left:0,behavior:'instant'});await Promise.all(document.getAnimations().filter(a=>a.effect.getComputedTiming().endTime!==Infinity).map(a=>a.finished))})()`);
+      const image=await call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      fs.writeFileSync(process.env.TASK_BADGE_SCREENSHOT,Buffer.from(image.data,'base64'));
+    }
   }
 });

@@ -352,7 +352,7 @@ func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, id int64, active
 		}
 		m, e := readSpriteDisk(r, id, entry.Name())
 		if e == nil && m.State.Revision >= revision {
-			if time.Since(info.ModTime()) < 17*time.Minute {
+			if time.Since(info.ModTime()) < spritePruneGrace {
 				return errors.New("another sprite generation is in progress")
 			}
 			if e = removeSpriteGeneration(r, id, entry.Name(), info); e != nil {
@@ -366,7 +366,7 @@ func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, id int64, active
 			if !errors.Is(e, ErrSpriteNotFound) {
 				return e
 			}
-			if time.Since(info.ModTime()) < 17*time.Minute {
+			if time.Since(info.ModTime()) < spritePruneGrace {
 				return errors.New("another sprite generation is in progress")
 			}
 			if err = removeSpriteGeneration(r, id, entry.Name(), info); err != nil {

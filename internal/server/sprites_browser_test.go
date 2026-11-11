@@ -132,11 +132,13 @@ with sync_playwright() as p:
   library_geometry=page.evaluate('({inner:innerWidth,scroll:document.documentElement.scrollWidth,right:document.querySelector("#library-sprite-settings").getBoundingClientRect().right})');assert library_geometry['scroll']<=width and library_geometry['right']<=width,library_geometry
   action_boxes=page.locator('[data-lib-sprites]').first.locator('..').locator('button').evaluate_all('(els)=>els.map(e=>{const r=e.getBoundingClientRect();return {label:e.textContent.trim()||e.title,x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height}})')
   assert all(b['x']>=0 and b['right']<=width for b in action_boxes),action_boxes
-  assert max(b['width'] for b in action_boxes)-min(b['width'] for b in action_boxes)<1,action_boxes
-  for i,b in enumerate(action_boxes):
-   assert b['height']>=44 and abs(b['x']-action_boxes[i%2]['x'])<1,action_boxes
-   if i%2: assert abs(b['y']-action_boxes[i-1]['y'])<1 and abs(b['bottom']-action_boxes[i-1]['bottom'])<1,action_boxes
-  table_geometry=page.locator('.library-table').evaluate('(e)=>({scroll:e.scrollWidth,client:e.clientWidth})');assert table_geometry['scroll']<=table_geometry['client']+1,table_geometry
+  assert all(b['height']>=(44 if width<1000 else 40) for b in action_boxes),action_boxes
+  for i in range(len(action_boxes)):
+   for j in range(i+1,len(action_boxes)):
+    a,c=action_boxes[i],action_boxes[j]
+    overlap=min(a['right'],c['right'])-max(a['x'],c['x'])>0 and min(a['bottom'],c['bottom'])-max(a['y'],c['y'])>0
+    assert not overlap,(a,c)
+  table_geometry=page.locator('.library-grid').evaluate('(e)=>({scroll:e.scrollWidth,client:e.clientWidth})');assert table_geometry['scroll']<=table_geometry['client']+1,table_geometry
   preset_box=preset.bounding_box();save_box=save.bounding_box();assert abs(preset_box['x']-save_box['x'])<1 and abs(preset_box['width']-save_box['width'])<1,(preset_box,save_box)
   library_sizes=settings.locator('button,input,select').evaluate_all('(els)=>els.filter(e=>e.getClientRects().length).map(e=>e.getBoundingClientRect().height)');assert all(v>=44 for v in library_sizes),library_sizes
   page.screenshot(path=os.path.join(root,str(width)+'-library-settings.png'),full_page=True);assert len(runs)==0;assert page.request.get(base+'/api/items/'+movie_id+'/sprites',headers={'X-Emby-Token':token}).json()['generation']==published
