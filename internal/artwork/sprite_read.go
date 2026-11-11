@@ -85,7 +85,7 @@ func readSpriteAsset(ctx context.Context, r *spriteRoot, m spriteDiskManifest, n
 	}
 	return b, ctx.Err()
 }
-func validateSpriteFiles(ctx context.Context, r *spriteRoot, m spriteDiskManifest) error {
+func validateSpriteFiles(ctx context.Context, source *spriteSource, r *spriteRoot, m spriteDiskManifest) error {
 	if err := validateSpriteManifest(m); err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func validateSpriteFiles(ctx context.Context, r *spriteRoot, m spriteDiskManifes
 			return err
 		}
 	}
-	b, err := readSpriteAsset(ctx, r, m, "index.bif", m.BIFBytes, m.BIFHash, spriteMaxBytes)
+	b, err := readSpriteBIFAsset(ctx, source, r, m)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ type spriteReadHandle struct {
 	unlock   func()
 }
 
-func (h *spriteReadHandle) close() { h.source.root.Close(); h.root.root.Close(); h.unlock() }
+func (h *spriteReadHandle) close() { h.source.close(); h.root.root.Close(); h.unlock() }
 func openSpriteRead(ctx context.Context, db *store.Store, id int64, generation, rootDir string) (*spriteReadHandle, error) {
 	if id <= 0 || generation != "" && !spriteHex(generation, 32) {
 		return nil, ErrSpriteNotFound
@@ -133,7 +133,7 @@ func openSpriteRead(ctx context.Context, db *store.Store, id int64, generation, 
 	}
 	defer func() {
 		if !ok {
-			source.root.Close()
+			source.close()
 		}
 	}()
 	current, err := db.SpriteContext(ctx, id)
@@ -165,6 +165,9 @@ func openSpriteRead(ctx context.Context, db *store.Store, id int64, generation, 
 	if err != nil {
 		return nil, err
 	}
+	if m.NFOPath != "" && m.NFOPath != source.movie.NFOPath {
+		return nil, ErrSpriteChanged
+	}
 	if !sameSpriteSource(m.State, current) || m.State.Revision > current.Revision {
 		return nil, ErrSpriteChanged
 	}
@@ -191,7 +194,7 @@ func (h *spriteReadHandle) verify(ctx context.Context, db *store.Store) error {
 	if err != nil {
 		return err
 	}
-	if movie.LibraryID != h.source.movie.LibraryID || movie.SourcePath != h.source.movie.SourcePath || libraryRoot != h.source.libraryRoot {
+	if movie.LibraryID != h.source.movie.LibraryID || movie.SourcePath != h.source.movie.SourcePath || movie.NFOPath != h.source.movie.NFOPath || libraryRoot != h.source.libraryRoot {
 		return ErrSpriteChanged
 	}
 	return ctx.Err()
@@ -245,7 +248,7 @@ func ReadSpriteBIF(ctx context.Context, db *store.Store, movieID int64, generati
 	}
 	defer h.close()
 	m := h.manifest
-	b, err := readSpriteAsset(ctx, h.root, m, "index.bif", m.BIFBytes, m.BIFHash, spriteMaxBytes)
+	b, err := readSpriteBIFAsset(ctx, h.source, h.root, m)
 	if err != nil {
 		return nil, err
 	}
@@ -297,9 +300,10 @@ func ReadSpriteFrame(ctx context.Context, db *store.Store, movieID int64, genera
 type spriteRetained struct {
 	generation string
 	created    int64
+	nfoPath    string
 }
 
-func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, id int64, active string, revision int64, keep int) error {
+func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, source *spriteSource, id int64, active string, revision int64, keep int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -355,6 +359,11 @@ func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, id int64, active
 			if time.Since(info.ModTime()) < spritePruneGrace {
 				return errors.New("another sprite generation is in progress")
 			}
+			if m.NFOPath == source.movie.NFOPath {
+				if e = removeSpriteBIF(source, entry.Name()); e != nil {
+					return e
+				}
+			}
 			if e = removeSpriteGeneration(r, id, entry.Name(), info); e != nil {
 				return e
 			}
@@ -369,17 +378,25 @@ func pruneSpriteGenerations(ctx context.Context, r *spriteRoot, id int64, active
 			if time.Since(info.ModTime()) < spritePruneGrace {
 				return errors.New("another sprite generation is in progress")
 			}
+			if err = removeSpriteBIF(source, entry.Name()); err != nil {
+				return err
+			}
 			if err = removeSpriteGeneration(r, id, entry.Name(), info); err != nil {
 				return err
 			}
 			continue
 		}
-		retained = append(retained, spriteRetained{entry.Name(), m.Created})
+		retained = append(retained, spriteRetained{entry.Name(), m.Created, m.NFOPath})
 	}
 	sort.Slice(retained, func(i, j int) bool { return retained[i].created > retained[j].created })
 	for i := keep; i < len(retained); i++ {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if retained[i].nfoPath == source.movie.NFOPath {
+			if err = removeSpriteBIF(source, retained[i].generation); err != nil {
+				return err
+			}
 		}
 		if err = removeSpriteGeneration(r, id, retained[i].generation); err != nil {
 			return err
@@ -441,12 +458,12 @@ func removeSpriteDirectory(parent *os.Root, dir string, expected ...os.FileInfo)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
-	if len(entries) > 8 {
+	if len(entries) > 9 {
 		return errors.New("sprite cleanup file quota exceeded")
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		valid := name == "manifest.json" || name == "index.bif"
+		valid := name == "manifest.json" || name == "manifest.json.tmp" || name == "index.bif"
 		for i := range 6 {
 			valid = valid || name == fmt.Sprintf("sheet-%03d.jpg", i)
 		}

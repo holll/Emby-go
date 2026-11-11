@@ -65,6 +65,18 @@ func spriteSeed(t *testing.T, f translationFixture) artwork.SpriteManifest {
 	if err != nil || !result.Changed {
 		t.Fatalf("seed: %+v %v", result, err)
 	}
+	movie, err := f.a.db.Movie(f.movie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bifPath := strings.TrimSuffix(movie.NFOPath, filepath.Ext(movie.NFOPath)) + ".bif"
+	if _, err := os.Stat(bifPath); err != nil {
+		t.Fatalf("BIF must be adjacent to and share the NFO basename: %v", err)
+	}
+	oldPath := filepath.Join(opts.RootDir, fmt.Sprint(f.movie), result.Manifest.Generation, "index.bif")
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("BIF must not remain in video-previews: %v", err)
+	}
 	return result.Manifest
 }
 func spriteJoin(t *testing.T, a *App) spriteStatus {

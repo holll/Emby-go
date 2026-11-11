@@ -60,20 +60,41 @@ function fixture(respond = async () => ({ title: 'Saved', images: 0 })) {
 test('ordered unique payload, deselection compaction/reselection append, version and explicit false/zero', async () => {
   const env = fixture();
   env.check(2); env.check(0); env.check(2, false); env.check(2);
-  assert.equal(env.get('scrape-still-order-0').textContent, '→ fanart1.jpg');
-  assert.equal(env.get('scrape-still-order-2').textContent, '→ fanart2.jpg');
-  assert.equal(env.get('scrape-stills-count').textContent, '已选 2 张');
+  assert.equal(env.get('scrape-still-order-0').textContent, '→ fanart1.webp');
+  assert.equal(env.get('scrape-still-order-2').textContent, '→ fanart2.webp');
+  assert.equal(env.get('scrape-stills-count').textContent, '仅下载已选 2 张');
+  assert.equal(env.get('scrape-still-order-1').textContent, '不在自定义范围');
   await env.submit();
   assert.deepEqual(env.calls[0].payload, { provider: 'p', id: 'old', overwrite: false, update: false, position: 0, stills: { version, indices: [0, 2] } });
 });
 
-test('empty/default and cleared selection omit stills completely', async () => {
+test('default and restored-all selections omit stills to request every upstream image', async () => {
   for (const clear of [false, true]) {
     const env = fixture();
-    if (clear) { env.check(1); env.get('scrape-stills-clear').click(); }
+    assert.match(env.results.innerHTML, /默认下载全部剧照/);
+    assert.match(env.results.innerHTML, /恢复默认全部下载/);
+    assert.match(env.results.innerHTML, /默认全部下载不受 24 张限制/);
+    assert.equal(env.get('scrape-stills-clear').disabled, true);
+    if (clear) {
+      env.check(1);
+      assert.equal(env.get('scrape-stills-count').textContent, '仅下载已选 1 张');
+      env.get('scrape-stills-clear').click();
+      assert.equal(env.get('scrape-stills-count').textContent, '默认下载全部剧照');
+      assert.equal(env.get('scrape-still-order-1').textContent, '默认下载全部');
+      assert.equal(env.get('scrape-stills-clear').disabled, true);
+    }
     await env.submit();
     assert.equal(Object.hasOwn(env.calls[0].payload, 'stills'), false);
   }
+});
+
+test('deselecting the last custom still restores the default-all policy', () => {
+  const env = fixture();
+  env.check(2);
+  assert.equal(env.get('scrape-still-order-0').textContent, '不在自定义范围');
+  env.check(2, false);
+  assert.equal(env.get('scrape-stills-count').textContent, '默认下载全部剧照');
+  for (const index of [0, 1, 2]) assert.equal(env.get('scrape-still-order-' + index).textContent, '默认下载全部');
 });
 
 test('native labeled controls retain preview version and escape all remote still values', () => {

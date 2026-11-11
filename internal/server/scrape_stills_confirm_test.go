@@ -244,7 +244,7 @@ func TestScrapeSelectedStillsConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths := []string{filepath.Join(dir, "fanart1.jpg"), filepath.Join(dir, "fanart2.jpg"), tail}
+	paths := []string{filepath.Join(dir, "fanart1.webp"), filepath.Join(dir, "fanart2.webp"), tail}
 	if !reflect.DeepEqual(after.ExtraBackdrops, paths) {
 		t.Fatalf("index=%v", after.ExtraBackdrops)
 	}
@@ -253,9 +253,13 @@ func TestScrapeSelectedStillsConfirm(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
-		if err != nil {
-			t.Fatalf("not JPEG %s: %v", path, err)
+		cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+		wantFormat := "webp"
+		if path == tail {
+			wantFormat = "jpeg" // Legacy unselected JPG remains untouched and indexed.
+		}
+		if err != nil || format != wantFormat {
+			t.Fatalf("image format %s: got %q want %q: %v", path, format, wantFormat, err)
 		}
 		width := 40
 		if i == 0 {
@@ -270,8 +274,8 @@ func TestScrapeSelectedStillsConfirm(t *testing.T) {
 		t.Fatal("unselected tail changed")
 	}
 	resp, raw = embyRaw(t, ts, "GET", "/Items/1/Images/Backdrop/1", "", "")
-	cfg, err := jpeg.DecodeConfig(bytes.NewReader(raw))
-	if resp.StatusCode != 200 || err != nil || cfg.Width != 80 {
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if resp.StatusCode != 200 || err != nil || format != "webp" || cfg.Width != 80 {
 		t.Fatalf("client image %d %+v %v", resp.StatusCode, cfg, err)
 	}
 	// One corrupt download preserves the old slot while another succeeds and NFO refreshes.
@@ -295,7 +299,7 @@ func TestScrapeSelectedStillsConfirm(t *testing.T) {
 	}
 	second, err := os.ReadFile(paths[1])
 	if err != nil || !bytes.Equal(second, oldSecond) {
-		t.Fatal("failed JPEG replaced old target")
+		t.Fatal("failed WebP download replaced old target")
 	}
 	mu.Lock()
 	priorDownloads := downloads

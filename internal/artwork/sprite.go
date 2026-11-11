@@ -114,6 +114,7 @@ type spriteDiskManifest struct {
 	Created  int64             `json:"created"`
 	BIFBytes int64             `json:"bif_bytes"`
 	BIFHash  string            `json:"bif_sha256"`
+	NFOPath  string            `json:"nfo_path,omitempty"`
 }
 
 func spriteHex(s string, n int) bool {
@@ -143,10 +144,13 @@ type spriteSource struct {
 	// direct is what ffmpeg is pointed at: raw unless it was resolved to a
 	// signed direct link. raw stays in place because the source hash is taken
 	// from the STRM file and must not change with link expiry.
-	direct   string
-	root     *os.Root
-	rootInfo os.FileInfo
-	original stamp
+	direct      string
+	root        *os.Root
+	rootInfo    os.FileInfo
+	original    stamp
+	nfoRelative string
+	nfoDirInfo  os.FileInfo
+	nfoRoot     *os.Root
 }
 
 func openSpriteSource(ctx context.Context, db *store.Store, id int64) (*spriteSource, error) {
@@ -182,6 +186,23 @@ func openSpriteSource(ctx context.Context, db *store.Store, id int64) (*spriteSo
 	if err != nil {
 		return nil, err
 	}
+	if movie.NFOPath == "" || !strings.EqualFold(filepath.Ext(movie.NFOPath), ".nfo") {
+		return nil, errors.New("indexed NFO path required for BIF")
+	}
+	s.nfoRelative, err = relative(abs, movie.NFOPath)
+	if err != nil {
+		return nil, err
+	}
+	if err = safe(root, s.nfoRelative); err != nil {
+		return nil, err
+	}
+	s.nfoDirInfo, err = root.Lstat(filepath.Dir(s.nfoRelative))
+	if err != nil {
+		return nil, err
+	}
+	if !s.nfoDirInfo.IsDir() {
+		return nil, errors.New("NFO parent is not a directory")
+	}
 	s.relative, err = relative(abs, movie.SourcePath)
 	if err != nil {
 		return nil, err
@@ -208,9 +229,19 @@ func openSpriteSource(ctx context.Context, db *store.Store, id int64) (*spriteSo
 	if err = s.verify(ctx); err != nil {
 		return nil, err
 	}
+	s.nfoRoot, err = root.OpenRoot(filepath.Dir(s.nfoRelative))
+	if err != nil {
+		return nil, err
+	}
+	openedNFO, err := s.nfoRoot.Stat(".")
+	if err != nil || !os.SameFile(s.nfoDirInfo, openedNFO) {
+		s.nfoRoot.Close()
+		return nil, ErrSpriteChanged
+	}
 	ok = true
 	return s, nil
 }
+func (s *spriteSource) close() { s.nfoRoot.Close(); s.root.Close() }
 func (s *spriteSource) verify(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -223,6 +254,16 @@ func (s *spriteSource) verify(ctx context.Context) error {
 		return err
 	}
 	if !os.SameFile(s.rootInfo, info) {
+		return ErrSpriteChanged
+	}
+	if err := safe(s.root, s.nfoRelative); err != nil {
+		return err
+	}
+	nfoDir, err := s.root.Lstat(filepath.Dir(s.nfoRelative))
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(s.nfoDirInfo, nfoDir) {
 		return ErrSpriteChanged
 	}
 	now, err := fingerprint(s.root, s.relative)
@@ -492,7 +533,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	if err != nil {
 		return res, err
 	}
-	defer source.root.Close()
+	defer source.close()
 	old, err := db.SpriteContext(ctx, req.MovieID)
 	if errors.Is(err, sql.ErrNoRows) {
 		old = store.SpriteState{}
@@ -505,7 +546,10 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 			defer r.root.Close()
 			m, e := readSpriteDisk(r, req.MovieID, old.Generation)
 			if e == nil && m.State == old {
-				if e = validateSpriteFiles(ctx, r, m); e == nil {
+				if e = validateSpriteFiles(ctx, source, r, m); e == nil {
+					if e = migrateSpriteBIF(ctx, source, r, m); e != nil {
+						return res, e
+					}
 					res.Skipped = true
 					res.Manifest = m.SpriteManifest
 					return res, nil
@@ -549,7 +593,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	}
 	// Before generation, prune only validated non-active directories. Unknown or
 	// excessive disk content blocks the task rather than being followed/deleted.
-	if err = pruneSpriteGenerations(ctx, r, req.MovieID, old.Generation, old.Revision, 2); err != nil {
+	if err = pruneSpriteGenerations(ctx, r, source, req.MovieID, old.Generation, old.Revision, 2); err != nil {
 		return res, err
 	}
 	unlock()
@@ -629,8 +673,23 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 			_ = removeSpriteDirectory(movieRoot, generation, genInfo)
 		}
 	}()
-	m := spriteDiskManifest{Version: 1, Generation: generation, MovieID: req.MovieID, Width: spriteWidth, Height: spriteHeight, Cols: spriteCols, Rows: spriteRows, Count: count, IntervalMs: interval, DurationMs: duration, SheetCount: (count + 99) / 100, State: source.state(generation, old.Revision+1), Created: time.Now().UnixNano()}
-	bif, err := newSpriteBIF(genRoot, "index.bif", count)
+	m := spriteDiskManifest{Version: 1, Generation: generation, MovieID: req.MovieID, Width: spriteWidth, Height: spriteHeight, Cols: spriteCols, Rows: spriteRows, Count: count, IntervalMs: interval, DurationMs: duration, SheetCount: (count + 99) / 100, State: source.state(generation, old.Revision+1), Created: time.Now().UnixNano(), NFOPath: source.movie.NFOPath}
+	bifPath, err := source.bifPath(generation)
+	if err != nil {
+		return res, err
+	}
+	bifTemp := bifPath + ".tmp"
+	bifPublished := false
+	defer func() {
+		if !published {
+			if bifPublished {
+				_ = source.nfoRoot.Remove(bifPath)
+			} else {
+				_ = source.nfoRoot.Remove(bifTemp)
+			}
+		}
+	}()
+	bif, err := newSpriteBIF(source.nfoRoot, bifTemp, count)
 	if err != nil {
 		return res, err
 	}
@@ -689,6 +748,19 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	if err = bif.finish(); err != nil {
 		return res, err
 	}
+	if err = source.verify(ctx); err != nil {
+		return res, err
+	}
+	if err = safe(source.nfoRoot, bifPath); err != nil {
+		return res, err
+	}
+	if err = source.nfoRoot.Rename(bifTemp, bifPath); err != nil {
+		return res, err
+	}
+	bifPublished = true
+	if err = syncSpriteDir(source.nfoRoot, "."); err != nil {
+		return res, err
+	}
 	m.BIFBytes = bif.size
 	m.BIFHash = bif.hash
 	raw, err := json.Marshal(m)
@@ -709,6 +781,20 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 		return res, err
 	}
 	locked = true
+	oldHash := ""
+	if !req.Overwrite && old.Revision > 0 {
+		previous, e := readSpriteDisk(r, req.MovieID, old.Generation)
+		if e == nil && previous.State == old && previous.NFOPath == source.movie.NFOPath {
+			if _, e = readSpriteBIFAsset(ctx, source, r, previous); e == nil {
+				oldHash = previous.BIFHash
+			}
+		}
+	}
+	alias, err := source.prepareBIFSidecar(m, oldHash, req.Overwrite)
+	if err != nil {
+		return res, err
+	}
+	defer func() { err = errors.Join(err, alias.finish(published)) }()
 	// verify re-reads the source, the generation directory and every sheet plus
 	// the BIF index (tens of megabytes). It is the store's Prepare phase, so it
 	// runs before writeMu and the SQLite write transaction are taken; leaving it
@@ -722,7 +808,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 		if e := verifyGeneration(); e != nil {
 			return e
 		}
-		if e := validateSpriteFiles(ctx, r, m); e != nil {
+		if e := validateSpriteFiles(ctx, source, r, m); e != nil {
 			return e
 		}
 		if phaseHook != nil {
@@ -730,7 +816,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 		}
 		return nil
 	}
-	err = db.CompareAndSwapSpriteFiles(ctx, source.movie, source.libraryRoot, old, m.State, store.SpriteFiles{Prepare: verify})
+	err = db.CompareAndSwapSpriteFiles(ctx, source.movie, source.libraryRoot, old, m.State, store.SpriteFiles{Prepare: verify, Commit: alias.commit})
 	if err != nil {
 		return res, err
 	}
@@ -740,7 +826,7 @@ func GenerateSprite(ctx context.Context, db *store.Store, req SpriteRequest, opt
 	// Keep active plus at most two older generations; inability to remove an old
 	// directory never rolls back an already committed preview. The next task will
 	// refuse quota-exceeding or unrecognized content before allocating another.
-	_ = pruneSpriteGenerations(ctx, r, req.MovieID, generation, m.State.Revision, 2)
+	_ = pruneSpriteGenerations(ctx, r, source, req.MovieID, generation, m.State.Revision, 2)
 	return res, nil
 }
 

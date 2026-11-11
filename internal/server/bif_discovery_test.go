@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"image/jpeg"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,6 +90,11 @@ func TestBIFDiscoveryIndependentOfPlaybackInfo(t *testing.T) {
 				const indexEnd = 64 + 3*8 // Two frames and the terminal index entry.
 				if bif.Code != http.StatusOK || len(data) <= indexEnd {
 					t.Fatalf("discovered BIF: status %d, length %d", bif.Code, len(data))
+				}
+				sidecar := strings.TrimSuffix(movie.NFOPath, filepath.Ext(movie.NFOPath)) + ".bif"
+				saved, err := os.ReadFile(sidecar)
+				if err != nil || !bytes.Equal(saved, data) {
+					t.Fatalf("HTTP BIF differs from the NFO-adjacent sidecar: %v", err)
 				}
 				if !bytes.Equal(data[:8], []byte{0x89, 'B', 'I', 'F', 13, 10, 26, 10}) || binary.LittleEndian.Uint32(data[8:12]) != 0 || binary.LittleEndian.Uint32(data[12:16]) != 2 || binary.LittleEndian.Uint32(data[16:20]) != 1 {
 					t.Fatal("invalid BIF magic/version/frame count/timestamp multiplier")

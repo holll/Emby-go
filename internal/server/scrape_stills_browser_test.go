@@ -158,7 +158,7 @@ func TestScrapeStillsBrowser(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			paths := []string{filepath.Join(media, "extrafanart", "fanart1.jpg"), filepath.Join(media, "extrafanart", "fanart2.jpg")}
+			paths := []string{filepath.Join(media, "extrafanart", "fanart1.webp"), filepath.Join(media, "extrafanart", "fanart2.webp")}
 			if !reflect.DeepEqual(after.ExtraBackdrops, paths) {
 				t.Fatalf("actual DB ExtraBackdrops=%v want %v", after.ExtraBackdrops, paths)
 			}
@@ -171,20 +171,20 @@ func TestScrapeStillsBrowser(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				decoded, err := jpeg.Decode(bytes.NewReader(data))
+				decoded, format, err := image.Decode(bytes.NewReader(data))
 				wantWidth := []int{80, 40}[i]
-				if err != nil {
-					t.Fatalf("fanart%d JPEG decode: %v", i+1, err)
+				if err != nil || format != "webp" {
+					t.Fatalf("fanart%d WebP decode: format=%q err=%v", i+1, format, err)
 				}
-				if decoded.Bounds().Dx() != wantWidth || decoded.Bounds().Dy() != 24 || !bytes.Equal(data, stills[1-i]) {
-					t.Fatalf("fanart%d does not preserve selected [1,0] JPEG order/bytes", i+1)
+				if decoded.Bounds().Dx() != wantWidth || decoded.Bounds().Dy() != 24 {
+					t.Fatalf("fanart%d does not preserve selected [1,0] image order/dimensions", i+1)
 				}
 				response, clientBytes := embyRaw(t, ts, "GET", fmt.Sprintf("/Items/1/Images/Backdrop/%d", i+1), token, "")
 				if response.StatusCode != http.StatusOK || !bytes.Equal(clientBytes, data) {
 					t.Fatalf("Emby backdrop %d: status=%d does not match disk bytes", i+1, response.StatusCode)
 				}
 			}
-			t.Log("real App UI -> scrape API -> ordered JPEG disk -> DB ExtraBackdrops -> Emby image bytes verified; browser skips=0")
+			t.Log("real App UI -> scrape API -> ordered WebP disk -> DB ExtraBackdrops -> Emby image bytes verified; browser skips=0")
 		})
 	}
 }

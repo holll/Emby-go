@@ -48,7 +48,8 @@ type ApplyOptions struct {
 	Refresh bool
 	// Position 是标记里的裁切位置，只作用于主海报（primary）；nil 表示沿用上游默认。
 	Position *float64
-	// StillURLs contains trusted selected image URLs resolved by the server, never client input.
+	// StillURLs overrides the upstream still list with trusted server-resolved URLs.
+	// Nil downloads all upstream stills; an explicit empty slice downloads none.
 	StillURLs []string
 }
 
@@ -125,11 +126,26 @@ func (s *Scraper) Apply(ctx context.Context, movie store.Movie, info metatube.Mo
 				result.ImageCount++
 			}
 		}
-		for i, url := range opts.StillURLs {
+		urls := opts.StillURLs
+		if urls == nil {
+			// 上游详情是自动、批量和手动刮削共用的来源；默认下载全部，
+			// 不受管理界面候选预览的 24 张上限影响。
+			urls = make([]string, 0, len(info.PreviewImages))
+			seen := make(map[string]bool, len(info.PreviewImages))
+			for _, raw := range info.PreviewImages {
+				url := strings.TrimSpace(raw)
+				if url == "" || seen[url] {
+					continue
+				}
+				seen[url] = true
+				urls = append(urls, url)
+			}
+		}
+		for i, url := range urls {
 			if err := ctx.Err(); err != nil {
 				return result, err
 			}
-			name := fmt.Sprintf("fanart%d.jpg", i+1)
+			name := fmt.Sprintf("fanart%d.webp", i+1)
 			path, err := s.downloadExtraBackdrop(ctx, info, url, filepath.Join(dir, "extrafanart", name), opts.Overwrite)
 			if err != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {

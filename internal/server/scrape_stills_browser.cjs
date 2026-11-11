@@ -87,8 +87,8 @@ test('production App scrape stills preview/cancel/ordered save', { timeout: 6000
     order: e.querySelector('strong').textContent
   }))`);
   assert.deepEqual(preview.map(p => p.width), [40, 80], 'real authenticated preview proxy decoded both upstream JPEGs');
-  assert.match(preview[1].order, /fanart1\.jpg/);
-  assert.match(preview[0].order, /fanart2\.jpg/);
+  assert.match(preview[1].order, /fanart1\.webp/);
+  assert.match(preview[0].order, /fanart2\.webp/);
   for (const p of preview) {
     const url = new URL(p.src, target);
     assert.equal(url.pathname, '/api/admin/scrape/image');

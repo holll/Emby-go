@@ -46,7 +46,7 @@ func fixture(t *testing.T) (*store.Store, store.Movie, string) {
 	if e = os.WriteFile(src, []byte("https://trusted.example/video"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	id, e := db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: src, Status: "pending", Title: "original", Plot: "plot", ProviderID: "keep", Genres: []string{"genre"}}, 1, time.Now(), nil)
+	id, e := db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: src, NFOPath: filepath.Join(dir, "A.nfo"), Status: "pending", Title: "original", Plot: "plot", ProviderID: "keep", Genres: []string{"genre"}}, 1, time.Now(), nil)
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -2513,7 +2513,7 @@ function renderScrapePreview() {
     <label class="scrape-still" for="scrape-still-${esc(still.index)}">
       <img src="${esc(still.preview)}" alt="" loading="lazy">
       <span class="scrape-still-caption"><input id="scrape-still-${esc(still.index)}" class="scrape-still-check" type="checkbox" data-index="${esc(still.index)}"${selected.includes(still.index) ? ' checked' : ''}${selectable ? '' : ' disabled'} aria-describedby="scrape-stills-help">
-        <span>剧照 #${esc(still.index)} <strong id="scrape-still-order-${esc(still.index)}">${selected.includes(still.index) ? `→ fanart${selected.indexOf(still.index) + 1}.jpg` : '未选择'}</strong></span></span>
+        <span>剧照 #${esc(still.index)} <strong id="scrape-still-order-${esc(still.index)}">${selected.includes(still.index) ? `→ fanart${selected.indexOf(still.index) + 1}.webp` : selected.length ? '不在自定义范围' : '默认下载全部'}</strong></span></span>
     </label>`).join('');
 
   body.innerHTML = `
@@ -2540,8 +2540,8 @@ function renderScrapePreview() {
           <div class="scrape-images">${images}</div>
         </div>
         <div>
-          <div class="scrape-stills-toolbar"><h3 class="scrape-h3">剧照选择</h3><span id="scrape-stills-count" role="status" aria-live="polite">已选 ${selected.length} 张</span><button id="scrape-stills-clear" type="button" class="btn btn-sm"${selected.length ? '' : ' disabled'}>清空选择</button><button id="scrape-inspect-reload" type="button" class="btn btn-sm">重新读取详情</button></div>
-          <p id="scrape-stills-help" class="hint" style="margin:0 0 8px">预览与勾选不写文件，确认写入后才保存。按勾选先后写入 extrafanart/fanart1.jpg…；取消后顺序压紧，重新勾选排到末尾。默认不选，不写额外剧照。只补缺失跳过已有目标，强制覆盖可替换；不会删除未涉及的旧尾图。实际下载遵循刮削图片下载设置。</p>
+          <div class="scrape-stills-toolbar"><h3 class="scrape-h3">剧照选择</h3><span id="scrape-stills-count" role="status" aria-live="polite">${selected.length ? `仅下载已选 ${selected.length} 张` : '默认下载全部剧照'}</span><button id="scrape-stills-clear" type="button" class="btn btn-sm"${selected.length ? '' : ' disabled'}>恢复默认全部下载</button><button id="scrape-inspect-reload" type="button" class="btn btn-sm">重新读取详情</button></div>
+          <p id="scrape-stills-help" class="hint" style="margin:0 0 8px">默认下载上游全部剧照，无需勾选；勾选后仅下载所选，按勾选先后自动压缩为 WebP 并写入 extrafanart/fanart1.webp…，取消后顺序压紧，重新勾选排到末尾。清除自定义选择即恢复全部下载。这里只预览前 24 张，自定义选择限于这些预览，默认全部下载不受 24 张限制。预览与勾选不写文件，确认写入后才保存。只补缺失跳过已有目标，强制覆盖可替换；不会删除未涉及的旧尾图。实际下载遵循刮削图片下载设置，关闭图片下载时不下载剧照。</p>
           ${stills && !selectable ? '<p class="hint" role="alert">剧照版本不可用，请重新读取详情后选择。</p>' : ''}
           ${stills ? `<div class="scrape-stills">${stills}</div>` : '<p class="hint" style="margin:0">上游没有剧照</p>'}
         </div>
@@ -2554,12 +2554,12 @@ function renderScrapePreview() {
     </div>`;
 
   const updateSelection = () => {
-    body.querySelector('#scrape-stills-count').textContent = `已选 ${selected.length} 张`;
+    body.querySelector('#scrape-stills-count').textContent = selected.length ? `仅下载已选 ${selected.length} 张` : '默认下载全部剧照';
     body.querySelector('#scrape-stills-clear').disabled = !selected.length;
     body.querySelectorAll('.scrape-still-check').forEach(input => {
       const index = Number(input.dataset.index), order = selected.indexOf(index);
       input.checked = order >= 0;
-      body.querySelector(`#scrape-still-order-${index}`).textContent = order >= 0 ? `→ fanart${order + 1}.jpg` : '未选择';
+      body.querySelector(`#scrape-still-order-${index}`).textContent = order >= 0 ? `→ fanart${order + 1}.webp` : selected.length ? '不在自定义范围' : '默认下载全部';
     });
   };
   body.querySelectorAll('.scrape-still-check').forEach(input => input.addEventListener('change', () => {

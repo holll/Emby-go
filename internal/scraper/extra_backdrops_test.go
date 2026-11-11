@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/deepteams/webp"
 	"image"
 	"image/color"
-	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +21,7 @@ import (
 	"emby-go/internal/translate"
 )
 
-func TestApplySelectedStillsJPEGOrderAndTail(t *testing.T) {
+func TestApplySelectedStillsWebPOrderAndTail(t *testing.T) {
 	dir := t.TempDir()
 	movie := store.Movie{SourcePath: filepath.Join(dir, "movie.strm"), OutputDir: dir}
 	requests := make(chan string, 16)
@@ -56,10 +56,10 @@ func TestApplySelectedStillsJPEGOrderAndTail(t *testing.T) {
 	if err := os.Mkdir(extra, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(extra, "fanart1.jpg"), []byte("old first"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(extra, "fanart1.webp"), []byte("old first"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tail := filepath.Join(extra, "fanart3.jpg")
+	tail := filepath.Join(extra, "fanart3.webp")
 	if err := os.WriteFile(tail, []byte("old tail"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestApplySelectedStillsJPEGOrderAndTail(t *testing.T) {
 	if err != nil || len(result.ImageWarn) != 0 || result.ImageCount != 5 {
 		t.Fatalf("Apply = %+v, %v", result, err)
 	}
-	wantPaths := []string{filepath.Join(dir, "poster.webp"), filepath.Join(dir, "fanart.webp"), filepath.Join(dir, "landscape.webp"), filepath.Join(extra, "fanart1.jpg"), filepath.Join(extra, "fanart2.jpg")}
+	wantPaths := []string{filepath.Join(dir, "poster.webp"), filepath.Join(dir, "fanart.webp"), filepath.Join(dir, "landscape.webp"), filepath.Join(extra, "fanart1.webp"), filepath.Join(extra, "fanart2.webp")}
 	if !reflect.DeepEqual(result.Images, wantPaths) {
 		t.Errorf("written paths = %v, want %v", result.Images, wantPaths)
 	}
@@ -83,9 +83,9 @@ func TestApplySelectedStillsJPEGOrderAndTail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		img, err := jpeg.Decode(bytes.NewReader(raw))
+		img, err := webp.Decode(bytes.NewReader(raw))
 		if err != nil || img.Bounds() != image.Rect(0, 0, 32, 18) {
-			t.Fatalf("real 16:9 JPEG %s: %v", path, err)
+			t.Fatalf("real 16:9 WebP %s: %v", path, err)
 		}
 		r, _, _, _ := img.At(0, 0).RGBA()
 		if (i == 0 && r > 100*257) || (i == 1 && r < 100*257) {
@@ -121,7 +121,7 @@ func TestApplySelectedStillsSkipAndDisabled(t *testing.T) {
 				if err := os.Mkdir(extra, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(extra, "fanart1.jpg"), []byte("old"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(extra, "fanart1.webp"), []byte("old"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			} else if mode == "nil" {
@@ -134,7 +134,7 @@ func TestApplySelectedStillsSkipAndDisabled(t *testing.T) {
 				t.Fatalf("Apply = %+v, %v", result, err)
 			}
 			if mode == "skip" {
-				if got, err := os.ReadFile(filepath.Join(extra, "fanart1.jpg")); err != nil || string(got) != "old" {
+				if got, err := os.ReadFile(filepath.Join(extra, "fanart1.webp")); err != nil || string(got) != "old" {
 					t.Errorf("skip changed old image: %q, %v", got, err)
 				}
 			} else if _, err := os.Stat(extra); !os.IsNotExist(err) {
@@ -169,7 +169,7 @@ func TestApplySelectedStillsFailurePreservesTargetsAndContinues(t *testing.T) {
 			if err := os.Mkdir(extra, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			first := filepath.Join(extra, "fanart1.jpg")
+			first := filepath.Join(extra, "fanart1.webp")
 			oldPath := first
 			if failure == "rename" {
 				if err := os.Mkdir(first, 0o755); err != nil {
@@ -185,7 +185,7 @@ func TestApplySelectedStillsFailurePreservesTargetsAndContinues(t *testing.T) {
 				t.Fatal(err)
 			}
 			result, err := s.Apply(context.Background(), store.Movie{SourcePath: filepath.Join(dir, "movie.strm")}, metatube.MovieInfo{Provider: "p", ID: "i", Title: "new"}, ApplyOptions{Overwrite: true, StillURLs: []string{"https://trusted/first", "https://trusted/second"}})
-			if err != nil || result.ImageCount != 4 || len(result.ImageWarn) != 1 || !strings.HasPrefix(result.ImageWarn[0], "extrafanart/fanart1.jpg:") {
+			if err != nil || result.ImageCount != 4 || len(result.ImageWarn) != 1 || !strings.HasPrefix(result.ImageWarn[0], "extrafanart/fanart1.webp:") {
 				t.Fatalf("Apply = %+v, %v", result, err)
 			}
 			if got, err := os.ReadFile(oldPath); err != nil || string(got) != "old target" {

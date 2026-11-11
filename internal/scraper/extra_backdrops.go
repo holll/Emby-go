@@ -11,7 +11,7 @@ import (
 	"emby-go/internal/metatube"
 )
 
-// downloadExtraBackdrop commits a selected still as real JPEG, leaving any old target intact on failure.
+// downloadExtraBackdrop commits a selected still as real WebP, leaving any old target intact on failure.
 func (s *Scraper) downloadExtraBackdrop(ctx context.Context, info metatube.MovieInfo, remoteURL, dest string, overwrite bool) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -44,9 +44,9 @@ func (s *Scraper) downloadExtraBackdrop(ctx context.Context, info metatube.Movie
 		_ = file.Close()
 		return "", err
 	}
-	if err := imageutil.EncodeJPEGTo(bytes.NewReader(data), file); err != nil {
+	if err := imageutil.EncodeWebPTo(bytes.NewReader(data), file); err != nil {
 		_ = file.Close()
-		return "", fmt.Errorf("转 JPEG 失败: %w", err)
+		return "", fmt.Errorf("转 WebP 失败: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return "", err

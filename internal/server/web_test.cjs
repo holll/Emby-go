@@ -3118,7 +3118,10 @@ test('刮削弹窗在图片之后渲染显式剧照选择：全部 index、esc �
   const markup = stillsMarkup(stills);
   assert.match(markup, /<h3 class="scrape-h3">剧照选择<\/h3>/);
   assert.match(markup, /预览与勾选不写文件/);
-  assert.match(markup, /默认不选，不写额外剧照/);
+  assert.match(markup, /默认下载上游全部剧照，无需勾选/);
+  assert.match(markup, /勾选后仅下载所选/);
+  assert.match(markup, /默认全部下载不受 24 张限制/);
+  assert.match(markup, /恢复默认全部下载/);
   assert.match(markup, /<div class="scrape-stills">/);
   assert.equal((markup.match(/class="scrape-still"/g) || []).length, 3);
   for (const still of stills) {

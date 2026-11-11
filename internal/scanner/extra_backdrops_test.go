@@ -17,7 +17,7 @@ func TestExtraBackdropSnapshotsCanonicalNumericOrder(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"fanart10.jpg", "fanart2.jpg", "fanart1.jpg", "fanart01.jpg", "fanart0.jpg", "fanart-1.jpg", "fanart3.png", "notes.jpg", "fanart4.JPG"} {
+	for _, name := range []string{"fanart10.jpg", "fanart2.jpg", "fanart1.jpg", "fanart1.webp", "fanart3.webp", "fanart01.jpg", "fanart01.webp", "fanart0.jpg", "fanart0.webp", "fanart-1.jpg", "fanart-1.webp", "fanart3.png", "notes.jpg", "notes.webp", "fanart4.JPG", "fanart4.WEBP"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -37,7 +37,7 @@ func TestExtraBackdropSnapshotsCanonicalNumericOrder(t *testing.T) {
 		}
 		paths = append(paths, image.Path)
 	}
-	want := []string{filepath.Join(dir, "fanart1.jpg"), filepath.Join(dir, "fanart2.jpg"), filepath.Join(dir, "fanart10.jpg")}
+	want := []string{filepath.Join(dir, "fanart1.webp"), filepath.Join(dir, "fanart2.jpg"), filepath.Join(dir, "fanart3.webp"), filepath.Join(dir, "fanart10.jpg")}
 	if !slices.Equal(paths, want) {
 		t.Fatalf("ordered assets = %v, want %v", paths, want)
 	}
@@ -73,8 +73,10 @@ func TestExtraBackdropSnapshotsDoNotFollowLinks(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(outside, "fanart1.jpg"), filepath.Join(dir, "fanart1.jpg")); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"fanart1.jpg", "fanart2.webp"} {
+		if err := os.Symlink(filepath.Join(outside, "fanart1.jpg"), filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	images, err = extraBackdropSnapshots(inside, "A.strm")
 	if err != nil || len(images) != 0 {
@@ -89,7 +91,7 @@ func TestScanExtraBackdropsRebuildAndIncremental(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"fanart10.jpg", "fanart2.jpg"} {
+	for _, name := range []string{"fanart10.webp", "fanart2.jpg"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -113,7 +115,7 @@ func TestScanExtraBackdropsRebuildAndIncremental(t *testing.T) {
 			t.Fatalf("extra backdrops = %v, want %v; %v", movie.ExtraBackdrops, want, err)
 		}
 	}
-	second, tenth := filepath.Join(dir, "fanart2.jpg"), filepath.Join(dir, "fanart10.jpg")
+	second, tenth := filepath.Join(dir, "fanart2.jpg"), filepath.Join(dir, "fanart10.webp")
 	if result := scan(); result.Updated != 1 || !result.IndexChanged {
 		t.Fatalf("added images not indexed: %+v", result)
 	}
@@ -121,6 +123,23 @@ func TestScanExtraBackdropsRebuildAndIncremental(t *testing.T) {
 	if result := scan(); result.UnchangedGroups != 1 || result.IndexChanged {
 		t.Fatalf("stable image list must skip: %+v", result)
 	}
+	// A new WebP at an existing index replaces the JPG in the indexed list;
+	// removing it restores the legacy JPG without duplicating that index.
+	secondWebP := filepath.Join(dir, "fanart2.webp")
+	if err := os.WriteFile(secondWebP, []byte("compressed image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := scan(); result.Updated != 1 || !result.IndexChanged {
+		t.Fatalf("WebP preference not detected: %+v", result)
+	}
+	assertPaths(s, []string{secondWebP, tenth})
+	if err := os.Remove(secondWebP); err != nil {
+		t.Fatal(err)
+	}
+	if result := scan(); result.Updated != 1 || !result.IndexChanged {
+		t.Fatalf("legacy JPG fallback not detected: %+v", result)
+	}
+	assertPaths(s, []string{second, tenth})
 	// Different size makes image mutation detectable without sleeps or clock assumptions.
 	if err := os.WriteFile(tenth, []byte("changed image payload"), 0o644); err != nil {
 		t.Fatal(err)

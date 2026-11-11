@@ -99,6 +99,9 @@ for (const width of [1440, 390]) {
     const b = await fixture(t, width);
     assert.deepEqual(await sent(b), []);
     assert.equal(await b.evaluate('document.querySelectorAll(".scrape-still-check:checked").length'), 0);
+    assert.equal(await b.evaluate('document.querySelector("#scrape-stills-count").textContent'), '默认下载全部剧照');
+    assert.equal(await b.evaluate('document.querySelector("#scrape-stills-clear").textContent'), '恢复默认全部下载');
+    assert.match(await b.evaluate('document.querySelector("#scrape-stills-help").textContent'), /默认全部下载不受 24 张限制/);
     assert.equal(await b.evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), true);
     assert.equal(await b.evaluate('Array.from(document.querySelectorAll(".scrape-still")).every(e => { const r=e.getBoundingClientRect(); return r.width>=44 && r.height>=44; })'), true);
     await b.evaluate('document.querySelector("#scrape-still-2").scrollIntoView({block:"center"}); document.querySelector("#scrape-still-2").focus()');
@@ -106,12 +109,12 @@ for (const width of [1440, 390]) {
     assert.equal(await b.evaluate('document.activeElement.id'), 'scrape-still-2', 'native checkbox retains keyboard focus');
     assert.equal(await b.evaluate('document.querySelector("#scrape-still-2").checked'), true);
     await click(b, '#scrape-still-0');
-    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-2").textContent'), /fanart1\.jpg/);
-    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), /fanart2\.jpg/);
+    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-2").textContent'), /fanart1\.webp/);
+    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), /fanart2\.webp/);
     await click(b, '#scrape-still-2');
-    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), /fanart1\.jpg/);
+    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), /fanart1\.webp/);
     await click(b, '#scrape-still-2');
-    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-2").textContent'), /fanart2\.jpg/);
+    assert.match(await b.evaluate('document.querySelector("#scrape-still-order-2").textContent'), /fanart2\.webp/);
     assert.deepEqual(await sent(b), [], 'selecting and reordering never writes');
     await click(b, '#scrape-confirm');
     assert.deepEqual(await sent(b), [{ provider: 'p', id: 'first', overwrite: false, update: false, position: 0, stills: { version, indices: [0, 2] } }]);
@@ -144,7 +147,7 @@ for (const width of [1440, 390]) {
   });
 }
 
-test('candidate change clears selection; empty selection omits stills; close isolates late write response (Chromium)', { timeout: 60000 }, async t => {
+test('candidate change restores default-all, custom clear omits stills, and close isolates late write response (Chromium)', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const b = await fixture(t, 1440);
   await click(b, '#scrape-still-2');
@@ -153,6 +156,13 @@ test('candidate change clears selection; empty selection omits stills; close iso
   await settle(b, 2, detail(nextVersion, 'second'));
   await waitFor(b, '!!document.querySelector("#scrape-confirm")');
   assert.equal(await b.evaluate('document.querySelectorAll(".scrape-still-check:checked").length'), 0);
+  assert.equal(await b.evaluate('document.querySelector("#scrape-stills-count").textContent'), '默认下载全部剧照');
+  await click(b, '#scrape-still-1');
+  assert.equal(await b.evaluate('document.querySelector("#scrape-stills-count").textContent'), '仅下载已选 1 张');
+  assert.equal(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), '不在自定义范围');
+  await click(b, '#scrape-stills-clear');
+  assert.equal(await b.evaluate('document.querySelector("#scrape-stills-count").textContent'), '默认下载全部剧照');
+  assert.equal(await b.evaluate('document.querySelector("#scrape-still-order-0").textContent'), '默认下载全部');
   await click(b, '#scrape-confirm');
   assert.deepEqual(await sent(b), [{ provider: 'p', id: 'second', overwrite: false }]);
   await click(b, '#scrape-cancel-btn');
