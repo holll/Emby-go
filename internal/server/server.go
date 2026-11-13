@@ -182,7 +182,7 @@ type App struct {
 	coverMu      sync.Mutex
 	coverFlights map[string]*coverFlight
 	coverTaskMu  sync.RWMutex
-	coverStatus  collectionCoverStatus
+	coverStatus  coverTaskStatus
 	coverCancel  context.CancelFunc
 
 	// updater 是 /opt/emby-go 平铺部署的 Web 自升级入口：检查、下载、原子替换，
@@ -676,6 +676,7 @@ func (a *App) routes() {
 	r.GET("/web/log-settings.js", a.webAsset)
 	r.GET("/web/log-stream.js", a.webAsset)
 	r.GET("/web/image-cache-settings.js", a.webAsset)
+	r.GET("/web/collection-cover-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/task-runner.js", a.webAsset)
 	r.GET("/web/vendor/artplayer.min.js", a.webAsset)
@@ -791,6 +792,16 @@ func (a *App) routes() {
 	admin.POST("/collection-cover/cancel", a.adminCollectionCoverCancel)
 	admin.GET("/collection-cover/preview", a.adminCollectionCoverPreview)
 	admin.POST("/collection-cover/revert", a.adminCollectionCoverRevert)
+	admin.GET("/collection-cover/settings", a.adminCollectionCoverSettings)
+	admin.PUT("/collection-cover/settings", a.adminSetCollectionCoverSettings)
+	// 媒体库封面：同一套拼贴，尺寸取 960×540。status/cancel 与合集共用一个任务槽。
+	admin.POST("/library-cover/run", a.adminLibraryCoverRun)
+	admin.GET("/library-cover/status", a.adminCollectionCoverStatus)
+	admin.POST("/library-cover/cancel", a.adminCollectionCoverCancel)
+	admin.GET("/library-cover/preview", a.adminLibraryCoverPreview)
+	admin.POST("/library-cover/revert", a.adminLibraryCoverRevert)
+	admin.GET("/library-cover/settings", a.adminLibraryCoverSettings)
+	admin.PUT("/library-cover/settings", a.adminSetLibraryCoverSettings)
 	// 计划任务（cron）：保存/启停后调度器即时重建，无需重启。
 	admin.GET("/scheduled", a.adminScheduledTasks)
 	admin.POST("/scheduled", a.adminCreateScheduledTask)

@@ -2324,6 +2324,89 @@ test('日志期限嵌入资源先加载，管理员设置挂载且不提供任�
   assert.equal((logSettingsUI.match(/apiRequest\('/g)||[]).length,2);
 });
 
+const collectionCoverUI = fs.readFileSync(path.join(__dirname, 'web/collection-cover-settings.js'), 'utf8');
+function collectionCoverPanel(api) {
+  const ids = ['cc-form', 'cc-fields', 'cc-save', 'cc-run', 'cc-reload', 'cc-status', 'cc-auto', 'cc-help', 'lc-auto', 'lc-run'];
+  const nodes = Object.fromEntries(ids.map(id => [id, { value: '', disabled: false, checked: false, textContent: '', setAttribute(k, v) { this[k] = v; } }]));
+  const host = { isConnected: true, innerHTML: '', querySelector: s => nodes[s.slice(1)] };
+  const calls = []; let active = true, agreed = true;
+  const box = sandbox({ confirm: () => agreed, setTimeout: fn => fn() });
+  vm.runInContext(collectionCoverUI, box);
+  const mounted = box.mountCollectionCoverSettings(host, async (...args) => { calls.push(args); return api(...args); }, () => active);
+  return { nodes, host, calls, mounted, submit: () => nodes['cc-form'].onsubmit({ preventDefault() {} }), run: () => nodes['cc-run'].onclick(), runLibrary: () => nodes['lc-run'].onclick(), reload: () => nodes['cc-reload'].onclick(), agree: v => { agreed = v; }, leave() { active = false; host.isConnected = false; } };
+}
+
+test('封面开关默认关闭，保存按两类分别提交auto布尔值', async () => {
+  const p = collectionCoverPanel(async (path, options) => (options ? JSON.parse(options.body) : { auto: false }));
+  await p.mounted;
+  assert.equal(p.nodes['cc-auto'].checked, false);
+  assert.equal(p.nodes['lc-auto'].checked, false);
+  assert.equal(p.nodes['cc-save'].disabled, false);
+  assert.match(p.nodes['cc-status'].textContent, /已关闭/);
+  p.nodes['cc-auto'].checked = true;
+  await p.submit();
+  assert.equal(p.calls.length, 4);
+  assert.equal(p.calls[2][0], '/collection-cover/settings');
+  assert.equal(p.calls[2][1].method, 'PUT');
+  assert.deepEqual(JSON.parse(p.calls[2][1].body), { auto: true });
+  assert.equal(p.calls[3][0], '/library-cover/settings');
+  assert.deepEqual(JSON.parse(p.calls[3][1].body), { auto: false });
+  assert.match(p.nodes['cc-status'].textContent, /已保存/);
+});
+
+test('封面开关读取失败禁保存，响应形状不对不写入', async () => {
+  let payload = { auto: 'yes' };
+  const p = collectionCoverPanel(async () => payload);
+  await p.mounted;
+  assert.equal(p.nodes['cc-save'].disabled, true);
+  assert.equal(p.nodes['cc-status'].role, 'alert');
+  payload = { auto: true };
+  await p.reload();
+  assert.equal(p.nodes['cc-save'].disabled, false);
+  assert.equal(p.nodes['cc-auto'].checked, true);
+});
+
+test('合集封面立即生成需确认，提交all+apply并轮询到结束再报告结果', async () => {
+  const p = collectionCoverPanel(async (path) => {
+    if (path.endsWith('/settings')) return { auto: false };
+    if (path === '/collection-cover/run') return { task_id: 7, instance_id: 'inst-1', running: true, total: 2, done: 0 };
+    assert.equal(path, '/collection-cover/status?task_id=7&instance_id=inst-1');
+    return { running: false, total: 2, done: 2, success: 2, skipped: 0, failed: 0, error: '' };
+  });
+  await p.mounted;
+  p.agree(false);
+  await p.run();
+  assert.equal(p.calls.filter(c => c[0] === '/collection-cover/run').length, 0, '未确认不提交生成');
+  p.agree(true);
+  await p.run();
+  const runCall = p.calls.find(c => c[0] === '/collection-cover/run');
+  assert.deepEqual(JSON.parse(runCall[1].body), { all: true, apply: true });
+  assert.match(p.nodes['cc-status'].textContent, /完成：成功 2/);
+  assert.equal(p.nodes['cc-run'].disabled, false);
+});
+
+test('媒体库封面立即生成走 library-cover 端点并轮询同一任务槽', async () => {
+  const p = collectionCoverPanel(async (path) => {
+    if (path.endsWith('/settings')) return { auto: false };
+    if (path === '/library-cover/run') return { task_id: 9, instance_id: 'inst-1', running: true, total: 3, done: 0 };
+    assert.equal(path, '/library-cover/status?task_id=9&instance_id=inst-1');
+    return { running: false, total: 3, done: 3, success: 3, skipped: 0, failed: 0, error: '' };
+  });
+  await p.mounted;
+  await p.runLibrary();
+  const runCall = p.calls.find(c => c[0] === '/library-cover/run');
+  assert.deepEqual(JSON.parse(runCall[1].body), { all: true, apply: true });
+  assert.match(p.nodes['cc-status'].textContent, /完成：成功 3/);
+});
+
+test('封面嵌入资源先加载，管理员设置挂载且不暴露任意路径', () => {
+  assert.ok(html.indexOf('/web/collection-cover-settings.js') >= 0);
+  assert.ok(html.indexOf('/web/collection-cover-settings.js') < html.indexOf('/web/app.js'));
+  assert.match(source, /mountCollectionCoverSettings\(collectionCoverHost, api, \(\) => gen === pageGen && collectionCoverHost\.isConnected\)/);
+  assert.match(source, /data-settings-panel="collection"/);
+  assert.equal((collectionCoverUI.match(/apiRequest\('/g) || []).length, 4);
+});
+
 // Review regression tests execute production functions, not only source-presence checks.
 function identityAPIFixture() {
   let stored = 'A', removed = 0, reply, jsonReply;

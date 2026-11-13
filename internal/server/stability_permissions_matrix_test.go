@@ -59,9 +59,16 @@ func TestStabilityPermissionsManagementRouteInventory(t *testing.T) {
 		"POST /api/admin/artwork/cancel":   "admission",
 		// 合集封面 run 登记后台批量生成/发布任务；cancel 只停后续；
 		// revert 只删本地生效记录，不触碰源海报或远端。
-		"POST /api/admin/collection-cover/run":             "admission",
-		"POST /api/admin/collection-cover/cancel":          "admission",
-		"POST /api/admin/collection-cover/revert":          "request-snapshot",
+		"POST /api/admin/collection-cover/run":    "admission",
+		"POST /api/admin/collection-cover/cancel": "admission",
+		"POST /api/admin/collection-cover/revert": "request-snapshot",
+		// 媒体库封面与合集封面同一套语义：run 起后台任务，revert 只删生效记录。
+		"POST /api/admin/library-cover/run":    "admission",
+		"POST /api/admin/library-cover/cancel": "admission",
+		"POST /api/admin/library-cover/revert": "request-snapshot",
+		// 自动触发开关只改本地 DB 设置项，与其它设置保存同属配置快照。
+		"PUT /api/admin/collection-cover/settings":         "configuration-snapshot",
+		"PUT /api/admin/library-cover/settings":            "configuration-snapshot",
 		"POST /api/admin/scheduled":                        "configuration-snapshot",
 		"POST /api/admin/scheduled/validate":               "request-snapshot",
 		"PUT /api/admin/scheduled/:id":                     "configuration-snapshot",

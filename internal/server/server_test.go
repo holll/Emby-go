@@ -47,6 +47,12 @@ func TestCoreAPI(t *testing.T) {
 	if err := a.db.SetSetting(settingCollectionMinMovies, "1"); err != nil {
 		t.Fatal(err)
 	}
+	// 自动封面默认开启；本用例断言合集封面是代表海报（image/jpeg），关掉以免被拼贴覆盖。
+	for _, key := range []string{settingCollectionCoverAuto, settingLibraryCoverAuto} {
+		if err := a.db.SetSetting(key, "false"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ts := httptest.NewServer(a.Handler())
 	defer ts.Close()
 	post := func(path, body string) (*http.Response, map[string]any) {

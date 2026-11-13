@@ -30,8 +30,8 @@ const (
 // errCoverRenderFailed 是 leader 异常退出时给 follower 的兜底结果。
 var errCoverRenderFailed = errors.New("collection cover render failed")
 
-// collectionCoverOptions 是一次生成的参数。零值字段回落到 Emby 历史常量。
-type collectionCoverOptions struct {
+// coverOptions 是一次生成的参数。零值字段回落到 Emby 历史常量。
+type coverOptions struct {
 	Width      int
 	Height     int
 	Quality    int
@@ -42,12 +42,14 @@ type collectionCoverOptions struct {
 	Overwrite bool
 }
 
-func (o collectionCoverOptions) normalize() collectionCoverOptions {
+// normalize 把未指定的尺寸/质量折成默认值；默认尺寸随对象类型不同
+// （合集 640×360、媒体库 960×540），所以由调用方传入。
+func (o coverOptions) normalize(width, height int) coverOptions {
 	if o.Width <= 0 {
-		o.Width = collectionCoverWidth
+		o.Width = width
 	}
 	if o.Height <= 0 {
-		o.Height = collectionCoverHeight
+		o.Height = height
 	}
 	if o.Quality <= 0 {
 		o.Quality = collectionCoverQuality
@@ -55,9 +57,9 @@ func (o collectionCoverOptions) normalize() collectionCoverOptions {
 	return o
 }
 
-// collectionCoverResult 是单个合集的处理结果，也是批量任务里 Current 的展示内容。
-type collectionCoverResult struct {
-	Collection string `json:"collection"`
+// coverResult 是单个合集的处理结果，也是批量任务里 Current 的展示内容。
+type coverResult struct {
+	Name       string `json:"name"`
 	Path       string `json:"path,omitempty"`
 	SourceHash string `json:"source_hash,omitempty"`
 	Width      int    `json:"width"`
@@ -74,17 +76,29 @@ type coverFlight struct {
 	err  error
 }
 
-// collectionCoverDir 返回合集封面目录：与数据库文件同级的 collection-covers/。
-func (a *App) collectionCoverDir() string {
+// coverDir 返回某类封面的输出目录：与数据库文件同级。
+func (a *App) coverDir(name string) string {
 	dir := filepath.Dir(a.cfg.DBPath)
 	if dir == "" || dir == "." {
-		return "collection-covers"
+		return name
 	}
-	return filepath.Join(dir, "collection-covers")
+	return filepath.Join(dir, name)
 }
 
-func (a *App) collectionCoverPath(key string) string {
-	return filepath.Join(a.collectionCoverDir(), key+".webp")
+// collectionCoverDir 返回合集封面目录：与数据库文件同级的 collection-covers/。
+func (a *App) collectionCoverDir() string { return a.coverDir("collection-covers") }
+
+// libraryCoverDir 返回媒体库封面目录：与数据库文件同级的 library-covers/。
+func (a *App) libraryCoverDir() string { return a.coverDir("library-covers") }
+
+// coverSourcePath 取一张可用于拼贴的成员图。Emby 3.3 的 GetStripCollageImagePaths
+// 只做 Primary → Thumb 两级回退（没有 backdrop 分支），这里对齐：海报缺失时用
+// 横图（本项目的 LandscapePath 即 Thumb 图），两者都没有才算该成员无图。
+func coverSourcePath(m store.Movie) string {
+	if m.PosterPath != "" {
+		return m.PosterPath
+	}
+	return m.LandscapePath
 }
 
 // collectionCoverSources 取参与拼贴的成员海报。
@@ -98,35 +112,36 @@ func (a *App) collectionCoverSources(collection string) (ids []int64, paths []st
 		return nil, nil, err
 	}
 	for _, m := range movies {
-		if m.PosterPath == "" {
+		path := coverSourcePath(m)
+		if path == "" {
 			continue
 		}
 		ids = append(ids, m.ID)
-		paths = append(paths, m.PosterPath)
+		paths = append(paths, path)
 	}
 	return ids, paths, nil
 }
 
-// collectionCoverKey 是缓存的唯一依据：算法、几何、画质、倒影开关、合集名，
-// 加上每个成员的 id 与海报 mtime tag。成员变化、海报文件被替换、参数调整
-// 都会换 key，因此命中即等价于「没有变化」。
-func (a *App) collectionCoverKey(collection string, ids []int64, paths []string, opts collectionCoverOptions) string {
+// coverKey 是缓存的唯一依据：算法、几何、画质、倒影开关、作用域（合集名或
+// library:<id>），加上每个成员的 id 与图片 mtime tag。成员变化、图片文件被
+// 替换、参数调整都会换 key，因此命中即等价于「没有变化」。
+func (a *App) coverKey(scope string, ids []int64, paths []string, layout collage.Layout, quality int, reflection bool) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%dx%d|q%d|r%t|%s", collectionCoverAlgorithm, opts.Width, opts.Height, opts.Quality, opts.Reflection, collection)
+	fmt.Fprintf(h, "%s|%dx%d|q%d|r%t|%s", collectionCoverAlgorithm, layout.Width, layout.Height, quality, reflection, scope)
 	for i, path := range paths {
 		fmt.Fprintf(h, "|%d:%s", ids[i], a.posterTag(path))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// collectionCoverVariant 返回该 key 的封面文件路径：已存在即命中，否则同 key
-// 只生成一次并原子落盘。
-func (a *App) collectionCoverVariant(ctx context.Context, key string, paths []string, opts collectionCoverOptions) (path string, err error) {
-	dest := a.collectionCoverPath(key)
+// coverVariant 返回该 key 的封面文件路径：已存在即命中，否则同一目标文件只
+// 生成一次并原子落盘。合集与媒体库共用这套单飞逻辑，只是落盘目录不同。
+func (a *App) coverVariant(ctx context.Context, dir, key string, paths []string, layout collage.Layout, quality int, reflection bool) (path string, err error) {
+	dest := filepath.Join(dir, key+".webp")
 	if _, statErr := os.Stat(dest); statErr == nil {
 		return dest, nil
 	}
-	flight, leader := a.beginCoverFlight(key)
+	flight, leader := a.beginCoverFlight(dest)
 	if !leader {
 		select {
 		case <-flight.done:
@@ -140,26 +155,23 @@ func (a *App) collectionCoverVariant(ctx context.Context, key string, paths []st
 	// defer 保证注销一定发生，再把 panic 原样抛出保留 monitor 的记录。
 	defer func() {
 		if r := recover(); r != nil {
-			a.finishCoverFlight(key, flight, "", errCoverRenderFailed)
+			a.finishCoverFlight(dest, flight, "", errCoverRenderFailed)
 			panic(r)
 		}
 	}()
-	path, err = a.renderCollectionCover(key, paths, opts)
-	a.finishCoverFlight(key, flight, path, err)
+	path, err = a.renderCover(dir, key, paths, layout, quality, reflection)
+	a.finishCoverFlight(dest, flight, path, err)
 	return path, err
 }
 
-// renderCollectionCover 是 leader 的生成路径：渲染 → 编码 → 同目录临时文件 + rename。
-func (a *App) renderCollectionCover(key string, paths []string, opts collectionCoverOptions) (string, error) {
-	data, err := collage.RenderWebP(paths, collage.Options{
-		Layout:     collage.Layout{Width: opts.Width, Height: opts.Height, Columns: collectionCoverColumns},
-		Reflection: opts.Reflection,
-	}, opts.Quality)
+// renderCover 是 leader 的生成路径：渲染 → 编码 → 同目录临时文件 + rename。
+func (a *App) renderCover(dir, key string, paths []string, layout collage.Layout, quality int, reflection bool) (string, error) {
+	data, err := collage.RenderWebP(paths, collage.Options{Layout: layout, Reflection: reflection}, quality)
 	if err != nil {
 		return "", err
 	}
-	dest := a.collectionCoverPath(key)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	dest := filepath.Join(dir, key+".webp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	if err := writeFileAtomic(dest, func(tmpPath string) error {
@@ -192,9 +204,9 @@ func (a *App) finishCoverFlight(key string, flight *coverFlight, path string, er
 }
 
 // generateCollectionCover 生成一个合集的封面，按需写入生效记录。
-func (a *App) generateCollectionCover(ctx context.Context, collection string, opts collectionCoverOptions) (collectionCoverResult, error) {
-	opts = opts.normalize()
-	result := collectionCoverResult{Collection: collection, Width: opts.Width, Height: opts.Height}
+func (a *App) generateCollectionCover(ctx context.Context, collection string, opts coverOptions) (coverResult, error) {
+	opts = opts.normalize(collectionCoverWidth, collectionCoverHeight)
+	result := coverResult{Name: collection, Width: opts.Width, Height: opts.Height}
 	ids, paths, err := a.collectionCoverSources(collection)
 	if err != nil {
 		return result, err
@@ -203,9 +215,10 @@ func (a *App) generateCollectionCover(ctx context.Context, collection string, op
 		result.Skipped, result.Reason = true, "no posters"
 		return result, nil
 	}
-	key := a.collectionCoverKey(collection, ids, paths, opts)
+	layout := collage.Layout{Width: opts.Width, Height: opts.Height, Columns: collectionCoverColumns}
+	key := a.coverKey(collection, ids, paths, layout, opts.Quality, opts.Reflection)
 	result.SourceHash = key
-	path, err := a.collectionCoverVariant(ctx, key, paths, opts)
+	path, err := a.coverVariant(ctx, a.collectionCoverDir(), key, paths, layout, opts.Quality, opts.Reflection)
 	if errors.Is(err, collage.ErrNoImages) {
 		result.Skipped, result.Reason = true, "no decodable posters"
 		return result, nil
@@ -224,6 +237,12 @@ func (a *App) generateCollectionCover(ctx context.Context, collection string, op
 	}
 	if applied && previous.Algorithm != collectionCoverAlgorithm && !opts.Overwrite {
 		result.Skipped, result.Reason = true, "custom cover kept"
+		return result, nil
+	}
+	// 同一批源图、同一套参数已经生效过：文件名就是 key，key 相同即同一张图，
+	// 不必重写记录，更不该失效图片缓存。自动触发每轮扫描都会走到这里。
+	if applied && previous.SourceHash == key {
+		result.Applied, result.Reason = true, "up to date"
 		return result, nil
 	}
 	err = a.db.SetAppliedCover(store.CollectionCover{

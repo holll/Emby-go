@@ -1686,7 +1686,7 @@ async function pageSettings() {
   if (gen !== pageGen) return; // 等待期间切走了页面，这次结果作废
   const keys = keyData.items || [];
   content.innerHTML = `
-    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['cache', '图片缓存'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')]].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
+    <nav class="settings-nav" aria-label="设置分类">${[['account', '账户与安全'], ['users', '用户与授权'], ['notifications', '通知'], ['logs', '日志与保留'], ['cache', '图片缓存'], ['collection', '合集封面'], ['recovery', '索引恢复' + ((recovery.items || []).length ? '（' + recovery.items.length + '）' : '')]].map(([key, label]) => `<button type="button" class="btn" data-settings-category="${key}" aria-pressed="${key === 'account'}">${esc(label)}</button>`).join('')}</nav>
     <div class="settings-category" data-settings-panel="account">
     <section class="panel">
       <div class="panel-head"><h2>登录会话</h2></div>
@@ -1794,6 +1794,10 @@ async function pageSettings() {
     <section id="image-cache-settings" class="panel" aria-labelledby="image-cache-title"></section>
     </div>
 
+    <div class="settings-category" data-settings-panel="collection" hidden>
+    <section id="collection-cover-settings" class="panel" aria-labelledby="cc-title"></section>
+    </div>
+
     <div class="settings-category" data-settings-panel="recovery" hidden>
     <section class="panel">
       <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
@@ -1820,6 +1824,8 @@ async function pageSettings() {
   void mountWebhookSettings(webhookHost, api, () => gen === pageGen && webhookHost.isConnected);
   const imageCacheHost = document.querySelector('#image-cache-settings');
   void mountImageCacheSettings(imageCacheHost, api, () => gen === pageGen && imageCacheHost.isConnected);
+  const collectionCoverHost = document.querySelector('#collection-cover-settings');
+  void mountCollectionCoverSettings(collectionCoverHost, api, () => gen === pageGen && collectionCoverHost.isConnected);
   document.querySelector('#apikey-form').addEventListener('submit', async event => {
     event.preventDefault();
     const submit = document.querySelector('#apikey-submit');

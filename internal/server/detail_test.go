@@ -66,6 +66,13 @@ func detailServer(t *testing.T, app *App) (*httptest.Server, string) {
 // scanOnce 触发一次全库扫描并要求成功。
 func scanOnce(t *testing.T, ts *httptest.Server, token string) {
 	t.Helper()
+	// 自动封面默认开启，扫描会顺带排一个后台任务写生效记录。多数用例与封面无关，
+	// 这里统一关掉，避免断言撞上异步写库；要验证自动触发的用例自己显式打开。
+	for _, path := range []string{"/api/admin/collection-cover/settings", "/api/admin/library-cover/settings"} {
+		if resp, body := embyCall(t, ts, "PUT", path, token, `{"auto":false}`); resp.StatusCode != http.StatusOK {
+			t.Fatalf("关闭自动封面 %s: %d %v", path, resp.StatusCode, body)
+		}
+	}
 	resp, body := embyCall(t, ts, "POST", "/api/admin/scan", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("扫描: %d %v", resp.StatusCode, body)

@@ -1,7 +1,19 @@
 # 合集自动拼接封面
 
-复刻 Emby 历史 `StripCollageBuilder` 的横版合集封面：把合集成员的竖版海报横向拼成一张
-640×360 的横版图。**不是九宫格、不是瀑布流、也不是把整张竖版海报缩小后并排。**
+复刻 Emby 历史 `StripCollageBuilder.BuildThumbCollage` 的横版拼贴：把成员的竖版海报
+横向拼成一张横版图。**不是九宫格、不是瀑布流、也不是把整张竖版海报缩小后并排。**
+
+这套拼贴在上游是 **Thumb（横版）/ 媒体库型**算法，同一份代码被两个地方用：
+
+| 用途 | 输出尺寸 | 上游依据 |
+| --- | --- | --- |
+| 媒体库文件夹封面（`CollectionFolder`） | 960×540 | `BaseDynamicImageProvider.CreateThumbCollage(item, items, outputPath, 960, 540)` |
+| 用户视图 / 播放列表（`UserView` 等） | 960×540 | `DynamicImageProvider`（Jellyfin 同名实现） |
+| `ImageType.Thumb` 动态图 | 640×360 | `CreateImage` 里 `ImageType.Thumb → CreateThumbCollage` |
+
+本项目把同一算法用在两处：**合集（BoxSet）Primary 640×360**、**媒体库文件夹 Primary 960×540**。
+前者是"把媒体库型拼贴套到合集上"的兼容做法（见 §2 的调用矩阵与 §10 的偏差说明），
+后者与上游媒体库封面的用途一致。
 
 ## 1. 依据：以源码为准
 
@@ -45,18 +57,33 @@
 ## 2. 已证实 / 未证实
 
 **已证实（可核对源码）**：四槽位布局、所有比例常量、缩放与裁剪方式、倒影构造、
-少图循环补位、编码质量 90、只接受本地海报文件（`ImageType.Primary` 且 `IsLocalFile`，
+少图循环补位、编码质量 90、只接受本地文件（`ImageType.Primary` 且 `IsLocalFile`，
 否则退到 `ImageType.Thumb` 且 `IsLocalFile`）。
 
-**未证实**：
-- BoxSet 成员传入的顺序与候选列表上限。`BaseDynamicImageProvider.GetItemsWithImages`
-  是抽象方法，从这两个文件里看不出 BoxSet 的取片顺序。
-- 当前 Emby 版本是否仍走这条 2018 年的链路（该文件此后未再改动，但没有拿到现行
-  BoxSet 专属 provider 作为证据）。
+### 上游调用矩阵（Emby 3.3 公开源码）
 
-因此本项目**不宣称等同于当前 Emby BoxSet Primary 的完整生成链路**，只宣称复现了
-已核实的这段历史横版拼接设计。成员顺序在本项目里取 `ORDER BY id DESC`（最新入库优先），
-这是兼容选择，不是已证实的原生排序；`LatestVisible` 目前也没有年份/标题排序入口。
+| 上游位置 | 行为 |
+| --- | --- |
+| `Emby.Drawing.Skia/SkiaEncoder.CreateImageCollage` | 按比例派发：`ratio >= 1.4` → `BuildThumbCollage`；`>= .9` → `BuildSquareCollage`；`< .9` 也是 `BuildSquareCollage`（源码注释 `// @todo create Poster collage capability`） |
+| `BaseDynamicImageProvider.CreateImage` | `Thumb` → `CreateThumbCollage` 640×360；`Primary` 时 `UserView`/`Playlist`/`MusicGenre`/`Genre`/`GameGenre`/`PhotoAlbum` 走 `CreateSquareCollage` 600×600，**其余一律 `CreatePosterCollage` 400×600** |
+| `BaseDynamicImageProvider.GetStripCollageImagePaths` | 只有 Primary → Thumb 两级回退，没有 backdrop 分支 |
+| `Collections/CollectionImageProvider.CreateImage` | BoxSet 走 `CreateSingleImage(..., ImageType.Primary)`：**从成员里挑一张本地 Primary 原文件拷贝，根本不拼贴**；成员顺序 `OrderBy(i => Guid.NewGuid())` 随机；`Supports()` 要求 `item.IsLocked` |
+
+**由此得到的结论**：Emby 3.3 的合集封面不是拼贴，拼贴是 Thumb / 媒体库那一侧的行为。
+本项目把 `BuildThumbCollage` 用到合集 Primary 上，是**兼容实现**（视觉与参考截图一致），
+不是对 3.3 行为的事实复刻；对媒体库文件夹（960×540）则与上游用途一致。
+
+**未证实**：
+- 现代 Emby（4.x 闭源）的合集封面算法。仅有 changelog 证据：
+  `4.10.0.40` 的 `fix collections not getting images on a fresh installation`、
+  `improve single item collages`（出现两次）、`4.11` 的 `Update to libvips 8.18` /
+  `Support creating image collage with libvips` —— 说明确实会给合集做拼贴、且"单条目拼贴"
+  被单独优化过（对应本项目 1 张时的 `AAAA`），但算法已迁到 libvips，无法逐行核对。
+- BoxSet 成员传入的顺序与候选上限。`GetItemsWithImages` 是抽象方法，从这两个文件看不出顺序。
+
+因此本项目**不宣称等同于当前 Emby 合集 Primary 的完整生成链路**，只宣称复现了
+已核实的这段历史横版拼接设计。成员顺序取 `ORDER BY id DESC`（最新入库优先），
+是兼容选择，不是已证实的原生排序。
 
 ## 3. 代码位置
 
@@ -65,16 +92,21 @@
 | `internal/collage/collage.go` | 布局几何、四列拼接、倒影、WebP 输出 |
 | `internal/collage/lanczos.go` | Lanczos3 可分离两趟重采样（缩小按 filter scale 扩核抗混叠） |
 | `internal/collage/exif.go` | 有界解码 + EXIF Orientation 1..8 |
-| `internal/server/collection_cover.go` | 取成员、缓存键、并发生成去重、原子写、生效记录 |
-| `internal/server/collection_cover_admin.go` | 5 个管理端点、批量任务状态机 |
+| `internal/server/collection_cover.go` | 取成员、缓存键、并发生成去重、原子写、生效记录（与媒体库共用） |
+| `internal/server/library_cover.go` | 媒体库封面：960×540、库根目录自定义封面保护、生效记录 |
+| `internal/server/collection_cover_admin.go` | 合集管理端点、批量任务状态机（媒体库复用 status/cancel） |
+| `internal/server/library_cover_admin.go` | 媒体库管理端点 |
+| `internal/server/collection_cover_auto.go` | 两类自动触发开关、统一任务入口 |
 | `internal/store/migration_collection_covers.go` | migration 23：`collection_covers` 表 |
-| `internal/store/collection_cover.go` | 生效记录读写 |
+| `internal/store/collection_cover.go` | 合集生效记录读写 |
+| `internal/store/migration_library_covers.go` | migration 24：`library_covers` 表 |
+| `internal/store/library_cover.go` | 媒体库生效记录读写 |
 
 不新增第三方依赖：Lanczos3 是自己实现的，未引入 `golang.org/x/image`。
 
 ## 4. 接口
 
-五个端点都在 `/api/admin` 组下（`requireAuth` + `requireAdmin` + 审计）：
+七个端点都在 `/api/admin` 组下（`requireAuth` + `requireAdmin` + 审计）：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -83,6 +115,23 @@
 | POST | `/api/admin/collection-cover/cancel` | 取消，只停后续 |
 | GET | `/api/admin/collection-cover/preview` | `?collection=<名称>`，直接返回 WebP |
 | POST | `/api/admin/collection-cover/revert` | 删除生效记录，回退代表海报 |
+| GET | `/api/admin/collection-cover/settings` | 读自动触发开关：`{"auto":bool}` |
+| PUT | `/api/admin/collection-cover/settings` | 写自动触发开关，body 必须是 `{"auto":bool}` |
+
+媒体库封面是同一套语义的另一组端点（`status`/`cancel` 与合集**共用同一个任务槽**）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/admin/library-cover/run` | body 用 `libraries: [<id>]` 或 `all: true` |
+| GET | `/api/admin/library-cover/status` | 复用合集任务状态（响应里的 `kind` 为 `library`） |
+| POST | `/api/admin/library-cover/cancel` | 复用合集取消 |
+| GET | `/api/admin/library-cover/preview` | `?library=<id>`，直接返回 WebP |
+| POST | `/api/admin/library-cover/revert` | body `{library:<id>}` 或 `{all:true}` |
+| GET | `/api/admin/library-cover/settings` | 读 `library.cover_auto` |
+| PUT | `/api/admin/library-cover/settings` | 写 `library.cover_auto` |
+
+管理前端「设置 → 合集与媒体库封面」提供两个开关，以及「立即生成全部合集」与
+「立即生成全部媒体库」两个按钮。
 
 请求体（`run`）：
 
@@ -103,6 +152,55 @@
 - `apply` 缺省为 `false`：**默认只生成预览文件，不写库、不改 Emby 数据**。
 - `overwrite` 缺省为 `false`：已有自定义封面（`algorithm` 不是 `emby-strip-4col-v1`）时跳过，
   并在任务结果里记 `skipped` + `custom cover kept`。
+
+### 自动触发（默认开）
+
+`collection.cover_auto` / `library.cover_auto`（两个独立的 DB 设置项，默认都开）为
+`true` 时，`scanLibraries` 在**扫描无错且 `IndexChanged` 为真**之后排一个后台 apply 任务，
+覆盖全部可见合集 / 全部媒体库。因为同一时刻只允许一个封面任务，两类目标会**合并进同一个
+任务**（而不是各排一个，否则第二个必然撞任务槽被整批跳过）。内容没变的目标在生成阶段按
+`SourceHash` 直接判 `up to date`，不重写记录、不失效图片缓存；已有自定义封面的照旧跳过。
+手动任务正在跑时自动触发让位（不排队、不报错）。
+
+出厂即开启（对齐 Emby 自己给封面出图的行为），读不到设置时也按开启处理；只有显式写入
+`false` 才关。关掉：
+
+```bash
+curl -X PUT -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"auto":false}' http://127.0.0.1:18080/api/admin/collection-cover/settings
+```
+
+注意：自动触发只在「扫描提交了索引变更」时排任务。开关从关改到开时，已经存在的合集不会
+自己变（库早就扫完了、成员没动），需要点一次设置页的「立即生成全部合集」或调
+`POST /api/admin/collection-cover/run` 做存量回填。
+
+### 媒体库封面（960×540）
+
+生成参数与合集相同（同一 `coverOptions`，默认尺寸换成 960×540），取片用
+`LatestVisible(libraryID, …)` 取库内最新 8 部有图的影片，同样走 Primary → Thumb 回退。
+
+生效后媒体库封面的解析优先级（`internal/server/library.go` 的 `libraryCoverPath`）：
+
+1. 管理端上传的库封面（库根目录 `cover.*`）
+2. 库根目录自带的 `poster/folder/cover/default` 图片
+3. **自动拼贴封面**（`library_covers` 生效记录，960×540）
+4. 库内最新入库影片的代表图
+
+第 1、2 项属用户自定义封面，`apply` 阶段遇到它们会直接跳过并记
+`skipped` + `custom cover kept`，不生成也不写库。第 3 项的文件名即缓存键，
+`libraryCoverPath` 的缓存键里带 `SourceHash`，换封面自然换键，不需要遍历删旧键。
+
+```bash
+# 全部媒体库，只落预览文件
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true}' http://127.0.0.1:18080/api/admin/library-cover/run
+
+# 发布 + 回退
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true,"apply":true}' http://127.0.0.1:18080/api/admin/library-cover/run
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true}' http://127.0.0.1:18080/api/admin/library-cover/revert
+```
 
 ## 5. 批量生成
 
@@ -127,8 +225,10 @@ curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
 
 ## 6. 缓存与增量
 
-缓存键 = `sha256(算法标识 | WxH | quality | reflection | 合集名 | 每个成员的 id:海报mtime tag)`，
-取前 32 位十六进制，文件名 `<key>.webp`，落在数据库同级 `collection-covers/`。
+缓存键 = `sha256(算法标识 | WxH | quality | reflection | 作用域 | 每个成员的 id:图mtime tag)`，
+取前 32 位十六进制，文件名 `<key>.webp`。作用域对合集是合集名（与改造前字节一致，
+既有缓存不失效）、对媒体库是 `library:<id>`；落盘目录分别是数据库同级
+`collection-covers/` 与 `library-covers/`。
 
 - 成员增减 → 键变 → 重新生成。
 - 海报被替换（mtime 变）→ `posterTag` 变 → 键变 → 重新生成。
@@ -169,7 +269,12 @@ go test ./internal/collage/ ./internal/server/ ./internal/store/ -count=1
   `overwrite` 才替换）、revert 回退代表海报、无海报与损坏海报只跳过不失败、
   源海报字节与 mtime 不变、8 种非法请求体 + 空名 + 不存在合集、
   4 并发预览结果字节一致且只落 1 个文件。
-- `internal/store`：`collection_covers` 表迁移与读写、重开库后仍在。
+- `internal/server`（`library_cover_test.go`，4 个用例）：`/library-cover/settings` 读写往返与
+  三种坏体 400、两个开关互不影响、生成后 960×540 落盘且 `Library/MediaFolders` 暴露
+  `ImageTags.Primary` 与 `PrimaryImageAspectRatio ≈ 1.7778`、重复生成复用同一文件、
+  库根目录有 `poster.png` 时 `custom cover kept` 且不写生效记录、
+  成员只有 `landscape.png` 时按 Thumb 回退参与拼贴。
+- `internal/store`：`collection_covers` / `library_covers` 表迁移与读写、重开库后仍在。
 
 全量：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿。
 
@@ -229,6 +334,10 @@ go test ./internal/collage/ ./internal/server/ ./internal/store/ -count=1
    权重归一化与抗混叠策略一致但浮点细节不同，缩放后的高频细节会有极小差异。
 3. **成员顺序**。参考截图无法反推出原生取片顺序；本项目取 `id DESC`。
    如果实际原生按年份或标题排序，同一合集的列顺序会不同。
-4. **上游选择范围**。源码只接受本地海报文件，远端 URL 不参与；本项目同样只读本地
-   `PosterPath`，但没有实现「Primary 缺失时回退 Thumb」这一层（本项目库里
-   `PosterPath` 已经是扫描/刮削后的最终结果）。
+4. **上游选择范围**。源码只接受本地文件，远端 URL 不参与；本项目同样只读本地，
+   并实现了 Primary → Thumb 回退（`coverSourcePath`：`PosterPath` 缺失时用
+   `LandscapePath`，即扫描器认的 `landscape.*` 横图），与上游
+   `GetStripCollageImagePaths` 的两级回退一致。
+5. **算法归属**。上游把 `BuildThumbCollage` 用于 Thumb / 媒体库 / UserView，
+   3.3 的合集 Primary 是"挑一张成员海报拷贝"（见 §2 调用矩阵）。本项目把该算法用于
+   合集 Primary 是兼容选择，视觉与参考截图一致，但不宣称是 3.3 的事实行为。

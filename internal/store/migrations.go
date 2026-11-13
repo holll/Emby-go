@@ -124,6 +124,10 @@ func baselineChecksum() string {
 // 多余列或索引漂移一律拒绝启动，而不是把错误拖到业务查询。
 // 批次 97：登录会话只存 SHA-256 摘要（D03/P1）。旧行在迁移里原地改写；
 // 摘要与明文都是 hex，迁移后行值固定 64 位。没有 DDL，参考库为空表时空跑。
+// LatestSchemaVersion 是最新迁移的版本号，供跨包测试断言「已迁移到完整结构」。
+// 新增迁移时同步改成新迁移的常量。
+const LatestSchemaVersion = libraryCoverMigrationVersion
+
 const tokenHashMigrationVersion = 12
 
 func migration12Checksum() string {
@@ -207,6 +211,7 @@ func validateSchema(db schemaDB) error {
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
 		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20, applyMigration21, applyMigration22, applyMigration23,
+		applyMigration24,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1227,6 +1232,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case libraryCoverMigrationVersion:
+			if checksum != migration24Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1353,6 +1363,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[libraryCoverMigrationVersion] {
+		if err := applyMigration24(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1470,6 +1485,11 @@ func (s *Store) migrate() error {
 	if !applied[collectionCoverMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", collectionCoverMigrationVersion, migration23Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", collectionCoverMigrationVersion, err)
+		}
+	}
+	if !applied[libraryCoverMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", libraryCoverMigrationVersion, migration24Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", libraryCoverMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

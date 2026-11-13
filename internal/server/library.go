@@ -404,16 +404,22 @@ func (a *App) cachedBody(key string) ([]byte, bool) {
 
 // libraryCoverPath 返回媒体库封面路径，优先级：
 // 管理端上传 → 库根目录自带的 poster/folder/cover/default 图片（webp/jpg/jpeg/png 均可）
+// → 已生效的自动拼贴封面（Emby 的媒体库封面形态，960×540）
 // → 库内最近入库影片的代表图（宽图优先）。
 // 解析要多次 stat 媒体盘并可能回查库，按库版本号缓存（空结果同样缓存）。
+// 生效记录的 SourceHash 进缓存键：换封面后自然换键，不用遍历删旧键。
 func (a *App) libraryCoverPath(l store.Library) string {
-	key := "libcover:" + a.db.Version("g:version") + ":" + strconv.FormatInt(l.ID, 10)
+	applied := a.appliedLibraryCovers()[l.ID]
+	key := "libcover:" + a.db.Version("g:version") + ":" + strconv.FormatInt(l.ID, 10) + ":" + applied.SourceHash
 	if b, ok := a.cachedBody(key); ok {
 		return string(b)
 	}
 	path := uploadedLibraryCover(l.Path)
 	if path == "" {
 		path = imageutil.FindPoster(l.Path)
+	}
+	if path == "" {
+		path = appliedLibraryCoverFile(applied)
 	}
 	if path == "" {
 		path, _ = a.db.RepresentativeArt(l.ID)

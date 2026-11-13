@@ -14,12 +14,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// collectionCoverStatus 是合集封面批量任务的可轮询状态，字段与 artworkStatus 同风格。
-type collectionCoverStatus struct {
+// coverTaskStatus 是封面批量任务的可轮询状态，字段与 artworkStatus 同风格。
+// 合集任务填 collections、媒体库任务填 libraries，kind 说明是哪一类。
+type coverTaskStatus struct {
 	InstanceID  string   `json:"instance_id"`
 	TaskID      int64    `json:"task_id"`
+	Kind        string   `json:"kind"`
 	Mode        string   `json:"mode"`
-	Collections []string `json:"collections"`
+	Collections []string `json:"collections,omitempty"`
+	Libraries   []int64  `json:"libraries,omitempty"`
 	Running     bool     `json:"running"`
 	Total       int      `json:"total"`
 	Done        int      `json:"done"`
@@ -92,22 +95,27 @@ func decodeCollectionCoverRequest(r io.Reader) (collectionCoverRequest, error) {
 	return req, nil
 }
 
-// collectionCoverOptions 把已校验的请求体折成生成参数。
-func (req collectionCoverRequest) options(mode string) collectionCoverOptions {
-	opts := collectionCoverOptions{Reflection: true, Apply: mode == "apply", Overwrite: req.Overwrite}
-	if req.Quality != nil {
-		opts.Quality = *req.Quality
+// coverOptionsFrom 把已校验的请求字段折成生成参数：没给的回落 Emby 历史常量。
+// 合集与媒体库两种请求体共用这一处映射。
+func coverOptionsFrom(quality, width, height *int, reflection *bool, overwrite bool, mode string) coverOptions {
+	opts := coverOptions{Reflection: true, Apply: mode == "apply", Overwrite: overwrite}
+	if quality != nil {
+		opts.Quality = *quality
 	}
-	if req.Width != nil {
-		opts.Width = *req.Width
+	if width != nil {
+		opts.Width = *width
 	}
-	if req.Height != nil {
-		opts.Height = *req.Height
+	if height != nil {
+		opts.Height = *height
 	}
-	if req.Reflection != nil {
-		opts.Reflection = *req.Reflection
+	if reflection != nil {
+		opts.Reflection = *reflection
 	}
 	return opts
+}
+
+func (req collectionCoverRequest) options(mode string) coverOptions {
+	return coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
 }
 
 func (a *App) adminCollectionCoverRun(c *gin.Context) {
@@ -127,40 +135,15 @@ func (a *App) adminCollectionCoverRun(c *gin.Context) {
 	if req.Apply {
 		mode = "apply"
 	}
-	a.coverTaskMu.Lock()
-	if a.rootCtx.Err() != nil {
-		a.coverTaskMu.Unlock()
-		apiError(c, http.StatusServiceUnavailable, "server shutting down")
-		return
-	}
-	// 登记在已持有的状态锁内、置运行态之前：关停窗口里既不会留下「Running 但没人跑」
-	// 的状态，也不会出现 Add 与 workerWG.Wait 并发。
-	release, err := a.beginWorker()
+	accepted, err := a.startCoverTask(collectionTargets(names), req.options(mode), mode)
 	if err != nil {
-		a.coverTaskMu.Unlock()
-		apiError(c, http.StatusServiceUnavailable, err.Error())
+		workerGateAPIError(c, err, http.StatusConflict)
 		return
 	}
-	if a.coverStatus.Running {
-		a.coverTaskMu.Unlock()
-		release()
-		apiError(c, http.StatusConflict, "合集封面任务正在进行中")
-		return
-	}
-	ctx, cancel := context.WithCancel(a.rootCtx)
-	taskID := a.startTask("collection_cover_" + mode)
-	accepted := collectionCoverStatus{
-		InstanceID: a.instanceID, TaskID: taskID, Mode: mode,
-		Collections: append([]string{}, names...), Running: true, Total: len(names),
-	}
-	a.coverStatus = accepted
-	a.coverCancel = cancel
-	a.coverTaskMu.Unlock()
-	go func() { defer release(); a.executeCollectionCovers(ctx, taskID, names, req.options(mode)) }()
 	c.JSON(http.StatusAccepted, accepted)
 }
 
-func (a *App) executeCollectionCovers(ctx context.Context, taskID int64, names []string, opts collectionCoverOptions) {
+func (a *App) executeCoverTargets(ctx context.Context, taskID int64, targets []coverTarget, opts coverOptions) {
 	defer func() {
 		a.coverTaskMu.Lock()
 		s := &a.coverStatus
@@ -173,7 +156,7 @@ func (a *App) executeCollectionCovers(ctx context.Context, taskID int64, names [
 		case s.Cancelled:
 			s.Error = "任务已取消"
 		case s.Failed > 0:
-			s.Error = "部分合集封面生成失败"
+			s.Error = "部分封面生成失败"
 		}
 		if s.Error != "" {
 			taskErr = errors.New(s.Error)
@@ -185,14 +168,20 @@ func (a *App) executeCollectionCovers(ctx context.Context, taskID int64, names [
 		a.finishTask(taskID, taskErr)
 		a.coverTaskMu.Unlock()
 	}()
-	for _, name := range names {
+	for _, target := range targets {
 		if ctx.Err() != nil {
 			break
 		}
 		a.coverTaskMu.Lock()
-		a.coverStatus.Current = name
+		a.coverStatus.Current = target.Name
 		a.coverTaskMu.Unlock()
-		result, err := a.generateCollectionCover(ctx, name, opts)
+		var result coverResult
+		var err error
+		if target.Kind == coverTargetLibrary {
+			result, err = a.generateLibraryCover(ctx, target.ID, opts)
+		} else {
+			result, err = a.generateCollectionCover(ctx, target.Name, opts)
+		}
 		a.coverTaskMu.Lock()
 		s := &a.coverStatus
 		s.Done++
@@ -231,7 +220,7 @@ func (a *App) adminCollectionCoverStatus(c *gin.Context) {
 		return
 	}
 	if id != 0 && (s.TaskID != id || instance != a.instanceID) {
-		apiError(c, http.StatusNotFound, "collection cover task not found")
+		apiError(c, http.StatusNotFound, "cover task not found")
 		return
 	}
 	s.InstanceID = a.instanceID
@@ -260,11 +249,11 @@ func (a *App) adminCollectionCoverCancel(c *gin.Context) {
 	a.coverTaskMu.Lock()
 	defer a.coverTaskMu.Unlock()
 	if a.coverStatus.TaskID != req.TaskID || req.InstanceID != a.instanceID {
-		apiError(c, http.StatusNotFound, "collection cover task not found")
+		apiError(c, http.StatusNotFound, "cover task not found")
 		return
 	}
 	if !a.coverStatus.Running || a.coverCancel == nil {
-		apiError(c, http.StatusConflict, "collection cover task finished")
+		apiError(c, http.StatusConflict, "cover task finished")
 		return
 	}
 	a.coverCancel()
@@ -291,7 +280,7 @@ func (a *App) adminCollectionCoverPreview(c *gin.Context) {
 		apiError(c, http.StatusNotFound, "collection not found")
 		return
 	}
-	result, err := a.generateCollectionCover(c.Request.Context(), name, collectionCoverOptions{})
+	result, err := a.generateCollectionCover(c.Request.Context(), name, coverOptions{})
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, err.Error())
 		return

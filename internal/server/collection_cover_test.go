@@ -55,6 +55,13 @@ func collectionCoverFixture(t *testing.T, posters map[string]bool) (*App, *httpt
 	ts := httptest.NewServer(app.Handler())
 	t.Cleanup(ts.Close)
 	token := loginFixtureAdmin(t, ts)
+	// 自动触发默认开启；fixture 统一关掉，让每个用例自己决定要不要自动生成，
+	// 否则建库扫描就会排一个封面任务，后续手动 run 会撞任务槽拿 409。
+	for _, path := range []string{"/api/admin/collection-cover/settings", "/api/admin/library-cover/settings"} {
+		if status, raw := doJSON(t, ts, "PUT", path, token, `{"auto":false}`); status != http.StatusOK {
+			t.Fatalf("disable auto %s: %d %s", path, status, raw)
+		}
+	}
 	libBody := `{"Name":"AV","Path":"` + strings.ReplaceAll(root, `\`, `\\`) + `"}`
 	if status, raw := doJSON(t, ts, "POST", "/api/admin/libraries", token, libBody); status != http.StatusOK {
 		t.Fatalf("add library: %d %s", status, raw)
@@ -437,7 +444,7 @@ func collectionCoverFiles(t *testing.T, a *App) []string {
 }
 
 // waitCollectionCoverTask 等到当前合集封面任务结束并返回终态。
-func waitCollectionCoverTask(t *testing.T, a *App) collectionCoverStatus {
+func waitCollectionCoverTask(t *testing.T, a *App) coverTaskStatus {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -450,7 +457,7 @@ func waitCollectionCoverTask(t *testing.T, a *App) collectionCoverStatus {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("合集封面任务超时未结束")
-	return collectionCoverStatus{}
+	return coverTaskStatus{}
 }
 
 func urlQuery(name string) string {

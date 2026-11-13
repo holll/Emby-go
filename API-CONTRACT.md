@@ -361,13 +361,26 @@
 
 ### 4.19 合集自动拼接封面（管理面，2026-11-12）
 
-- 五个管理端点，全部走 `/api/admin` 组的 `requireAuth` + `requireAdmin` + 审计：`POST /api/admin/collection-cover/run`、`GET /api/admin/collection-cover/status`、`POST /api/admin/collection-cover/cancel`、`GET /api/admin/collection-cover/preview`、`POST /api/admin/collection-cover/revert`。这些是后台契约，不属于 Emby 兼容承诺。
+- 七个管理端点，全部走 `/api/admin` 组的 `requireAuth` + `requireAdmin` + 审计：`POST /api/admin/collection-cover/run`、`GET /api/admin/collection-cover/status`、`POST /api/admin/collection-cover/cancel`、`GET /api/admin/collection-cover/preview`、`POST /api/admin/collection-cover/revert`、`GET /api/admin/collection-cover/settings`、`PUT /api/admin/collection-cover/settings`。这些是后台契约，不属于 Emby 兼容承诺。
 - `run` 请求体只接受 `collections`（数组）或 `all`（布尔）二选一，另可选 `apply`、`overwrite`、`quality`（1..100）、`width` / `height`（64..4096）、`reflection`。未知字段、同时给 `collections` 与 `all`、两者都不给、空合集名、越界数值一律 400 `INVALID_REQUEST`，不做静默兜底。
 - `run` 返回 202 与任务快照；同一时刻只允许一个合集封面任务，占用时 409 `CONFLICT`。`status` 需 `task_id` 与 `instance_id` 双匹配，否则 404 `NOT_FOUND`。`cancel` 对已结束任务返回 409。
 - `preview` 用 `?collection=<名称>` 直接返回生成的 WebP（`Cache-Control: no-store`），不写库、不发布；合集不存在 404，无可解码海报 404 且错误消息说明原因。
 - `apply` 默认不覆盖既有自定义封面：只有当库中已有记录的 `algorithm` 不是 `emby-strip-4col-v1` 时才跳过，必须显式 `overwrite=true` 才替换。`revert` 删除生效记录，合集 Primary 回退到代表海报。
 - 生效后 `ImageTags.Primary` 指向生成的封面文件，`PrimaryImageAspectRatio` 取该文件真实比例（≈1.7778）；`boxsets` 虚拟库封面取第一个有生效封面的合集。
 - 生成文件写在数据库同级的 `collection-covers/` 目录，使用临时文件 + 原子改名；源海报文件只读，不会被修改。
+- `settings` 读写自动触发开关：`GET` 返回 `{"auto":bool}`，`PUT` 只接受 `{"auto":bool}`（`auto` 必填，未知字段或非布尔值 400 `INVALID_REQUEST`）。开关落 DB 设置项 `collection.cover_auto`，**默认 `true`**（读不到设置时按关闭处理，不主动改数据）。为 `true` 时，扫描无错且索引确有变更（`IndexChanged`）后自动排一个 `apply` 任务；内容未变的合集按 `SourceHash` 判 `up to date` 直接跳过，已有自定义封面照旧保留，手动任务在跑时自动触发让位。
+
+### 4.19.1 媒体库自动拼接封面（管理面，2026-11-13）
+
+与 §4.19 同一套拼贴，输出改为 Emby/Jellyfin 给媒体库文件夹用的 **960×540**。七个端点同样在 `/api/admin` 组下（`requireAuth` + `requireAdmin` + 审计）：`POST /api/admin/library-cover/run`、`GET /api/admin/library-cover/status`、`POST /api/admin/library-cover/cancel`、`GET /api/admin/library-cover/preview`、`POST /api/admin/library-cover/revert`、`GET /api/admin/library-cover/settings`、`PUT /api/admin/library-cover/settings`。
+
+- `run` 请求体用 `libraries`（内部库 id 数组，元素须 > 0）或 `all` 二选一，其余可选字段与 `collection-cover/run` 相同（`apply`、`overwrite`、`quality`、`width`、`height`、`reflection`）。未知字段、两者同给或都不给、id ≤ 0、越界数值一律 400 `INVALID_REQUEST`。
+- `status` / `cancel` **与合集封面共用同一个任务槽**（`coverTaskStatus` 用 `kind` 区分 `collection` / `library` / `mixed`），因此任意时刻最多一个封面任务；占用时 `run` 返回 409 `CONFLICT`。
+- `preview` 用 `?library=<内部 id>` 返回 WebP（`Cache-Control: no-store`）；库不存在或无可解码海报 404。
+- `apply` 的保护条件是「库根目录已有自定义封面」：`cover.*`（管理端上传）或 `poster/folder/cover/default` 任一存在即跳过，记 `skipped` + `custom cover kept`，不写生效记录。
+- 生效后媒体库封面解析优先级为：管理端上传 → 库根目录自带海报 → **生成的 960×540 拼贴** → 库内代表图。`Library/MediaFolders` 与 `Views` 的 `CollectionFolder` DTO 暴露 `ImageTags.Primary` 与 `PrimaryImageAspectRatio`（≈1.7778）。
+- `settings` 落 DB 设置项 `library.cover_auto`，**默认 `true`**，与 `collection.cover_auto` 相互独立。扫描后若两个开关都开，两类目标合并进**同一个**后台任务（单任务槽决定的实现约束）。
+- 生效记录落 `library_covers` 表（migration 24）；生成文件写在数据库同级 `library-covers/`，同样走临时文件 + 原子改名，源海报只读。
 
 ### 4.20 与官方 RestAPI 文档对齐（2026-11-13）
 

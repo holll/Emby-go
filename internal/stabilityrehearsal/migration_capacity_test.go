@@ -160,11 +160,11 @@ func TestSchema13UpgradeCapacityFailureAndRetry(t *testing.T) {
 		s := openStore(t, path)
 		retained(t, s)
 		db := rawDB(t, path)
-		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 23 || scalar(t, db, "SELECT count(*) FROM schema_migrations") != 23 {
-			t.Fatal("unrestricted retry did not reach complete schema23")
+		if scalar(t, db, "SELECT max(version) FROM schema_migrations") != store.LatestSchemaVersion || scalar(t, db, "SELECT count(*) FROM schema_migrations") != store.LatestSchemaVersion {
+			t.Fatal("unrestricted retry did not reach complete schema")
 		}
 		if scalar(t, db, "SELECT count(*) FROM playback_sessions") != 2 || scalar(t, db, "SELECT count(*) FROM playback_events") != 2 || scalar(t, db, "SELECT count(*) FROM movies WHERE id=42 AND auto_marks='[]'") != 1 {
-			t.Fatal("retry lost retained history or schema23 defaults")
+			t.Fatal("retry lost retained history or latest schema defaults")
 		}
 		integrity(t, path)
 	})
