@@ -156,7 +156,9 @@
 ### 自动触发（默认开）
 
 `collection.cover_auto` / `library.cover_auto`（两个独立的 DB 设置项，默认都开）为
-`true` 时，`scanLibraries` 在**扫描无错且 `IndexChanged` 为真**之后排一个后台 apply 任务，
+`true` 时，`scanLibraries` 在**扫描无错且 `IndexChanged` 为真**之后排一个后台 apply 任务
+（这是扫描的副作用，**不单独记一条任务历史**，`status` 里的 `task_id` 为 0；只有手动
+`run` 才记任务行），
 覆盖全部可见合集 / 全部媒体库。因为同一时刻只允许一个封面任务，两类目标会**合并进同一个
 任务**（而不是各排一个，否则第二个必然撞任务槽被整批跳过）。内容没变的目标在生成阶段按
 `SourceHash` 直接判 `up to date`，不重写记录、不失效图片缓存；已有自定义封面的照旧跳过。

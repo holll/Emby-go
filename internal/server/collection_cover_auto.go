@@ -77,7 +77,12 @@ func (a *App) startCoverTask(targets []coverTarget, opts coverOptions, mode stri
 	}
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	label := targetKindLabel(targets)
-	taskID := a.startTask("cover_" + label + "_" + mode)
+	// 自动触发是扫描的副作用，不单独记一条任务：扫描任务本身已经记过这一次，
+	// 再记一条只会让任务历史被每轮扫描灌满。手动 run 仍然记，用户点了才有记录。
+	var taskID int64
+	if mode != "auto" {
+		taskID = a.startTask("cover_" + label + "_" + mode)
+	}
 	accepted := coverTaskStatus{
 		InstanceID: a.instanceID, TaskID: taskID, Kind: label, Mode: mode,
 		Running: true, Total: len(targets),

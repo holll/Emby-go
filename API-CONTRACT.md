@@ -368,7 +368,7 @@
 - `apply` 默认不覆盖既有自定义封面：只有当库中已有记录的 `algorithm` 不是 `emby-strip-4col-v1` 时才跳过，必须显式 `overwrite=true` 才替换。`revert` 删除生效记录，合集 Primary 回退到代表海报。
 - 生效后 `ImageTags.Primary` 指向生成的封面文件，`PrimaryImageAspectRatio` 取该文件真实比例（≈1.7778）；`boxsets` 虚拟库封面取第一个有生效封面的合集。
 - 生成文件写在数据库同级的 `collection-covers/` 目录，使用临时文件 + 原子改名；源海报文件只读，不会被修改。
-- `settings` 读写自动触发开关：`GET` 返回 `{"auto":bool}`，`PUT` 只接受 `{"auto":bool}`（`auto` 必填，未知字段或非布尔值 400 `INVALID_REQUEST`）。开关落 DB 设置项 `collection.cover_auto`，**默认 `true`**（读不到设置时按关闭处理，不主动改数据）。为 `true` 时，扫描无错且索引确有变更（`IndexChanged`）后自动排一个 `apply` 任务；内容未变的合集按 `SourceHash` 判 `up to date` 直接跳过，已有自定义封面照旧保留，手动任务在跑时自动触发让位。
+- `settings` 读写自动触发开关：`GET` 返回 `{"auto":bool}`，`PUT` 只接受 `{"auto":bool}`（`auto` 必填，未知字段或非布尔值 400 `INVALID_REQUEST`）。开关落 DB 设置项 `collection.cover_auto`，**默认 `true`**（读不到设置时按关闭处理，不主动改数据）。为 `true` 时，扫描无错且索引确有变更（`IndexChanged`）后自动排一个 `apply` 任务（不记任务历史行，`GET .../status` 返回的 `task_id` 为 0；手动 `run` 才记）；内容未变的合集按 `SourceHash` 判 `up to date` 直接跳过，已有自定义封面照旧保留，手动任务在跑时自动触发让位。
 
 ### 4.19.1 媒体库自动拼接封面（管理面，2026-11-13）
 

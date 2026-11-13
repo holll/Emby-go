@@ -165,7 +165,9 @@ func (a *App) executeCoverTargets(ctx context.Context, taskID int64, targets []c
 			a.coverCancel()
 		}
 		a.coverCancel = nil
-		a.finishTask(taskID, taskErr)
+		if taskID != 0 {
+			a.finishTask(taskID, taskErr)
+		}
 		a.coverTaskMu.Unlock()
 	}()
 	for _, target := range targets {
