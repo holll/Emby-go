@@ -206,7 +206,7 @@ func validateSchema(db schemaDB) error {
 	migrations := []func(*sql.Tx) error{
 		applyMigration2, applyMigration3, applyMigration4, applyMigration5,
 		applyMigration6, applyMigration7, applyMigration8, applyMigration9,
-		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20, applyMigration21, applyMigration22,
+		applyMigration10, applyMigration11, applyMigration12, applyMigration13, applyMigration14, applyMigration15, applyMigration16, applyMigration17, applyMigration18, applyMigration19, applyMigration20, applyMigration21, applyMigration22, applyMigration23,
 	}
 	for _, apply := range migrations {
 		tx, err := reference.Begin()
@@ -1222,6 +1222,11 @@ func (s *Store) migrate() error {
 				rows.Close()
 				return fmt.Errorf("unsupported or modified schema migration %d", version)
 			}
+		case collectionCoverMigrationVersion:
+			if checksum != migration23Checksum() {
+				rows.Close()
+				return fmt.Errorf("unsupported or modified schema migration %d", version)
+			}
 		default:
 			rows.Close()
 			return fmt.Errorf("unsupported or modified schema migration %d", version)
@@ -1343,6 +1348,11 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	if !applied[collectionCoverMigrationVersion] {
+		if err := applyMigration23(tx); err != nil {
+			return err
+		}
+	}
 	if err := validateSchema(tx); err != nil {
 		return fmt.Errorf("validate schema: %w", err)
 	}
@@ -1455,6 +1465,11 @@ func (s *Store) migrate() error {
 	if !applied[searchFtsMigrationVersion] {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", searchFtsMigrationVersion, migration22Checksum(), now); err != nil {
 			return fmt.Errorf("record schema migration %d: %w", searchFtsMigrationVersion, err)
+		}
+	}
+	if !applied[collectionCoverMigrationVersion] {
+		if _, err := tx.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", collectionCoverMigrationVersion, migration23Checksum(), now); err != nil {
+			return fmt.Errorf("record schema migration %d: %w", collectionCoverMigrationVersion, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

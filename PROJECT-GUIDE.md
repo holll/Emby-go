@@ -31,6 +31,7 @@ Emby 客户端 ── HTTP ──┐
 | 播放、续播、收藏、进度上报 | [播放信息与流端点](<internal/server/media.go>)、[用户数据 handler](<internal/server/userdata.go>) | [播放会话/进度事务 `RecordPlaybackEvent`](<internal/store/playback_sessions.go>)；注意影片可见性和播放会话绑定不是同一个检查。 |
 | 刮削、翻译、人工编辑、NFO 写入 | [刮削入口](<internal/server/scrape.go>)、[翻译入口](<internal/server/translation.go>)、[编辑恢复](<internal/server/edit_recovery.go>) | [刮削应用](<internal/scraper/apply.go>)、[NFO 局部更新](<internal/nfo/update.go>)；先确认走预览、确认写入还是索引恢复，再看 [元数据锁测试](<internal/server/metadata_lock_test.go>)。 |
 | 图片、海报缩略图、预热、预览图 | [图片与预热](<internal/server/media.go>)、[磁盘图片缓存](<internal/imagecache/disk.go>) | [图像任务](<internal/server/artwork.go>)、[视频缩略图](<internal/server/sprites.go>)；看 [预热测试](<internal/server/prewarm_test.go>) 与相关资源测试。 |
+| 合集自动拼接封面 | [合集封面生成](<internal/server/collection_cover.go>)、[管理端点](<internal/server/collection_cover_admin.go>) | [四列拼接算法](<internal/collage/collage.go>)（[说明](<COLLECTION-COVER.md>)）、[生效记录](<internal/store/collection_cover.go>)；看 [封面测试](<internal/server/collection_cover_test.go>)。 |
 | 计划任务、启动/关闭、运行状态 | [任务配置与分发](<internal/server/scheduled.go>)、[调度器](<internal/scheduler/scheduler.go>) | [App 的关闭链路](<internal/server/server.go>)、[进程退出](<cmd/metatube/main.go>)；看 [关闭测试](<internal/server/health_shutdown_test.go>)。 |
 | 后台页面、请求或交互 | [后台 HTML](<internal/server/web/index.html>)、[页面与请求入口](<internal/server/web/app.js>) | [导航](<internal/server/web/navigation.js>)、[任务交互](<internal/server/web/task-runner.js>) 或对应功能脚本；新增资源需同时检查 HTML 引用、嵌入、ETag 与路由，见 [资源测试](<internal/server/web_assets_test.go>)。 |
 

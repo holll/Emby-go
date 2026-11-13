@@ -36,7 +36,8 @@ func TestLogoutRevokesOnlyCurrentSessionOnAllAliases(t *testing.T) {
 				t.Fatal(err)
 			}
 			w := logoutRequest(a, http.MethodPost, path, token)
-			if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+			// POST /Sessions/Logout 按文档返回 200（自有 /api/auth/logout 仍为 204）。
+			if w.Code != http.StatusOK || w.Body.Len() != 0 {
 				t.Fatalf("logout status=%d body=%s", w.Code, w.Body.String())
 			}
 			if _, valid, err := a.db.ValidateAccessTokenUser(token, time.Now(), 0); err != nil || valid {
@@ -67,7 +68,7 @@ func TestLogoutPreservesAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", key.Key); w.Code != http.StatusNoContent {
+	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", key.Key); w.Code != http.StatusOK {
 		t.Fatalf("key logout status=%d", w.Code)
 	}
 	if _, valid, err := a.db.APIKeyUser(key.Key); err != nil || !valid {
@@ -119,7 +120,7 @@ func TestLogoutWriteFailureDoesNotReportSuccess(t *testing.T) {
 	if _, err := fixture.Exec("DROP TRIGGER fixture_reject_logout"); err != nil {
 		t.Fatal(err)
 	}
-	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", token); w.Code != http.StatusNoContent {
+	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", token); w.Code != http.StatusOK {
 		t.Fatalf("retry status=%d", w.Code)
 	}
 	if calls := legacy.calls.Load(); calls != 0 {
@@ -136,7 +137,7 @@ func TestLogoutPersistsAcrossReopen(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", revoked); w.Code != http.StatusNoContent {
+	if w := logoutRequest(a, http.MethodPost, "/Sessions/Logout", revoked); w.Code != http.StatusOK {
 		t.Fatalf("logout status=%d", w.Code)
 	}
 	a.Close()

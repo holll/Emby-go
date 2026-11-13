@@ -60,7 +60,8 @@ func TestUserSettingsResponseShapeAndCapturedValue(t *testing.T) {
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 		}
-		want := map[string]any{"ItemId": fmt.Sprint(f.victim), "ServerId": f.a.serverID, "PlaybackPositionTicks": float64(600000000), "PlayCount": float64(3), "Played": true, "IsFavorite": true, "PlayedPercentage": float64(50), "LastPlayedDate": "2026-10-17T00:00:00Z"}
+		// Rating/UnplayedItemCount/Key 是文档 UserItemDataDto 要求的字段，一并快照。
+		want := map[string]any{"ItemId": fmt.Sprint(f.victim), "Key": fmt.Sprint(f.victim), "ServerId": f.a.serverID, "PlaybackPositionTicks": float64(600000000), "PlayCount": float64(3), "Played": true, "IsFavorite": true, "PlayedPercentage": float64(50), "LastPlayedDate": "2026-10-17T00:00:00Z", "Rating": float64(0), "UnplayedItemCount": float64(0)}
 		// Likes 按库内当前评分回显：未评分不出现，赞/踩输出 true/false。
 		var likes int
 		if err := f.db.QueryRow("SELECT likes FROM userdata WHERE movie_id=?", f.victim).Scan(&likes); err != nil {
@@ -68,6 +69,12 @@ func TestUserSettingsResponseShapeAndCapturedValue(t *testing.T) {
 		}
 		if likes != 0 {
 			want["Likes"] = likes > 0
+			// Rating 与 Likes 同源：赞=10、踩=1（0 表示未评分）。
+			if likes > 0 {
+				want["Rating"] = float64(10)
+			} else {
+				want["Rating"] = float64(1)
+			}
 		}
 		if !reflect.DeepEqual(body, want) {
 			t.Fatalf("response=%v want=%v", body, want)

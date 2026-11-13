@@ -215,8 +215,8 @@ END`)
 		t.Fatal(err)
 	}
 	db = rawDB(t, path)
-	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 22 {
-		t.Fatal("retry did not migrate to schema22")
+	if scalar(t, db, "SELECT max(version) FROM schema_migrations") != 23 {
+		t.Fatal("retry did not migrate to schema23")
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

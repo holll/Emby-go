@@ -22,7 +22,7 @@ func TestNoRouteContract(t *testing.T) {
 	ts := httptest.NewServer(a.Handler())
 	defer ts.Close()
 
-	for _, path := range []string{"/.svn/entries", "/emby-115-cf.7z", "/wp-login.php", "/Branding/Configuration", "/Persons"} {
+	for _, path := range []string{"/.svn/entries", "/emby-115-cf.7z", "/wp-login.php", "/Branding/Configuration", "/Artists"} {
 		resp, err := http.Get(ts.URL + path)
 		if err != nil {
 			t.Fatal(err)

@@ -152,6 +152,10 @@ const (
 	prewarmWorkers = 2
 	// prewarmPosterWidth 是预热的海报档位，与前端墙页 <img src> 的 maxWidth=360 一致。
 	prewarmPosterWidth = 360
+	// embyImageQualityDefault 是图片端点的默认画质。文档 ImageService 明确写
+	// Quality「0–100，默认 90」，因此缺省时按 90 生成，而不是用 imageutil 的
+	// 通用默认值——两者不一致会让「按文档请求」与「按文档默认」得到不同字节。
+	embyImageQualityDefault = 90
 	// thumbDiskKeyVersion 是磁盘变体的命名空间：编码参数或缩放实现变化时递增，
 	// 旧变体自然过期淘汰，不需要逐条改文件名。
 	thumbDiskKeyVersion = "v1"
@@ -223,7 +227,15 @@ func (a *App) cachedMovie(id int64) (store.Movie, bool) {
 func (a *App) serveImage(c *gin.Context, path string) {
 	tag := a.posterTag(path)
 	c.Header("ETag", `"`+tag+`"`)
-	c.Header("Cache-Control", "public, max-age="+strconv.Itoa(int(imageMaxAge.Seconds()))+", must-revalidate")
+	// 文档：客户端带上条目的 ImageTag（?tag=）时应返回「强缓存」响应头。
+	// 注意强缓存不等于 304——304 表示「你已经有了」，而首个请求必须拿到字节。
+	// 因此 tag 吻合时只把 max-age 抬到一年并标 immutable：tag 随源图变化，
+	// 客户端因此永远不用重新校验；不吻合则维持按天过期 + 每次校验。
+	cacheControl := "public, max-age=" + strconv.Itoa(int(imageMaxAge.Seconds())) + ", must-revalidate"
+	if clientTag := c.Query("tag"); clientTag != "" && clientTag == tag {
+		cacheControl = "public, max-age=31536000, immutable"
+	}
+	c.Header("Cache-Control", cacheControl)
 	if ifNoneMatchHit(c.GetHeader("If-None-Match"), tag) {
 		c.Status(http.StatusNotModified)
 		return
@@ -396,7 +408,8 @@ func (a *App) prewarmOne(job prewarmJob) {
 			slog.Error("预热缩略图 panic，已跳过", "path", job.path, "panic", r)
 		}
 	}()
-	a.thumbVariant(a.rootCtx, job.path, job.tag, job.width, job.height, 0)
+	// 画质必须与请求路径的默认值一致，否则预热出来的变体 key 不同、等于白算。
+	a.thumbVariant(a.rootCtx, job.path, job.tag, job.width, job.height, embyImageQualityDefault)
 }
 
 // beginThumbFlight 登记一次生成；leader=true 表示由当前请求负责生成，
@@ -448,7 +461,7 @@ func imageResizeParams(c *gin.Context) (width, height, quality int) {
 	width = normalizeImageEdge(width)
 	height = normalizeImageEdge(height)
 	if quality < 1 || quality > 100 {
-		quality = 0 // 0 表示用内置默认画质
+		quality = embyImageQualityDefault
 	}
 	return width, height, quality
 }
@@ -500,15 +513,19 @@ func ifNoneMatchHit(header, tag string) bool {
 	return false
 }
 
-// boxsetPoster 解析合集相关 id（boxsets 媒体库 / boxset:<b64>）并返回代表海报路径。
+// boxsetPoster 解析合集相关 id（boxsets 媒体库 / boxset:<b64>）并返回封面路径。
+// 已生效的拼贴封面优先；没有记录时回退到代表海报，行为与改造前一致。
 func (a *App) boxsetPoster(rawID string) string {
 	if rawID == boxsetViewID {
-		// 合集文件夹的封面要逐个合集试到第一个有海报的，缓存住避免每张图都扫一遍合集。
+		// 合集文件夹的封面要逐个合集试到第一个有封面的，缓存住避免每张图都扫一遍合集。
 		key := "boxcover:" + a.db.Version("g:version")
 		if raw, ok := a.imgMeta.Get(key); ok {
 			return string(raw)
 		}
-		poster := a.firstCollectionPoster(a.cachedCollections())
+		poster := a.firstCollectionCover(a.cachedCollections())
+		if poster == "" {
+			poster = a.firstCollectionPoster(a.cachedCollections())
+		}
 		a.imgMeta.Set(key, []byte(poster), 5*time.Minute)
 		return poster
 	}
@@ -517,6 +534,9 @@ func (a *App) boxsetPoster(rawID string) string {
 		names = append(names, name)
 	}
 	for _, name := range names {
+		if cover, ok := a.appliedCover(name); ok {
+			return cover
+		}
 		if poster, _ := a.db.CollectionPoster(name); poster != "" {
 			return poster
 		}
@@ -573,14 +593,20 @@ func (a *App) imageInfo(c *gin.Context) {
 				apiError(c, http.StatusNotFound, "not found")
 				return
 			}
-			poster = stat.Poster
+			if cover, ok := a.appliedCover(name); ok {
+				poster = cover
+			} else {
+				poster = stat.Poster
+			}
 		} else {
 			// Stable representative from visible collections only.
 			names := slices.Sorted(maps.Keys(stats))
-			for _, name := range names {
-				if stats[name].Poster != "" {
-					poster = stats[name].Poster
-					break
+			if poster = a.firstCollectionCover(names); poster == "" {
+				for _, name := range names {
+					if stats[name].Poster != "" {
+						poster = stats[name].Poster
+						break
+					}
 				}
 			}
 		}
@@ -672,6 +698,8 @@ func (a *App) playback(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"MediaSources":  []gin.H{a.mediaSourceFor(movie, id, sourcePath, c)},
 		"PlaySessionId": randomSessionID(),
+		// 成功路径按文档给空错误码（PlaybackErrorCode 枚举，空串表示无错误）。
+		"ErrorCode": "",
 	})
 }
 
@@ -1421,21 +1449,74 @@ func (a *App) playing(c *gin.Context) {
 		return
 	}
 	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
-		c.Status(http.StatusNoContent)
+		// 文档 PlaystateService 对 /Sessions/Playing* 全部写「200（无返回内容）」。
+		c.Status(http.StatusOK)
 		return
 	}
-	var req struct {
-		ItemId        string `json:"ItemId"`
-		PositionTicks int64  `json:"PositionTicks"`
-		PlaySessionId string `json:"PlaySessionId"`
-		DeviceId      string `json:"DeviceId"`
-		EventName     string `json:"EventName"`
-		IsPaused      bool   `json:"IsPaused"`
-	}
+	var req playbackEventRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		apiError(c, http.StatusBadRequest, "invalid playback payload")
 		return
 	}
+	kind := store.PlaybackStart
+	switch strings.ToLower(filepath.Base(c.Request.URL.Path)) {
+	case "progress":
+		kind = store.PlaybackProgress
+	case "stopped":
+		kind = store.PlaybackStopped
+	}
+	a.applyPlaybackEvent(c, req, kind)
+}
+
+// playbackEventRequest 是 /Sessions/Playing* 的 body 与 /Users/{uid}/PlayingItems/{id}*
+// 的 query 的公共形状：文档两族字段同名，只是承载位置不同。
+type playbackEventRequest struct {
+	ItemId        string `json:"ItemId"`
+	PositionTicks int64  `json:"PositionTicks"`
+	PlaySessionId string `json:"PlaySessionId"`
+	DeviceId      string `json:"DeviceId"`
+	EventName     string `json:"EventName"`
+	IsPaused      bool   `json:"IsPaused"`
+}
+
+// playingItems 处理旧式上报族（文档 PlaystateService #2/#10/#11/#12）：
+//
+//	POST   /Users/{UserId}/PlayingItems/{Id}           开始
+//	POST   /Users/{UserId}/PlayingItems/{Id}/Progress  进度
+//	POST   /Users/{UserId}/PlayingItems/{Id}/Delete    停止
+//	DELETE /Users/{UserId}/PlayingItems/{Id}           停止
+//
+// 条目 id 在路径上，其余字段走 query（文档如此）。与 /Sessions/Playing* 共用
+// 同一条落库路径，两族写的是同一份 userdata / playback_sessions。
+func (a *App) playingItems(c *gin.Context) {
+	if !a.validUser(c) {
+		return
+	}
+	req := playbackEventRequest{
+		ItemId:        c.Param("id"),
+		PlaySessionId: c.Query("PlaySessionId"),
+		DeviceId:      c.Query("DeviceId"),
+	}
+	if raw := c.Query("PositionTicks"); raw != "" {
+		ticks, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			apiError(c, http.StatusBadRequest, "invalid PositionTicks")
+			return
+		}
+		req.PositionTicks = ticks
+	}
+	kind := store.PlaybackStart
+	if c.Request.Method == http.MethodDelete || strings.EqualFold(filepath.Base(c.Request.URL.Path), "delete") {
+		kind = store.PlaybackStopped
+	} else if strings.EqualFold(filepath.Base(c.Request.URL.Path), "progress") {
+		kind = store.PlaybackProgress
+	}
+	a.applyPlaybackEvent(c, req, kind)
+}
+
+// applyPlaybackEvent 是播放上报的唯一落库路径（/Sessions/Playing* 与
+// /Users/{uid}/PlayingItems* 共用）。kind 由调用方按路径判定。
+func (a *App) applyPlaybackEvent(c *gin.Context, req playbackEventRequest, kind store.PlaybackKind) {
 	movie, _, _, ok := a.resolvePlaybackTarget(req.ItemId)
 	if !ok || !movie.IsVisible() || !a.canViewMovie(c, movie) {
 		apiError(c, http.StatusNotFound, "not found")
@@ -1446,13 +1527,6 @@ func (a *App) playing(c *gin.Context) {
 	// 播放计数由 D07 会话/事件协议保证一次播放只计一次（迁移 2）：
 	// start/progress/stopped 都进同一事务；重复 Stopped 与停止后的迟到心跳
 	// 不会再改计数或覆盖停止标记，也不能靠重放同一位置来回滚 play_count。
-	kind := store.PlaybackStart
-	switch strings.ToLower(filepath.Base(c.Request.URL.Path)) {
-	case "progress":
-		kind = store.PlaybackProgress
-	case "stopped":
-		kind = store.PlaybackStopped
-	}
 	isStopped := kind == store.PlaybackStopped
 	result, err := a.db.RecordPlaybackEvent(store.PlaybackEvent{
 		SessionKey:    req.PlaySessionId,
@@ -1489,7 +1563,8 @@ func (a *App) playing(c *gin.Context) {
 	} else {
 		a.cache.Delete(movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), strconv.FormatInt(id, 10)))
 	}
-	c.Status(http.StatusNoContent)
+	// 文档 PlaystateService 对 /Sessions/Playing|Progress|Stopped 全部写 200。
+	c.Status(http.StatusOK)
 }
 
 func (a *App) setPlayed(c *gin.Context, played bool) {

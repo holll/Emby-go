@@ -43,7 +43,9 @@ func TestBIFDiscoveryIndependentOfPlaybackInfo(t *testing.T) {
 					if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 						t.Fatal(err)
 					}
-					if len(response) != 2 || response["MediaSources"] == nil || response["PlaySessionId"] == nil {
+					// PlaybackInfoResponse 按文档只有 MediaSources / PlaySessionId / ErrorCode
+					// 三个字段，多一个都说明混进了不该有的预览信息。
+					if len(response) != 3 || response["MediaSources"] == nil || response["PlaySessionId"] == nil || response["ErrorCode"] == nil {
 						t.Fatalf("%s PlaybackInfo must keep its media/session envelope, without invented preview fields: keys %v", method, response)
 					}
 					var sources []struct{ Id string }

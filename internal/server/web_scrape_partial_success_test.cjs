@@ -32,6 +32,8 @@ function fixture(api) {
     };
   }
   const results = element(), body = element(), overlay = element();
+  // 刮削浮层是原生 <dialog>：fixture 直接渲染预览，等价于 openScrapePreview 已 showModal。
+  overlay.open = true;
   const nodes = { '#scrape-results': results, '#scrape-body': body, '#scrape-overlay': overlay };
   const box = vm.createContext({
     URLSearchParams, pageGen: 3, detailGen: 9, pageItems() {},
@@ -39,8 +41,9 @@ function fixture(api) {
     api: async (url, options) => { calls.push({ url, options }); return api(url, options); },
     toast: (...args) => toasts.push(args),
     closeDetail: () => closedDetails.push(true),
-    refreshPage: (render, gen) => { refreshes.push(gen); assert.equal(overlay.hidden, !body.innerHTML.includes('scrape-done')); },
-    overlayPop: selector => popped.push(selector),
+    refreshPage: (render, gen) => { refreshes.push(gen); assert.equal(overlay.open, body.innerHTML.includes('scrape-done')); },
+    overlayPush: selector => { if (selector === '#scrape-overlay') overlay.open = true; },
+    overlayPop: selector => { if (selector === '#scrape-overlay') overlay.open = false; popped.push(selector); },
     numberUnlessInTitle: () => ''
   });
   vm.runInContext(escCode + scrapeCode, box);
@@ -58,7 +61,7 @@ test('clean confirmation keeps existing toast, close, detail close and page refr
     const env = fixture(async () => result);
     await env.submit();
     assert.deepEqual(env.toasts, [['已写入「Movie」（图片 2 张）']]);
-    assert.equal(env.overlay.hidden, true);
+    assert.equal(env.overlay.open, false);
     assert.equal(env.closedDetails.length, 1);
     assert.deepEqual(env.refreshes, [3]);
     assert.equal(env.body.innerHTML, '');
@@ -98,7 +101,7 @@ for (const [label, partial] of [
     }
     for (const warning of partial.warnings || []) assert.ok(html.includes(warning));
     assert.doesNotMatch(html, /scrape-confirm|scrape-force|scrape-manual-search|确认写入|NFO.*保存失败/);
-    assert.equal(env.overlay.hidden, false);
+    assert.equal(env.overlay.open, true);
     assert.deepEqual(env.toasts, []);
     assert.deepEqual(env.refreshes, [3], 'refresh does not close the pending result panel');
     const done = env.body.querySelector('#scrape-done');
@@ -108,7 +111,7 @@ for (const [label, partial] of [
     await env.confirm.handlers.click();
     await done.click();
     assert.equal(env.calls.length, 1);
-    assert.equal(env.overlay.hidden, true);
+    assert.equal(env.overlay.open, false);
     assert.deepEqual(env.popped, ['#scrape-overlay']);
     assert.equal(vm.runInContext('scrapeState', env.box), null);
   });
@@ -135,7 +138,7 @@ for (const change of ['page', 'closed', 'replaced']) {
       else resolve({ title: 'old title', images: 1, ...(outcome === 'partial' ? { refresh_error: 'old failure', warnings: ['old warning'] } : {}) });
       await pending;
       assert.equal(env.body.innerHTML, '');
-      assert.equal(env.overlay.hidden, false);
+      assert.equal(env.overlay.open, true);
       assert.deepEqual(env.toasts, []);
       assert.deepEqual(env.refreshes, []);
       assert.deepEqual(env.closedDetails, []);

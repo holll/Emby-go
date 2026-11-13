@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
+const embySource = fs.readFileSync(path.join(__dirname, 'web/emby.js'), 'utf8');
 const html = fs.readFileSync(path.join(__dirname, 'web/index.html'), 'utf8');
 
 function section(start, end) {
@@ -17,7 +18,7 @@ function sandbox(values = {}) {
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
-    stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, stopTranslationPolling() {}, scanClose: { hidden: true, addEventListener() {} },
+    stopScanPolling() {}, embyUserPath: () => '/Users/1', WALL_STATUS_TEXT: {}, stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, stopTranslationPolling() {}, scanClose: { hidden: true, addEventListener() {} },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
@@ -29,10 +30,10 @@ test('媒体墙请求失败后停止自动加载，手工重试后恢复', async
   const state = { loading: false, failed: false, done: false, offset: 0, items: [], userdata: {} };
   const box = sandbox({ wallState: state, wallGen: 1, WALL_PAGE_SIZE: 100,
     window: { innerHeight: 800 }, document: { querySelector: id => id === '#wall-more' ? more : null },
-    esc: String, empty: () => '', STATUS_TEXT: {}, api: async () => {
+    esc: String, empty: () => '', STATUS_TEXT: {}, wallEmbyQuery: () => '', embyRequest: async () => {
       attempts++;
       if (attempts === 1) throw Error('模拟500');
-      return { items: [], total: 0 };
+      return { Items: [], TotalRecordCount: 0 };
     } });
   vm.runInContext(section('function wallMaybeLoadMore()', '/* ------------------------------------------------------------ 详情抽屉'), box);
   await box.loadWallPage();
@@ -51,22 +52,22 @@ test('筛选的旧 libraries 响应不能覆盖最新筛选', async () => {
   const requests = [];
   const element = { addEventListener() {}, value: '' };
   const box = sandbox({ pageGen: 1, wallGen: 0, wallState: null,
-    location: { search: '?status=manual', pathname: '/', hash: '#items' },
+    location: { search: '?status=unplayed', pathname: '/', hash: '#items' },
     content: { innerHTML: '' }, ENTITY_PARAMS: [], esc: String, icon: () => '',
-    api: () => new Promise(resolve => requests.push(resolve)),
+    embyRequest: () => new Promise(resolve => requests.push(resolve)),
     document: { querySelector: () => element, querySelectorAll: () => [] },
     debounce: fn => fn, runProbeAll() {}, stopProbePolling() {}, startProbePolling() {}, loadWallPage: async () => {} });
   vm.runInContext(section('async function pageItems()', '// reloadWall'), box);
   const first = box.pageItems();
-  box.location.search = '?status=success';
+  box.location.search = '?status=played';
   const second = box.pageItems();
-  requests[1]({ items: [] });
+  requests[1]({ Items: [] });
   await second;
   const rendered = box.content.innerHTML;
-  assert.equal(box.wallState.status, 'success');
-  requests[0]({ items: [] });
+  assert.equal(box.wallState.status, 'played');
+  requests[0]({ Items: [] });
   await first;
-  assert.equal(box.wallState.status, 'success');
+  assert.equal(box.wallState.status, 'played');
   assert.equal(box.content.innerHTML, rendered);
 });
 
@@ -88,7 +89,7 @@ test('旧表单保存完成后不能刷新已经切走的页面', async () => {
 
 test('字段锁保存保留未知字段并按勾选解锁已知字段', () => {
   const box = sandbox({});
-  vm.runInContext(section('const EDIT_LOCK_FIELDS =', 'async function openDetail('), box);
+  vm.runInContext(section('const EDIT_LOCK_FIELDS =', 'async function openMaintenanceDetail('), box);
   const inputs = [{ dataset: { lockField: 'Name' }, checked: false },
     { dataset: { lockField: 'Genres' }, checked: true }];
   const fields = box.editLockFields(['Name', 'FutureField', 'People'], inputs);
@@ -356,65 +357,63 @@ test('设置页提供会话期限说明与退出全部会话', () => {
   ]) assert.ok(source.includes(snippet), `missing: ${snippet}`);
 });
 
-test('遮罩层级决定 Esc 目标，Tab 在顶层遮罩循环并恢复触发焦点', () => {
+test('遮罩用原生 dialog 打开并记录层级，焦点交给浏览器管理', () => {
   const log = [];
-  const focusable = name => ({ name, hidden: false, disabled: false, focus() { log.push(name); } });
-  const trigger = focusable('card-trigger');
-  const closeBtn = focusable('player-close');
-  const secondBtn = focusable('player-second');
   const overlays = {};
-  const items = { '#scrape-overlay': [], '#player-overlay': [closeBtn, secondBtn], '#detail-overlay': [] };
+  const buttons = {
+    '#scrape-overlay': [], '#player-overlay': ['player-close', 'player-second'], '#detail-overlay': []
+  };
   function overlayEl(selector) {
     if (!overlays[selector]) {
-      const buttons = items[selector] || [];
+      const focusables = (buttons[selector] || []).map(name => ({ name, hidden: false, focus() { log.push(name); } }));
       overlays[selector] = {
-        hidden: true,
+        open: false,
+        showModal() { this.open = true; log.push('showModal ' + selector); },
+        close() { this.open = false; log.push('close ' + selector); },
         focus() { log.push('focus ' + selector); },
-        querySelectorAll: () => buttons,
-        contains: element => buttons.includes(element)
+        querySelector: () => null,
+        querySelectorAll: () => focusables,
+        contains: element => focusables.includes(element)
       };
     }
     return overlays[selector];
   }
-  let active = null;
   const box = sandbox({
     document: {
-      get activeElement() { return active; }, set activeElement(value) { active = value; },
-      querySelector: selector => selector in items ? overlayEl(selector) : null,
+      get activeElement() { return null; },
+      querySelector: selector => selector in buttons ? overlayEl(selector) : null,
+      createElement: () => ({ className: '', hidden: false }),
       contains: () => true, addEventListener() {}
     }
   });
   vm.runInContext(section('/* 遮罩焦点：', '/* 遮罩焦点结束 */'), box);
-  overlayEl('#detail-overlay').hidden = false;
-  overlayEl('#player-overlay').hidden = false;
-  assert.equal(box.topOverlaySelector(), '#player-overlay', '播放器在详情之上');
-  overlayEl('#scrape-overlay').hidden = false;
-  assert.equal(box.topOverlaySelector(), '#scrape-overlay', '刮削预览在最上层');
-  overlayEl('#scrape-overlay').hidden = true;
 
-  active = trigger;
+  // 打开顺序即层级：后打开的浮层是最上层，供 toast 选择反馈条。
   box.overlayPush('#detail-overlay');
+  assert.equal(overlayEl('#detail-overlay').open, true, 'overlayPush 以模态方式打开');
   assert.equal(log.at(-1), 'focus #detail-overlay', '内容渲染前先聚焦遮罩容器');
+  box.overlayPush('#player-overlay');
+  assert.equal(box.topOverlaySelector(), '#player-overlay', '播放器在详情之上');
+  assert.equal(log.at(-1), 'player-close', '打开时聚焦首个可操作元素');
+  box.overlayPush('#scrape-overlay');
+  assert.equal(box.topOverlaySelector(), '#scrape-overlay', '刮削预览在最上层');
+  assert.equal(box.overlayVisible('#scrape-overlay'), true);
+  box.overlayPop('#scrape-overlay');
+  assert.equal(overlayEl('#scrape-overlay').open, false, 'overlayPop 关闭原生 dialog');
+  assert.equal(box.topOverlaySelector(), '#player-overlay', '关闭后回落到下一层');
+  assert.equal(box.overlayVisible('#scrape-overlay'), false);
+
+  // 焦点归还由 dialog.close() 完成，这里不再手工 focus 触发元素。
+  box.overlayPop('#player-overlay');
   box.overlayPop('#detail-overlay');
-  assert.equal(log.at(-1), 'card-trigger', '关闭后恢复触发元素');
+  assert.equal(box.topOverlaySelector(), '', '全部关闭后没有顶层浮层');
+  assert.deepEqual(log.filter(entry => entry === 'focus #detail-overlay'), ['focus #detail-overlay'], '只聚焦一次');
 
-  active = null;
-  const tab = { key: 'Tab', shiftKey: false, prevented: false, preventDefault() { this.prevented = true; } };
-  box.overlayTrapTab(tab);
-  assert.equal(tab.prevented, true);
-  assert.equal(log.at(-1), 'player-close');
-
-  active = closeBtn;
-  const inside = { key: 'Tab', shiftKey: false, prevented: false, preventDefault() { this.prevented = true; } };
-  box.overlayTrapTab(inside);
-  assert.equal(inside.prevented, true, '受控顺序：遮罩内 Tab 也由脚本推进');
-  assert.equal(log.at(-1), 'player-second', 'Tab 从首项前进到第二项');
-
-  active = secondBtn; // 真实浏览器里 focus() 已把焦点移到第二项
-  const shift = { key: 'Tab', shiftKey: true, prevented: false, preventDefault() { this.prevented = true; } };
-  box.overlayTrapTab(shift);
-  assert.equal(shift.prevented, true);
-  assert.equal(log.at(-1), 'player-close', 'Shift+Tab 从第二项回退到首项');
+  // 重复打开同一浮层不会重复入栈。
+  box.overlayPush('#detail-overlay');
+  box.overlayPush('#detail-overlay');
+  box.overlayPop('#detail-overlay');
+  assert.equal(box.topOverlaySelector(), '', '重复打开后一次关闭即清空');
 });
 
 function recoveryPanel() {
@@ -436,7 +435,7 @@ test('编辑部分成功保留警告、禁止重发旧表单，只按摘要恢�
     api: async (path, options) => { requests.push({ path, options }); return requests.length === 1 ? { status: 'partial_success', manual_status: 'pending', recovery: { nfo_sha256: 'digest' } } : { status: 'success', indexed: true }; },
     toast: text => messages.push(text), isCurrent: () => true,
     editLockFields: () => [], closeDetail: () => { closed++; }, pageItems() {}, refreshPage: () => { refreshed++; } });
-  vm.runInContext(section('function renderEditRecovery(', 'async function openDetail('), box);
+  vm.runInContext(section('function renderEditRecovery(', 'async function openMaintenanceDetail('), box);
   vm.runInContext(section("  const editForm = document.querySelector('#detail-edit-form');", '  // 实体跳转'), box);
   await submit({ preventDefault() {} });
   assert.equal(closed, 0); assert.equal(refreshed, 0); assert.equal(save.disabled, true);
@@ -453,7 +452,7 @@ test('恢复网络失败可重试，再次部分成功不误报成功', async ()
   const panel = recoveryPanel(); let attempts = 0, recovered = 0;
   const partial = { status: 'partial_success', manual_status: 'saved', recovery: { nfo_sha256: 'digest' } };
   const box = sandbox({ api: async () => { attempts++; if (attempts === 1) throw Error('network unavailable'); return attempts === 2 ? partial : { status: 'success' }; } });
-  vm.runInContext(section('function renderEditRecovery(', 'async function openDetail('), box);
+  vm.runInContext(section('function renderEditRecovery(', 'async function openMaintenanceDetail('), box);
   box.renderEditRecovery(panel, 42, partial, () => { recovered++; }, () => true);
   await panel.querySelector('[data-recover-edit]').click();
   assert.equal(panel.error.textContent, 'network unavailable'); assert.equal(panel.querySelector('[data-recover-edit]').disabled, false);
@@ -464,7 +463,7 @@ test('恢复网络失败可重试，再次部分成功不误报成功', async ()
 test('旧抽屉恢复完成不能关闭或刷新新页面', async () => {
   let finish, current = true, recovered = 0;
   const panel = recoveryPanel(); const box = sandbox({ api: () => new Promise(resolve => { finish = resolve; }) });
-  vm.runInContext(section('function renderEditRecovery(', 'async function openDetail('), box);
+  vm.runInContext(section('function renderEditRecovery(', 'async function openMaintenanceDetail('), box);
   box.renderEditRecovery(panel, 42, { recovery: { nfo_sha256: 'digest' } }, () => { recovered++; }, () => current);
   const pending = panel.querySelector('[data-recover-edit]').click();
   assert.equal(panel.querySelector('[data-recover-edit]').disabled, true);
@@ -617,17 +616,18 @@ async function wallKeyboardFixture() {
   const box = sandbox({ pageGen: 1, wallGen: 0, wallState: null,
     location: { search: '', pathname: '/', hash: '#items' },
     content: { innerHTML: '' }, ENTITY_PARAMS: [], esc: String, icon: () => '',
-    api: async (url, options) => { if (url === '/libraries') return { items: [] }; calls.push([url, options.method]); return { status: 'manual' }; },
+    embyRequest: async url => { assert.equal(url, '/Users/1/Views'); return { Items: [] }; },
+    api: async (url, options) => { calls.push([url, options.method]); return { status: 'manual' }; },
     document: { querySelector: id => id === '#wall' ? wall : element, querySelectorAll: () => [] },
     debounce: fn => fn, runProbeAll() {}, stopProbePolling() {}, startProbePolling() {}, loadWallPage: async () => {},
-    openDetail: item => calls.push(['detail', item.id]),
-    openPlayer: item => calls.push(['play', item.id]),
+    openDetail: item => calls.push(['detail', item.Id]),
+    openPlayer: item => calls.push(['play', item.Id]),
     probeItem: id => calls.push(['probe', id]),
     confirm: () => true, toast() {}, STATUS_TEXT: {}, refreshPage() {} });
   vm.runInContext(section('async function deleteIndexedItem(', 'const STATUS_TEXT ='), box);
   vm.runInContext(section('async function pageItems()', '// reloadWall'), box);
   await box.pageItems();
-  box.wallState.items = [{ id: 7 }];
+  box.wallState.items = [{ Id: 7 }];
   const card = { dataset: { play: '7' }, closest: selector => selector === '.wall-card' ? card : null };
   return { handlers, calls, card, box, element };
 }
@@ -662,7 +662,7 @@ test('媒体卡片不再整体充当按钮：模板无 role=button/tabindex，�
   const src = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
   assert.ok(!/<article class="wall-card" data-play="\$\{item\.id\}"[^>]*role=/.test(src), '卡片不得整体 role=button');
   assert.ok(!/<article class="wall-card" data-play="\$\{item\.id\}"[^>]*tabindex/.test(src), '卡片不得整体可聚焦');
-  assert.match(src, /class="wall-title" data-open="\$\{item\.id\}"/, '标题必须是可聚焦按钮');
+  assert.match(src, /class="wall-title" data-open="\$\{esc\(item\.Id\)\}"/, '标题必须是可聚焦按钮');
   assert.ok(!src.includes("document.querySelector('#wall').addEventListener('keydown'"), '卡片级 keydown 必须移除（避免嵌套交互）');
 });
 
@@ -1176,7 +1176,7 @@ function probePageFixture(progress = async () => ({ running: false }), post = as
       addEventListener(type, fn) { this.handlers[type] = fn; } });
     return nodes.get(id);
   }
-  const status = node('status-pill'); status.dataset.status = 'success';
+  const status = node('status-pill'); status.dataset.status = 'played';
   const content = node('content');
   const location = { search: '', pathname: '/', hash: '#items' };
   const box = sandbox({ AbortController, pageGen: 1, wallGen: 0, wallState: null,
@@ -1184,6 +1184,7 @@ function probePageFixture(progress = async () => ({ running: false }), post = as
     document: { querySelector: node, querySelectorAll: selector => selector === '.pill[data-status]' ? [status] : [] },
     history: { pushState(_, __, url) { location.search = new URL(url, 'http://fixture').search; },
       replaceState(_, __, url) { location.search = new URL(url, 'http://fixture').search; } }, URL,
+    embyRequest: async path => { assert.equal(path, '/Users/1/Views'); return { Items: [] }; },
     ENTITY_PARAMS: [], esc: String, icon: () => '', debounce: fn => fn,
     loadWallPage: async () => {}, toast: (...args) => toasts.push(args),
     stopScrapePolling() {}, cancelScanHide() {}, setMeta() {}, skeletonPanel: () => 'new page',
@@ -1216,8 +1217,11 @@ async function probeReady(env) {
   for (let i = 0; i < 12; i++) await Promise.resolve();
   assert.equal(ready, true, 'pageItems must not await bare probe GET');
   await initial;
-  assert.equal(env.node('#probe-media').disabled, true, 'initial read must forbid duplicate start');
   assert.equal(typeof env.node('#probe-media').handlers.click, 'function');
+  assert.equal(env.gets().length, 0, '普通浏览不读管理状态');
+  env.node('.wall-maintenance').open = true;
+  env.node('.wall-maintenance').handlers.toggle({ currentTarget: env.node('.wall-maintenance') });
+  assert.equal(env.node('#probe-media').disabled, true, 'initial explicit maintenance read must forbid duplicate start');
 }
 
 test('真实媒体墙首次503/network/畸形恢复只观察GET，未知不释放按钮或伪造终态', async () => {
@@ -1315,10 +1319,10 @@ test('真实pageItems同页状态筛选和page导航中止旧GET，晚响应不�
     else { env.status.handlers.click(); for (let i = 0; i < 12; i++) await Promise.resolve(); }
     assert.equal(env.gets()[0].options.signal.aborted, true);
     assert.equal(env.box.pageGen, navigation ? gen + 1 : gen);
-    if (!navigation) { assert.equal(env.box.wallState.status, 'success'); assert.equal(env.box.wallGen, 2); }
+    if (!navigation) { assert.equal(env.box.wallState.status, 'played'); assert.equal(env.box.wallGen, 2); }
     const before = env.snapshot(); resolve(probeTerminal); await pending;
     assert.equal(env.snapshot(), before);
-    assert.equal(env.timers.size, navigation ? 0 : 1);
+    assert.equal(env.timers.size, 0, '重新渲染后维护区收起，不自动恢复管理请求');
     env.box.stopProbePolling(); assert.equal(env.timers.size, 0);
   }
 });
@@ -1435,8 +1439,8 @@ test('旧搜索延时在导航或同页DOM重建后不能改URL或复活探测�
 test('boot不得裸读probe进度，恢复入口只在媒体墙DOM/button创建后', () => {
   assert.doesNotMatch(section('async function boot()', '\nboot();'), /api\(['"]\/probe\/media\/progress['"]/);
   const items = section('async function pageItems()', '// reloadWall');
-  assert.ok(items.indexOf('stopProbePolling();') < items.indexOf("await api('/libraries')"));
-  assert.ok(items.indexOf('startProbePolling();') > items.indexOf("probeButton.addEventListener('click', runProbeAll)"));
+  assert.ok(items.indexOf('stopProbePolling();') < items.indexOf("await embyRequest(embyUserPath() + '/Views')"));
+  assert.match(items, /addEventListener\('toggle'[\s\S]*?currentTarget.open\) startProbePolling\(\)/);
 });
 
 // 第23批：实际扫描函数 + 串行 helper；只模拟DOM/API/时钟，不启动服务器或浏览器。
@@ -1695,6 +1699,7 @@ test('实际boot首scan GET悬挂不阻塞初始page或导航，统一观察器�
     signal.addEventListener('abort', () => reject(Error('boot progress timeout')), { once: true });
   }));
   // 范围声明：boot/scan/helper均为实际函数；认证、DOM及page渲染/导航是调用桩，非浏览器集成。
+  env.box.location.hash = '#overview';
   const rendered = [], events = {}, nav = env.node('nav'); nav.dataset.page = 'fixture';
   Object.assign(env.box, { token: 'fixture', fetch: async () => ({ ok: true, status: 200 }),
     window: { location: { replace() { assert.fail('unexpected redirect'); } }, addEventListener(type, fn) { events[type] = fn; } },
@@ -1708,10 +1713,10 @@ test('实际boot首scan GET悬挂不阻塞初始page或导航，统一观察器�
   const boot = env.box.boot().then(() => { ready = true; });
   for (let i = 0; i < 12; i++) await Promise.resolve();
   assert.equal(ready, true, 'boot must render without awaiting bare scan progress'); await boot;
-  assert.deepEqual(rendered, ['items']); assert.equal(env.gets().length, 0);
+  assert.deepEqual(rendered, ['overview']); assert.equal(env.gets().length, 0);
   const pending = env.fire(0); assert.equal(env.gets().length, 1); assert.equal(env.has(10000), true);
-  nav.handlers.click(); assert.deepEqual(rendered, ['items', 'fixture']);
-  env.box.location.hash = '#items'; events.popstate(); assert.deepEqual(rendered, ['items', 'fixture', 'items']);
+  nav.handlers.click(); assert.deepEqual(rendered, ['overview', 'fixture']);
+  env.box.location.hash = '#items'; events.popstate(); assert.deepEqual(rendered, ['overview', 'fixture', 'items']);
   assert.equal(env.gets()[0].options.signal.aborted, false, 'navigation must not cancel global scan read');
   env.fire(10000); await pending; assert.equal(env.gets()[0].options.signal.aborted, true);
   assert.match(env.node('#scan-progress-detail').textContent, /未确认.*3秒/);
@@ -1738,7 +1743,10 @@ test('探测文件成功但版本刷新失败保持错误面板，不生成成�
 
 test('图片请求带宽度预算与 1x/2x srcset（FE-11）', () => {
   // 媒体墙：200/400 两档；详情海报 120/240；详情背景 540/1080；详情海报带尺寸避免 CLS。
-  assert.match(source, /posterBase \? `\$\{posterBase\}\?maxWidth=200 1x, \$\{posterBase\}\?maxWidth=400 2x` : ''/);
+  assert.match(source, /embyImageURL\(item, kind, 200\)/);
+  assert.match(source, /embyImageURL\(item, kind, 400\)\} 2x/);
+  assert.match(embySource, /embyImageURL\(m, posterKind, 120\)/);
+  assert.match(embySource, /embyImageURL\(m, backdropKind, 540\)/);
   assert.match(source, /class="detail-poster" width="104" height="156"/);
   assert.match(source, /\?maxWidth=120 1x, \$\{posterBase\}\?maxWidth=240 2x/);
   assert.match(source, /\?maxWidth=540 1x, \$\{backdropBase\}\?maxWidth=1080 2x/);
@@ -1873,29 +1881,59 @@ test('刮削候选慢回包不覆盖更新的选择（P1-10）', async () => {
 });
 
 test('运行日志独立页与 ffprobe 状态（生产可诊断）', async () => {
-  // R4：日志从设置页拆到独立磁盘日志页，不再轮询 ring 的 /logs 接口。
+  // 原始日志使用独立 fetch SSE 模块，旧结构化接口保留给兼容调用方。
   assert.match(html, /id="nav-logs"/);
   assert.match(source, /logs: pageLogs/);
-  assert.match(source, /api\('\/logs\/disk' \+ query/);
-  assert.match(source, /\?kind=app&limit=200/);
-  assert.match(source, /id="dl-earlier"/);
+  assert.match(source, /mountLogStream\(content,/);
+  assert.match(html, /src="\/web\/log-stream\.js"/);
   assert.match(source, /部分通知未送达，业务操作已完成/);
   assert.match(source, /ff\.error/);
   assert.match(source, /ffprobe/);
 });
 
-test('移动端表格：用户卡片化与日志堆叠', async () => {
-  // 用户管理在窄屏按字段堆叠（data-label），日志表改为时间/级别一行、内容独占一行。
+test('表格可访问性：容器可键盘滚动、有名称、表头带 scope', async () => {
+  // 静态断言：所有前端 JS 里生成的 table-wrap 都必须带 tabindex="0" + role="region"
+  // + 可访问名（aria-label 或 aria-labelledby），表格必须有 caption，th 必须带 scope。
+  const files = ['app.js', 'dashboard.js', 'security.js', 'image-cache-settings.js', 'webhook-settings.js'];
+  for (const file of files) {
+    const src = fs.readFileSync(path.join(__dirname, 'web', file), 'utf8');
+    for (const m of src.matchAll(/<div[^>]*class="table-wrap[^"]*"[^>]*>/g)) {
+      assert.match(m[0], /tabindex="0"/, `${file}: table-wrap 必须可聚焦滚动：${m[0]}`);
+      assert.match(m[0], /role="region"/, `${file}: table-wrap 必须有 region 角色：${m[0]}`);
+      assert.match(m[0], /aria-(label|labelledby)=/, `${file}: table-wrap 必须有可访问名：${m[0]}`);
+    }
+    for (const m of src.matchAll(/<th(\s[^>]*)?>/g)) {
+      assert.match(m[0], /scope="(col|row)"/, `${file}: th 必须声明 scope：${m[0]}`);
+    }
+  }
+  // webhook 投递历史是 DOM 构建的表格，单独核对 caption 与 scope。
+  const wh = fs.readFileSync(path.join(__dirname, 'web/webhook-settings.js'), 'utf8');
+  assert.match(wh, /caption\.className = 'sr-only'/);
+  assert.match(wh, /th\.scope = 'col'/);
+  // 每个渲染出的 table 都带 caption（sr-only 也算），避免屏幕阅读器读到无名表格。
+  const app = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
+  const tables = [...app.matchAll(/<table[^>]*>/g)];
+  assert.ok(tables.length > 0);
+  for (const m of tables) {
+    const tail = app.slice(m.index, m.index + 400);
+    assert.match(tail, /<caption/, `app.js: table 必须带 caption：${m[0]}`);
+  }
+});
+
+test('移动端表格：用户卡片化与审计堆叠', async () => {
+  // 用户管理在窄屏按字段堆叠（data-label），活动记录同样改为堆叠卡片。
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
   assert.match(source, /<table class="user-table">/);
   assert.match(source, /data-label="媒体库授权"/);
   assert.match(css, /\.user-table thead \{ display: none; \}/);
   // 宽表格的横向滚动只用于确实需要滚动的表；已卡片化的包装层必须排除，
   // 否则 560px 的最小宽度会把移动端布局视口撑宽（innerWidth > 设备宽度）。
-  assert.match(css, /\.table-wrap:not\(\.security-table\):not\(\.audit-table\):not\(\.scheduled-table\):not\(\.library-table\) table:not\(\.log-table\):not\(\.user-table\) \{ min-width: 560px; \}/);
-  assert.match(css, /\.log-table td:nth-child\(3\) \{ margin-top: 2px; word-break: break-word; \}/);
+  assert.match(css, /\.table-wrap:not\(\.security-table\):not\(\.audit-table\):not\(\.scheduled-table\) table:not\(\.user-table\) \{ min-width: 560px; \}/);
+  // .log-table / .library-table 是没有任何消费者的死选择器，已删除；回归防护：
+  assert.doesNotMatch(css, /\.log-table/);
+  assert.doesNotMatch(css, /\.library-table/);
   assert.match(css, /\.audit-table thead \{ display: none; \}/);
-  assert.match(source, /<div class="table-wrap audit-table"><table>/);
+  assert.match(source, /<div class="table-wrap audit-table" tabindex="0" role="region" aria-label="登录记录"><table>/);
   assert.match(source, /<td data-label="来源 IP" class="mono">/);
 });
 
@@ -2418,54 +2456,39 @@ test('扫描202首读历史终态必须按task_id确认；快速完成未见runn
   await fast.box.runScan(); await fast.fire(0); assert.equal(fast.reloads, 2);
 });
 
-test('运行日志页转义日志文本并支持级别筛选，切页后晚回不写新页面', async () => {
-  const nodes = new Map();
-  const make = id => ({ id, isConnected: true, textContent: '', innerHTML: '', hidden: false, value: '',
-    scrollTop: 0, scrollHeight: 100, clientHeight: 50, handlers: {},
-    addEventListener(type, fn) { this.handlers[type] = fn; }, setAttribute() {}, style: {} });
-  const content = {
-    _html: '',
-    get innerHTML() { return this._html; }, set innerHTML(value) { this._html = value; },
-    querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, make(selector)); return nodes.get(selector); }
-  };
-  const timers = [], listeners = {};
-  const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const box = sandbox({ me: { is_admin: true }, pageGen: 1, token: 'fixture-token', esc, empty: (a, b) => `${a} ${b}`,
-    content, document: { hidden: false, addEventListener(type, fn) { listeners[type] = fn; }, removeEventListener() {}, querySelector: () => null },
-    setTimeout: (fn, delay) => { timers.push([fn, delay]); return timers.length; }, clearTimeout() {},
-    api: async () => ({ items: [{ id: '1', time: '2026-10-23T10:00:00Z', level: 'INFO', message: '<script>x</script> token=ABC' }],
-      next_after: 'n1', next_before: 'b1', has_more: true }) });
-  vm.runInContext(section('let logsTimer = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
+test('运行日志挂载捕获身份与导航代次，销毁后旧流不再有效', async () => {
+  const content = { innerHTML: '' };
+  const mounts = [];
+  let disposed = 0;
+  const box = sandbox({ me: { is_admin: true }, pageGen: 1, token: 'fixture-token', content,
+    mountLogStream(host, options) { mounts.push({ host, options }); return () => { disposed++; }; }
+  });
+  vm.runInContext(section('let logsStop = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
   await box.pageLogs();
-  assert.match(nodes.get('#dl-body').innerHTML, /&lt;script&gt;/);
-  assert.doesNotMatch(nodes.get('#dl-body').innerHTML, /<script>/);
-  assert.equal(nodes.get('#dl-earlier').hidden, false);
-  nodes.get('#dl-level').value = 'warn';
-  nodes.get('#dl-level').handlers.change({ target: { value: 'warn' } });
-  assert.doesNotMatch(nodes.get('#dl-body').innerHTML, /token=ABC/);
-  assert.equal(timers.filter(([, delay]) => delay === 1000).length, 1, '只安排下一次增量轮询');
+  assert.equal(mounts.length, 1);
+  assert.equal(mounts[0].host, content);
+  assert.equal(mounts[0].options.token, 'fixture-token');
+  assert.equal(mounts[0].options.current(), true);
+  box.pageGen = 2;
+  assert.equal(mounts[0].options.current(), false);
+  await box.pageLogs();
+  assert.equal(disposed, 1);
+  assert.equal(mounts[1].options.current(), true);
+  box.token = 'different-account';
+  assert.equal(mounts[1].options.current(), false);
   box.stopLogsPolling();
-  assert.equal(timers.filter(([, delay]) => delay === 1000).length, 1);
+  box.stopLogsPolling();
+  assert.equal(disposed, 2, '销毁幂等且不重连旧流');
 });
 
-test('运行日志首读在切页后不渲染旧响应', async () => {
-  const nodes = new Map();
-  const make = id => ({ id, isConnected: true, textContent: '', innerHTML: '', hidden: false,
-    scrollTop: 0, scrollHeight: 100, clientHeight: 50, handlers: {},
-    addEventListener(type, fn) { this.handlers[type] = fn; }, setAttribute() {}, style: {} });
-  const content = {
-    innerHTML: '', querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, make(selector)); return nodes.get(selector); }
-  };
-  let resolve;
-  const box = sandbox({ me: { is_admin: true }, pageGen: 1, token: 'fixture-token', esc: String, empty: () => '',
-    content, document: { hidden: false, addEventListener() {}, removeEventListener() {}, querySelector: () => null },
-    setTimeout: () => 0, clearTimeout() {}, api: () => new Promise(r => { resolve = r; }) });
-  vm.runInContext(section('let logsTimer = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
-  const loading = box.pageLogs();
-  box.pageGen = 2;
-  resolve({ items: [{ id: 'old', time: '2026-10-23T10:00:00Z', level: 'INFO', message: 'old-response' }], next_after: 'x' });
-  await loading;
-  assert.equal(nodes.get('#dl-body').innerHTML, '', '旧页面响应不得写入新页面');
+test('非管理员不挂载原始日志流', async () => {
+  const content = { innerHTML: '' };
+  const box = sandbox({ me: { is_admin: false }, content, empty: (title, text) => title + text,
+    mountLogStream() { assert.fail('非管理员不能挂载'); }
+  });
+  vm.runInContext(section('let logsStop = null;', '/* ---------------------------------------------------------------- 路由 */'), box);
+  await box.pageLogs();
+  assert.match(content.innerHTML, /仅管理员可用/);
 });
 
 test('刮削inspect失败保留已有候选并提供重试，首次失败同样可重试，旧失败不可重绘', async () => {
@@ -2492,7 +2515,8 @@ test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位
   if (!available(t)) return;
   const box = sandbox({ me: { is_admin: true }, esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
   vm.runInContext(section('function cleanDisplayName(', 'const WALL_PAGE_SIZE'), box);
-  const card = box.wallCard({ id: 1, status: 'success', Title: 'test' }, null);
+  box.me = { is_admin: true }; box.embyImageURL = () => '';
+  const card = box.wallCard({ Id: '1', Name: 'test' }, null);
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
   const doc = `<!doctype html><meta charset="utf-8"><style>${css}</style><div class="wall is-selecting" style="margin:20px;width:260px">${card}<div class="field" hidden id="f">probe<input></div></div><script>
     const f=document.querySelector('#f'); const hits=['probe','reread','delete'].map(k=>{const b=document.querySelector('[data-'+k+']'),r=b.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===b;});
@@ -2947,7 +2971,7 @@ test('计划列表与刮削执行先于收起配置，墙和详情维护为原�
   const items = section('async function pageItems(', 'function reloadWall(');
   assert.ok(items.indexOf('id="item-search"') < items.indexOf('id="probe-media"'));
   assert.match(items, /<details class="disclosure wall-maintenance"><summary/);
-  const detail = section('async function openDetail(', 'async function pageFirewall(');
+  const detail = section('async function openMaintenanceDetail(', 'async function pageFirewall(');
   assert.ok(detail.indexOf('id="detail-play"') < detail.indexOf('detail-maintenance'));
   assert.match(detail, /<details class="disclosure detail-maintenance"><summary/);
   assert.match(section('function overlayFocusables(', 'function overlayContains('), /summary,/);
@@ -2976,13 +3000,13 @@ function detailFixture(metatubeId) {
     document: { querySelector: node, querySelectorAll: () => [] },
     api: async () => ({ movie: { id: 1, Title: '示例影片' }, actors: [], files: [], metatube_id: metatubeId }) });
   vm.runInContext(section('function detailMetaRow(', 'const EDIT_LOCK_FIELDS'), box);
-  vm.runInContext(section('async function openDetail(', '// entityIdOf 生成与后端一致的虚拟实体 id'), box);
+  vm.runInContext(section('async function openMaintenanceDetail(', '// entityIdOf 生成与后端一致的虚拟实体 id'), box);
   return { box, node, copied, toasts, opened };
 }
 
 test('详情抽屉只读展示已保存 MetaTube ID：未设置、可复制、不可解析只作文本并提示', async () => {
   const empty = detailFixture({ saved: '', canonical: '', valid: false });
-  await empty.box.openDetail({ id: 1 });
+  await empty.box.openMaintenanceDetail({ id: 1 });
   const emptyMarkup = empty.node('#detail-content').innerHTML;
   assert.match(emptyMarkup, /<dt>MetaTube ID<\/dt>/);
   assert.match(emptyMarkup, /未设置/);
@@ -2991,7 +3015,7 @@ test('详情抽屉只读展示已保存 MetaTube ID：未设置、可复制、�
 
   // 历史 metatube: 前缀不展示，回填/展示都用官方格式；后缀保留。
   const valid = detailFixture({ saved: 'metatube:FANZA:abc%2B00123', canonical: 'FANZA:abc%2B00123:1', valid: true });
-  await valid.box.openDetail({ id: 1 });
+  await valid.box.openMaintenanceDetail({ id: 1 });
   const validMarkup = valid.node('#detail-content').innerHTML;
   assert.match(validMarkup, /<code>FANZA:abc%2B00123:1<\/code>/);
   assert.doesNotMatch(validMarkup, /metatube:/);
@@ -3005,7 +3029,7 @@ test('详情抽屉只读展示已保存 MetaTube ID：未设置、可复制、�
   assert.deepEqual(valid.toasts.at(-1), ['复制失败，请手动选择', 'error']);
 
   const broken = detailFixture({ saved: '<img src=x onerror="alert(1)">', canonical: '', valid: false });
-  await broken.box.openDetail({ id: 1 });
+  await broken.box.openMaintenanceDetail({ id: 1 });
   const brokenMarkup = broken.node('#detail-content').innerHTML;
   assert.match(brokenMarkup, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
   assert.doesNotMatch(brokenMarkup, /<img src=x/);
@@ -3018,23 +3042,23 @@ test('详情抽屉只读展示已保存 MetaTube ID：未设置、可复制、�
 });
 
 function scrapeOpenFixture(metatubeId) {
-  const calls = [], inspected = [];
-  const overlay = { hidden: true };
+  const calls = [], inspected = [], opened = [];
+  const overlay = { open: false };
   const body = { innerHTML: '', querySelector: () => ({ addEventListener() {} }) };
   const results = { innerHTML: '' };
-  const box = sandbox({ scrapeState: null, overlayPush() {},
+  const box = sandbox({ scrapeState: null, overlayPush: selector => opened.push(selector),
     esc: value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
     document: { querySelector: selector => selector === '#scrape-overlay' ? overlay : selector === '#scrape-results' ? results : body },
     api: async (path, options) => { calls.push({ path, options }); return { candidates: [{ provider: 'p', id: 'i', update: true, position: 0.3 }], recommended: 0 }; },
     loadScrapeInspect: async (...args) => { inspected.push(args); } });
   vm.runInContext(section('async function openScrapePreview(', 'async function loadScrapeInspect('), box);
-  return { box, overlay, body, results, calls, inspected, metatubeId };
+  return { box, overlay, body, results, calls, inspected, opened, metatubeId };
 }
 
 test('刮削弹窗独立展示已保存标记，只回填有效标记且打开仍走无参自动预览', async () => {
   const valid = scrapeOpenFixture({ saved: 'metatube:FANZA:abc%2B00123', canonical: 'FANZA:abc%2B00123:1', valid: true });
   await valid.box.openScrapePreview({ id: 7 }, valid.metatubeId);
-  assert.equal(valid.overlay.hidden, false);
+  assert.equal(valid.opened.length, 1, '打开走 overlayPush，由它 showModal');
   assert.match(valid.body.innerHTML, /已保存 MetaTube ID/);
   assert.match(valid.body.innerHTML, /<code>FANZA:abc%2B00123:1<\/code>/, '已保存区展示官方格式');
   assert.doesNotMatch(valid.body.innerHTML, /metatube:/, '不展示历史前缀');

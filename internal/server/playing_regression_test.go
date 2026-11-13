@@ -57,7 +57,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 					c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
 					a.playing(c)
 					c.Writer.WriteHeaderNow()
-					if w.Code != http.StatusNoContent {
+					if w.Code != http.StatusOK {
 						t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 					}
 					d, err := a.db.DataUser(1, id)

@@ -158,9 +158,9 @@ func TestStabilityLiveHTTPWorkflow(t *testing.T) {
 	request("GET", detail, viewer, nil, 200)
 	request("GET", "/Videos/"+movieID+"/stream", viewer, nil, 302)
 	playing := map[string]any{"ItemId": movieID, "PlaySessionId": "live-stability-session", "PositionTicks": int64(1234567)}
-	request("POST", "/Sessions/Playing", viewer, playing, 204)
-	request("POST", "/Sessions/Playing/Stopped", viewer, playing, 204)
-	request("POST", "/Sessions/Playing/Stopped", viewer, playing, 204)
+	request("POST", "/Sessions/Playing", viewer, playing, 200)
+	request("POST", "/Sessions/Playing/Stopped", viewer, playing, 200)
+	request("POST", "/Sessions/Playing/Stopped", viewer, playing, 200)
 	data := request("GET", detail, viewer, nil, 200)["UserData"].(map[string]any)
 	if data["PlayCount"] != float64(1) {
 		t.Fatalf("stop replay changed play count: %+v", data)

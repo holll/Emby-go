@@ -321,7 +321,7 @@ func TestCoreAPI(t *testing.T) {
 	nullStopReq.Header.Set("Content-Type", "application/json")
 	nullStopResp, _ := http.DefaultClient.Do(nullStopReq)
 	nullStopResp.Body.Close()
-	if nullStopResp.StatusCode != http.StatusNoContent {
+	if nullStopResp.StatusCode != http.StatusOK {
 		t.Fatalf("null stopped: %d", nullStopResp.StatusCode)
 	}
 	for range 2 {

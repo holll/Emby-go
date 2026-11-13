@@ -36,3 +36,12 @@
 .vscode/
 .DS_Store
 Thumbs.db
+
+# AI 代理工具产物（技能包与锁文件，体积大且与运行时无关）
+/.agents/
+/.claude/
+skills-lock.json
+
+# Python 字节码
+__pycache__/
+*.pyc

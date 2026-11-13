@@ -30,6 +30,43 @@ func (a *App) currentAdminName() string {
 	return a.adminName
 }
 
+// embyAuthParams 解析 X-Emby-Authorization（或等价的 Authorization）头里的
+// key=value 参数，键名大小写不敏感、值去掉引号。客户端用它声明 Client/
+// Device/DeviceId/Version 等身份信息，登录响应要把它们回显进 SessionInfo。
+func embyAuthParams(c *gin.Context) map[string]string {
+	params := map[string]string{}
+	if c == nil {
+		return params
+	}
+	authorization := c.GetHeader("X-Emby-Authorization")
+	if authorization == "" {
+		authorization = c.GetHeader("Authorization")
+	}
+	authorization = strings.TrimSpace(authorization)
+	if i := strings.IndexAny(authorization, " \t"); i >= 0 &&
+		(strings.EqualFold(authorization[:i], "Emby") || strings.EqualFold(authorization[:i], "MediaBrowser")) {
+		authorization = strings.TrimSpace(authorization[i+1:])
+	}
+	for part := range strings.SplitSeq(authorization, ",") {
+		key, value, found := strings.Cut(strings.TrimSpace(part), "=")
+		if !found {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		key = strings.ToLower(key)
+		if _, seen := params[key]; seen {
+			// 首个出现的值胜出：与凭据提取的历史语义保持一致（重复 Token= 时
+			// 用第一个，避免客户端拼接多个头导致后者覆盖前者）。
+			continue
+		}
+		params[key] = strings.Trim(strings.TrimSpace(value), "\\\"")
+	}
+	return params
+}
+
 // requestToken 与鉴权及播放 URL 共用同一套凭据提取规则。
 func requestToken(c *gin.Context) string {
 	if c == nil {
@@ -49,24 +86,9 @@ func requestToken(c *gin.Context) string {
 		token = c.Query("X-Emby-Token")
 	}
 	if token == "" {
-		authorization := c.GetHeader("X-Emby-Authorization")
-		if authorization == "" {
-			authorization = c.GetHeader("Authorization")
-		}
-		// Emby clients may place Token first; remove only a known scheme before
-		// parsing parameters. Keep legacy scheme-less headers and source priority.
-		authorization = strings.TrimSpace(authorization)
-		if i := strings.IndexAny(authorization, " \t"); i >= 0 &&
-			(strings.EqualFold(authorization[:i], "Emby") || strings.EqualFold(authorization[:i], "MediaBrowser")) {
-			authorization = strings.TrimSpace(authorization[i+1:])
-		}
-		for part := range strings.SplitSeq(authorization, ",") {
-			key, value, found := strings.Cut(strings.TrimSpace(part), "=")
-			if found && strings.EqualFold(key, "Token") {
-				token = strings.Trim(strings.TrimSpace(value), "\\\"")
-				break
-			}
-		}
+		// Emby clients may place Token first; embyAuthParams removes only a known
+		// scheme before parsing parameters, keeping legacy scheme-less headers.
+		token = embyAuthParams(c)["token"]
 	}
 	return token
 }
@@ -197,20 +219,38 @@ func (a *App) requireAdmin(c *gin.Context) {
 	c.Next()
 }
 
-// logout is protected by requireAuth. API keys retain their existing lifetime:
-// only a matching login session is deleted, never the API-key record.
-func (a *App) logout(c *gin.Context) {
+// revokeSession 删除当前请求携带的登录会话令牌；返回 false 表示已写错误响应。
+// API 密钥保留原有效期：只删匹配的登录会话，从不删 API-key 记录。
+// 调用方负责决定成功状态码——自有 /api/auth/* 契约写 204，Emby 兼容端点写 200。
+func (a *App) revokeSession(c *gin.Context) bool {
 	if err := a.db.DeleteAccessToken(requestToken(c)); err != nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"error": "session revocation unavailable", "code": "AUTH_UNAVAILABLE", "retryable": true,
 		})
-		return
+		return false
 	}
 	// Exec returns only after the autocommit delete completes successfully.
 	if user, ok := currentUser(c); ok {
 		a.notifyUserWebhook(c, "user.logout", user)
 	}
+	return true
+}
+
+// logout 是自有 /api/auth/logout：契约固定 204（无响应体）。
+func (a *App) logout(c *gin.Context) {
+	if !a.revokeSession(c) {
+		return
+	}
 	c.Status(http.StatusNoContent)
+}
+
+// embyLogout 是 POST /Sessions/Logout。文档 SessionsService #20 的成功响应写 200，
+// 按 200 判定的客户端拿到 204 会走异常分支，因此这里与自有端点分开。
+func (a *App) embyLogout(c *gin.Context) {
+	if !a.revokeSession(c) {
+		return
+	}
+	c.Status(http.StatusOK)
 }
 
 // sessionExpiry 计算新会话的过期时间；TTL=0 返回零值（存 NULL，永不过期）。
@@ -449,7 +489,38 @@ func (a *App) authenticate(c *gin.Context) {
 		"AccessToken": token,
 		"ServerId":    a.serverID,
 		"User":        a.userDtoFor(user),
+		"SessionInfo": a.sessionInfoFor(c, user),
 	})
+}
+
+// sessionInfoFor 组装文档 AuthenticationResult 里的 SessionInfo。
+// 本服务不维护设备会话表（播放上报只当作事件处理），因此 Id 每次登录新生成：
+// 客户端只用它作为「本设备本次会话」的本地标签，不做服务端校验。
+// Client/Device/DeviceId/Version 回显客户端在 X-Emby-Authorization 头里声明的值，
+// 缺失时给 Emby 自己的默认值，避免客户端读到空串后把设备名显示成空白。
+func (a *App) sessionInfoFor(c *gin.Context, u store.User) gin.H {
+	params := embyAuthParams(c)
+	pick := func(key, fallback string) string {
+		if v := params[key]; v != "" {
+			return v
+		}
+		return fallback
+	}
+	return gin.H{
+		"Id":                    randomSessionID(),
+		"ServerId":              a.serverID,
+		"UserId":                strconv.FormatInt(u.ID, 10),
+		"UserName":              u.Name,
+		"Client":                pick("client", "Emby"),
+		"DeviceName":            pick("device", "Emby-go"),
+		"DeviceId":              pick("deviceid", ""),
+		"ApplicationVersion":    pick("version", embyVersion),
+		"LastActivityDate":      time.Now().UTC().Format(time.RFC3339),
+		"SupportsRemoteControl": false,
+		"PlayableMediaTypes":    []string{"Video"},
+		"SupportedCommands":     []string{},
+		"PlayState":             gin.H{},
+	}
 }
 
 // userDtoFor 按真实账户组装 Emby UserDto。Policy 必须包含 IsAdministrator：

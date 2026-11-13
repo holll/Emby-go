@@ -1,46 +1,46 @@
 /* Independent preview generation, retaining the existing dark console tokens. */
-.sprites-panel { min-width: 0; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line-strong); }
+.sprites-panel { min-width: 0; margin-top: var(--space-24); padding-top: var(--space-16); border-top: 1px solid var(--line-strong); }
 .sprites-panel, .sprites-panel * { box-sizing: border-box; }
 .sprites-panel h3 { margin: 0; overflow-wrap: anywhere; }
-.sprites-panel h3 small { font-size: 12px; font-weight: 400; color: var(--muted); }
-.sprites-panel .hint { margin: 8px 0; }
-.sprites-fields, .sprites-actions { display: grid; gap: 8px; min-width: 0; }
-.sprites-fields { margin-top: 12px; }
-.sprites-fields label { display: grid; gap: 8px; min-width: 0; }
-.sprites-fields input:not([type=checkbox]) { min-width: 0; width: 100%; min-height: 44px; font-size: 16px; }
-.sprites-fields .sprites-check { display: flex; align-items: center; min-height: 44px; gap: 8px; cursor: pointer; }
+.sprites-panel h3 small { font-size: var(--text-12); font-weight: 400; color: var(--muted); }
+.sprites-panel .hint { margin: var(--space-8) 0; }
+.sprites-fields, .sprites-actions { display: grid; gap: var(--space-8); min-width: 0; }
+.sprites-fields { margin-top: var(--space-12); }
+.sprites-fields label { display: grid; gap: var(--space-8); min-width: 0; }
+.sprites-fields input:not([type=checkbox]) { min-width: 0; width: 100%; min-height: 44px; font-size: var(--text-16); }
+.sprites-fields .sprites-check { display: flex; align-items: center; min-height: 44px; gap: var(--space-8); cursor: pointer; }
 .sprites-check input { flex: 0 0 auto; width: 20px; height: 20px; }
 .sprites-panel .btn, .sprites-timeline .btn { min-height: 44px; min-width: 44px; white-space: normal; }
-.sprites-state, .sprites-error { margin: 12px 0; overflow-wrap: anywhere; }
-.sprites-error { padding: 12px; color: var(--text); background: var(--danger-soft); border-left: 3px solid var(--danger); }
+.sprites-state, .sprites-error { margin: var(--space-12) 0; overflow-wrap: anywhere; }
+.sprites-error { padding: var(--space-12); color: var(--text); background: var(--danger-soft); border-left: 3px solid var(--danger); }
 .sprites-panel :focus-visible, .sprites-timeline :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .sprites-player-preview { position: absolute; bottom: 64px; z-index: 70; max-width: calc(100% - 16px); overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); color: var(--text); background: var(--panel); pointer-events: none; box-shadow: var(--shadow); }
 .sprites-player-preview[hidden], .sprites-timeline[hidden] { display: none; }
 .sprites-player-picture { background-repeat: no-repeat; background-color: #000; }
-.sprites-player-preview > span { display: block; padding: 4px 8px; text-align: center; font: 12px var(--font-mono); }
-.sprites-timeline { flex: 0 0 auto; min-width: 0; padding: 8px 16px 12px; border-top: 1px solid var(--line); color: var(--text); background: var(--panel); }
-.sprites-timeline label { display: grid; min-width: 0; font-size: 13px; }
+.sprites-player-preview > span { display: block; padding: var(--space-4) var(--space-8); text-align: center; font: 12px var(--font-mono); }
+.sprites-timeline { flex: 0 0 auto; min-width: 0; padding: var(--space-8) var(--space-16) var(--space-12); border-top: 1px solid var(--line); color: var(--text); background: var(--panel); }
+.sprites-timeline label { display: grid; min-width: 0; font-size: var(--text-13); }
 .sprites-timeline input[type=range] { display: block; min-width: 0; width: 100%; min-height: 44px; margin: 0; padding: 0; accent-color: var(--accent); touch-action: pan-y; }
-.sprites-timeline-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.sprites-timeline-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8); }
 .sprites-timeline output { font: 13px var(--font-mono); }
-.sprites-timeline .hint { margin: 8px 0 0; overflow-wrap: anywhere; }
+.sprites-timeline .hint { margin: var(--space-8) 0 0; overflow-wrap: anywhere; }
 .sprites-preview-shell .player-stage { max-height: calc(100vh - 260px); max-height: calc(100dvh - 260px); }
-@media (max-width: 480px) { .sprites-panel h3 small { display: block; margin-top: 4px; } .sprites-timeline { padding-inline: 12px; } .sprites-player-preview { bottom: 48px; } }
+@media (max-width: 480px) { .sprites-panel h3 small { display: block; margin-top: var(--space-4); } .sprites-timeline { padding-inline: var(--space-12); } .sprites-player-preview { bottom: 48px; } }
 .library-sprite-open { min-height: 44px; min-width: 44px; }
-.library-sprite-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; color: var(--text); background: #101014; border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow); overflow: auto; }
+.library-sprite-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: var(--space-24); color: var(--text); background: #101014; border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow); overflow: auto; }
 .library-sprite-dialog::backdrop { background: rgba(0,0,0,.72); }
-.library-sprite-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.library-sprite-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); }
 .library-sprite-dialog-head h2 { margin: 0; }
 .library-sprite-dialog-head .btn { min-height: 44px; min-width: 64px; }
 .library-sprite-dialog :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
-@media (max-width: 480px) { .library-sprite-dialog { padding: 16px; } }
-.library-sprites { min-width: 0; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-strong); overflow-wrap: anywhere; }
+@media (max-width: 480px) { .library-sprite-dialog { padding: var(--space-16); } }
+.library-sprites { min-width: 0; margin-top: var(--space-20); padding-top: var(--space-16); border-top: 1px solid var(--line-strong); overflow-wrap: anywhere; }
 .library-sprites, .library-sprites * { box-sizing: border-box; }
 .library-sprites h3 { margin: 0; }
-.library-sprites form { display: grid; gap: 12px; max-width: 520px; min-width: 0; }
-.library-sprites label { display: grid; gap: 8px; min-width: 0; }
+.library-sprites form { display: grid; gap: var(--space-12); max-width: 520px; min-width: 0; }
+.library-sprites label { display: grid; gap: var(--space-8); min-width: 0; }
 .library-sprites [hidden] { display: none; }
-.library-sprites input, .library-sprites select { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+.library-sprites input, .library-sprites select { width: 100%; min-width: 0; min-height: 44px; font-size: var(--text-16); }
 .library-sprites .btn { min-height: 44px; min-width: 44px; white-space: normal; }
 .library-sprites :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .sprites-panel *, .sprites-timeline * { scroll-behavior: auto; } }

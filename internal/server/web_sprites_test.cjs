@@ -102,6 +102,16 @@ test('racing sheet decodes keep the requested Blob alive, cache bounded and dest
 test('closing preview aborts pending image GET and prevents late decode/render',async()=>{
   const f=previewFixture();await flush();f.hover(0.1);await flush();assert.equal(f.requests.length,1);f.dispose();assert.equal(f.requests[0].signal.aborted,true);f.requests[0].resolve({type:'image/jpeg',size:500});await flush();assert.equal(f.decoding.length,0);assert.equal(f.timers.size,0);
 });
-test('all cache URLs are Blob-only, authenticated app integration has no URL token and vendor remains unused',()=>{
-  const app=fs.readFileSync(path.join(__dirname,'web/app.js'),'utf8');assert.match(app,/SpritePreview\.mount/);assert.match(app,/requestImage: \(path, options\) => request\(path, options, true\)/);assert.match(app,/headers: \{ 'X-Emby-Token': identity \}/);assert.match(source,/global\.URL\.revokeObjectURL/);assert.doesNotMatch(source,/api_key=|thumbnail:\s*\{/);
+test('cache and Emby preview image URLs remain authenticated Blob-only without URL tokens',()=>{
+  const app=fs.readFileSync(path.join(__dirname,'web/app.js'),'utf8');
+  const player=fs.readFileSync(path.join(__dirname,'web/player.js'),'utf8');
+  assert.match(app,/mountEmbyPreview\(/);
+  assert.doesNotMatch(app,/SpritePreview\.mount/);
+  assert.match(player,/\/emby\/Items\/\$\{encodeURIComponent\(itemID\)\}\/Images\/Thumbnail/);
+  assert.match(player,/headers: \{ 'X-Emby-Token': identity \}/);
+  assert.match(player,/URL\.createObjectURL\(blob\)/);
+  assert.match(player,/URL\.revokeObjectURL\(objectURL\)/);
+  assert.match(source,/global\.URL\.revokeObjectURL/);
+  assert.doesNotMatch(player,/api_key=|\/api\/items\//);
+  assert.doesNotMatch(source,/api_key=|thumbnail:\s*\{/);
 });

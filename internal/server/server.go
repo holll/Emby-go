@@ -177,6 +177,14 @@ type App struct {
 	translation translationState
 	artwork     artworkState
 
+	// 合集封面：coverMu/coverFlights 让同一份拼贴只渲染一次（预览图被 <img> 与
+	// 状态轮询同时请求时会并发打进来）；coverTaskMu 保护批量任务状态。
+	coverMu      sync.Mutex
+	coverFlights map[string]*coverFlight
+	coverTaskMu  sync.RWMutex
+	coverStatus  collectionCoverStatus
+	coverCancel  context.CancelFunc
+
 	// updater 是 /opt/emby-go 平铺部署的 Web 自升级入口：检查、下载、原子替换，
 	// 然后通过 UpgradeRestart 让 main 走正常退出，由 systemd 拉起新程序。
 	updater *upgrade.Manager
@@ -384,6 +392,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		scrapeStills: cache.NewMemory(scrapeStillCacheSize),
 		scrapeThumbs: cache.NewMemory(scrapeThumbCacheSize),
 		thumbFlights: make(map[string]*thumbFlight), thumbGenerate: imageutil.Thumbnail,
+		coverFlights: make(map[string]*coverFlight),
 		prewarmQueue: make(chan prewarmJob, prewarmQueueSize),
 		instanceID:   newInstanceID(),
 		authGuard:    newAuthGuard(authGuardConfig{IPRequestRate: cfg.Security.Auth.IPRequestRate, IPRequestBurst: cfg.Security.Auth.IPRequestBurst, GlobalRequestRate: cfg.Security.Auth.GlobalRequestRate, GlobalRequestBurst: cfg.Security.Auth.GlobalRequestBurst, BcryptConcurrency: cfg.Security.Auth.BcryptConcurrency, CredentialBodyBytes: int64(cfg.Security.Auth.CredentialBodyBytes), MaxKeys: cfg.Security.Auth.MaxKeys, AccountCooldownMaxSeconds: cfg.Security.Auth.AccountCooldownMaxSeconds}),
@@ -651,6 +660,8 @@ func (a *App) routes() {
 	r.HEAD("/favicon.ico", a.favicon)
 	r.GET("/web/login.js", a.webAsset)
 	r.GET("/web/app.js", a.webAsset)
+	r.GET("/web/emby.js", a.webAsset)
+	r.GET("/web/player.js", a.webAsset)
 	r.GET("/web/artwork.js", a.webAsset)
 	r.GET("/web/artwork.css", a.webAsset)
 	r.GET("/web/sprites.js", a.webAsset)
@@ -663,6 +674,7 @@ func (a *App) routes() {
 	r.GET("/web/dashboard.css", a.webAsset)
 	r.GET("/web/webhook-settings.js", a.webAsset)
 	r.GET("/web/log-settings.js", a.webAsset)
+	r.GET("/web/log-stream.js", a.webAsset)
 	r.GET("/web/image-cache-settings.js", a.webAsset)
 	r.GET("/web/style.css", a.webAsset)
 	r.GET("/web/task-runner.js", a.webAsset)
@@ -738,6 +750,7 @@ func (a *App) routes() {
 	admin.GET("/dashboard", a.adminDashboard)
 	admin.GET("/logs", a.adminLogs)
 	admin.GET("/logs/disk", a.adminDiskLogs)
+	admin.GET("/logs/stream", a.adminLogsStream)
 	admin.GET("/logs/settings", a.adminLogSettings)
 	admin.PUT("/logs/settings", a.adminSaveLogSettings)
 	// 图片缓存（缩略图变体目录）：容量上限、当前占用与手动清理。
@@ -772,6 +785,12 @@ func (a *App) routes() {
 	admin.POST("/artwork/cancel", a.adminArtworkCancel)
 	admin.GET("/artwork/capabilities", a.adminArtworkCapabilities)
 	admin.GET("/artwork/candidates", a.adminArtworkCandidates)
+	// 合集封面：复刻 Emby 历史四列倒影拼贴。默认只生成预览文件，apply 才写生效记录。
+	admin.POST("/collection-cover/run", a.adminCollectionCoverRun)
+	admin.GET("/collection-cover/status", a.adminCollectionCoverStatus)
+	admin.POST("/collection-cover/cancel", a.adminCollectionCoverCancel)
+	admin.GET("/collection-cover/preview", a.adminCollectionCoverPreview)
+	admin.POST("/collection-cover/revert", a.adminCollectionCoverRevert)
 	// 计划任务（cron）：保存/启停后调度器即时重建，无需重启。
 	admin.GET("/scheduled", a.adminScheduledTasks)
 	admin.POST("/scheduled", a.adminCreateScheduledTask)
@@ -831,7 +850,7 @@ func (a *App) embyRoutes() []embyRoute {
 		{"POST", "/Sessions/Playing/Ping", true, a.noContent},
 		{"POST", "/Sessions/Capabilities", true, a.noContent},
 		{"POST", "/Sessions/Capabilities/Full", true, a.noContent},
-		{"POST", "/Sessions/Logout", true, a.logout},
+		{"POST", "/Sessions/Logout", true, a.embyLogout},
 		{"GET", "/DisplayPreferences/:pref", true, a.displayPreferences},
 		{"POST", "/DisplayPreferences/:pref", true, a.displayPreferences},
 		{"GET", "/System/Ext/ServerDomains", true, a.serverDomains},
@@ -865,6 +884,27 @@ func (a *App) embyRoutes() []embyRoute {
 		{"GET", "/Videos/:id/AdditionalParts", true, a.additionalParts},
 		{"GET", "/Episode/:id/IntroSkipperSegments", true, a.emptyList},
 		{"GET", "/MediaSegments/:id", true, a.emptyList},
+		// 文档有、本项目结构上不会有数据的端点：返回空集合而不是 404，
+		// 让客户端页面显示「暂无」而不是报错。见 emby_extra.go 与 API-CONTRACT §4.21。
+		{"GET", "/Items/:id/ThemeMedia", true, a.emptyThemeMediaAll},
+		{"GET", "/Items/:id/ThemeSongs", true, a.emptyThemeMedia},
+		{"GET", "/Items/:id/ThemeVideos", true, a.emptyThemeMedia},
+		{"GET", "/Users/:uid/Items/:id/Intros", true, a.emptyItems},
+		{"GET", "/Users/:uid/Items/:id/LocalTrailers", true, a.emptyItems},
+		{"GET", "/Users/:uid/Items/:id/SpecialFeatures", true, a.emptyItems},
+		{"GET", "/Shows/:id/Seasons", true, a.emptyItems},
+		{"GET", "/Shows/:id/Episodes", true, a.emptyItems},
+		{"GET", "/Shows/Upcoming", true, a.emptyItems},
+		// A 组第二批：数据与逻辑都已存在，只是没挂这些路径（见 API-CONTRACT §4.21）。
+		{"GET", "/Users/:uid/Items/Root", true, a.rootItem},
+		{"GET", "/Library/MediaFolders", true, a.mediaFolders},
+		{"GET", "/Tags", true, a.tagList},
+		{"GET", "/Studios", true, a.studioList},
+		{"GET", "/Persons", true, a.personList},
+		{"GET", "/Genres/:name", true, a.genreByName},
+		{"GET", "/Items/:id/Ancestors", true, a.ancestors},
+		// 文档的相似作品路径是 /Movies/{Id}/Similar，我方只挂了 /Items/:id/Similar。
+		{"GET", "/Movies/:id/Similar", true, a.similar},
 		{"POST", "/Sessions/Playing", true, a.playing},
 		{"POST", "/Sessions/Playing/Progress", true, a.playing},
 		{"POST", "/Sessions/Playing/Stopped", true, a.playing},
@@ -877,6 +917,21 @@ func (a *App) embyRoutes() []embyRoute {
 		{"DELETE", "/Users/:uid/Items/:id/Rating", true, a.unrate},
 		{"POST", "/Users/:uid/Items/:id/Rating/Delete", true, a.unrate},
 		{"POST", "/Users/:uid/Items/:id/HideFromResume", true, a.hideFromResume},
+		// 旧式上报族（文档 PlaystateService #2/#10/#11/#12）与通用 UserData 读写。
+		{"GET", "/Users/:uid/Items/:id/UserData", true, a.itemUserData},
+		{"POST", "/Users/:uid/Items/:id/UserData", true, a.itemUserData},
+		{"POST", "/Users/:uid/PlayingItems/:id", true, a.playingItems},
+		{"POST", "/Users/:uid/PlayingItems/:id/Progress", true, a.playingItems},
+		{"POST", "/Users/:uid/PlayingItems/:id/Delete", true, a.playingItems},
+		{"DELETE", "/Users/:uid/PlayingItems/:id", true, a.playingItems},
+		// B 组：需要新查询或新聚合的端点（见 API-CONTRACT §4.21）。
+		{"GET", "/Sessions", true, a.sessions},
+		{"GET", "/Auth/Keys", true, a.apiKeys},
+		{"POST", "/Auth/Keys", true, a.createAPIKey},
+		{"DELETE", "/Auth/Keys/:key", true, a.deleteAPIKey},
+		{"POST", "/Auth/Keys/:key/Delete", true, a.deleteAPIKey},
+		{"GET", "/Years", true, a.years},
+		{"GET", "/OfficialRatings", true, a.officialRatings},
 	}
 }
 
@@ -905,8 +960,24 @@ func (a *App) registerEmby(g *gin.RouterGroup) {
 		if lower := strings.ToLower(route.path); lower != route.path {
 			g.Handle(route.method, lower, handlers...)
 		}
+		// 图片端点与 /System/Ping 额外挂 HEAD：Emby 客户端用 HEAD 探测图片是否存在
+		// 以省流量（速查表 §4），Gin 不做 GET→HEAD 自动映射，缺了会拿到 404
+		// 而误判「无图」，海报墙退化成占位块。
+		if route.method == http.MethodGet && embyNeedsHead(route.path) {
+			g.HEAD(route.path, handlers...)
+			if lower := strings.ToLower(route.path); lower != route.path {
+				g.HEAD(lower, handlers...)
+			}
+		}
 	}
 	a.registerStreamRoutes(g)
+}
+
+// embyNeedsHead 判定某条 GET 路由是否需要额外的 HEAD 变体。
+// 只覆盖文档明确列出的两类：条目图片（含长形式）与 /System/Ping。
+// /Items/{Id}/Images（图片信息 JSON）不在其列——文档没有它的 HEAD。
+func embyNeedsHead(path string) bool {
+	return strings.Contains(path, "/Images/") || path == "/System/Ping"
 }
 
 // registerStreamRoutes 同时注册 /Videos 与 /videos 大小写，吞掉可选扩展名。

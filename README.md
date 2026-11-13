@@ -93,6 +93,37 @@ ABF-018/
 
 影片详情维护区「字幕标记整理」：先看证据与拟提交，再确认。不需 MetaTube，不翻译/探测/下图，只处理单片现有 STRM/NFO。默认只补缺失，有标签或锁受保护；依据变化要重新预览；部分成功时归属失败需人工核对（重扫救不回归属）。
 
+### 合集自动拼接封面
+
+合集（NFO `<set><name>` 归并出的 BoxSet）默认借用成员里最新的那张海报当封面。合集封面模块把成员海报横向拼成一张横版封面，复刻 Emby 历史 `StripCollageBuilder` 的设计：**640×360、黑底、固定四列、底部渐隐倒影**。
+
+只读成员海报、不改任何源文件；生成的图片落在数据库同级的 `collection-covers/` 目录，写入用临时文件 + 原子改名，中断不会留下半张图。
+
+```bash
+# 预览：只生成并返回图片，不写库、不发布（默认行为）
+curl -H "X-Emby-Token: $TOKEN" \
+  'http://127.0.0.1:18080/api/admin/collection-cover/preview?collection=系列A' -o cover.webp
+
+# 批量预览：全部合集，只落文件
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true}' http://127.0.0.1:18080/api/admin/collection-cover/run
+
+# 发布为合集 Primary（不覆盖已有自定义封面）
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true,"apply":true}' http://127.0.0.1:18080/api/admin/collection-cover/run
+
+# 回退到代表海报
+curl -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"all":true}' http://127.0.0.1:18080/api/admin/collection-cover/revert
+```
+
+- 参数：`collections`（数组）或 `all` 二选一；`apply`、`overwrite`、`quality`（1..100，默认 90）、`width`/`height`（64..4096，默认 640×360）、`reflection`（默认 `true`）。
+- 任务异步执行，`run` 返回 202 与快照，用 `GET /collection-cover/status?task_id=..&instance_id=..` 轮询，`POST /collection-cover/cancel` 取消；同一时刻只跑一个合集封面任务。
+- 缓存键含算法标识、尺寸、质量、合集名和每个成员的海报 mtime，成员变化或海报被替换后自动重生成，未变化直接复用。
+- 已有自定义封面的合集默认跳过（`skipped` + `custom cover kept`），必须显式 `overwrite=true`。
+- 成员顺序当前取**最新入库优先**（`id DESC`），这是本项目的兼容选择，不是已证实的 Emby 上游排序规则；`LatestVisible` 目前也没有年份/标题排序入口。
+- 少于 4 张有效海报时按源码语义循环补位：1 张 `AAAA`、2 张 `ABAB`、3 张 `ABCA`、4 张 `ABCD`。
+
 ## 配置（config.yaml）
 
 最常用几项，完整示例见 [config.example.yaml](<config.example.yaml>)：

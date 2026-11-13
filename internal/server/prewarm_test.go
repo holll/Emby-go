@@ -68,7 +68,8 @@ func TestPrewarmThumbnailsFillsDiskCache(t *testing.T) {
 	}
 
 	// 浏览器随后按同一档位请求：应命中磁盘，不再生成。
-	data, ok := app.thumbVariant(context.Background(), poster, job.tag, job.width, job.height, 0)
+	// 请求路径的默认画质是 embyImageQualityDefault，预热必须用同一档位才命中。
+	data, ok := app.thumbVariant(context.Background(), poster, job.tag, job.width, job.height, embyImageQualityDefault)
 	if !ok || string(data) != "webp-bytes" {
 		t.Fatalf("磁盘命中应返回预热字节，得到 ok=%v data=%q", ok, data)
 	}

@@ -13,8 +13,9 @@ const end = source.indexOf('/* -------------------------------------------------
 assert.ok(start >= 0 && end > start, 'extract complete production scrape UI, not a copied implementation');
 const scrapeCode = source.slice(start, end);
 const index = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
-const modalStart = index.indexOf('<div id="scrape-overlay"');
-const modalEnd = index.indexOf('<div id="detail-overlay"', modalStart);
+// 浮层是原生 <dialog>，切片按 id 定位标签起点，不绑定标签名。
+const modalStart = index.lastIndexOf('<', index.indexOf('id="scrape-overlay"'));
+const modalEnd = index.lastIndexOf('<', index.indexOf('id="detail-overlay"'));
 assert.ok(modalStart >= 0 && modalEnd > modalStart);
 const html = '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>' +
   fs.readFileSync(path.join(web, 'style.css'), 'utf8') + '</style></head><body>' + index.slice(modalStart, modalEnd) + '</body></html>';
@@ -27,7 +28,9 @@ async function fixture(t) {
     addEventListener('error', e => __errors.push(e.message));
     addEventListener('unhandledrejection', e => __errors.push(String(e.reason)));
     const pageGen = 1, detailGen = 1, pageItems = [];
-    const overlayPush = () => {}, overlayPop = () => {};
+    // 浮层是原生 <dialog>：stub 保留真实开关语义，否则切片里的内容不可见。
+    const overlayPush = selector => { const el = document.querySelector(selector); if (el && !el.open) el.showModal(); };
+    const overlayPop = selector => { const el = document.querySelector(selector); if (el && el.open) el.close(); };
     const closeDetail = () => {}, refreshPage = () => {};
     const numberUnlessInTitle = (title, number) => title?.includes(number) ? '' : number;
     const toast = (...args) => __toasts.push(args);
@@ -77,7 +80,7 @@ for (const width of [1440, 390]) {
     await assertNoConfirm(b);
     await settle(b, 0, {query:'filename without a match', candidates:[]});
     await waitFor(b, 'document.querySelector("#scrape-results").textContent.includes("没有搜到候选")');
-    assert.equal(await b.evaluate('document.querySelector("#scrape-overlay").hidden'), false);
+    assert.equal(await b.evaluate('!document.querySelector("#scrape-overlay").open'), false);
     assert.deepEqual(await b.evaluate(`['scrape-query','scrape-metatube-id'].map(id => {
       const e = document.getElementById(id), r = e.getBoundingClientRect();
       return {visible:r.width > 0 && r.height > 0, label:!!e.labels.length, within:r.left >= 0 && r.right <= innerWidth + 1};
@@ -142,7 +145,7 @@ for (const width of [1440, 390]) {
     assert.deepEqual((await calls(b)).filter(c => c.url === '/items/7/scrape'), [{url:'/items/7/scrape', method:'POST', body:JSON.stringify({provider:'Provider1',id:'exact-id',overwrite:true})}]);
     assert.equal(await b.evaluate('document.querySelector("#scrape-confirm").disabled'), true);
     await settle(b, (await calls(b)).length - 1, {title:'Exact inspected title',images:0});
-    await waitFor(b, 'document.querySelector("#scrape-overlay").hidden');
+    await waitFor(b, '!document.querySelector("#scrape-overlay").open');
     assert.deepEqual(await b.evaluate('__errors'), [], 'no browser exceptions or unhandled rejections');
   });
 }

@@ -12,9 +12,10 @@
   let opened = false;
   let previousFocus = null;
   let previousInert = false;
+  // 三个媒体浮层都是原生 <dialog>：可见性看 open 属性，不再看 hidden。
   const visibleOverlay = () => overlays.some(id => {
     const node = document.getElementById(id);
-    return node && !node.hidden;
+    return node && node.open === true;
   });
   const focusables = () => Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], [tabindex="0"]'))
     .filter(node => !node.hidden && node.getClientRects().length);
@@ -93,7 +94,7 @@
   });
   overlays.forEach(id => {
     const node = document.getElementById(id);
-    if (node) observer.observe(node, { attributes: true, attributeFilter: ['hidden'] });
+    if (node) observer.observe(node, { attributes: true, attributeFilter: ['open'] });
   });
   observer.observe(drawer, { childList: true, subtree: true });
   reset();

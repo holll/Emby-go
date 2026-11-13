@@ -92,10 +92,10 @@ func TestAdminUsersCRUDGrantsAndAudit(t *testing.T) {
 	}
 
 	// 播放一次，供活动记录查询。
-	if status, raw = embyDo(t, ts, http.MethodPost, "/Sessions/Playing", viewerToken, `{"ItemId":"1","PlaySessionId":"sess-a","PositionTicks":0,"PlayMethod":"DirectPlay"}`); status != http.StatusNoContent {
+	if status, raw = embyDo(t, ts, http.MethodPost, "/Sessions/Playing", viewerToken, `{"ItemId":"1","PlaySessionId":"sess-a","PositionTicks":0,"PlayMethod":"DirectPlay"}`); status != http.StatusOK {
 		t.Fatalf("Playing status=%d body=%s", status, raw)
 	}
-	if status, raw = embyDo(t, ts, http.MethodPost, "/Sessions/Playing/Stopped", viewerToken, `{"ItemId":"1","PlaySessionId":"sess-a","PositionTicks":0,"PlayMethod":"DirectPlay"}`); status != http.StatusNoContent {
+	if status, raw = embyDo(t, ts, http.MethodPost, "/Sessions/Playing/Stopped", viewerToken, `{"ItemId":"1","PlaySessionId":"sess-a","PositionTicks":0,"PlayMethod":"DirectPlay"}`); status != http.StatusOK {
 		t.Fatalf("Stopped status=%d body=%s", status, raw)
 	}
 

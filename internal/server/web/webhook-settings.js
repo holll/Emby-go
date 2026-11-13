@@ -37,10 +37,10 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
         </div>
       </div>
       <p class="hint">记录每个目标的投递结果，只保留事件、影片 ID、目标 ID、状态与时间；不保存接收地址、请求体、响应头或响应内容。最多保留 1000 条、7 天。</p>
-      <div id="wh-history-body" class="table-wrap" aria-live="polite"><p class="hint">正在加载投递历史…</p></div>
+      <div id="wh-history-body" class="table-wrap" tabindex="0" role="region" aria-label="投递历史" aria-live="polite"><p class="hint">正在加载投递历史…</p></div>
     </section>
     <dialog id="wh-dialog" class="wh-dialog" aria-labelledby="wh-dialog-title" aria-describedby="wh-dialog-hint">
-      <form id="wh-dialog-form" novalidate>
+      <form id="wh-dialog-form" method="dialog" novalidate>
         <div class="wh-dialog-head"><h2 id="wh-dialog-title">添加 Webhook 目标</h2><button id="wh-dialog-close" type="button" class="btn btn-sm" aria-label="关闭添加 Webhook 目标">关闭</button></div>
         <div class="wh-dialog-scroll"><p id="wh-dialog-hint" class="hint">地址明文显示。可先点击“发送测试消息”验证，再添加到草稿并保存。添加和保存不会自动发送通知。</p><div id="wh-dialog-body"></div><p id="wh-dialog-status" class="hint" role="alert" aria-live="polite"></p></div>
         <div class="wh-dialog-foot"><button id="wh-dialog-cancel" type="button" class="btn">取消</button><button id="wh-dialog-submit" type="submit" class="btn btn-accent">添加到草稿</button></div>
@@ -191,7 +191,7 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
       <div class="disclosure-body">
       ${editor ? '' : `<div class="wh-target-actions"><button class="btn btn-sm" type="button" data-remove>删除目标 ${index + 1}</button></div>`}
       <div class="field-grid">
-        <div class="field full"><label for="wh-${index}-name">名称</label><input id="wh-${index}-name" data-field="name" maxlength="80" autocomplete="off" placeholder="例如：家庭通知机器人"></div>
+        <div class="field full"><label for="wh-${index}-name">名称</label><input id="wh-${index}-name" data-field="name" maxlength="80" autocomplete="off" placeholder="例如：家庭通知机器人"${editor ? ' autofocus' : ''}></div>
         <label class="check" for="wh-${index}-enabled"><input id="wh-${index}-enabled" data-field="enabled" type="checkbox">启用该目标</label>
         <label class="check" for="wh-${index}-allow-private"><input id="wh-${index}-allow-private" data-field="allow-private" type="checkbox">允许受信任的内网 / 本机接收端</label>
         <div class="field"><label for="wh-${index}-format">编码格式</label><select id="wh-${index}-format" data-field="format" aria-describedby="wh-${index}-format-hint"><option value="json">JSON 请求体</option><option value="form">表单 data（兼容模式）</option></select><span id="wh-${index}-format-hint" class="hint">两种方式发送相同的事件 JSON，仅 HTTP 包装方式不同：JSON 直接作为请求体；表单将 JSON 放入 data 字段。请按接收端要求选择。</span></div>
@@ -311,6 +311,10 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
       return;
     }
     const table = document.createElement('table');
+    const caption = document.createElement('caption');
+    caption.className = 'sr-only';
+    caption.textContent = '投递历史';
+    table.append(caption);
     const head = document.createElement('thead');
     const headRow = document.createElement('tr');
     for (const label of ['时间', '事件', '影片 ID', '目标', '结果']) {

@@ -297,7 +297,7 @@ func TestMoviePartParentAndProgressCache(t *testing.T) {
 	}
 	before := a.db.Version("g:version")
 	status, body := embyDo(t, ts, http.MethodPost, "/emby/Sessions/Playing/Progress", token, fmt.Sprintf(`{"ItemId":%q,"PositionTicks":123000000,"PlaySessionId":"parent-cache-progress"}`, partID))
-	if status != 204 {
+	if status != 200 {
 		t.Fatalf("progress: %d %s", status, body)
 	}
 	if a.db.Version("g:version") != before {

@@ -35,6 +35,53 @@ func entityScope(libraryID int64, visible []int64, collection string) (string, [
 	return where, args
 }
 
+// entityScalarColumns 实体类型 → movies 上存单个值的标量列（不是 JSON 数组）。
+// Year / OfficialRating 在库里就是标量，不能走 entityColumns 的 JSON 解析路径。
+var entityScalarColumns = map[string]string{
+	"Year":           "year",
+	"OfficialRating": "official_rating",
+}
+
+// EntityScalarNamesVisible 聚合标量列（Year / OfficialRating）的去重取值。
+// 数值列用 CAST 转文本，空值跳过；结果按字典序排序（年份请调用方自行按数值重排）。
+func (s *Store) EntityScalarNamesVisible(kind string, libraryID int64, visible []int64, collection string) ([]string, error) {
+	column, ok := entityScalarColumns[kind]
+	if !ok {
+		return []string{}, nil
+	}
+	where, args := entityScope(libraryID, visible, collection)
+	expr := "COALESCE(CAST(movies." + column + " AS TEXT),'')"
+	if kind == "Year" {
+		where += " AND COALESCE(movies.year,0) > 0"
+	} else {
+		where += " AND COALESCE(movies." + column + ",'') <> ''"
+	}
+	rows, err := s.db.Query("SELECT DISTINCT "+expr+" FROM movies WHERE "+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if raw = strings.TrimSpace(raw); raw != "" {
+			seen[raw] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // EntityNamesVisible filters the movie set before aggregating entity names.
 // nil visible is unrestricted; an empty, non-nil set grants no libraries.
 func (s *Store) EntityNamesVisible(kind string, libraryID int64, visible []int64, collection string) ([]string, error) {

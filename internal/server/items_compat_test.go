@@ -25,16 +25,17 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, name := range []string{"A Alpha", "B Beta", "C Solo", "D Private", "E Uncollected"} {
+	for i, name := range []string{"A Alpha", "B Beta", "C Solo", "D Private", "E Uncollected", "F Zeta", "G Zeta"} {
 		lib, collection := first, "Shared Set"
-		if i == 2 {
+		switch i {
+		case 2:
 			collection = "Solo Set"
-		}
-		if i == 3 {
+		case 3:
 			lib = private
-		}
-		if i == 4 {
+		case 4:
 			collection = ""
+		case 5, 6:
+			collection = "Zeta Set"
 		}
 		id, err := a.db.IndexMovie(store.Movie{LibraryID: lib.ID, SourcePath: filepath.Join(lib.Path, fmt.Sprintf("compat-%d.strm", i)), Title: name, SortName: name, Collection: collection, Status: "success"}, 1, time.Unix(1, 0), nil)
 		if err != nil {
@@ -64,18 +65,19 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 	for _, prefix := range []string{"", "/emby"} {
 		for _, route := range []string{"/Items", "/Users/1/Items"} {
 			base := prefix + route + "?ParentId=boxsets&IncludeItemTypes=" + types
+			// 客户端按影片类型递归请求合集父级（首页合集栏的原始请求）时，
+			// 必须拿到合集本身，而不是退化成单部影片。
 			for _, tc := range []struct {
 				query string
 				want  []string
 				total int
 				start int
 			}{
-				{"&Recursive=true", []string{"A Alpha", "B Beta", "C Solo", "D Private"}, 4, 0},
-				{"&Recursive=true&SortBy=SortName&SortOrder=Descending", []string{"D Private", "C Solo", "B Beta", "A Alpha"}, 4, 0},
-				{"&Recursive=true&SortOrder=Descending&StartIndex=1&Limit=2", []string{"C Solo", "B Beta"}, 4, 1},
-				{"&Recursive=true&StartIndex=20&Limit=2", []string{}, 4, 20},
-				{"&Recursive=true&Filters=IsFavorite", []string{"A Alpha"}, 1, 0},
-				{"&Recursive=true&SearchTerm=Solo", []string{"C Solo"}, 1, 0},
+				{"&Recursive=true", []string{"Shared Set", "Zeta Set"}, 2, 0},
+				{"&Recursive=true&SortBy=SortName&SortOrder=Descending", []string{"Zeta Set", "Shared Set"}, 2, 0},
+				{"&Recursive=true&SortOrder=Descending&StartIndex=1&Limit=2", []string{"Shared Set"}, 2, 1},
+				{"&Recursive=true&StartIndex=20&Limit=2", []string{}, 2, 2},
+				{"&Recursive=true&SearchTerm=Zeta", []string{"Zeta Set"}, 1, 0},
 				{"", []string{}, 0, 0},
 				{"&Recursive=false", []string{}, 0, 0},
 			} {
@@ -83,8 +85,8 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 				names, ids := make([]string, 0, len(r.Items)), map[string]bool{}
 				for _, item := range r.Items {
 					id := item["Id"].(string)
-					if item["Type"] != "Movie" || ids[id] {
-						t.Fatalf("wrong type or duplicate movie: %v", item)
+					if item["Type"] != "BoxSet" || item["IsFolder"] != true || ids[id] {
+						t.Fatalf("wrong type or duplicate boxset: %v", item)
 					}
 					ids[id] = true
 					names = append(names, item["Name"].(string))
@@ -93,17 +95,23 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 					t.Fatalf("%s: names=%v total=%d start=%d; want=%+v", base+tc.query, names, r.Total, r.Start, tc)
 				}
 			}
-			// Querying members must not change explicit BoxSet browsing priority.
+			// 只有一部影片的合集仍受合集最低影片数约束，不进合集栏。
 			for _, include := range []string{"BoxSet", "Movie,BoxSet"} {
 				r := get(prefix+route+"?ParentId=boxsets&Recursive=true&IncludeItemTypes="+include, token)
-				if r.Total != 1 || len(r.Items) != 1 || r.Items[0]["Type"] != "BoxSet" || r.Items[0]["Id"] != boxsetID("Shared Set") {
-					t.Fatalf("BoxSet regression: %+v", r)
+				if r.Total != 2 || len(r.Items) != 2 {
+					t.Fatalf("BoxSet include=%q: %+v", include, r)
+				}
+				for _, item := range r.Items {
+					if item["Type"] != "BoxSet" || item["Id"] == boxsetID("Solo Set") {
+						t.Fatalf("BoxSet regression: %v", item)
+					}
 				}
 			}
+			// 钻取具体合集仍是成员影片，且 Fields 照常生效。
 			for _, fields := range []string{"", "&Fields=MediaSources,Path,DateCreated", ""} {
-				r := get(base+"&Recursive=true&Limit=1"+fields, token)
-				if len(r.Items) != 1 {
-					t.Fatalf("Fields query: %+v", r)
+				r := get(prefix+route+"?ParentId="+url.QueryEscape(boxsetID("Zeta Set"))+"&Recursive=true&IncludeItemTypes=Movie&Limit=1"+fields, token)
+				if len(r.Items) != 1 || r.Items[0]["Type"] != "Movie" {
+					t.Fatalf("member drill-down: %+v", r)
 				}
 				for _, key := range []string{"MediaSources", "Path", "DateCreated"} {
 					if _, present := r.Items[0][key]; present != (fields != "") {
@@ -137,7 +145,8 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 				r := get(base, auth.AccessToken)
 				want := []string{}
 				if granted {
-					want = []string{"A Alpha", "B Beta", "C Solo"}
+					// 未授权的私有库合集整份隐藏；共享合集仍有 2 部可见成员。
+					want = []string{"Shared Set", "Zeta Set"}
 				}
 				names := make([]string, 0, len(r.Items))
 				for _, item := range r.Items {
@@ -145,10 +154,6 @@ func TestBoxsetsRecursiveMovieCompatibility(t *testing.T) {
 				}
 				if !reflect.DeepEqual(names, want) || r.Total != len(want) {
 					t.Fatalf("viewer granted=%t: %+v", granted, r)
-				}
-				favorite := get(base+"&Filters=IsFavorite", auth.AccessToken)
-				if favorite.Total != 0 || len(favorite.Items) != 0 {
-					t.Fatalf("admin favorites leaked to viewer: %+v", favorite)
 				}
 			}
 			status, _ := embyDo(t, ts, http.MethodGet, prefix+"/Users/1/Items?ParentId=boxsets&Recursive=true&IncludeItemTypes="+types, auth.AccessToken, "")

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(`${__dirname}/web/app.js`, 'utf8');
-const context = vm.createContext({ esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
+const context = vm.createContext({ esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {}, me: { is_admin: false }, embyImageURL: () => '' });
 vm.runInContext(source.slice(source.indexOf('function cleanDisplayName('), source.indexOf('const WALL_PAGE_SIZE')), context);
 
 test('display names strip only terminal valid CD parts and retain source fields', () => {
@@ -14,7 +14,10 @@ test('display names strip only terminal valid CD parts and retain source fields'
   const item = { id: 7, source_path: '/media/dir-CD1/FC2-PPV-1050737-CD1.strm', Status: 'pending', AdditionalParts: ['/media/part-CD2.strm'] };
   const before = JSON.stringify(item);
   assert.equal(context.movieDisplayTitle(item), 'FC2-PPV-1050737');
-  const card = context.wallCard(item, null);
+  const embyItem = { Id: '7', Name: 'FC2-PPV-1050737-CD1', Path: item.source_path, PartCount: 2, UserData: {} };
+  const embyBefore = JSON.stringify(embyItem);
+  const card = context.wallCard(embyItem);
+  assert.equal(JSON.stringify(embyItem), embyBefore);
   assert.match(card, />FC2-PPV-1050737<\/button>/);
   assert.match(card, />2 段<\/span>/);
   assert.doesNotMatch(card, /CD×/);

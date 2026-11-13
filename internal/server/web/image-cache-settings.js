@@ -21,12 +21,13 @@ async function mountImageCacheSettings(host, apiRequest, isCurrent = () => host.
   host.innerHTML = `
     <div class="panel-head"><h2 id="image-cache-title">图片缓存</h2><button type="button" id="ic-reload" class="btn btn-sm">重新加载</button></div>
     <p class="hint">客户端按 <code>maxWidth</code>/<code>maxHeight</code> 请求的封面会实时缩放（webp 解码 + 缩放 + 编码，单张 45~130ms），生成过的尺寸落盘复用，重启后仍然有效。目录里的文件都是派生数据，随时可以删除。</p>
-    <div class="table-wrap"><table>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="图片缓存状态"><table>
+      <caption class="sr-only">图片缓存状态</caption>
       <tbody>
-        <tr><th style="width:160px">目录</th><td class="mono" id="ic-dir">—</td></tr>
-        <tr><th>状态</th><td id="ic-enabled">—</td></tr>
-        <tr><th>当前占用</th><td id="ic-used">—</td></tr>
-        <tr><th>容量上限</th><td id="ic-limit">—</td></tr>
+        <tr><th scope="row" style="width:160px">目录</th><td class="mono" id="ic-dir">—</td></tr>
+        <tr><th scope="row">状态</th><td id="ic-enabled">—</td></tr>
+        <tr><th scope="row">当前占用</th><td id="ic-used">—</td></tr>
+        <tr><th scope="row">容量上限</th><td id="ic-limit">—</td></tr>
       </tbody>
     </table></div>
     <form id="ic-form">

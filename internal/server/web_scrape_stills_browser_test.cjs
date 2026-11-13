@@ -13,8 +13,9 @@ const start = source.indexOf('let scrapeState = null;');
 const end = source.indexOf('/* ------------------------------------------------------------ 独立翻译 */', start);
 assert.ok(start >= 0 && end > start);
 const index = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
-const modalStart = index.indexOf('<div id="scrape-overlay"');
-const modalEnd = index.indexOf('<div id="detail-overlay"', modalStart);
+// 浮层是原生 <dialog>，切片按 id 定位标签起点，不绑定标签名。
+const modalStart = index.lastIndexOf('<', index.indexOf('id="scrape-overlay"'));
+const modalEnd = index.lastIndexOf('<', index.indexOf('id="detail-overlay"'));
 assert.ok(modalStart >= 0 && modalEnd > modalStart);
 const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>' +
   fs.readFileSync(path.join(web, 'style.css'), 'utf8') + '</style></head><body>' + index.slice(modalStart, modalEnd) + '</body></html>';
@@ -49,7 +50,10 @@ async function fixture(t, width) {
     addEventListener('error', e => __errors.push(e.message));
     addEventListener('unhandledrejection', e => __errors.push(String(e.reason)));
     const pageGen = 1, detailGen = 1, pageItems = [];
-    const overlayPush = () => {}, overlayPop = () => {}, closeDetail = () => {};
+    // 浮层是原生 <dialog>：stub 保留真实开关语义，否则切片里的内容不可见。
+    const overlayPush = selector => { const el = document.querySelector(selector); if (el && !el.open) el.showModal(); };
+    const overlayPop = selector => { const el = document.querySelector(selector); if (el && el.open) el.close(); };
+    const closeDetail = () => {};
     const refreshPage = () => { __refreshes++; };
     const numberUnlessInTitle = () => '';
     const toast = (...args) => __toasts.push(args);
@@ -142,7 +146,7 @@ for (const width of [1440, 390]) {
     assert.match(await b.evaluate('document.querySelector("#scrape-body").textContent'), /NFO 已保存/);
     assert.equal(await b.evaluate('!!document.querySelector("#scrape-body saved, #scrape-body bad")'), false);
     await click(b, '#scrape-done');
-    assert.equal(await b.evaluate('document.querySelector("#scrape-overlay").hidden'), true);
+    assert.equal(await b.evaluate('!document.querySelector("#scrape-overlay").open'), true);
     assert.deepEqual(await b.evaluate('__errors'), []);
   });
 }
@@ -171,6 +175,6 @@ test('candidate change restores default-all, custom clear omits stills, and clos
   assert.equal(await b.evaluate('!!document.querySelector("#scrape-done")'), false);
   assert.equal(await b.evaluate('__refreshes'), 0);
   assert.deepEqual(await b.evaluate('__toasts'), []);
-  assert.equal(await b.evaluate('document.querySelector("#scrape-overlay").hidden'), false);
+  assert.equal(await b.evaluate('!document.querySelector("#scrape-overlay").open'), false);
   assert.deepEqual(await b.evaluate('__errors'), []);
 });

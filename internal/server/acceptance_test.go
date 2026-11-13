@@ -151,7 +151,8 @@ func (c *acceptanceClient) play(t *testing.T, token, itemID, sessionID, event st
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{"ItemId": itemID, "PositionTicks": position, "PlaySessionId": sessionID})
 	status, out := c.do(t, http.MethodPost, "/Sessions/Playing"+event, body, token)
-	if status != http.StatusNoContent {
+	// 文档 PlaystateService 对 /Sessions/Playing* 写 200（无返回内容）。
+	if status != http.StatusOK {
 		t.Fatalf("A05 %s status=%d body=%s", event, status, out)
 	}
 }
@@ -227,7 +228,7 @@ func TestAcceptanceConcurrentPlayback(t *testing.T) {
 			}
 			defer resp.Body.Close()
 			_, _ = io.Copy(io.Discard, resp.Body)
-			if resp.StatusCode != http.StatusNoContent {
+			if resp.StatusCode != http.StatusOK {
 				errs <- fmt.Errorf("并发停止 status=%d", resp.StatusCode)
 			}
 		}(i)
@@ -475,7 +476,7 @@ func TestAcceptanceSessionRevoke(t *testing.T) {
 	if status, body := client.do(t, http.MethodGet, "/api/admin/settings", nil, token); status != http.StatusOK {
 		t.Fatalf("A01 新会话应可用 status=%d body=%s", status, body)
 	}
-	if status, body := client.do(t, http.MethodPost, "/Sessions/Logout", nil, token); status != http.StatusNoContent {
+	if status, body := client.do(t, http.MethodPost, "/Sessions/Logout", nil, token); status != http.StatusOK {
 		t.Fatalf("A01 注销当前会话 status=%d body=%s", status, body)
 	}
 	if status, body := client.do(t, http.MethodGet, "/api/admin/settings", nil, token); status != http.StatusUnauthorized {

@@ -65,6 +65,10 @@ test('production App scrape stills preview/cancel/ordered save', { timeout: 6000
   assert.equal(await b.evaluate('!!localStorage.getItem("emby_token")'), true, 'real login stored the real issued token');
   await waitFor(b, '!!document.querySelector(".wall-card")');
   await click(b, '.wall-card');
+  // 墙卡现在打开 emby.js 的 Emby 风格详情抽屉（app.js 的同名函数已改名 openMaintenanceDetail），
+  // 由抽屉里的「维护与元数据编辑」按钮进入 app.js 的维护抽屉，再展开刮削面板。
+  await waitFor(b, '!!document.querySelector("#detail-maintenance")');
+  await click(b, '#detail-maintenance');
   await waitFor(b, '!!document.querySelector("#detail-scrape")');
   await click(b, '.detail-maintenance > summary');
   await click(b, '#detail-scrape');
@@ -110,11 +114,11 @@ test('production App scrape stills preview/cancel/ordered save', { timeout: 6000
   process.stdin.pause();
   if (mode === 'cancel') {
     await click(b, '#scrape-cancel-btn');
-    await waitFor(b, 'document.querySelector("#scrape-overlay").hidden');
+    await waitFor(b, '!document.querySelector("#scrape-overlay").open');
   } else {
     await click(b, '#scrape-confirm');
-    await waitFor(b, 'document.querySelector("#scrape-overlay").hidden');
-    await waitFor(b, 'document.querySelector("#detail-overlay").hidden && !!document.querySelector(".wall-card")');
+    await waitFor(b, '!document.querySelector("#scrape-overlay").open');
+    await waitFor(b, '!document.querySelector("#detail-overlay").open && !!document.querySelector(".wall-card")');
     assert.match(await b.evaluate('document.querySelector("#toasts").textContent'), /已写入/);
   }
   assert.deepEqual(await b.evaluate('__browserErrors'), [], 'no page errors or unhandled rejections');

@@ -88,11 +88,11 @@ func (p *nativeRestartPlayback) afterReady(t *testing.T, base, dbPath string, ru
 				}
 			}
 		}()
-		report(p.movie, "restart-active", "", 0, http.StatusNoContent)
-		report(p.movie, "restart-active", "/Progress", 5000000, http.StatusNoContent)
-		report(p.movie, "restart-stopped", "", 0, http.StatusNoContent)
-		report(p.movie, "restart-stopped", "/Progress", 10000000, http.StatusNoContent)
-		report(p.movie, "restart-stopped", "/Stopped", 12000000, http.StatusNoContent)
+		report(p.movie, "restart-active", "", 0, http.StatusOK)
+		report(p.movie, "restart-active", "/Progress", 5000000, http.StatusOK)
+		report(p.movie, "restart-stopped", "", 0, http.StatusOK)
+		report(p.movie, "restart-stopped", "/Progress", 10000000, http.StatusOK)
+		report(p.movie, "restart-stopped", "/Stopped", 12000000, http.StatusOK)
 		p.baseline = nativeRestartPlaybackSnapshot(t, dbPath)
 		return
 	}
@@ -112,7 +112,7 @@ func (p *nativeRestartPlayback) afterReady(t *testing.T, base, dbPath string, ru
 	}
 	// A legal retained-token/same-film replay must still be accepted. Check
 	// this after the zero-write assertions, rather than using only rejections.
-	report(p.movie, "restart-stopped", "/Stopped", 12000000, http.StatusNoContent)
+	report(p.movie, "restart-stopped", "/Stopped", 12000000, http.StatusOK)
 	got := nativeRestartPlaybackSnapshot(t, dbPath)
 	for table, before := range p.baseline {
 		// A successful event invalidates cache versions even for a duplicate

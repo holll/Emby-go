@@ -62,7 +62,7 @@ async function openAsAdmin(t, tag) {
   await waitFor(b, 'document.querySelector("#version-badge") && !document.querySelector("#version-badge").hidden', '自动检查后出现新版本徽标');
   assert.equal(await b.evaluate('document.querySelector("#version-badge").title'), '有新版本 ' + tag);
   await click(b, '#version-btn');
-  await waitFor(b, 'document.querySelector("#update-overlay") && !document.querySelector("#update-overlay").hidden', '更新面板打开');
+  await waitFor(b, 'document.querySelector("#update-overlay") && document.querySelector("#update-overlay").open', '更新面板打开');
   return b;
 }
 
@@ -82,7 +82,7 @@ test('admin sees new-version badge, opens upgrade dialog, and reads a failed ins
 
   await b.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-  await waitFor(b, 'document.querySelector("#update-overlay").hidden', 'Escape 关闭更新面板');
+  await waitFor(b, '!document.querySelector("#update-overlay").open', 'Escape 关闭更新面板');
   assert.deepEqual(await b.evaluate('window.__browserErrors'), []);
 });
 

@@ -35,6 +35,9 @@ func TestWebShellAssetsAreServed(t *testing.T) {
 			if len(assetBody) == 0 {
 				t.Errorf("GET %s 返回空正文", ref)
 			}
+			if asset.Header.Get("ETag") == "" || asset.Header.Get("Cache-Control") != "no-cache" {
+				t.Errorf("GET %s 缺少资源版本校验：ETag=%q Cache-Control=%q", ref, asset.Header.Get("ETag"), asset.Header.Get("Cache-Control"))
+			}
 			contentType := asset.Header.Get("Content-Type")
 			switch {
 			case strings.HasSuffix(ref, ".js"):

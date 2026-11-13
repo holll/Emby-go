@@ -35,7 +35,7 @@ func TestParseMovieQueryOptions(t *testing.T) {
 		{"invalid and wrong-kind IDs ignored", url.Values{"GenreIds": {"invalid," + entityId("Tag", "Wrong")}, "TagIds": {entityId("Genre", "Wrong")}}, defaults},
 		{"mixed-case filters", url.Values{"Filters": {"IsUnPlAyEd,iSfAvOrItE"}}, movieQueryOptions{sortBy: "SortName", unplayed: true, favorite: true}},
 		{"filter substring behavior", url.Values{"Filters": {"NotIsUnplayedSuffix,NotIsFavoriteSuffix"}}, movieQueryOptions{sortBy: "SortName", unplayed: true, favorite: true}},
-		{"unrelated filters", url.Values{"Filters": {"IsPlayed,IsFavoriteOrLiked"}}, movieQueryOptions{sortBy: "SortName", favorite: true}},
+		{"played plus legacy favorite substring", url.Values{"Filters": {"IsPlayed,IsFavoriteOrLiked"}}, movieQueryOptions{sortBy: "SortName", favorite: true, filter: store.MovieListFilter{Played: true}}},
 		{"term and years remain raw", url.Values{"SearchTerm": {"  A&B + 中文  "}, "Years": {" 2020,invalid,2022 "}}, movieQueryOptions{sortBy: "SortName", term: "  A&B + 中文  ", years: " 2020,invalid,2022 "}},
 		{"first query value wins", url.Values{"SearchTerm": {"first", "second"}, "Years": {"2020", "2021"}, "Genres": {"Drama", "Comedy"}}, movieQueryOptions{sortBy: "SortName", term: "first", years: "2020", genre: "Drama"}},
 	} {

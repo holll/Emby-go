@@ -88,7 +88,7 @@ func TestWebhookEventsAfterSuccessfulWrites(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &login); err != nil || login.AccessToken == "" {
 		t.Fatal(err)
 	}
-	if w = call("POST", "/Sessions/Logout", login.AccessToken, ""); w.Code != 204 {
+	if w = call("POST", "/Sessions/Logout", login.AccessToken, ""); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
 	expect("user.logout")
@@ -147,7 +147,7 @@ func TestWebhookEventsAfterSuccessfulWrites(t *testing.T) {
 		{"", "", "playback.start"}, {"/Progress", "", "playback.progress"}, {"/Progress", "Pause", "playback.pause"}, {"/Progress", "Unpause", "playback.unpause"},
 	} {
 		body := fmt.Sprintf(`{"ItemId":%q,"PlaySessionId":"events-session","DeviceId":"device","PositionTicks":123,"EventName":%q}`, fmt.Sprint(f.victim), tc.name)
-		if w := call("POST", "/Sessions/Playing"+tc.suffix, token, body); w.Code != 204 {
+		if w := call("POST", "/Sessions/Playing"+tc.suffix, token, body); w.Code != 200 {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		e := expect(tc.event)
@@ -168,7 +168,7 @@ func TestWebhookEventsAfterSuccessfulWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, suffix := range []string{"/Stopped", "/Progress"} {
-		if w := call("POST", "/Sessions/Playing"+suffix, token, body); w.Code != 204 {
+		if w := call("POST", "/Sessions/Playing"+suffix, token, body); w.Code != 200 {
 			t.Fatal(w.Code)
 		}
 		none()

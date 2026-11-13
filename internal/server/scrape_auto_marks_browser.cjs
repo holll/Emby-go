@@ -58,6 +58,10 @@ test('production App keeps auto-marks partial success visible until keyboard com
   assert.equal(await b.evaluate('!!localStorage.getItem("emby_token")'), true);
   await waitFor(b, '!!document.querySelector(".wall-card")');
   await click(b, '.wall-card');
+  // 墙卡现在打开 emby.js 的 Emby 风格详情抽屉（app.js 的同名函数已改名 openMaintenanceDetail），
+  // 由抽屉里的「维护与元数据编辑」按钮进入 app.js 的维护抽屉，再展开刮削面板。
+  await waitFor(b, '!!document.querySelector("#detail-maintenance")');
+  await click(b, '#detail-maintenance');
   await waitFor(b, '!!document.querySelector("#detail-scrape")');
   await click(b, '.detail-maintenance > summary');
   await click(b, '#detail-scrape');
@@ -68,7 +72,7 @@ test('production App keeps auto-marks partial success visible until keyboard com
   assert.ok(oldCard.result.objectId);
   if (!(await b.evaluate('document.querySelector("#scrape-force").checked'))) await click(b, '#scrape-force');
   await click(b, '#scrape-confirm');
-  await waitFor(b, '!!document.querySelector("#scrape-done") && document.querySelector("#detail-overlay").hidden');
+  await waitFor(b, '!!document.querySelector("#scrape-done") && !document.querySelector("#detail-overlay").open');
   const refreshDeadline = performance.now() + 10000;
   while (!(await b.call('Runtime.callFunctionOn', {
     objectId: oldCard.result.objectId,
@@ -90,7 +94,7 @@ test('production App keeps auto-marks partial success visible until keyboard com
       live: status?.getAttribute('aria-live'), atomic: status?.getAttribute('aria-atomic'),
       labelledBy: status?.getAttribute('aria-labelledby'),
       headings: Array.from(body.querySelectorAll('h4')).map(e => e.textContent),
-      focus: document.activeElement?.id, overlayHidden: document.querySelector('#scrape-overlay').hidden,
+      focus: document.activeElement?.id, overlayHidden: !document.querySelector('#scrape-overlay').open,
       staleControls: !!body.querySelector('#scrape-confirm, #scrape-manual-search, #scrape-query, #scrape-force, .scrape-candidate'),
       injectedElement: !!body.querySelector('img[onerror], script'),
       injected: window.__autoMarksInjected,
@@ -129,10 +133,10 @@ test('production App keeps auto-marks partial success visible until keyboard com
   assert.equal(String(await acknowledged).trim(), 'continue');
   process.stdin.pause();
   assert.equal(await b.evaluate('document.activeElement?.id'), 'scrape-done');
-  assert.equal(await b.evaluate('document.querySelector("#scrape-overlay").hidden'), false);
+  assert.equal(await b.evaluate('document.querySelector("#scrape-overlay").open'), true);
   await b.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' });
   await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-  await waitFor(b, 'document.querySelector("#scrape-overlay").hidden');
+  await waitFor(b, '!document.querySelector("#scrape-overlay").open');
   assert.deepEqual(await b.evaluate('window.__browserErrors'), []);
   assert.equal(await b.evaluate('window.__autoMarksInjected'), undefined);
   console.log(JSON.stringify({ mode, width, realLogin: true, productionUI: true, persistentSavedResult: true, keyboardDone: true, geometry: saved.geometry }));

@@ -42,7 +42,7 @@ func reportPlayback(t *testing.T, a *App, id int64, event, sessionID string, pos
 	c.Set(currentUserKey, store.User{ID: 1, IsAdmin: true})
 	a.playing(c)
 	c.Writer.WriteHeaderNow()
-	if w.Code != http.StatusNoContent {
+	if w.Code != http.StatusOK {
 		t.Fatalf("%s/%s status=%d body=%s", event, sessionID, w.Code, w.Body.String())
 	}
 }

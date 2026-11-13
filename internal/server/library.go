@@ -564,6 +564,11 @@ func (a *App) boxsetFolderDTO(collections map[string]store.CollectionStat) gin.H
 		"UserData":          gin.H{"UnplayedItemCount": len(collections), "PlaybackPositionTicks": 0, "IsFavorite": false, "Played": false},
 	}
 	names := slices.Sorted(maps.Keys(collections))
+	if poster := a.firstCollectionCover(names); poster != "" {
+		item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
+		item["PrimaryImageAspectRatio"] = a.cachedCoverRatio(poster)
+		return item
+	}
 	for _, name := range names {
 		if poster := collections[name].Poster; poster != "" {
 			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
@@ -582,7 +587,12 @@ func (a *App) boxsetItemFrom(name string, stat store.CollectionStat) gin.H {
 		"BackdropImageTags": []string{},
 		"UserData":          zeroUserData(),
 	}
-	if stat.Poster != "" {
+	// 已生效的拼贴封面优先于代表海报：拼贴是 16:9，比例必须读真实尺寸，
+	// artRatio 会按文件名猜成 2:3，客户端会把它当竖版海报排。
+	if cover, ok := a.appliedCover(name); ok {
+		item["ImageTags"] = gin.H{"Primary": a.posterTag(cover)}
+		item["PrimaryImageAspectRatio"] = a.cachedCoverRatio(cover)
+	} else if stat.Poster != "" {
 		item["ImageTags"] = gin.H{"Primary": a.posterTag(stat.Poster)}
 		item["PrimaryImageAspectRatio"] = artRatio(stat.Poster)
 	}
@@ -631,6 +641,150 @@ func (a *App) genres(c *gin.Context) {
 		return
 	}
 	a.entityBrowse(c, "Genre", libraryID, collection)
+}
+
+// tags / studios / persons 复用实体聚合：文档这三个端点与 /Genres 同源，
+// 只是实体类型不同（Tag/Studio/Person），返回 QueryResult_BaseItemDto。
+func (a *App) tagList(c *gin.Context)    { a.entityEndpoint(c, "Tag") }
+func (a *App) studioList(c *gin.Context) { a.entityEndpoint(c, "Studio") }
+func (a *App) personList(c *gin.Context) { a.entityEndpoint(c, "Person") }
+
+func (a *App) entityEndpoint(c *gin.Context, kind string) {
+	if !a.validQueryUser(c) {
+		return
+	}
+	libraryID, collection, ok := parseParentScope(c.Query("ParentId"))
+	if !ok {
+		a.emptyItems(c)
+		return
+	}
+	a.entityBrowse(c, kind, libraryID, collection)
+}
+
+// genreByName 返回单个流派（文档 GET /Genres/{Name} → BaseItemDto）。
+// 不存在时 404，与真实 Emby 一致。
+func (a *App) genreByName(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
+	name := strings.TrimSpace(c.Param("name"))
+	libraryID, collection, ok := parseParentScope(c.Query("ParentId"))
+	if !ok || name == "" {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
+	visible, _, viewerOK := a.viewerLibraries(c)
+	if !viewerOK {
+		itemDataUnavailable(c)
+		return
+	}
+	names, err := a.db.EntityNamesVisible("Genre", libraryID, visible, collection)
+	if err != nil {
+		itemDataUnavailable(c)
+		return
+	}
+	for _, candidate := range names {
+		if !strings.EqualFold(candidate, name) {
+			continue
+		}
+		item := gin.H{
+			"Id": entityId("Genre", candidate), "Name": candidate, "Type": "Genre",
+			"IsFolder": false, "ServerId": a.serverID,
+		}
+		poster, err := a.db.EntityPosterVisible("Genre", candidate, libraryID, visible, collection)
+		if err != nil {
+			itemDataUnavailable(c)
+			return
+		}
+		if poster != "" {
+			item["ImageTags"] = gin.H{"Primary": a.posterTag(poster)}
+		}
+		respondItemJSON(c, item)
+		return
+	}
+	apiError(c, http.StatusNotFound, "not found")
+}
+
+// mediaFolders 对应文档 GET /Library/MediaFolders（QueryResult_BaseItemDto）。
+// 与 /Users/{uid}/Views 同一份库列表，只是不含「合集」虚拟视图。
+func (a *App) mediaFolders(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
+	visible, admin, ok := a.viewerLibraries(c)
+	if !ok {
+		itemDataUnavailable(c)
+		return
+	}
+	libs, err := a.db.Libraries()
+	if err != nil {
+		itemDataUnavailable(c)
+		return
+	}
+	granted := map[int64]bool{}
+	for _, id := range visible {
+		granted[id] = true
+	}
+	out := make([]gin.H, 0, len(libs))
+	for _, l := range libs {
+		if !admin && !granted[l.ID] {
+			continue
+		}
+		out = append(out, a.collectionFolderDTO(c, l))
+	}
+	respondItemJSON(c, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
+}
+
+// rootItem 对应文档 GET /Users/{UserId}/Items/Root（BaseItemDto，单个根条目）。
+// Id 固定 "0"：客户端拿到后会用 ParentId=0 请求子项，而 parseParentScope
+// 把 ""/"0" 视为不限范围，正好等价于「根之下全部媒体库」。
+func (a *App) rootItem(c *gin.Context) {
+	if !a.validUser(c) {
+		return
+	}
+	respondItemJSON(c, gin.H{
+		"Id": "0", "Name": a.serverName, "Type": "AggregateFolder",
+		"ServerId": a.serverID, "IsFolder": true,
+		"BackdropImageTags": []string{},
+	})
+}
+
+// ancestors 对应文档 GET /Items/{Id}/Ancestors（BaseItemDto[]，由近及远）。
+// 影片的祖先链最多两级：所属合集（若有）→ 所属媒体库。
+func (a *App) ancestors(c *gin.Context) {
+	if !a.validQueryUser(c) {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
+	m, err := a.db.Movie(id)
+	if err != nil || !m.IsVisible() || !a.canViewMovie(c, m) {
+		apiError(c, http.StatusNotFound, "not found")
+		return
+	}
+	out := make([]gin.H, 0, 2)
+	if m.Collection != "" {
+		if stats, ok := a.collectionStats(c, 0); ok {
+			if stat, found := stats[m.Collection]; found {
+				out = append(out, a.boxsetItemFrom(m.Collection, stat))
+			}
+		}
+	}
+	libs, err := a.db.Libraries()
+	if err != nil {
+		itemDataUnavailable(c)
+		return
+	}
+	for _, l := range libs {
+		if l.ID == m.LibraryID {
+			out = append(out, a.collectionFolderDTO(c, l))
+			break
+		}
+	}
+	respondItemJSON(c, out)
 }
 
 func (a *App) resume(c *gin.Context) {
@@ -1038,7 +1192,8 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 		"ServerId":  a.serverID,
 		"Container": m.SourceContainer,
 		"CanDelete": false, "CanDownload": false, "SupportsSync": false,
-		"UserData": userDataDTO(d),
+		// 条目级 UserData 必须带 ItemId/Key/ServerId（文档 UserItemDataDto）。
+		"UserData": a.userDataJSON(m.ID, d),
 	}
 	if m.RuntimeSeconds > 0 {
 		v["RunTimeTicks"] = m.RuntimeSeconds * 10000000
@@ -1130,7 +1285,7 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	v["BackdropImageTags"] = backdrops
 	if m.RuntimeSeconds > 0 && d.PositionTicks > 0 {
 		d.PlayedPercentage = float64(d.PositionTicks) / float64(m.RuntimeSeconds*10000000) * 100
-		v["UserData"] = userDataDTO(d)
+		v["UserData"] = a.userDataJSON(m.ID, d)
 	}
 	return v
 }
@@ -1323,6 +1478,11 @@ func parseMovieQueryOptions(c *gin.Context) (movieQueryOptions, bool) {
 		ids = "invalid"
 	}
 	filter := store.MovieListFilter{ImageTypes: splitQueryTypes(c.Query("ImageTypes"))}
+	for _, value := range splitQueryTypes(c.Query("Filters")) {
+		if strings.EqualFold(value, "IsPlayed") {
+			filter.Played = true
+		}
+	}
 	if values, present := c.Request.URL.Query()["HasTmdbId"]; present {
 		if len(values) != 1 {
 			apiError(c, http.StatusBadRequest, "invalid HasTmdbId")
@@ -1467,8 +1627,12 @@ func (a *App) itemsQuery(c *gin.Context) {
 
 	// 合集媒体库（boxset view）或某个合集内部：以实体之外均按盒集/成员处理。
 	if isBoxsetView || (collection != "" && collection != "*") {
-		if isBoxsetView && !(movieWanted && !boxsetWanted && strings.EqualFold(c.Query("Recursive"), "true")) {
-			if len(include) > 0 && !boxsetWanted {
+		// 合集视图是「合集」的父级：客户端按影片类型递归请求（首页合集栏
+		// 就是 `IncludeItemTypes=Movie,Series...&Recursive=true`）时应拿到合集本身，
+		// 否则该栏会退化成单部影片。具体合集（boxset:<名>）仍列出成员；
+		// 省略 Recursive 的纯 Movie 查询保持空列表，不把合集父级当成员集合。
+		if isBoxsetView {
+			if len(include) > 0 && !boxsetWanted && !(movieWanted && strings.EqualFold(c.Query("Recursive"), "true")) {
 				a.emptyItems(c)
 				return
 			}
@@ -1538,7 +1702,7 @@ func (a *App) itemsQuery(c *gin.Context) {
 		}
 		grantKey = strings.Join(parts, ",")
 	}
-	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), c.Query("ImageTypes"), c.Query("HasTmdbId"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit)}, "|")
+	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), c.Query("ImageTypes"), c.Query("HasTmdbId"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit), strconv.FormatBool(options.filter.Played)}, "|")
 	if b, ok := a.cachedBody("items:" + key); ok {
 		respondMediaJSON(c, b)
 		return

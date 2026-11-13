@@ -73,7 +73,7 @@ func TestAdminDiagnosticsAggregatesEvidence(t *testing.T) {
 	if got.App.Version == "" || got.App.StartedAt == "" || got.App.GoVersion == "" {
 		t.Fatalf("app evidence incomplete: %+v", got.App)
 	}
-	if got.Store.Path == "" || got.Store.SizeBytes <= 0 || got.Store.SchemaVersion != 22 {
+	if got.Store.Path == "" || got.Store.SizeBytes <= 0 || got.Store.SchemaVersion != 23 {
 		t.Fatalf("store evidence incomplete: %+v", got.Store)
 	}
 	if got.Store.Libraries < 1 || got.Store.TaskRecords < 0 {

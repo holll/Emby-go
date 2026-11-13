@@ -71,17 +71,17 @@
 | 端点组 | 方法/路径 | 契约要点 |
 |---|---|---|
 | 认证 | `POST /Users/AuthenticateByName` | 返回 `AccessToken`、`User.Id/Name`；失败 401 `AUTH_INVALID` |
-| 系统 | `GET /System/Info/Public`、`GET /System/Ping` | 无需鉴权；`ServerName`/`Id`/`Version` 必在 |
+| 系统 | `GET /System/Info/Public`、`GET|HEAD /System/Ping` | 无需鉴权；严格按文档 `PublicSystemInfo` 七字段（`LocalAddress`/`LocalAddresses`/`WanAddress`/`RemoteAddresses`/`ServerName`/`Version`/`Id`），不再输出私有的 `ProductName` |
 | 用户 | `GET /Users/Me`、`GET /Users/Public` | `/Users/Me` 返回当前认证用户；`/Users/Public` 恒返回空数组（不公开用户列表） |
 | 视图 | `GET /Users/:uid/Views` | 库 `Id/Name/CollectionType` |
 | 列表 | `GET /Users/:uid/Items`、`GET /Items` | `Items`、`TotalRecordCount`；排序/筛选参数为可选增量 |
 | 详情 | `GET /Items/:id`、`GET /Users/:uid/Items/:id` | `Id/Name/Type/ImageTags/UserData/MediaSources` |
 | 所属合集 | `GET /Items/:id/Collections`、`GET /Users/:uid/Items/:id/Collections` | 返回包含该影片的 `BoxSet` 列表（`Items`/`TotalRecordCount`）；无合集为空数组 |
-| 图片 | `GET /Items/:id/Images/:kind[/:index]` | 匿名；ETag/缓存头有效；`CacheTag` 变化即换图；带 `maxWidth`/`maxHeight` 时按档位**向下**对齐（响应永不超过请求上限），同一输入只编码一次 |
-| 播放信息 | `GET|POST /Items/:id/PlaybackInfo` | 单 `MediaSources`，`DirectPlay/DirectStream=true`、`Transcoding=false` |
-| 播放上报 | `POST /Sessions/Playing`、`/Progress`、`/Stopped` | 204；计数由会话+序号保证幂等 |
+| 图片 | `GET|HEAD /Items/:id/Images/:kind[/:index]` | 匿名；ETag/缓存头有效；`CacheTag` 变化即换图；带 `maxWidth`/`maxHeight` 时按档位**向下**对齐（响应永不超过请求上限），同一输入只编码一次；缺省画质 90（对齐文档 ImageService）；查询参数 `tag` 等于当前 ImageTag 时返回 `public, max-age=31536000, immutable`（强缓存），否则按天过期 + `must-revalidate` |
+| 播放信息 | `GET|POST /Items/:id/PlaybackInfo` | 单 `MediaSources`，`DirectPlay/DirectStream=true`、`Transcoding=false`；响应按文档 `PlaybackInfoResponse` 出 `MediaSources`/`PlaySessionId`/`ErrorCode`（成功路径 `ErrorCode` 为空串） |
+| 播放上报 | `POST /Sessions/Playing`、`/Progress`、`/Stopped`、`/Playing/Ping` | **200**（无响应体）；文档 PlaystateService 对这组端点写 200；计数由会话+序号保证幂等 |
 | 续播 | `GET /Users/:uid/Items/Resume` | `UserData.PlaybackPositionTicks` 有效 |
-| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回 200 及更新后的 `UserData`；评分用查询参数 `Likes=true|false`；`UserData.Likes` 为 bool，未评分时该字段不出现 |
+| 用户数据 | `POST|DELETE /Users/:uid/PlayedItems/:id`、`FavoriteItems/:id`、`Items/:id/Rating` | 返回 200 及更新后的 `UserData`；评分用查询参数 `Likes=true|false`（与文档 UserLibraryService 一致）；`UserData` 按文档 `UserItemDataDto` 输出 `Rating`（赞=10/踩=1/未评=0）、`UnplayedItemCount`（单部影片恒 0）、`Key`（等于 `ItemId`）与 `ItemId`/`ServerId`；`Likes` 作为 3.x 兼容字段保留（赞/踩输出 true/false，未评分时不出现） |
 | 流 | `GET /Videos/:id/stream`（含 `.ext`） | 302 直拉真实地址；失败 404 `NOT_FOUND` / 415 `UNSUPPORTED_MEDIA_TYPE` |
 
 自批次 91 起，影片/列表项在 `Collection` 非空时输出 `CollectionIds: ["boxset:<base64url(name)>"]`（Emby 客户端据此渲染“所属合集”）。
@@ -94,10 +94,11 @@
 - `Filters` 的逗号分隔项含 `IsFavorite`（大小写不敏感）时按文件夹自身 `UserData.IsFavorite` 筛选后再分页。当前媒体库及合集入口没有收藏存储、DTO 均为未收藏，因此结果为空数组、总数为 0；不以库内影片的收藏状态替代文件夹收藏。
 - 混合 `Folder,Movie` / `Folder,BoxSet` / `Folder,Genre` 等查询保持现有影片、合集或实体分支优先，不增加混合类型并集。单独不支持的类型（如 `Series` / `Episode`）仍为空列表。认证、用户路径校验和媒体库授权不变，根路径与 `/emby` 前缀等价。
 
-合集视图的递归影片查询：`ParentId=boxsets&Recursive=true` 且 `IncludeItemTypes` 包含 `Movie` 或 `Video`、不含 `BoxSet` 时，返回当前用户可见媒体库中 `Collection` 非空的影片，每片一次，不把 BoxSet 伪装成 Movie。沿用影片的筛选（含收藏/未播放）、排序、分页、`Fields` 和用户数据；单片合集成员也包括在内，合集展示最低影片数只约束 BoxSet 列表，不约束此成员查询。省略/关闭 `Recursive` 时纯 Movie 查询仍为空；省略类型或包含 `BoxSet` 时保留原合集列表行为，不增加混合类型并集。纯不支持类型（如 `Series`）不回退为 Movie。上述规则适用于两种列表路径及 `/emby` 前缀。
+合集父级查询（批次 111）：`ParentId=boxsets` 表示「合集」文件夹本身，客户端按影片类型递归请求（首页合集栏即 `IncludeItemTypes=Movie,Series...&Recursive=true`）时返回当前用户可见的成功/手动成员的合集列表（真实 `BoxSet`，`IsFolder=true`、稳定合集 ID、可见成员 `ChildCount`），不把合集伪装成影片、也不退化成单部影片，并应用合集最低影片数。沿用合集列表的 `SearchTerm`、`Ids`（合集 ID）、`ExcludeItemTypes=BoxSet`、标题排序与分页；`ListItemIds` 仍按成员归属解析合集。省略 `Recursive` 的纯 Movie/Video 查询返回空列表；纯不支持类型（如 `Series`）同样为空。钻取具体合集（`ParentId=boxset:<名>`）仍返回成员影片并沿用影片筛选、排序、`Fields` 和用户数据。`Latest?ParentId=boxsets&GroupItems=true` 的聚合语义见下文，保持不变。上述规则适用于两种列表路径及 `/emby` 前缀。
 
 列表参数兼容边界（批次 107）：
 
+- 影片列表（根、媒体库、合集成员）的 `Filters` 支持大小写不敏感的 `IsFavorite`、`IsUnplayed`、`IsPlayed`，多个条件取交集。已看要求当前用户 `userdata.played=1`；未看包含尚无该用户记录的影片。过滤在 SQL 计数与分页前执行，`TotalRecordCount` 为筛选后总数；同时指定已看和未看得到空列表。不将影片个人状态规则套用于文件夹收藏或跨用户查询。
 - 影片列表（含合集成员）支持逗号分隔的多键 `SortBy`，依次用于同值时的次级排序；单个 `SortOrder=Descending` 应用于所有请求键，最后恒以影片 `id ASC` 稳定分页。`SortName` 使用非空 `sortname`，为空回退 `title`；`DateCreated` 使用 `created_at`，不以自增 ID 近似时间。扁平 Movie 没有子内容新增时间，`DateLastContentAdded` 明确按 `created_at` 处理。`Year` / `ProductionYear`、`Date`、`CommunityRating` 保留对应年/首映日期/评分排序；未知键仅按标题排序，绝不插入原始 SQL。合集、Folder、流派/标签/制片商/演员实体列表仍只按名称排序，但支持 `SortOrder=Descending`，且先排序再分页；实体缓存区分排序方向。
 - `Items` 影片列表及 `Resume` 共用可选 `Fields`：`MediaSources`、`DateCreated`（同时含 `DateModified`）、`Path`、`Size`、顶层 `MediaStreams`、`PrimaryImageAspectRatio`（有海报时）。`Size` 来自 NFO 探测数据，无来源不伪造；`Size` / `MediaStreams` 可独立请求，无需同时请求 `MediaSources`。`MediaSources` 仍附带已知的 `Bitrate/Container/Size`。不请求可选字段时不新增它们；影片详情既有的默认字段不受影响。列表缓存包含完整 Fields 身份，流地址凭据只在发送当前会话响应时附加，不进入共享 DTO 缓存。
 - 条目列表/详情（含 `Resume`、Views、Folder、合集及实体列表）支持 `EnableImageTypes` 与 `ImageTypeLimit` 的 JSON 图片元数据筛选。`EnableImageTypes` 为大小写不敏感的逗号列表，未给或空值保留全部类型；只保留所选类型的 `ImageTags`，不选 `Backdrop` 时背景图数组为空。`ImageTypeLimit` 缺省不限制，非负整数按每种类型限制数量（单值标签至多一张，背景图按原索引顺序截断），0 清空图片标签/背景数组；空值、负数、非法数字或溢出返回 400。背景首图标签与数组首项保持一致。筛选仅作用于解码后的响应副本，不污染共享缓存、不改变图片字节端点或重新编号图片。
@@ -129,7 +130,7 @@
 - 条目响应支持单个布尔参数 `EnableUserData`、`EnableTotalRecordCount`：省略/true 保留既有字段，false 分别省略条目 `UserData` / QueryResult `TotalRecordCount`，不改变数组包装、`StartIndex` 或筛选结果。非法/空值返回 400。仅修改响应副本，不污染缓存；省略计数字段不承诺跳过底层计数查询。
 - `Similar` 支持与影片列表相同的可选 `Fields`，缓存区分 Fields，流 URL 凭据在发送响应时附加；无真实探测数据时不伪造 `Size`。`Similar` / `PlaybackInfo` 的可选查询 `UserId`、POST PlaybackInfo JSON 的可选字符串 `UserId` 必须是当前认证用户本人，否则 404。POST 允许空 body；畸形 JSON、错误字段类型及多段 JSON 返回 400。仍仅支持直放/直流，不承诺按 `DeviceProfile`、码率或转码请求协商媒体源。
 - BIF 按 NFO 同目录、同基名保存，例如 `abc-123.nfo` 对应 `abc-123.bif`；雪碧图 JPEG 与清单仍在数据库旁的 `video-previews`，该目录不再作为 BIF 的最终保存位置。HTTP 的 `index.bif` 路径保持不变，不代表磁盘文件名。
-- PlaybackInfo 成功响应保持 `MediaSources` / `PlaySessionId`，不虚构 BIF URL 或 `Has...` 标记。预览由独立鉴权的 `GET /Items/:id/ThumbnailSet?Width=320` 和 `GET|HEAD /Videos/:id/index.bif?Width=320` 提供；无产物时预览 404 不妨碍 PlaybackInfo 成功。回归测试验证有产物时 ThumbnailSet 非空后可获取有效 BIF，但不代表所有客户端平台/版本都会发起该发现序列。
+- PlaybackInfo 成功响应保持 `MediaSources` / `PlaySessionId` / `ErrorCode`，不虚构 BIF URL 或 `Has...` 标记。预览由独立鉴权的 `GET /Items/:id/ThumbnailSet?Width=320` 和 `GET|HEAD /Videos/:id/index.bif?Width=320` 提供；无产物时预览 404 不妨碍 PlaybackInfo 成功。回归测试验证有产物时 ThumbnailSet 非空后可获取有效 BIF，但不代表所有客户端平台/版本都会发起该发现序列。
 
 影片搜索的 FTS 与实体索引（批次 114）：
 
@@ -145,7 +146,8 @@
 - `GET /api/admin/login-events?user_id=&start=&limit=&ip=&result=` → 登录审计分页（批次 1110）：`start` 默认 0，`limit` 默认 20、范围 1–100；`user_id`/`start` 必须为非负整数，分页参数只允许单值，显式空值、非法格式、溢出或越界返回 400；`ip` 为 IPv4/IPv6 精确匹配（不支持模糊/CIDR，非法 400），`result` 取 `all|success|failed`。响应 `{"events":[…],"total":n}`，`total` 是筛选后的匹配总数，翻页直接使用。失败登录 `user_id=0`，不归因具体账户。
 - `GET /api/admin/playback-events?user_id=&start=&limit=` → 播放记录合并视图（批次 1110）：同一 `(user_id, movie_id)` 只保留一行，`play_count` 是不同播放会话数（`COUNT(DISTINCT session_key)`），`last_at/position_ticks/last_kind` 取该组合 id 最大的事件；按最近播放倒序，`start` 默认 0、`limit` 默认 20、范围 1–100；分页参数与登录审计相同，非法、空值、重复或越界返回 400。响应 `{"items":[…],"total":n}`。不提供逐次明细；`position_ticks` 由前端按 10,000,000 ticks/秒显示，没有总时长就不算百分比。`movie_title`/`user_name` 为快照，用户删除后仍保留（`user_name` 为空）。
 - `POST /api/auth/password`（需登录）→ 204，改密后撤销该账户全部会话；改密前已通过密码验证但尚未签发的登录请求也不能再产生有效会话。
-- `POST /api/auth/logout`（需登录）→ 204，仅撤销当前登录 token；其他设备的登录会话及 API 密钥不受影响。Emby 兼容入口 `POST /Sessions/Logout` 保留。
+- `POST /api/auth/logout`（需登录）→ 204，仅撤销当前登录 token；其他设备的登录会话及 API 密钥不受影响。Emby 兼容入口 `POST /Sessions/Logout` 保留，按文档返回 **200**。
+- `POST /Users/AuthenticateByName` 成功响应按文档 `AuthenticationResult` 输出 `AccessToken`/`ServerId`/`User`/**`SessionInfo`**。`SessionInfo.Id` 每次登录新签发（本服务不维护设备会话表，客户端只把它当本地标签）；`Client`/`DeviceName`/`DeviceId`/`ApplicationVersion` 回显请求头 `X-Emby-Authorization` 中声明的值，缺失时回落默认值。
 - 可见性（批次 87 起强制）：媒体库按用户授权（`user_libraries`，默认无授权）；未授权库的列表为空、详情/PlaybackInfo/流/代理/播放 404；管理员不受限。Suggestions 与实体聚合也必须限定可见库，实体缓存按授权范围隔离；Images JSON 清单、AdditionalParts、Similar 源影片及个人状态写入遵守同样的对象授权。Emby 数据只认本人；仅图片字节端点保持匿名（已批准兼容边界）。
 
 ### 4.2 独立翻译（管理面）
@@ -165,7 +167,8 @@
 | `POST /Users/AuthenticateByName`（及 `/emby` 别名）、`POST /api/auth/initialize`、`POST /api/auth/password` | 共用进程内防爆破 guard：IP/全局令牌桶、bcrypt 槽、IP/账号/组合失败预留；成功仅在凭据提交后清账号与组合历史，不清 IP 历史。凭据请求体上限 8192 字节（超出 `413 AUTH_BODY_TOO_LARGE`）。 |
 | `GET /api/admin/security/auth-limits` | 只读快照：`backend:"memory"`、配置上限、计数（`rejected_*`、`overflow` 等）与 IP/账号失败键摘要；不返回密码/token。 |
 | `POST /api/admin/security/unlock` | body `{target_type:"account"\|"ip",value,reason,current_password}`；需当前管理员密码再认证。成功 `200 {"unlocked":true}`；再认证失败 `401 AUTH_REVERIFY_FAILED`。 |
-| `GET /api/admin/logs/disk?kind=app&limit=200&after=<cursor>` | 独立磁盘 app 日志页数据源：`kind` 仅 `app`；`after`/`before` 互斥；`limit` 1–500；响应含 `items[{id,time,level,message}]`、`next_after`/`next_before`/`has_more`/`reset`/`gap`，`message` 已脱敏；非法游标 `400`、目录不可用 `503 LOGS_UNAVAILABLE`。旧 ring 接口 `GET /api/admin/logs` 保持不变。 |
+| `GET /api/admin/logs/disk?kind=app&limit=200&after=<cursor>` | 历史结构化磁盘 app 日志接口：`kind` 仅 `app`；`after`/`before` 互斥；`limit` 1–500；响应含 `items[{id,time,level,message}]`、`next_after`/`next_before`/`has_more`/`reset`/`gap`，`message` 已脱敏；非法游标 `400`、目录不可用 `503 LOGS_UNAVAILABLE`。旧 ring 接口 `GET /api/admin/logs` 保持不变。 |
+| `GET /api/admin/logs/stream?kind=app\|request&after=<cursor>` | 管理员交互会话专用原始日志 SSE（`fetch` 携带 `X-Emby-Token`），`Cache-Control: no-store`。`event: logs` 的 JSON 数据包含 `kind/text/cursor/reset/gap/has_more`，`id` 为续读游标；`text` 保留文件原文，不解析或脱敏。首次读取文件尾部，重连使用 `after` 补读；轮转或清理导致无法连续读取时明确 `reset/gap`，不承诺永久历史。流内错误通过 `event: error` 返回稳定 `code` 并结束；建立流前的错误仍遵守 JSON 错误信封。 |
 | `POST /api/admin/apikeys/:key/rotate` | `:key` 为稳定 ID `ak_<32hex>`；必须 `If-Match: "ak-<stable_id>-<version>"`（缺失 428、格式非法 400、过期/并发 412）；body `{reason}`（不再要求当前密码，2026-11-10 起）；成功 200 一次返回新明文 `key`（`Cache-Control: no-store`），旧 key 立即失效；`403`/`404`/`412`/`428`/`503` 分类见实现。 |
 | `GET/PUT /api/admin/image-cache/settings`、`POST /api/admin/image-cache/trim` | 缩略图变体目录（`image_cache`）的运行期容量上限：`GET` 返回 `{dir,enabled,max_bytes,used_bytes,files,max_allowed_bytes,config_etag}`（`max_bytes=0` 表示不限制，`used_bytes`/`files` 为变体目录快照，不含临时文件）。`PUT` body `{max_bytes}`（0–64 GiB），必须 `If-Match: "ic1-<max_bytes>"`（缺 428、过期 412 `IMAGE_CACHE_SETTINGS_CHANGED`）；保存立即生效并按新上限清理，配置禁用时返回 `409 IMAGE_CACHE_DISABLED`。`trim` 立即清理过期/超限变体，返回 `{removed,freed_bytes,files,used_bytes,config_etag}`。变体是纯派生数据，清理不影响任何接口语义。 |
 | `GET/PUT /api/admin/webhook/targets` | v2 多目标整集合：`GET` 返回 `version:2`、`targets[{id,name,enabled,url_configured,events,format,timeout_seconds,allow_private}]`、`config_etag`、`multi_target`，永不回显 URL。`PUT` 必须 `If-Match`（缺 428、过期 412）；body `{targets:[...],confirm_delete,confirm_empty_targets}`，按目标 ID 合并秘密（空白 URL 保留、`clear_url` 清除），新目标由服务端生成 `wh_<16hex>` ID；最多 10 个目标、整体 ≤64 KiB；清空需显式确认。v2 形成后旧 `PUT /api/admin/webhook/settings` 返回 `409 WEBHOOK_MULTI_TARGET_CONFIG`，旧 `GET` 标 `multi_target:true`。 |
@@ -174,7 +177,8 @@
 
 - 普通与 debug 请求日志均记录原始 `RequestURI`（构造请求缺省时回退 `URL.RequestURI()`），包括未知路径、敏感路由、全部 query、重复值和原始转义；不再将路径替换为模板或将 query 脱敏。日志字符串仍采用可逆引号转义。普通模式继续高频成功请求降噪，不新增头/body/error 内容，panic 详情仍省略；debug 的敏感头遮盖与敏感路由请求体保护保持不变，审计日志政策不变。
 - 未匹配路由只返回 `404 NOT_FOUND`、`Cache-Control: no-store`，不再记录未实现端点，`/api/admin/probe` 与历史清空接口已删除。历史 `api_probe` 数据保留在库中但不再写入、不再提供查询入口；需要补接口时直接看请求日志。
-- **安全取舍：即使 debug 关闭，URL 内 api_key/token 等凭据仍可能落入 request 日志。** 此项仅取消入站请求 URL 脱敏，不改变 app 日志视图、上游错误脱敏、鉴权或响应内容。不恢复历史已遮盖的 URL；关闭 debug 不删除旧记录，也不恢复 URL 脱敏。
+- **安全取舍：即使 debug 关闭，URL 内 api_key/token 等凭据仍可能落入 request 日志。** 此项仅取消入站请求 URL 脱敏，不改变历史结构化 app 日志接口、上游错误脱敏、鉴权或响应内容。不恢复历史已遮盖的 URL；关闭 debug 不删除旧记录，也不恢复 URL 脱敏。
+- **原始日志流（2026-11-12）：**运行日志页以 `app.log` / `requests.log` 区分两个逻辑来源，磁盘仍沿用 `log/app-YYYY-MM-DD.log` / `log/request-YYYY-MM-DD.log` 的按日轮转命名，不重命名既有文件。新增 `/api/admin/logs/stream` 按管理员明确选择原样展示文件内容，包括 request URL 中可能存在的凭据；不再套用结构化视图的脱敏或隐藏占位符。正文仅作为文本渲染，不能作为 HTML 执行；该例外不扩展到其它接口或日志写入政策。
 
 ### 4.4 全量与增量扫描
 
@@ -338,6 +342,110 @@
 - 已有普通用户 token 直接访问 `/admin` 时，前端清除本机凭据并回到登录页；后端管理端点继续由 `requireAdmin` 返回 403，不依赖前端拦截。
 - `POST /Users/AuthenticateByName` 的响应结构不变（仍返回 Emby 兼容的 `User.Policy`），普通用户 token 仍可用于 Emby 客户端播放；本限制只作用于 Web 管理界面。
 - 登录页与管理台的判定都取同一份 `/Users/Me` 策略，不新增端点、不新增字段。
+
+### 4.17 Web 媒体墙的 Emby 浏览链路
+
+- Web 媒体墙正常浏览直接使用 `/emby` 前缀的兼容端点及原生 DTO：`Users/Me`、用户 `Views` / `Items`、单条详情 / `Collections` 和 `Items/{id}/Images/*`。搜索、分类、排序与分页使用 Emby 查询参数，不再由 `/api/admin/items` 适配浏览结果。
+- 收藏、已看和喜好通过当前用户的 `FavoriteItems` / `PlayedItems` / `Items/{id}/Rating` 写入；播放通过 `PlaybackInfo` 协商，使用返回的直流地址，并按顺序发送 `Sessions/Playing`、`Progress`、`Stopped`。视频预览使用现有 `ThumbnailSet` / `Images/Thumbnail` 兼容端点。
+- 管理字段（未刮削、需处理、NFO 锁、索引维护等）不冒充 Emby 字段；媒体墙显示全部 / 收藏 / 已看 / 未看，待处理素材由显式刮削管理入口处理。展开维护或点击管理操作后仍使用 `/api/admin`，兼容 API 的可见性约束及管理鉴权均不改变。
+- 日志 SSE 仅用于单向文本更新。管理写操作仍为普通 HTTP，断线恢复不能自动重放写入；总览与防火墙保留既有低频轮询。
+
+### 4.18 Web 媒体墙合集浏览（2026-11-12）
+
+- 媒体墙新增“影片 / 合集”视图切换，纯前端状态：`?view=collections` 为合集列表，`?view=collections&collection=boxset:<base64url(name)>` 为合集成员列表；切换视图只改查询参数，不新增端点。
+- 合集列表直接查 `Users/{uid}/Items?IncludeItemTypes=BoxSet&Recursive=true`，不带影片库 `ParentId`、影片 `Filters` 或 `MediaSources` 字段；`views` 中 `CollectionType=boxsets`（`Id=boxsets`）的虚拟合集库不参与影片库筛选，`library_id=boxsets` 的旧书签会归一化为合集视图。
+- 合集成员列表按 `ParentId=<合集 ID>` + `IncludeItemTypes=Movie` 查询，保留全部 / 收藏 / 已看 / 未看筛选与搜索，成员属于全局可见范围而非单一媒体库，因此不展示媒体库选择。
+- 合集后端仅支持标题排序，故合集视图的排序固定为“标题 A–Z / Z–A”（`SortBy=SortName`），非法或影片排序参数在进入时被清洗，不回退 `DateCreated`。
+- 合集卡片为原生 `button`（可 Tab 聚焦、回车/空格打开），带合集角标与成员数，不显示快捷播放、探测、重读或批量维护入口；影片索引的批量维护与翻译仅在影片视图出现。
+- 返回合集按历史回退恢复进入前的筛选；直接打开合集链接而无历史时只清除 `collection` 参数，不影响影片视图。
+
+### 4.19 合集自动拼接封面（管理面，2026-11-12）
+
+- 五个管理端点，全部走 `/api/admin` 组的 `requireAuth` + `requireAdmin` + 审计：`POST /api/admin/collection-cover/run`、`GET /api/admin/collection-cover/status`、`POST /api/admin/collection-cover/cancel`、`GET /api/admin/collection-cover/preview`、`POST /api/admin/collection-cover/revert`。这些是后台契约，不属于 Emby 兼容承诺。
+- `run` 请求体只接受 `collections`（数组）或 `all`（布尔）二选一，另可选 `apply`、`overwrite`、`quality`（1..100）、`width` / `height`（64..4096）、`reflection`。未知字段、同时给 `collections` 与 `all`、两者都不给、空合集名、越界数值一律 400 `INVALID_REQUEST`，不做静默兜底。
+- `run` 返回 202 与任务快照；同一时刻只允许一个合集封面任务，占用时 409 `CONFLICT`。`status` 需 `task_id` 与 `instance_id` 双匹配，否则 404 `NOT_FOUND`。`cancel` 对已结束任务返回 409。
+- `preview` 用 `?collection=<名称>` 直接返回生成的 WebP（`Cache-Control: no-store`），不写库、不发布；合集不存在 404，无可解码海报 404 且错误消息说明原因。
+- `apply` 默认不覆盖既有自定义封面：只有当库中已有记录的 `algorithm` 不是 `emby-strip-4col-v1` 时才跳过，必须显式 `overwrite=true` 才替换。`revert` 删除生效记录，合集 Primary 回退到代表海报。
+- 生效后 `ImageTags.Primary` 指向生成的封面文件，`PrimaryImageAspectRatio` 取该文件真实比例（≈1.7778）；`boxsets` 虚拟库封面取第一个有生效封面的合集。
+- 生成文件写在数据库同级的 `collection-covers/` 目录，使用临时文件 + 原子改名；源海报文件只读，不会被修改。
+
+### 4.20 与官方 RestAPI 文档对齐（2026-11-13）
+
+依据 `/root/src/EmbyRestApiDocs`（`index.json`：70 services / 548 endpoints）逐条核对后，按用户要求「严格按文档」修正以下既有偏差。审计明细见 `EMBY-COMPAT-AUDIT.md`。
+
+以文档为准的修正：
+
+| 项 | 修正前 | 修正后（= 文档） |
+|---|---|---|
+| 图片 HEAD | 未注册，客户端 `HEAD /Items/:id/Images/:kind` 得 404 | GET 图片路由（含 `Images/Thumbnail`）与 `/System/Ping` 自动挂同 handler 的 HEAD 变体 |
+| `PublicSystemInfo` | 出 `ProductName`，缺 `LocalAddress`/`WanAddress` | 严格七字段，不含 `ProductName` |
+| `SystemInfo` | 21 字段 | 按文档 36 字段补齐（`PackageName`/`WebSocketPortNumber`/各 `*Path`/`WakeOnLanInfo` 等；无实现的用零值） |
+| `AuthenticationResult` | 缺 `SessionInfo` | 出 `SessionInfo`（`Id` 每登录新签发；`Client`/`DeviceName`/`DeviceId`/`ApplicationVersion` 回显请求头） |
+| `PlaybackInfoResponse` | 缺 `ErrorCode` | 出 `ErrorCode`（成功路径空串） |
+| `UserItemDataDto` | 缺 `Rating`/`UnplayedItemCount`/`Key` | 三项补齐；`Rating` 由赞/踩派生（10/1/0），`Key` 等于 `ItemId` |
+| 播放上报与 Capabilities、Logout | 204 | **200**（文档 SessionsService / PlaystateService 写「200（无返回内容）」） |
+| 图片画质默认值 | `imageutil` 通用默认 82 | 图片端点缺省 90（文档 ImageService「0–100，默认 90」）；预热档位同步改 90 以保证变体命中 |
+| 图片 `?tag=` | 忽略 | 等于当前 `ImageTag` 时返回 `public, max-age=31536000, immutable` |
+
+两点明确边界：
+
+- 自有 `/api/auth/*` 契约**不受影响**：`POST /api/auth/logout` 仍是 204（`/Sessions/Logout` 走独立 handler 返回 200），`POST /api/auth/initialize` 仍是 204。Emby 兼容端点与自有管理端点各用各的状态码。
+- 未按文档改的部分：`?tag=` 只改缓存头不改 304 语义（强缓存不等于 304，首个请求必须拿到字节）；`UserData` 的 `Likes`（3.x 语义）与 `Rating`（4.x 数值）并存，因为自有前端读 `Likes`。
+
+本次修正使 §5「不改变状态码」的约束在 Emby 兼容面上做了一次**明确登记的例外**：只把文档写 200 的端点从 204 改为 200，其它状态码不变。
+
+### 4.21 补齐的 Emby 兼容端点（2026-11-13）
+
+4.20 只修正了「已实现端点」的形状。本节登记**新增**的 30 条端点——它们此前一律 404，导致第三方客户端在对应页面报错或空白。全部按 `/root/src/EmbyRestApiDocs` 的路径与响应形状实现，实现集中在 `internal/server/emby_extra.go`、`internal/server/library.go`、`internal/server/userdata.go`、`internal/server/media.go`。
+
+**一、结构上无数据，返回空集合（9 条）**
+
+本项目是电影库，没有主题曲、预告片、剧集、主题媒体等概念，这些端点返回空集合而不是 404——客户端拿到空列表会显示「无内容」，拿到 404 会报错。
+
+| 端点 | 响应 |
+|---|---|
+| `GET /Items/:id/ThemeMedia` | `AllThemeMediaResult`：`ThemeVideosResult`/`ThemeSongsResult`/`SoundtrackSongsResult` 三段，各 `{OwnerId:0, Items:[], TotalRecordCount:0}` |
+| `GET /Items/:id/ThemeSongs`、`/ThemeVideos` | 单个 `ThemeMediaResult`，空 |
+| `GET /Users/:uid/Items/:id/Intros`、`/LocalTrailers`、`/SpecialFeatures` | 空 `QueryResult` |
+| `GET /Shows/:id/Seasons`、`/Shows/:id/Episodes`、`/Shows/Upcoming` | 空 `QueryResult` |
+
+`GET /Movies/:id/Similar` 也在此组新增，但它**有真实数据**：复用既有的 `similar` 逻辑（按流派/标签/制片商交集排序），与 `/Items/:id/Similar` 同源。
+
+**二、复用既有聚合的真实数据（7 条）**
+
+| 端点 | 数据来源 |
+|---|---|
+| `GET /Users/:uid/Items/Root` | 固定根 `{Id:"0", Name:<serverName>, Type:"AggregateFolder", IsFolder:true}` |
+| `GET /Library/MediaFolders` | `db.Libraries()` → `QueryResult`；与 `/Users/:uid/Views` 同源但形状是 `QueryResult`，且不含「合集」虚拟视图 |
+| `GET /Tags`、`/Studios`、`/Persons` | `EntityNamesVisible` 聚合；`/Persons` 走 `movie_actors` 特例。响应 `{Id, Name, Type, IsFolder:false, ServerId}` |
+| `GET /Genres/:name` | 单个 `BaseItemDto`；名称大小写不敏感匹配，未命中 **404** |
+| `GET /Items/:id/Ancestors` | 影片 → 所属合集（若有）→ 所属媒体库；影片不存在或不可见 **404** |
+
+**三、用户数据与旧式上报（6 条）**
+
+| 端点 | 行为 |
+|---|---|
+| `GET /Users/:uid/Items/:id/UserData` | 返回 `UserItemDataDto`（文档只登记了 POST，GET 是客户端实际会调的补充） |
+| `POST /Users/:uid/Items/:id/UserData` | body 可含 `Played`/`IsFavorite`/`Rating`/`Likes` 任意子集，逐字段应用后返回 **200 空 body**；`Likes`(bool) 优先于 `Rating`(数值) |
+| `POST /Users/:uid/PlayingItems/:id`、`/Progress`、`/Delete`、`DELETE /Users/:uid/PlayingItems/:id` | 旧式上报族，与 `/Sessions/Playing*` 共用同一条落库路径（`applyPlaybackEvent`），全部 200 |
+
+`Rating` 与内部赞/踩的映射：`>5 → 赞 → 回读 10`，`0<r<=5 → 踩 → 回读 1`，`0 → 未评 → 回读 0`。
+
+**四、需要新查询的会话与密钥（7 条）**
+
+| 端点 | 行为 |
+|---|---|
+| `GET /Sessions` | 读 `playback_sessions` 中 `stopped=0` 的记录；非管理员只看到自己的会话；每条带 `NowPlayingItem`（不可见影片整条跳过）；无会话返回 `[]` 而非 `null` |
+| `GET /Auth/Keys` | 管理员；返回 `{Id, AppName, CreatedDate, DeviceId, DeviceName, AppVersion}` 数组 |
+| `POST /Auth/Keys?App=` | 管理员；`App` 为空 **400**；成功 200 空 body |
+| `DELETE /Auth/Keys/:key`、`POST /Auth/Keys/:key/Delete` | 管理员；不存在 **404**，成功 200 |
+| `GET /Years`、`/OfficialRatings` | 从 `movies.year` / `movies.official_rating` 去重聚合；`/Years` 按数值倒序 |
+
+`/Auth/Keys` 三条的管理员限制在 handler 内判定（`embyRoute.auth` 只有「要认证/不要认证」两态），非管理员返回 **403** `{"error":"administrator required","code":"ADMIN_REQUIRED"}`——与文档「administrator」标注一致。
+
+**仍不实现的（有意）**：字幕 `GET /Videos/{Id}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`——探测器只记录「是否内嵌」，不保存外挂字幕文件路径，物理上无法对外提供；Live TV / DLNA / 音乐 / 插件 / Sync / 播放列表不在本项目范围；管理面走自有 `/api/admin/*`，不重复实现 Emby 管理端点。
+
+回归测试见 `internal/server/emby_doc_endpoints_test.go`（7 个用例，逐条断言文档形状）。
 
 ## 5. 变更规则（v2）
 

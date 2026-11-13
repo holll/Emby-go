@@ -18,8 +18,44 @@ async function browser(t) {
     window.confirm=()=>true;
     window.fetch=async (input, options={})=>{
       const url=String(input), p=url.split('?')[0]; __calls.push({url,method:options.method||'GET',body:options.body});
+      if(p==='/api/admin/logs/stream'){
+        let timer,closed=false;
+        const kind=new URL(url,location.origin).searchParams.get('kind');
+        const record={kind,url,token:options.headers['X-Emby-Token'],aborted:false};
+        (window.__logStreams ||= []).push(record);
+        const stream=new ReadableStream({start(controller){
+          const emit=()=>{const id=++__logID;controller.enqueue(new TextEncoder().encode('event: logs\\ndata: '+JSON.stringify({kind,text:window.__logRawText??(kind+'-auto-log-'+id+'\\n'),cursor:String(id),reset:false,gap:false,has_more:false})+'\\n\\n'));};
+          const close=()=>{clearInterval(timer);if(!closed){closed=true;controller.close();}};
+          record.close=close;
+          emit();timer=setInterval(emit,300);
+          options.signal?.addEventListener('abort',()=>{record.aborted=true;close();},{once:true});
+        },cancel(){clearInterval(timer);closed=true;}});
+        return new Response(stream,{headers:{'Content-Type':'text/event-stream'}});
+      }
       let data={};
-      if(p==='/Users/Me')data={Name:'owner',Policy:{IsAdministrator:true}};
+      if(p.endsWith('/Users/Me'))data={Id:'1',Name:'owner',Policy:{IsAdministrator:true}};
+      else if(p==='/emby/Users/1/Views'){const items=window.__nativeViews||[{Id:'1000000000001',Name:'测试媒体库',CollectionType:'movies'}];data={Items:items,TotalRecordCount:items.length};}
+      else if(p==='/emby/Users/1/Items'){
+        const query=new URL(url,location.origin).searchParams;
+        if(query.get('IncludeItemTypes')==='BoxSet'){
+          let items=[...(window.__collectionItems||[])];
+          const term=(query.get('SearchTerm')||'').toLowerCase();
+          items=items.filter(item=>item.Name.toLowerCase().includes(term)).sort((a,b)=>a.Name.localeCompare(b.Name));
+          if(query.get('SortOrder')==='Descending')items.reverse();
+          const start=Number(query.get('StartIndex')||0),limit=Number(query.get('Limit')||48);
+          data={Items:items.slice(start,start+limit),TotalRecordCount:items.length,StartIndex:start};
+        }else data={Items:[{Id:'1',Name:'示例影片：移动端资料管理',ProductionYear:2026,UserData:{}},{Id:'2',Name:'另一部影片',UserData:{}}],TotalRecordCount:2};
+      }
+      else if(decodeURIComponent(p).startsWith('/emby/Users/1/Items/boxset:')){
+        const id=decodeURIComponent(p).slice('/emby/Users/1/Items/'.length);
+        data=(window.__collectionItems||[]).find(item=>item.Id===id)||{Id:id,Name:'合集',Type:'BoxSet',IsFolder:true,ChildCount:2};
+      }
+      else if(p==='/emby/Users/1/Items/1/Collections')data={Items:[],TotalRecordCount:0};
+      else if(p==='/emby/Users/1/Items/1'){
+        if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
+        if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
+        data={Id:'1',Name:'长详情验证',Overview:'长简介与文件路径 '.repeat(800),People:[],MediaSources:[],UserData:{}};
+      }
       else if(p.endsWith('/libraries')){const items=window.__libraryItems||[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}];data={total:items.length,items};}
       else if(p.endsWith('/items'))data={total:2,items:[{id:1,status:'success',Title:'示例影片：移动端资料管理',Number:'TEST-001',source_path:'/media/测试/TEST-001.strm'},{id:2,status:'pending',Title:'等待处理的影片',source_path:'/media/待处理/TEST-002.strm'}]};
       else if(p.endsWith('/detail')){
@@ -422,7 +458,7 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
         const hits = await evaluate(`(()=>{return [...document.querySelectorAll('.wall-card:first-child [data-probe],.wall-card:first-child [data-reread],.wall-card:first-child [data-delete],.wall-card:first-child [data-translate-select]')].map(b=>{b.scrollIntoView({block:'center'});const target=b.matches('input')?b.closest('label'):b;target.scrollIntoView({block:'center'});const r=target.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {ok:hit===target||target.contains(hit),width:r.width,height:r.height,button:b.tagName==='BUTTON'};});})()`);
         assert.equal(hits.length,4);if(width<=860)assert.ok(hits.every(h=>h.ok),`card hit targets at ${width}: ${JSON.stringify(hits)}`);
         if(width<=860)assert.ok(hits.filter(h=>h.button).every(h=>h.width>=43.99&&h.height>=43.99),`card touch dimensions at ${width}`);
-        const detail = await evaluate(`(async()=>{await openDetail({id:1});const maintenance=document.querySelector('.detail-maintenance');if(!maintenance)return {missing:true};const collapsed=!maintenance.open;maintenance.open=true;document.querySelector('#detail-edit-toggle').click();await new Promise(r=>setTimeout(r,20));const result={collapsed,scroll:document.documentElement.scrollWidth,shown:!document.querySelector('#detail-edit').hidden};document.querySelector('#detail-close').click();return result;})()`);
+        const detail = await evaluate(`(async()=>{await openMaintenanceDetail({id:1});const maintenance=document.querySelector('.detail-maintenance');if(!maintenance)return {missing:true};const collapsed=!maintenance.open;maintenance.open=true;document.querySelector('#detail-edit-toggle').click();await new Promise(r=>setTimeout(r,20));const result={collapsed,scroll:document.documentElement.scrollWidth,shown:!document.querySelector('#detail-edit').hidden};document.querySelector('#detail-close').click();return result;})()`);
         assert.equal(detail.missing, undefined);assert.equal(detail.collapsed,true);assert.equal(detail.shown,true);assert.ok(detail.scroll<=width+1,`detail editor at ${width}: ${detail.scroll}`);
       }
       if (process.env.EMBY_LAYOUT_ARTIFACT_DIR && [1280,390].includes(width) && ['overview','settings','scheduled','items'].includes(name)) {
@@ -441,6 +477,124 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
 });
 
 
+test('日志 SSE：原文安全、来源切换、断流游标恢复、暂停与页面清理', {timeout:30000}, async t => {
+  if (!available(t)) return;
+  const {evaluate}=await browser(t);
+  await evaluate(`(async()=>{window.__logRawText='<img src=x onerror="window.__logXSS=true">\\n\\n{"level":"info"}\\n  continuation 中文🙂\\n';await page('logs');for(let i=0;i<50&&!document.querySelector('#dl-body')?.textContent;i++)await new Promise(r=>setTimeout(r,10));})()`);
+  const initial=await evaluate(`({text:document.querySelector('#dl-body').textContent,raw:__logRawText,xss:!!document.querySelector('#dl-body img')||!!window.__logXSS,live:document.querySelector('#dl-body').getAttribute('aria-live'),token:__logStreams[0].token,kind:__logStreams[0].kind})`);
+  assert.equal(initial.text,initial.raw);assert.equal(initial.xss,false);assert.equal(initial.live,null);assert.equal(initial.token,'layout-fixture');assert.equal(initial.kind,'app');
+  const switched=await evaluate(`(async()=>{window.__logRawText='GET /Items?token=raw-secret\\n';const selector=document.querySelector('#dl-kind');selector.value='request';selector.dispatchEvent(new Event('change'));for(let i=0;i<50&&!document.querySelector('#dl-body').textContent;i++)await new Promise(r=>setTimeout(r,10));return {aborted:__logStreams[0].aborted,text:document.querySelector('#dl-body').textContent,kind:__logStreams.at(-1).kind,url:__logStreams.at(-1).url,source:document.querySelector('#dl-source').textContent};})()`);
+  assert.equal(switched.aborted,true);assert.equal(switched.text,'GET /Items?token=raw-secret\n');assert.equal(switched.kind,'request');assert.doesNotMatch(switched.url,/after=/);assert.match(switched.source,/request-YYYY-MM-DD/);
+  const disconnected=await evaluate(`(async()=>{const count=__logStreams.length;__logStreams.at(-1).close();for(let i=0;i<150&&__logStreams.length===count;i++)await new Promise(r=>setTimeout(r,10));return {count:__logStreams.length,url:__logStreams.at(-1).url};})()`);
+  assert.equal(disconnected.count,3);assert.match(disconnected.url,/kind=request&after=/);
+  const paused=await evaluate(`(async()=>{document.querySelector('#dl-pause').click();const count=__logStreams.length;await new Promise(r=>setTimeout(r,500));return {count,after:__logStreams.length,aborted:__logStreams.at(-1).aborted,pressed:document.querySelector('#dl-pause').getAttribute('aria-pressed')};})()`);
+  assert.equal(paused.count,paused.after);assert.equal(paused.aborted,true);assert.equal(paused.pressed,'true');
+  const resumed=await evaluate(`(async()=>{document.querySelector('#dl-pause').click();for(let i=0;i<50&&__logStreams.length<4;i++)await new Promise(r=>setTimeout(r,10));const count=__logStreams.length;await page('settings');await new Promise(r=>setTimeout(r,400));return {count,after:__logStreams.length,aborted:__logStreams.at(-1).aborted,writes:__calls.filter(c=>c.url.includes('/logs/stream')&&c.method!=='GET').length,errors:__errors};})()`);
+  assert.equal(resumed.count,4);assert.equal(resumed.after,4);assert.equal(resumed.aborted,true);assert.equal(resumed.writes,0);assert.deepEqual(resumed.errors,[]);
+});
+
+test('合集浏览：封面卡片进成员列表、返回恢复、隐藏影片专属控件与真实键盘操作', {timeout:60000}, async t => {
+  if (!available(t)) return;
+  const {call,evaluate}=await browser(t);
+  // 人工视觉核验用：EMBY_REPORT_ARTIFACT_DIR 指向 /tmp 下目录时落两张截图。
+  const output=process.env.EMBY_REPORT_ARTIFACT_DIR;
+  if(output){assert.ok(path.resolve(output).startsWith('/tmp/'));fs.mkdirSync(output,{recursive:true});}
+  async function shot(name){if(!output)return;const result=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(output,name+'.png'),Buffer.from(result.data,'base64'));}
+  const listed=await evaluate(`(async()=>{
+    window.__collectionItems=[{Id:'boxset:QlVH',Name:'系列合集 B',Type:'BoxSet',IsFolder:true,ChildCount:3,ImageTags:{Primary:'tag-b'}},{Id:'boxset:QUFB',Name:'另一合集 A',Type:'BoxSet',IsFolder:true,ChildCount:2}];
+    await page('items');location.hash='#items';
+    // file:// 夹具里只能用相对 URL，用 pathname 保留当前文档。
+    history.replaceState({},'',location.pathname+'?view=collections#items');await pageItems();
+    for(let i=0;i<60&&!document.querySelector('.collection-card');i++)await new Promise(r=>setTimeout(r,15));
+    const cards=[...document.querySelectorAll('.collection-card')];
+    return {count:cards.length,tags:cards.map(c=>c.tagName),labels:cards.map(c=>c.dataset.collection),
+      marks:cards.map(c=>c.querySelector('.collection-mark')?.textContent),
+      movieOnly:!!document.querySelector('.wall-maintenance'),
+      quick:cards.some(c=>c.querySelector('[data-quickplay],[data-probe],[data-reread]')),
+      switchActive:document.querySelector('[data-wall-view="collections"]').getAttribute('aria-pressed'),
+      url:location.search};
+  })()`);
+  assert.equal(listed.count,2);
+  assert.deepEqual(listed.tags,['BUTTON','BUTTON']);
+  assert.match(listed.labels[0],/^boxset:/);
+  assert.ok(listed.marks.every(mark=>mark==='合集'));
+  assert.equal(listed.movieOnly,false,'纯合集列表不显示影片批量维护');
+  assert.equal(listed.quick,false,'合集卡片没有快捷播放/探测/重读入口');
+  assert.equal(listed.switchActive,'true');
+  assert.match(listed.url,/view=collections/);
+  await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  await evaluate("scrollTo(0,0)");await shot('collections-list-1280');
+
+  const opened=await evaluate(`(async()=>{
+    const card=document.querySelector('.collection-card');
+    card.focus();card.click();
+    for(let i=0;i<60&&!document.querySelector('#collection-title');i++)await new Promise(r=>setTimeout(r,15));
+    const call=__calls.filter(c=>c.url.includes('/Items?')&&c.url.includes('ParentId')).at(-1);
+    const q=new URL(call.url,location.origin).searchParams;
+    const page=new URL(location.href,location.origin).searchParams;
+    return {title:document.querySelector('#collection-title').textContent,
+      back:!!document.querySelector('#collection-back'),hash:location.hash,
+      collection:page.get('collection'),parentId:q.get('ParentId'),types:q.get('IncludeItemTypes'),
+      search2:!!document.querySelector('#item-search'),movieOnly:!!document.querySelector('.wall-maintenance'),
+      statusFilters:!!document.querySelector('.wall-status-filters'),
+      cards:document.querySelectorAll('.wall-card').length};
+  })()`);
+  assert.equal(opened.title,'另一合集 A','首张卡片按标题序打开对应合集');
+  assert.equal(opened.back,true);
+  assert.equal(opened.hash,'#items');
+  assert.match(opened.collection,/^boxset:/);
+  assert.match(opened.parentId,/^boxset:/,'成员列表按合集 ParentId 查询');
+  assert.equal(opened.types,'Movie','合集成员仍是影片');
+  assert.equal(opened.search2,true,'成员列表保留搜索');
+  assert.equal(opened.movieOnly,false,'合集成员列表不显示影片索引批量维护');
+  assert.equal(opened.statusFilters,true,'成员仍可按收藏/已看筛选');
+  assert.equal(opened.cards,2);
+  await evaluate("scrollTo(0,0)");await shot('collection-members-1280');
+
+  const backing=await evaluate(`(async()=>{
+    document.querySelector('#collection-back').click();
+    for(let i=0;i<60&&location.search.includes('collection');i++)await new Promise(r=>setTimeout(r,15));
+    return {search:location.search,title:!!document.querySelector('#collection-title'),cards:document.querySelectorAll('.collection-card').length};
+  })()`);
+  assert.doesNotMatch(backing.search,/collection=/,'返回后退回合集列表');
+  assert.equal(backing.title,false);
+  assert.equal(backing.cards,2);
+
+  // 版面与可操作性几何：窄屏不横向滚动、卡片触控目标、键盘焦点可见。
+  const geometry=await evaluate(`(async()=>{
+    const measure=async width=>{
+      const card=document.querySelector('.collection-card');
+      card.scrollIntoView({block:'center'});
+      const box=card.getBoundingClientRect();
+      card.focus();
+      const style=getComputedStyle(card);
+      return {width,scroll:document.documentElement.scrollWidth,cardW:Math.round(box.width),cardH:Math.round(box.height),
+        outline:style.outlineStyle,outlineWidth:style.outlineWidth,focused:document.activeElement===card};
+    };
+    const wide=await measure(1280);return wide;
+  })()`);
+  assert.ok(geometry.scroll<=geometry.width+1,'合集列表在 1280 宽不横向滚动');
+  assert.ok(geometry.cardW>=148,'卡片不小于媒体墙最小列宽');
+  assert.ok(geometry.cardH>=44,'卡片满足 44px 触控高度');
+  assert.equal(geometry.focused,true,'合集卡片可键盘聚焦');
+  assert.notEqual(geometry.outline,'none','聚焦时有可见轮廓');
+  await call('Emulation.setDeviceMetricsOverride',{width:375,height:900,deviceScaleFactor:1,mobile:true});
+  const narrow=await evaluate(`(async()=>{const card=document.querySelector('.collection-card');card.scrollIntoView({block:'center'});const box=card.getBoundingClientRect();return {scroll:document.documentElement.scrollWidth,cardH:Math.round(box.height)};})()`);
+  assert.ok(narrow.scroll<=376,'合集列表在 375 宽不横向滚动');
+  assert.ok(narrow.cardH>=44,'窄屏卡片仍满足 44px 触控高度');
+  await shot('collections-list-375');
+  await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+
+  const keyboard=await evaluate(`(async()=>{
+    const btn=[...document.querySelectorAll('[data-wall-view]')].find(b=>b.dataset.wallView==='movies');
+    btn.focus();btn.click();
+    for(let i=0;i<60&&location.search.includes('view=collections');i++)await new Promise(r=>setTimeout(r,15));
+    return {search:location.search,focused:document.activeElement.dataset.wallView||'',errors:__errors};
+  })()`);
+  assert.doesNotMatch(keyboard.search,/view=collections/,'切回影片视图');
+  assert.equal(keyboard.focused,'movies','切换后把焦点还给当前视图按钮');
+  assert.deepEqual(keyboard.errors,[]);
+});
 test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自动更新、审计筛选与IP黑名单', {timeout:120000}, async t => {
   if (!available(t)) return;
   const {call,evaluate}=await browser(t);
@@ -496,16 +650,17 @@ test('详情固定外壳：加载关闭、错误重试、长详情关闭、背�
   const {call,evaluate}=await browser(t);
   await call('Emulation.setDeviceMetricsOverride',{width:320,height:740,deviceScaleFactor:1,mobile:true});
   await evaluate("page('items')");
-  const loading=await evaluate(`(async()=>{const trigger=document.querySelector('.wall-title');trigger.focus();window.__detailDelay=true;void openDetail({id:1});const result={close:!!document.querySelector('#detail-close'),focus:document.activeElement.id,inert:document.querySelector('#app-shell').inert,lock:document.body.style.overflow};closeDetail();result.restored=document.activeElement===trigger;result.unlocked=document.body.style.overflow;window.__detailDelay=false;window.__resolveDetail();await new Promise(r=>setTimeout(r,30));result.stale=!document.querySelector('#detail-content');return result;})()`);
-  assert.equal(loading.close,true); assert.equal(loading.focus,'detail-close'); assert.equal(loading.inert,true); assert.equal(loading.lock,'hidden'); assert.equal(loading.restored,true); assert.equal(loading.unlocked,''); assert.equal(loading.stale,true);
-  const failureClose=await evaluate(`(async()=>{document.querySelector('.wall-title').focus();window.__detailFail=true;await openDetail({id:1});const r=document.querySelector('#detail-close').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+  // 详情抽屉是原生 <dialog>：模态性由浏览器保证，背景既不可聚焦也不随滚轮滚动。
+  const loading=await evaluate(`(async()=>{const trigger=document.querySelector('.wall-title');trigger.focus();window.__detailDelay=true;void openDetail({Id:'1'});const overlay=document.querySelector('#detail-overlay');const result={close:!!document.querySelector('#detail-close'),focus:document.activeElement.id,open:overlay.open,modal:overlay.matches(':modal')};trigger.focus();result.escaped=!overlay.contains(document.activeElement);closeDetail();result.restored=document.activeElement===trigger;result.closed=!overlay.open;window.__detailDelay=false;window.__resolveDetail();await new Promise(r=>setTimeout(r,30));result.stale=!document.querySelector('#detail-content');return result;})()`);
+  assert.equal(loading.close,true); assert.equal(loading.focus,'detail-close'); assert.equal(loading.open,true); assert.equal(loading.modal,true,'浮层以 showModal 打开'); assert.equal(loading.escaped,false,'模态期间背景不可聚焦'); assert.equal(loading.restored,true); assert.equal(loading.closed,true); assert.equal(loading.stale,true);
+  const failureClose=await evaluate(`(async()=>{document.querySelector('.wall-title').focus();window.__detailFail=true;await openDetail({Id:'1'});const r=document.querySelector('#detail-close').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
   await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[failureClose]});
   await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
-  const exited=await evaluate(`({hidden:document.querySelector('#detail-overlay').hidden,focus:document.activeElement.classList.contains('wall-title'),inert:document.querySelector('#app-shell').inert,overflow:document.body.style.overflow})`);
-  assert.equal(exited.hidden,true); assert.equal(exited.focus,true); assert.equal(exited.inert,false); assert.equal(exited.overflow,'');
-  const failed=await evaluate(`(async()=>{window.__detailFail=true;await openDetail({id:1});const result={retry:!!document.querySelector('#detail-retry'),close:!!document.querySelector('#detail-close'),focus:document.activeElement.id};window.__detailFail=false;document.querySelector('#detail-retry').click();await new Promise(r=>setTimeout(r,40));result.loaded=!!document.querySelector('.detail-plot');const drawer=document.querySelector('#detail-drawer');drawer.scrollTop=drawer.scrollHeight;const rect=document.querySelector('#detail-close').getBoundingClientRect();result.closeVisible=rect.top>=0&&rect.bottom<innerHeight;toast('持久操作错误','error');result.feedback=document.querySelector('#detail-overlay .overlay-feedback').textContent;await new Promise(r=>setTimeout(r,3500));result.persistent=document.querySelector('#detail-overlay .overlay-feedback').textContent;closeDetail();result.inert=document.querySelector('#app-shell').inert;return result;})()`);
-  assert.equal(failed.retry,true);assert.equal(failed.close,true);assert.equal(failed.focus,'detail-close');assert.equal(failed.loaded,true);assert.equal(failed.closeVisible,true);assert.equal(failed.feedback,'持久操作错误');assert.equal(failed.persistent,'持久操作错误');assert.equal(failed.inert,false);
-  const longFeedback=await evaluate(`(async()=>{await openDetail({id:1});toast('长错误反馈'.repeat(500),'error');const feedback=document.querySelector('#detail-overlay .overlay-feedback');const height=feedback.getBoundingClientRect().height;feedback.scrollTop=feedback.scrollHeight;const close=document.querySelector('#detail-close').getBoundingClientRect();const result={height,limit:innerHeight*.25,readable:feedback.scrollHeight>feedback.clientHeight,close:close.top>=0&&close.bottom<innerHeight};closeDetail();return result;})()`);
+  const exited=await evaluate(`({open:document.querySelector('#detail-overlay').open,focus:document.activeElement.classList.contains('wall-title')})`);
+  assert.equal(exited.open,false); assert.equal(exited.focus,true);
+  const failed=await evaluate(`(async()=>{window.__detailFail=true;await openDetail({Id:'1'});const result={retry:!!document.querySelector('#detail-retry'),close:!!document.querySelector('#detail-close'),focus:document.activeElement.id};window.__detailFail=false;document.querySelector('#detail-retry').click();await new Promise(r=>setTimeout(r,40));result.loaded=!!document.querySelector('.detail-plot');const drawer=document.querySelector('#detail-drawer');drawer.scrollTop=drawer.scrollHeight;const rect=document.querySelector('#detail-close').getBoundingClientRect();result.closeVisible=rect.top>=0&&rect.bottom<innerHeight;toast('持久操作错误','error');result.feedback=document.querySelector('#detail-overlay .overlay-feedback').textContent;await new Promise(r=>setTimeout(r,3500));result.persistent=document.querySelector('#detail-overlay .overlay-feedback').textContent;closeDetail();result.closed=!document.querySelector('#detail-overlay').open;return result;})()`);
+  assert.equal(failed.retry,true);assert.equal(failed.close,true);assert.equal(failed.focus,'detail-close');assert.equal(failed.loaded,true);assert.equal(failed.closeVisible,true);assert.equal(failed.feedback,'持久操作错误');assert.equal(failed.persistent,'持久操作错误');assert.equal(failed.closed,true);
+  const longFeedback=await evaluate(`(async()=>{await openDetail({Id:'1'});toast('长错误反馈'.repeat(500),'error');const feedback=document.querySelector('#detail-overlay .overlay-feedback');const height=feedback.getBoundingClientRect().height;feedback.scrollTop=feedback.scrollHeight;const close=document.querySelector('#detail-close').getBoundingClientRect();const result={height,limit:innerHeight*.25,readable:feedback.scrollHeight>feedback.clientHeight,close:close.top>=0&&close.bottom<innerHeight};closeDetail();return result;})()`);
   assert.ok(longFeedback.height<=longFeedback.limit+1); assert.equal(longFeedback.readable,true); assert.equal(longFeedback.close,true);
 });
 
@@ -520,7 +675,7 @@ test('实心强调控件：详情保存与媒体库添加在各视口及交互�
     await call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:false});
     await evaluate("page('libraries')");
     for (const selector of ['[data-lib-add]','#detail-edit-save']) {
-      if (selector==='#detail-edit-save') await evaluate(`(async()=>{await openDetail({id:1});document.querySelector('.detail-maintenance').open=true;document.querySelector('#detail-edit-toggle').click();})()`);
+      if (selector==='#detail-edit-save') await evaluate(`(async()=>{await openMaintenanceDetail({id:1});document.querySelector('.detail-maintenance').open=true;document.querySelector('#detail-edit-toggle').click();})()`);
       const {root}=await call('DOM.getDocument');
       const {nodeId}=await call('DOM.querySelector',{nodeId:root.nodeId,selector});
       assert.ok(nodeId,selector);

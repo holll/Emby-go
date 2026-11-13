@@ -57,6 +57,36 @@ func maybePrunePlaybackEvents(tx *sql.Tx, eventID int64) error {
 	return nil
 }
 
+// ActivePlaybackSession 是一条仍在进行的播放会话（/Sessions 用）。
+type ActivePlaybackSession struct {
+	SessionKey    string
+	UserID        int64
+	MovieID       int64
+	DeviceID      string
+	StartedAt     string
+	PositionTicks int64
+}
+
+// ActivePlaybackSessions 返回所有未停止的播放会话，最近开始的在前。
+// 只读、无事务：/Sessions 是展示型端点，读到稍旧的快照没有副作用。
+func (s *Store) ActivePlaybackSessions() ([]ActivePlaybackSession, error) {
+	rows, err := s.db.Query(`SELECT session_key,user_id,movie_id,COALESCE(device_id,''),started_at,position_ticks
+		FROM playback_sessions WHERE stopped=0 ORDER BY started_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ActivePlaybackSession, 0)
+	for rows.Next() {
+		var v ActivePlaybackSession
+		if err := rows.Scan(&v.SessionKey, &v.UserID, &v.MovieID, &v.DeviceID, &v.StartedAt, &v.PositionTicks); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // PlaybackEvent 是一次播放上报。SessionKey 为空时回退为 item:<movie_id>，
 // 此时同片多次播放依赖客户端先发 start 重开会话；有 PlaySessionId 时按会话隔离。
 type PlaybackEvent struct {

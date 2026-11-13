@@ -1,6 +1,6 @@
 /* Emby-go 管理控制台前端 —— 单文件，无依赖 */
 let token = localStorage.getItem('emby_token');
-let me = null; // /api/auth/me：Web 端据此区分管理员与普通用户
+let me = null; // /emby/Users/Me：当前用户 ID 与管理员权限
 // D03：新建密钥的原文只在创建后显示一次，刷新/离开页面即丢弃。
 let createdAPIKey = null;
 const content = document.querySelector('#content');
@@ -16,6 +16,7 @@ const icon = name => {
     plus: '<path d="M12 5v14M5 12h14"/>',
     film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5M16 4v5M8 15v5M16 15v5"/>',
     archive: '<path d="M3 4h18v5H3z"/><path d="M5 9v11h14V9"/><path d="M10 13h4"/>',
+    library: '<rect x="3" y="5" width="6" height="14" rx="1"/><rect x="11" y="7" width="4" height="12" rx="1"/><path d="m17 6 3.2.8 1.4 9.6-2.6.6"/>',
     alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
     probe: '<path d="M4 12h2.5l2-5.5 3 11 2.5-7 1.5 1.5H20"/>',
@@ -134,16 +135,6 @@ const STATUS_TEXT = {
   needs_attention: '需处理',
   failed: '失败',
   skipped: '跳过'
-};
-// 「需处理」内部再按 last_scrape_error 前缀区分两种子情形：
-// 带 store.ScrapeConfirmPrefix（[待人工确认] ）的是自动刮削主动跳过，
-// 其余非空错误才是真失败。判定与后端 store.ScrapeConfirmPrefix 保持一致。
-const SCRAPE_CONFIRM_PREFIX = '[待人工确认] ';
-const needsAttentionBadge = error => {
-  const text = String(error || '');
-  return text.startsWith(SCRAPE_CONFIRM_PREFIX)
-    ? '<span class="wall-badge confirm">待人工确认</span>'
-    : '<span class="wall-badge failed">刮削失败</span>';
 };
 const statusBadge = status => {
   const key = Object.prototype.hasOwnProperty.call(STATUS_TEXT, status) ? status : 'manual';
@@ -381,7 +372,7 @@ function cleanDisplayName(value) {
 }
 
 function movieDisplayTitle(item) {
-  for (const value of [item.Title, item.Number]) {
+  for (const value of [item.Name, item.Title, item.Number]) {
     const name = cleanDisplayName(value);
     if (name) return name;
   }
@@ -390,58 +381,36 @@ function movieDisplayTitle(item) {
 }
 
 /* ---------------------------------------------------------------- 媒体墙 */
-function wallCard(item, ud) {
-  const st = item.Status || item.status || '';
-  const title = movieDisplayTitle(item);
-  const playable = st === 'success' || st === 'manual';
-  // 海报格子最宽约 185px（.wall 的 minmax(148px,1fr)）；按 1x/2x 取 200/400，
-  // 避免 1x 屏也拉 360 的缩略图。不带 maxWidth 会拉原图（约 56KB/张 × 每页 100 张），
-  // 服务端虽支持按需缩略（LRU 缓存 + 并发限流 + 失败回退原图），前端不请求就等于白搭。
-  const posterBase = item.PosterPath ? `/Items/${item.id}/Images/Primary`
-    : (item.LandscapePath ? `/Items/${item.id}/Images/Thumb` : '');
-  const poster = posterBase ? `${posterBase}?maxWidth=360` : '';
-  const posterSrcset = posterBase ? `${posterBase}?maxWidth=200 1x, ${posterBase}?maxWidth=400 2x` : '';
-  const sub = [numberUnlessInTitle(title, cleanDisplayName(item.Number)), item.Year, cleanDisplayName(item.OriginalTitle)].filter(Boolean).join(' · ')
-    || (item.source_protocol || item.SourceProtocol || '');
-  const progress = ud && item.RuntimeSeconds > 0 && ud.position_ticks > 0
-    ? Math.min(100, Math.round(ud.position_ticks / (item.RuntimeSeconds * 10000000) * 100)) : 0;
-  // 需处理的两种子情形（刮削失败 / 待人工确认）用 badge 区分，其余状态直接用状态名。
-  const attention = st === 'pending' && item.last_scrape_error;
-  const stateBadge = attention
-    ? needsAttentionBadge(item.last_scrape_error)
-    : (st !== 'success' ? `<span class="wall-badge ${esc(st)}">${esc(STATUS_TEXT[st] || st)}</span>` : '');
-  const badges = [
-    stateBadge,
-    ud && ud.played ? '<span class="wall-badge played">已看</span>' : '',
-    ud && ud.favorite ? '<span class="wall-badge fav">♥</span>' : '',
-    (item.AdditionalParts || []).length ? `<span class="wall-badge multi">${(item.AdditionalParts || []).length + 1} 段</span>` : ''
-  ].join('');
-  const body = poster
-    ? `<img loading="lazy" src="${esc(poster)}"${posterSrcset ? ` srcset="${esc(posterSrcset)}"` : ''} alt="">`
-    : `<span class="wall-path" title="${esc(item.source_path)}">${esc(title || '—')}</span>`;
-  const label = title || '—';
-  return `
-    <article class="wall-card" data-play="${item.id}">
-      <div class="wall-poster">
-        ${body}
-        <div class="wall-badges">${badges}</div>
-        ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
-        ${typeof me !== 'undefined' && me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${item.id}" aria-label="选择翻译：${esc(label)}">选择</label>` : ''}
-        <div class="wall-actions">
-          <button class="icon-btn" data-probe="${item.id}" aria-label="探测媒体信息（ffprobe，写回 NFO）" title="探测媒体信息（ffprobe，写回 NFO）">${icon('probe')}</button>
-          <button class="icon-btn" data-reread="${item.id}" aria-label="重读 .strm 与 NFO" title="重读 .strm 与 NFO">${icon('refresh')}</button>
-          <button class="icon-btn danger" data-delete="${item.id}" aria-label="删除索引（启用 Webhook 时可能联动删除远端目录）" title="删除索引（启用 Webhook 时可能联动删除远端目录）">${icon('trash')}</button>
-        </div>
-        ${playable ? `<button class="wall-play" data-quickplay="${item.id}" aria-label="直接播放" title="直接播放">${icon('play')}</button>` : ''}
-      </div>
-      <div class="wall-meta">
-        <button type="button" class="wall-title" data-open="${item.id}" title="${esc(title || '—')}">${esc(label)}</button>
-        <small>${esc(sub)}</small>
-      </div>
-    </article>`;
+function wallCard(item) {
+  const title = movieDisplayTitle(item) || '—';
+  if (item.Type === 'BoxSet') {
+    const poster = embyImageURL(item, 'Primary', 200);
+    return `<button type="button" class="wall-card collection-card" data-collection="${esc(item.Id)}" aria-label="打开合集：${esc(title)}">
+      <span class="wall-poster">${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(poster)} 1x, ${esc(embyImageURL(item, 'Primary', 400))} 2x" alt="">` : `<span class="collection-placeholder" aria-hidden="true">${icon('library')}</span>`}<span class="collection-mark">合集</span></span>
+      <span class="wall-meta"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${Number.isInteger(item.ChildCount) ? `${item.ChildCount} 部影片` : '查看影片'}</small></span>
+    </button>`;
+  }
+  const ud = item.UserData || {};
+  const kind = item.ImageTags?.Primary ? 'Primary' : 'Thumb';
+  const poster = embyImageURL(item, kind, 200);
+  const srcset = poster ? `${poster} 1x, ${embyImageURL(item, kind, 400)} 2x` : '';
+  const progress = item.RunTimeTicks > 0 && ud.PlaybackPositionTicks > 0
+    ? Math.min(100, Math.round(ud.PlaybackPositionTicks / item.RunTimeTicks * 100)) : 0;
+  return `<article class="wall-card" data-play="${esc(item.Id)}">
+    <div class="wall-poster">
+      ${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(srcset)}" alt="">` : `<span class="wall-path">${esc(title)}</span>`}
+      <div class="wall-badges">${ud.Played ? '<span class="wall-badge played">已看</span>' : ''}${ud.IsFavorite ? '<span class="wall-badge fav">♥</span>' : ''}${item.PartCount > 1 ? `<span class="wall-badge multi">${item.PartCount} 段</span>` : ''}</div>
+      ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
+      ${me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${esc(item.Id)}" aria-label="选择翻译：${esc(title)}">选择</label>` : ''}
+      ${me?.is_admin ? `<div class="wall-actions"><button class="icon-btn" data-probe="${esc(item.Id)}" aria-label="探测媒体信息" title="探测媒体信息">${icon('probe')}</button><button class="icon-btn" data-reread="${esc(item.Id)}" aria-label="重读源" title="重读源">${icon('refresh')}</button><button class="icon-btn danger" data-delete="${esc(item.Id)}" aria-label="删除索引" title="删除索引">${icon('trash')}</button></div>` : ''}
+      <button class="wall-play" data-quickplay="${esc(item.Id)}" aria-label="直接播放" title="直接播放">${icon('play')}</button>
+    </div>
+    <div class="wall-meta"><button type="button" class="wall-title" data-open="${esc(item.Id)}" title="${esc(title)}">${esc(title)}</button><small>${esc([item.ProductionYear, item.OriginalTitle].filter(Boolean).join(' · '))}</small></div>
+  </article>`;
 }
 
 const WALL_PAGE_SIZE = 100;
+const WALL_STATUS_TEXT = { favorite: '收藏', played: '已看', unplayed: '未看' };
 // 筛选后整页重绘会丢焦点；记录触发控件选择器，重绘后还原（P1-9）。
 let pendingWallFocus = '';
 let wallState = null;
@@ -453,46 +422,64 @@ async function pageItems() {
   if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
   stopProbePolling();
   stopLogsPolling();
+  stopScanPolling();
   wallState = null;
   const params = new URLSearchParams(location.search);
-  // 旧书签兼容：早期用 ?scrape=failed 表示「刮削失败」，现已并入 ?status=needs_attention。
-  if (!params.get('status') && params.get('scrape') === 'failed') {
-    params.set('status', 'needs_attention');
-    history.replaceState({}, '', location.pathname + '?' + params.toString() + location.hash);
-  }
-  const status = params.get('status') || '';
+  const view = params.get('view') === 'collections' || params.get('collection') ? 'collections' : 'movies';
+  const collectionList = view === 'collections' && !params.get('collection');
+  const status = !collectionList && ['favorite', 'played', 'unplayed'].includes(params.get('status')) ? params.get('status') : '';
+  if (!status && params.has('status')) { params.delete('status'); history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash); }
   const search = params.get('search') || '';
-  const sort = params.get('sort') || 'datecreated';
-  const order = params.get('order') || (sort === 'title' ? 'asc' : 'desc');
+  // 合集侧（列表与成员）只提供标题升降序，避免和影片默认的「最近入库」互相穿插。
+  const collectionView = view === 'collections';
+  let sort = collectionView ? (params.get('sort') === 'title-desc' ? 'title-desc' : 'title') : (params.get('sort') || 'datecreated');
+  let order = params.get('order') || (sort === 'title' || sort === 'title-desc' ? (sort === 'title-desc' ? 'desc' : 'asc') : 'desc');
+  if (collectionView && (params.has('sort') || params.has('order')) && !['title', 'title-desc'].includes(params.get('sort') || '')) {
+    params.delete('sort'); params.delete('order');
+    history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash);
+  }
   // 库筛选：URL 里的 library_id 若指向已删除的库，回退「全部」并同步清洗 URL，
   // 避免刷新后一直停在空列表（旧书签/前进后退同样适用）。
-  const libraries = ((await api('/libraries')).items || []);
+  const views = (await embyRequest(embyUserPath() + '/Views')).Items || [];
   if (gen !== pageGen || requestGen !== wallGen) return;
+  const libraries = views.filter(lib => lib.CollectionType !== 'boxsets' && lib.Id !== 'boxsets');
   const requestedLib = params.get('library_id') || '';
-  const libraryID = libraries.some(lib => String(lib.Id) === requestedLib) ? requestedLib : '';
+  if (requestedLib === 'boxsets') {
+    params.delete('library_id'); params.set('view', 'collections');
+    history.replaceState(history.state, '', location.pathname + '?' + params.toString() + location.hash);
+    return pageItems();
+  }
+  const libraryID = view === 'movies' && libraries.some(lib => String(lib.Id) === requestedLib) ? requestedLib : '';
   if (requestedLib && !libraryID) {
     params.delete('library_id');
-    history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash);
+    history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash);
   }
   const activeLib = libraries.find(lib => String(lib.Id) === libraryID);
   // 实体筛选（详情抽屉里点演员/类型/厂商/合集跳过来的），单值，URL 可见且可一键清除。
-  const entity = ENTITY_PARAMS.map(([key, label]) => [key, label, params.get(key) || '']).find(item => item[2]) || null;
+  const entity = view === 'collections'
+    ? (params.get('collection') ? ['collection', '合集', params.get('collection')] : null)
+    : (ENTITY_PARAMS.map(([key, label]) => [key, label, params.get(key) || '']).find(item => item[2]) || null);
+  let collection = null;
+  if (view === 'collections' && entity?.[0] === 'collection') {
+    const id = entity[2].startsWith('boxset:') ? entity[2] : entityIdOf('boxset', entity[2]);
+    collection = await embyRequest(embyUserPath() + '/Items/' + encodeURIComponent(id));
+    if (gen !== pageGen || requestGen !== wallGen) return;
+  }
   wallState = {
-    status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
-    entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: [], userdata: {}
+    view, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
+    entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: []
   };
 
   wallState.translateSelection = new Set();
-  // 一排互斥的状态筛选：未刮削 / 需处理 互斥（合起来是全部 pending）；
-  // 已刮削的片子重刮失败仍属「已刮削」，不会掉进需处理。
+  // 使用 Emby 用户状态；未刮削与失败候选由显式刮削管理入口提供。
   const pills = [
     ['', '全部'],
-    ['unscraped', '未刮削'],
-    ['success', '已刮削'],
-    ['manual', '手动录入'],
-    ['needs_attention', '需处理']
+    ['favorite', '收藏'],
+    ['played', '已看'],
+    ['unplayed', '未看']
   ];
-  const sorts = [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
+  const sorts = collectionView ? [['title', '标题 A–Z'], ['title-desc', '标题 Z–A']]
+    : [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
   // 库少时平铺成 Tab，库多（>8）转下拉，避免筛选行被撑爆。
   const libFilter = libraries.length <= 8
     ? `<button class="pill ${libraryID === '' ? 'is-active' : ''}" data-lib="" aria-pressed="${libraryID === ''}">全部库</button>` +
@@ -508,25 +495,28 @@ async function pageItems() {
 
         </div>
       </div>
-      ${libraries.length ? `<div class="filters">${libFilter}</div>` : ''}
-      ${entity ? `<div class="filters"><span class="filter-chip">${esc(entity[1])}：${esc(entity[2])}
+      <nav class="filters wall-view-switch" aria-label="媒体类型"><button type="button" class="pill ${view === 'movies' ? 'is-active' : ''}" data-wall-view="movies" aria-pressed="${view === 'movies'}">影片</button><button type="button" class="pill ${view === 'collections' ? 'is-active' : ''}" data-wall-view="collections" aria-pressed="${view === 'collections'}">合集</button></nav>
+      ${collection ? `<div class="collection-heading"><button type="button" class="btn" id="collection-back">← 返回合集</button><div><h3 id="collection-title">${esc(collection.Name)}</h3><p>${Number.isInteger(collection.ChildCount) ? `${collection.ChildCount} 部影片 · ` : ''}选择影片查看详情或播放</p></div></div>` : ''}
+      ${view === 'movies' && libraries.length ? `<div class="filters">${libFilter}</div>` : ''}
+      ${entity && !collection ? `<div class="filters"><span class="filter-chip">${esc(entity[1])}：${esc(entity[2])}
         <button class="chip-x" id="entity-clear" title="清除该筛选" aria-label="清除筛选"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></span></div>` : ''}
       <div class="filters wall-toolbar">
         <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
       </div>
-      <div class="filters wall-status-filters">
+      ${collectionList ? '' : `<div class="filters wall-status-filters">
         ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
-      </div>
+      </div>`}
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
         <div class="scan-progress-bar"><i id="probe-progress-fill"></i></div>
         <small id="probe-progress-detail"></small>
       </div>
-      <details class="disclosure wall-maintenance"><summary class="disclosure-summary">批量维护与翻译</summary><div class="disclosure-body">
+      ${collectionView ? '' : `<details class="disclosure wall-maintenance"><summary class="disclosure-summary">批量维护与翻译</summary><div class="disclosure-body">
+<button class="btn" id="wall-scrape">未刮削与需处理：打开刮削管理</button>
 <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
       ${typeof me !== 'undefined' && me?.is_admin ? `<div class="filters"><button type="button" class="btn" id="wall-translate-toggle" aria-expanded="false" aria-controls="wall-translate-panel">选择影片仅翻译</button><span id="wall-translate-count" role="status">已选 0 部（最多1000）</span></div><section id="wall-translate-panel" hidden>${translationWidget('wall-translate')}</section>` : ''}
-      </div></details>
+      </div></details>`}
       <div class="wall" id="wall"></div>
       <div id="wall-empty"></div>
       <div id="wall-more" class="wall-more"></div>
@@ -543,6 +533,33 @@ async function pageItems() {
   const queryURL = qs => location.pathname + (qs.toString() ? '?' + qs.toString() : '') + location.hash;
   const pushQuery = qs => history.pushState({}, '', queryURL(qs));
   const replaceQuery = qs => history.replaceState({}, '', queryURL(qs));
+  // 影片/合集切换：只改 view（离开合集时清掉 collection），保留搜索关键词。
+  document.querySelectorAll('[data-wall-view]').forEach(button => {
+    const target = button.dataset.wallView;
+    if (target === view) return;
+    button.addEventListener('click', () => {
+      const qs = new URLSearchParams(location.search);
+      qs.delete('status');
+      qs.delete('scrape');
+      qs.delete('collection');
+      if (target === 'collections') qs.set('view', 'collections'); else qs.delete('view');
+      // 影片和合集的排序字段不通用，切换时清掉排序参数回到各自默认。
+      qs.delete('sort'); qs.delete('order');
+      pendingWallFocus = '[data-wall-view="' + target + '"]';
+      pushQuery(qs);
+      refreshPage(pageItems, gen);
+    });
+  });
+  // 返回合集列表：优先用历史回退拿回进入前的筛选，没有可回退的历史就直接清参数。
+  document.querySelector('#collection-back')?.addEventListener('click', () => {
+    if (history.state && history.state.wallFromCollections) { history.back(); return; }
+    const qs = new URLSearchParams(location.search);
+    qs.delete('collection');
+    qs.set('view', 'collections');
+    pendingWallFocus = '#item-search';
+    history.replaceState({}, '', location.pathname + '?' + qs.toString() + '#items');
+    refreshPage(pageItems, gen);
+  });
   // 状态筛选：一排互斥，点第二次取消回「全部」（与库筛选同款 toggle 语义）。
   document.querySelectorAll('.pill[data-status]').forEach(button => button.addEventListener('click', () => {
     const qs = new URLSearchParams(location.search);
@@ -559,7 +576,7 @@ async function pageItems() {
   document.querySelectorAll('.pill[data-lib]').forEach(button => button.addEventListener('click', () => {
     const qs = new URLSearchParams(location.search);
     const value = button.dataset.lib;
-    if (value) qs.set('library_id', value); else qs.delete('library_id');
+    if (value) { qs.set('library_id', value); qs.delete('collection'); } else qs.delete('library_id');
     pendingWallFocus = '[data-lib="' + (qs.get('library_id') || '') + '"]';
     pushQuery(qs);
     refreshPage(pageItems, gen);
@@ -567,7 +584,7 @@ async function pageItems() {
   const libSelect = document.querySelector('#item-lib');
   if (libSelect) libSelect.addEventListener('change', () => {
     const qs = new URLSearchParams(location.search);
-    if (libSelect.value) qs.set('library_id', libSelect.value); else qs.delete('library_id');
+    if (libSelect.value) { qs.set('library_id', libSelect.value); qs.delete('collection'); } else qs.delete('library_id');
     pendingWallFocus = '#item-lib';
     pushQuery(qs);
     refreshPage(pageItems, gen);
@@ -600,10 +617,13 @@ async function pageItems() {
     pushQuery(qs);
     refreshPage(pageItems, gen);
   });
+  document.querySelector('#wall-scrape')?.addEventListener('click', () => { location.hash = '#scrape'; page('scrape'); });
   const probeButton = document.querySelector('#probe-media');
   if (probeButton) probeButton.addEventListener('click', runProbeAll);
-  // 页面恢复也走有超时/退避的观察器，不在启动阶段裸读全局进度。
-  startProbePolling();
+  // 管理任务仅在用户展开维护区时恢复观察，不污染正常浏览抓包。
+  document.querySelector('.wall-maintenance')?.addEventListener('toggle', event => {
+    if (event.currentTarget.open) startProbePolling(); else stopProbePolling();
+  });
   const batchTranslate = document.querySelector('#wall-translate');
   if (batchTranslate && typeof me !== 'undefined' && me?.is_admin) {
     const sourceWall = wallState;
@@ -659,20 +679,31 @@ async function pageItems() {
     const quick = event.target.closest('[data-quickplay]');
     if (quick) {
       event.stopPropagation();
-      const target = wallState.items.find(m => String(m.id) === quick.dataset.quickplay);
+      const target = wallState.items.find(m => String(m.Id) === quick.dataset.quickplay);
       if (target) openPlayer(target);
       return;
     }
     const open = event.target.closest('[data-open]');
     if (open) {
       event.stopPropagation();
-      const target = wallState.items.find(m => String(m.id) === open.dataset.open);
+      const target = wallState.items.find(m => String(m.Id) === open.dataset.open);
       if (target) openDetail(target);
+      return;
+    }
+    const collectionCard = event.target.closest('[data-collection]');
+    if (collectionCard) {
+      event.stopPropagation();
+      const qs = new URLSearchParams();
+      qs.set('view', 'collections');
+      qs.set('collection', collectionCard.dataset.collection);
+      pendingWallFocus = '#item-search';
+      history.pushState({ wallFromCollections: true }, '', location.pathname + '?' + qs.toString() + '#items');
+      refreshPage(pageItems, gen);
       return;
     }
     const card = event.target.closest('.wall-card');
     if (!card) return;
-    const item = wallState.items.find(m => String(m.id) === card.dataset.play);
+    const item = wallState.items.find(m => String(m.Id) === card.dataset.play);
     if (item) openDetail(item);
   });
   await loadWallPage();
@@ -682,15 +713,14 @@ async function pageItems() {
 function reloadWall() {
   if (!wallState) return;
   wallGen += 1; // 作废尚未返回的旧请求
-  // 搜索不重建DOM，但仍更换观察代次，避免旧回包污染或永久静默。
-  startProbePolling();
+  // 已显式展开维护区时，搜索换代同步恢复管理观察；正常浏览不启动。
+  if (document.querySelector('.wall-maintenance')?.open) startProbePolling();
   wallState.offset = 0;
   wallState.total = 0;
   wallState.items = [];
   wallState.translateSelection?.clear();
   const selectedCount = document.querySelector('#wall-translate-count');
   if (selectedCount) selectedCount.textContent = '已选 0 部（最多1000）';
-  wallState.userdata = {};
   wallState.done = false;
   wallState.loading = false;
   wallState.failed = false;
@@ -718,37 +748,36 @@ async function loadWallPage() {
   const more = document.querySelector('#wall-more');
   if (more) more.textContent = '加载中…';
   try {
-    const query = new URLSearchParams({ limit: String(WALL_PAGE_SIZE), offset: String(wallState.offset), sort: wallState.sort, order: wallState.order });
-    if (wallState.status) query.set('status', wallState.status);
-    if (wallState.search) query.set('search', wallState.search);
-    if (wallState.libraryID) query.set('library_id', wallState.libraryID);
-    if (wallState.entity) query.set(wallState.entity[0], wallState.entity[2]);
-    const data = await api('/items?' + query.toString());
+    const query = wallEmbyQuery(wallState);
+    const result = await embyRequest(embyUserPath() + '/Items?' + query.toString());
+    const data = { items: result.Items, total: result.TotalRecordCount };
     if (!wallState || wallGen !== gen) return; // 已被新的搜索/筛选作废，丢弃过期响应
     wallState.total = data.total;
-    Object.assign(wallState.userdata, data.userdata || {});
     const items = data.items || [];
     wallState.items.push(...items);
     wallState.offset += items.length;
     wallState.done = items.length === 0 || wallState.offset >= data.total;
     if (items.length) {
       document.querySelector('#wall').insertAdjacentHTML('beforeend',
-        items.map(item => wallCard(item, wallState.userdata[String(item.id)])).join(''));
+        items.map(item => wallCard(item)).join(''));
     }
     const count = document.querySelector('#wall-count');
     const scope = [
       wallState.libraryName,
-      wallState.entity ? `${wallState.entity[1]}：${wallState.entity[2]}` : '',
-      wallState.status ? (STATUS_TEXT[wallState.status] || wallState.status) : ''
+      wallState.collection ? `合集：${wallState.collection.Name || ''}` : '',
+      !wallState.collection && wallState.entity ? `${wallState.entity[1]}：${wallState.entity[2]}` : '',
+      wallState.status ? (WALL_STATUS_TEXT[wallState.status] || wallState.status) : ''
     ].filter(Boolean).join(' · ');
     if (count) count.textContent = `共 ${data.total} 条${scope ? ' · ' + scope : ''} · 已加载 ${wallState.items.length}`;
     const emptyBox = document.querySelector('#wall-empty');
     if (emptyBox) {
-      const what = wallState.entity ? `「${wallState.entity[2]}」的影片`
+      const what = wallState.collection ? (wallState.collection.Name ? `「${wallState.collection.Name}」的影片` : '合集影片')
+        : wallState.entity ? `「${wallState.entity[2]}」的影片`
+        : wallState.view === 'collections' ? '合集'
         : (wallState.libraryName ? `「${wallState.libraryName}」的影片` : '影片');
       emptyBox.innerHTML = data.total === 0
-        ? empty(wallState.status ? `没有 ${STATUS_TEXT[wallState.status] || wallState.status} 的${what}` : `没有符合条件的${what}`,
-            wallState.search ? '试试其它关键词。' : '添加媒体库并扫描后再来看看。')
+        ? empty(wallState.status ? `没有 ${WALL_STATUS_TEXT[wallState.status] || wallState.status} 的${what}` : `没有符合条件的${what}`,
+            wallState.search ? '试试其它关键词。' : (wallState.view === 'collections' && !wallState.collection ? '还没有自动合集，至少需要 2 部同系列影片。' : '添加媒体库并扫描后再来看看。'))
         : '';
     }
     if (more) more.textContent = wallState.done && data.total > 0 ? `已全部加载（共 ${data.total} 条）` : '';
@@ -792,7 +821,6 @@ function closeDetail() {
   if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
   if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
   detailGen += 1;
-  detailOverlay.hidden = true;
   detailDrawer.innerHTML = '';
   overlayPop('#detail-overlay');
 }
@@ -802,7 +830,8 @@ function gotoEntity(key, value) {
   const qs = new URLSearchParams();
   ENTITY_PARAMS.forEach(([k]) => qs.delete(k));
   qs.set(key, value);
-  if (wallState && wallState.libraryID) qs.set('library_id', wallState.libraryID);
+  // 合集和媒体库都使用 ParentId；合集跳转明确切到全部媒体库，不伪造交集。
+  if (key !== 'collection' && wallState && wallState.libraryID) qs.set('library_id', wallState.libraryID);
   history.pushState({}, '', location.pathname + '?' + qs.toString() + '#items');
   closeDetail();
   pageItems();
@@ -838,8 +867,9 @@ function streamTable(streams) {
       <td class="mono">${esc(detail.filter(Boolean).join(' · ') || '—')}</td>
       <td class="mono">${esc([s.IsDefault ? '默认' : '', s.IsForced ? '强制' : '', s.IsExternal ? '外挂' : ''].filter(Boolean).join(' ') || '—')}</td></tr>`;
   }).join('');
-  return `<div class="table-wrap"><table>
-    <thead><tr><th>#</th><th>类型</th><th>参数</th><th>标记</th></tr></thead>
+  return `<div class="table-wrap" tabindex="0" role="region" aria-label="媒体流信息"><table>
+    <caption class="sr-only">媒体流信息</caption>
+    <thead><tr><th scope="col">#</th><th scope="col">类型</th><th scope="col">参数</th><th scope="col">标记</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
 
@@ -990,39 +1020,18 @@ function bindSubtitleMarks(panel, toggle, movieId, isCurrent) {
   });
 }
 
-/* 遮罩焦点：z-index 顺序与 Esc/Tab 行为一致（FE-04）。 */
-const overlayFocusStack = [];
+/* 遮罩焦点：四个浮层都是原生 <dialog>，模态语义（焦点限制、Esc 关闭、背景隔离、
+   滚动链）由浏览器承担；这里只维护开启顺序，供 toast 找到最上层反馈条与路由切换时收起。 */
 const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay', '#update-overlay'];
-let overlayBackground = null;
-function syncOverlayIsolation() {
-  const top = topOverlaySelector();
-  if (!document.body?.style) return;
-  if (top && !overlayBackground) {
-    overlayBackground = { overflow: document.body.style.overflow, nodes: [] };
-    for (const node of document.body.children || []) {
-      if (OVERLAY_LAYERS.includes('#' + node.id) || node.id === 'toasts' || node.tagName === 'SCRIPT') continue;
-      overlayBackground.nodes.push([node, node.inert]); node.inert = true;
-    }
-    document.body.style.overflow = 'hidden';
-  }
-  for (const selector of OVERLAY_LAYERS) {
-    const node = document.querySelector(selector);
-    if (node) node.inert = !!top && selector !== top;
-  }
-  if (!top && overlayBackground) {
-    for (const [node, inert] of overlayBackground.nodes) node.inert = inert;
-    document.body.style.overflow = overlayBackground.overflow;
-    overlayBackground = null;
-  }
-}
+const openOverlays = [];
 
 function overlayVisible(selector) {
   const overlay = document.querySelector(selector);
-  return !!overlay && !overlay.hidden;
+  return !!overlay && overlay.open === true;
 }
 
 function topOverlaySelector() {
-  return OVERLAY_LAYERS.find(overlayVisible) || '';
+  return openOverlays[openOverlays.length - 1] || '';
 }
 
 // 路由切换时按层级从上到下收起浮层，避免播放器/详情跨页残留。
@@ -1046,18 +1055,18 @@ function overlayContains(overlay, element) {
   return typeof overlay.contains === 'function' ? overlay.contains(element) : false;
 }
 
-// overlayPush 记录触发元素并把焦点移入遮罩；重复打开同一遮罩不会重复入栈。
+// overlayPush 以模态方式打开浮层并记录顺序；重复打开同一浮层不会重复入栈。
 function overlayPush(selector) {
   const overlay = document.querySelector(selector);
   if (!overlay) return;
-  syncOverlayIsolation();
   if (typeof overlay.querySelector === 'function' && !overlay.querySelector('.overlay-feedback')) {
     const feedback = document.createElement('p'); feedback.className = 'overlay-feedback'; feedback.hidden = true;
     overlay.firstElementChild?.prepend(feedback);
   }
-  const active = document.activeElement;
-  const trigger = active && active !== document.body ? active : null;
-  if (!overlayFocusStack.some(entry => entry.selector === selector)) overlayFocusStack.push({ selector, trigger });
+  if (typeof overlay.showModal === 'function' && !overlay.open) overlay.showModal();
+  const index = openOverlays.indexOf(selector);
+  if (index !== -1) openOverlays.splice(index, 1);
+  openOverlays.push(selector);
   const target = overlayFocusables(selector)[0] || overlay;
   if (target && typeof target.focus === 'function') target.focus();
 }
@@ -1072,46 +1081,16 @@ function overlayFocusFirst(selector) {
   if (target && typeof target.focus === 'function') target.focus();
 }
 
+// overlayPop 关闭浮层；焦点归还触发元素由 dialog.close() 负责。
 function overlayPop(selector) {
-  syncOverlayIsolation();
-  for (let i = overlayFocusStack.length - 1; i >= 0; i--) {
-    if (overlayFocusStack[i].selector !== selector) continue;
-    const { trigger } = overlayFocusStack.splice(i, 1)[0];
-    if (trigger && typeof trigger.focus === 'function') {
-      const stillThere = !document.contains || document.contains(trigger);
-      if (stillThere) trigger.focus();
-    }
-    return;
-  }
-}
-
-// overlayTrapTab 保持 Tab/Shift+Tab 在顶层遮罩内循环。
-function overlayTrapTab(event) {
-  if (event.key !== 'Tab') return;
-  const selector = topOverlaySelector();
-  if (!selector) return;
+  const index = openOverlays.indexOf(selector);
+  if (index !== -1) openOverlays.splice(index, 1);
   const overlay = document.querySelector(selector);
-  const items = overlayFocusables(selector);
-  if (!items.length) {
-    event.preventDefault();
-    if (overlay && typeof overlay.focus === 'function') overlay.focus();
-    return;
-  }
-  // 受控顺序循环：不依赖浏览器对「几乎不可聚焦」元素的自然 Tab 顺序，
-  // 避免焦点落到 body 或播放器内部控件后逃出顶层遮罩（FE-07）。
-  event.preventDefault();
-  const active = document.activeElement;
-  const index = items.indexOf(active);
-  if (index === -1) {
-    items[event.shiftKey ? items.length - 1 : 0].focus();
-    return;
-  }
-  const next = (index + (event.shiftKey ? -1 : 1) + items.length) % items.length;
-  items[next].focus();
+  if (overlay && overlay.open && typeof overlay.close === 'function') overlay.close();
 }
 /* 遮罩焦点结束 */
 
-async function openDetail(item) {
+async function openMaintenanceDetail(item) {
   if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
   if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
   if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
@@ -1121,7 +1100,6 @@ async function openDetail(item) {
   const shell = body => `<div class="detail-toolbar"><button id="detail-close" class="icon-btn" aria-label="关闭详情 (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><p class="overlay-feedback" hidden></p><div id="detail-content">${body}</div>`;
   detailDrawer.innerHTML = shell('<div class="detail-body" role="status">加载中…</div>');
   document.querySelector('#detail-close').addEventListener('click', closeDetail);
-  detailOverlay.hidden = false;
   overlayPush('#detail-overlay');
   let data;
   try {
@@ -1129,7 +1107,7 @@ async function openDetail(item) {
   } catch (error) {
     if (!isCurrent()) return;
     document.querySelector('#detail-content').innerHTML = `<div class="detail-body"><p role="alert">${esc(error.message || error)}</p><button id="detail-retry" class="btn">重试加载</button></div>`;
-    document.querySelector('#detail-retry').addEventListener('click', () => openDetail(item));
+    document.querySelector('#detail-retry').addEventListener('click', () => openMaintenanceDetail(item));
     return;
   }
   if (!isCurrent()) return;
@@ -1141,11 +1119,11 @@ async function openDetail(item) {
   const st = m.Status || '';
   const playable = st === 'success' || st === 'manual';
   // 详情海报渲染 104px 宽，背景铺满抽屉；按 1x/2x 取 120/240 与 540/1080，避免拉原图。
-  const posterBase = m.PosterPath ? `/Items/${m.id}/Images/Primary` : '';
+  const posterBase = m.PosterPath ? `/emby/Items/${m.id}/Images/Primary` : '';
   const poster = posterBase ? `${posterBase}?maxWidth=240` : '';
   const posterSrcset = posterBase ? `${posterBase}?maxWidth=120 1x, ${posterBase}?maxWidth=240 2x` : '';
-  const backdropBase = m.BackdropPath ? `/Items/${m.id}/Images/Backdrop`
-    : (m.LandscapePath ? `/Items/${m.id}/Images/Thumb` : posterBase);
+  const backdropBase = m.BackdropPath ? `/emby/Items/${m.id}/Images/Backdrop`
+    : (m.LandscapePath ? `/emby/Items/${m.id}/Images/Thumb` : posterBase);
   const backdrop = backdropBase ? `${backdropBase}?maxWidth=1080` : '';
   const backdropSrcset = backdropBase ? `${backdropBase}?maxWidth=540 1x, ${backdropBase}?maxWidth=1080 2x` : '';
   const head = [numberUnlessInTitle(title, cleanDisplayName(m.Number)), m.Year, fmtDuration(m.RuntimeSeconds), m.Rating ? `★ ${m.Rating}` : ''].filter(Boolean).join(' · ');
@@ -1243,7 +1221,7 @@ async function openDetail(item) {
         ${actors.length ? `<div class="avatar-grid">${actors.map(actor => `
           <button class="avatar-card" data-entity-key="person" data-entity-value="${esc(actor.name)}">
             ${actor.has_image
-              ? `<img loading="lazy" src="/Items/${esc(entityIdOf('person', actor.name))}/Images/Primary?maxWidth=200${actor.image_tag ? '&tag=' + esc(actor.image_tag) : ''}" alt="">`
+              ? `<img loading="lazy" src="/emby/Items/${esc(entityIdOf('person', actor.name))}/Images/Primary?maxWidth=200${actor.image_tag ? '&tag=' + esc(actor.image_tag) : ''}" alt="">`
               : `<span class="avatar-fallback">${esc((actor.name || '?').trim().slice(0, 1))}</span>`}
             <small>${esc(actor.name)}</small>
           </button>`).join('')}</div>`
@@ -1280,7 +1258,7 @@ async function openDetail(item) {
   if (playBtn) playBtn.addEventListener('click', () => { closeDetail(); openPlayer(item); });
   document.querySelector('#detail-probe').addEventListener('click', async () => {
     await probeItem(m.id);
-    if (isCurrent()) openDetail(item);
+    if (isCurrent()) openMaintenanceDetail(item);
   });
   const artworkRoot = document.querySelector('#detail-artwork');
   if (artworkRoot && me?.is_admin) {
@@ -1298,7 +1276,7 @@ async function openDetail(item) {
         onComplete: status => {
           if (!isCurrent() || token !== identity || localStorage.getItem('emby_token') !== identity) return;
           if (wallGen === originalWall) reloadWall();
-          if (document.querySelector('#detail-edit')?.hidden !== false) openDetail(item);
+          if (document.querySelector('#detail-edit')?.hidden !== false) openMaintenanceDetail(item);
           else toast('封面已更新；元数据编辑草稿保持，退出编辑后重新打开详情核对');
           if (status.index_refresh_failed) toast('封面文件已写入，但索引刷新失败；请核对封面，默认补缺可重试修复索引。', 'error');
           else if (status.failed || status.error) toast('封面任务已结束，但存在失败；请检查源文件和服务配置。', 'error');
@@ -1326,7 +1304,7 @@ async function openDetail(item) {
       () => {
         if (!isCurrent()) return;
         if (wallGen === originalWall) reloadWall();
-        if (document.querySelector('#detail-edit')?.hidden !== false) openDetail(item);
+        if (document.querySelector('#detail-edit')?.hidden !== false) openMaintenanceDetail(item);
         else toast('翻译已完成；当前编辑草稿保持，请退出编辑后重新打开详情核对');
       });
   }
@@ -1427,71 +1405,86 @@ function entityIdOf(kind, name) {
 /* ---------------------------------------------------------------- 在线播放 */
 let artInstance = null;
 let spritePreviewStop = null;
+let playbackStop = null;
+let playerGen = 0;
 
 function closePlayer() {
+  playerGen += 1;
+  playbackStop?.(); playbackStop = null;
   spritePreviewStop?.(); spritePreviewStop = null;
-  if (artInstance) { try { artInstance.destroy(); } catch { /* ignore */ } artInstance = null; }
-  const overlay = document.querySelector('#player-overlay');
-  if (overlay) overlay.hidden = true;
-  document.body.classList.remove('player-open');
+  if (artInstance) { artInstance.destroy(); artInstance = null; }
   overlayPop('#player-overlay');
 }
 
-// streamURL 构造播放地址。播放器是 <video>/artplayer，浏览器不会给它带
-// X-Emby-Token 这类自定义头，只能把凭据放进 query —— 后端 authOK 支持
-// ?api_key=（与 Emby 客户端一致）。stream 端点要求鉴权，302 直拉真实地址。
+// Video elements cannot send authentication headers; Emby stream URLs carry api_key.
 function streamURL(id, kind) {
-  return '/Videos/' + id + '/' + kind + '?api_key=' + encodeURIComponent(token || '');
+  return '/emby/Videos/' + encodeURIComponent(id) + '/' + kind + '?api_key=' + encodeURIComponent(token || '');
 }
 
-function openPlayer(item) {
-  if (artInstance) closePlayer();
+async function openPlayer(item) {
+  closePlayer();
+  const session = ++playerGen, identity = token;
+  const current = () => session === playerGen && token === identity && localStorage.getItem('emby_token') === identity;
+  const id = String(item.Id || item.id);
   const overlay = document.querySelector('#player-overlay');
   const title = movieDisplayTitle(item) || '播放';
   document.querySelector('#player-title').textContent = title;
-  overlay.hidden = false;
   overlayPush('#player-overlay');
-  document.body.classList.add('player-open');
   const stage = document.querySelector('#player-stage');
-  stage.innerHTML = '';
-  const container = String(item.source_container || item.SourceContainer || '').toLowerCase();
-  const type = container === 'webm' ? 'webm' : 'mp4';
-  artInstance = new Artplayer({
-    container: stage,
-    url: streamURL(item.id, 'stream'),
-    type,
-    title,
-    autoplay: true,
-    volume: 1,
-    playbackRate: true,
-    aspectRatio: true,
-    fullscreen: true,
-    fullscreenWeb: true,
-    setting: true,
-    hotkey: true,
-    pip: true,
-    theme: '#e0a44b',
-    lang: 'zh-cn'
-  });
-  if (globalThis.SpritePreview) {
-    const instance = artInstance, identity = token;
-    const request = async (path, { signal }, image) => {
-      if (token !== identity || localStorage.getItem('emby_token') !== identity) throw new Error('登录状态已改变');
-      const response = await fetch(path, { signal, headers: { 'X-Emby-Token': identity } });
-      if (!response.ok) { const error = new Error('视频预览不可用'); error.status = response.status; throw error; }
-      return image ? response.blob() : response.json();
-    };
-    spritePreviewStop = SpritePreview.mount(instance, {
-      movieID: item.id, stage,
-      requestJSON: (path, options) => request(path, options, false),
-      requestImage: (path, options) => request(path, options, true),
-      isCurrent: () => artInstance === instance && token === identity && localStorage.getItem('emby_token') === identity
+  stage.innerHTML = '<p role="status">正在获取播放信息…</p>';
+  try {
+    const info = await embyRequest('/Items/' + encodeURIComponent(id) + '/PlaybackInfo', { method: 'POST', body: JSON.stringify({ UserId: String(me.id) }) });
+    if (!current()) return;
+    const source = info.MediaSources?.[0];
+    if (!source?.DirectStreamUrl) throw new Error('该影片暂无可用播放源');
+    const url = source.DirectStreamUrl.startsWith('/emby/') ? source.DirectStreamUrl : '/emby' + source.DirectStreamUrl;
+    stage.innerHTML = '';
+    const instance = artInstance = new Artplayer({
+      container: stage, url, type: String(source.Container || '').toLowerCase() === 'webm' ? 'webm' : 'mp4',
+      title, autoplay: true, volume: 1, playbackRate: true, aspectRatio: true,
+      fullscreen: true, fullscreenWeb: true, setting: true, hotkey: true, pip: true, theme: '#e0a44b', lang: 'zh-cn'
     });
+    let started = false, stopped = false, lastProgress = 0, queue = Promise.resolve();
+    const report = (kind, eventName) => {
+      const body = { ItemId: id, MediaSourceId: source.Id, PlaySessionId: info.PlaySessionId,
+        PositionTicks: Math.max(0, Math.round((instance.currentTime || 0) * 10000000)), IsPaused: !instance.playing, EventName: eventName };
+      // Preserve start/progress/stop order, including close while start is still in flight.
+      queue = queue.then(() => {
+        if (token !== identity || localStorage.getItem('emby_token') !== identity) return;
+        return embyRequest('/Sessions/Playing' + (kind ? '/' + kind : ''), { method: 'POST', body: JSON.stringify(body), keepalive: kind === 'Stopped' });
+      }).catch(error => { if (current()) toast('播放状态上报失败：' + error.message, 'error'); });
+    };
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (started) report('Stopped', 'Stop');
+    };
+    playbackStop = stop;
+    instance.on('video:loadedmetadata', () => {
+      const position = (item.UserData?.PlaybackPositionTicks || 0) / 10000000;
+      if (position > 0 && position < instance.duration) instance.seek = position;
+    });
+    instance.on('video:playing', () => {
+      if (stopped) {
+        // 自然结束后的重播需要新的 PlaySessionId；不能复用已停止的会话。
+        if (current()) void openPlayer({ ...item, UserData: { ...item.UserData, PlaybackPositionTicks: 0 } });
+        return;
+      }
+      if (!started) { started = true; report('', 'Start'); }
+      else report('Progress', 'Unpause');
+      lastProgress = Date.now();
+    });
+    instance.on('video:timeupdate', () => {
+      if (started && !stopped && Date.now() - lastProgress >= 10000) { lastProgress = Date.now(); report('Progress', 'TimeUpdate'); }
+    });
+    instance.on('video:pause', () => { if (started && !stopped) report('Progress', 'Pause'); });
+    instance.on('video:seeked', () => { if (started && !stopped) report('Progress', 'TimeUpdate'); });
+    instance.on('video:ended', stop);
+    instance.on('error', () => { if (current()) toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error'); });
+    spritePreviewStop = mountEmbyPreview(instance, id, stage, identity, () => current() && artInstance === instance);
+  } catch (error) {
+    if (current()) stage.innerHTML = `<p role="alert">${esc(error.message)}</p>`;
   }
-  // 直链 302 在 HTTPS 页面可能被混合内容/跨域拦截；失败时提示（302 三边不变）。
-  artInstance.on('error', () => {
-    toast('播放失败：浏览器可能不支持该编码（如 H.265/MKV）', 'error');
-  });
 }
 
 /* ---------------------------------------------------------------- 设置 */
@@ -1557,8 +1550,9 @@ async function pageFirewall() {
     const blocked = new Set((blocklist.items || []).map(item => item.network));
     const events = data.events || [], total = Number(data.total) || 0;
     if (page > 0 && !events.length) { firewallLoginPage = 0; return renderLogins(); }
-    loginBody.innerHTML = `${events.length ? `<div class="table-wrap audit-table"><table>
-        <thead><tr><th>时间</th><th>账户</th><th>来源 IP</th><th>结果</th><th>操作</th></tr></thead>
+    loginBody.innerHTML = `${events.length ? `<div class="table-wrap audit-table" tabindex="0" role="region" aria-label="登录记录"><table>
+        <caption class="sr-only">登录记录</caption>
+        <thead><tr><th scope="col">时间</th><th scope="col">账户</th><th scope="col">来源 IP</th><th scope="col">结果</th><th scope="col">操作</th></tr></thead>
         <tbody>${events.map(e => {
           const ip = String(e.ip || '').trim(), isBlocked = ip && blocked.has(ip);
           return `<tr><td data-label="时间" class="mono">${esc(e.created_at)}</td><td data-label="账户">${esc(e.name || '—')}</td><td data-label="来源 IP" class="mono">${esc(ip || '—')}</td><td data-label="结果">${e.success ? '成功' : '失败'}</td><td data-label="操作">${ip ? `<button type="button" class="btn btn-sm" data-block-ip="${esc(ip)}"${isBlocked ? ' disabled aria-disabled="true"' : ''}>${isBlocked ? '已拉黑' : '拉黑'}</button>` : '—'}</td></tr>`;
@@ -1574,8 +1568,9 @@ async function pageFirewall() {
     if (!current() || seq !== playSeq) return;
     const items = data.items || [], total = Number(data.total) || 0;
     if (page > 0 && !items.length) { firewallPlayPage = 0; return renderPlays(); }
-    playBody.innerHTML = `${items.length ? `<div class="table-wrap audit-table"><table>
-        <thead><tr><th>影片</th><th>账户</th><th>累计次数</th><th>最近播放</th><th>最近进度</th><th>最近事件</th></tr></thead>
+    playBody.innerHTML = `${items.length ? `<div class="table-wrap audit-table" tabindex="0" role="region" aria-label="播放记录"><table>
+        <caption class="sr-only">播放记录</caption>
+        <thead><tr><th scope="col">影片</th><th scope="col">账户</th><th scope="col">累计次数</th><th scope="col">最近播放</th><th scope="col">最近进度</th><th scope="col">最近事件</th></tr></thead>
         <tbody>${items.map(e => `<tr><td data-label="影片">${esc(e.movie_title || '#' + e.movie_id)}</td><td data-label="账户">${esc(e.user_name || '已删除用户')}</td><td data-label="累计次数" class="mono">${esc(e.play_count)}</td><td data-label="最近播放" class="mono">${esc(e.last_at || '—')}</td><td data-label="最近进度" class="mono">${esc(ticksToClock(e.position_ticks))}</td><td data-label="最近事件">${esc(playbackKindText(e.last_kind))}</td></tr>`).join('')}</tbody>
       </table></div>${firewallPager('play', page, total, '（合并后）')}` : empty('暂无播放记录', '播放/进度/停止事件会合并记录在这里。')}`;
   };
@@ -1713,8 +1708,9 @@ async function pageSettings() {
     <div class="settings-category" data-settings-panel="users" hidden>
     <section class="panel" aria-labelledby="users-title">
       <div class="panel-head"><h2 id="users-title">用户管理</h2><span class="hint" style="margin:0">共 ${esc(String((users.users || []).length))} 个账户 · 媒体库默认无授权</span></div>
-      <div class="table-wrap"><table class="user-table">
-        <thead><tr><th>账户</th><th>角色</th><th>最后登录</th><th>媒体库授权</th><th class="user-actions-head">操作</th></tr></thead>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="用户管理"><table class="user-table">
+        <caption class="sr-only">用户管理</caption>
+        <thead><tr><th scope="col">账户</th><th scope="col">角色</th><th scope="col">最后登录</th><th scope="col">媒体库授权</th><th scope="col" class="user-actions-head">操作</th></tr></thead>
         <tbody>${(users.users || []).map(u => `<tr data-user-row="${u.id}">
           <td data-label="账户"><span class="user-identity"><strong class="title">${esc(u.name)}</strong>${u.id === 1 ? '<span class="badge">owner</span>' : ''}</span></td>
           <td data-label="角色"><span class="role-tag${u.is_admin ? ' is-admin' : ''}">${u.is_admin ? '管理员' : '普通用户'}</span></td>
@@ -1749,8 +1745,9 @@ async function pageSettings() {
         </div></div>` : ''}
       <h3 class="apikey-subtitle">已有密钥</h3>
       ${keys.length ? `
-        <div class="table-wrap apikey-table"><table>
-          <thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>版本</th><th>最近轮转</th><th style="text-align:right">操作</th></tr></thead>
+        <div class="table-wrap apikey-table" tabindex="0" role="region" aria-label="已有密钥"><table>
+          <caption class="sr-only">已有密钥</caption>
+          <thead><tr><th scope="col">名称</th><th scope="col">密钥</th><th scope="col">创建时间</th><th scope="col">版本</th><th scope="col">最近轮转</th><th scope="col" style="text-align:right">操作</th></tr></thead>
           <tbody>${keys.map(item => `<tr>
             <td data-label="名称"><strong class="title">${esc(item.name || '—')}</strong></td>
             <td data-label="密钥" class="mono">${esc(item.key_prefix || '—')}…</td>
@@ -1802,8 +1799,9 @@ async function pageSettings() {
       <div class="panel-head"><h2>索引恢复</h2><span class="hint" style="margin:0">NFO 已保存但索引未完成的条目</span></div>
       ${recovery.stale_over_7d > 0 ? `<p class="warning-block" role="alert">有 ${esc(String(recovery.stale_over_7d))} 个条目索引未完成已超过 7 天，请尽快打开对应条目处理恢复提示。</p>` : ''}
       ${(recovery.items || []).length ? `
-        <div class="table-wrap"><table>
-          <thead><tr><th>条目</th><th>首次失败</th><th>已持续</th><th>原因</th></tr></thead>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="索引恢复"><table>
+          <caption class="sr-only">索引恢复</caption>
+          <thead><tr><th scope="col">条目</th><th scope="col">首次失败</th><th scope="col">已持续</th><th scope="col">原因</th></tr></thead>
           <tbody>${recovery.items.map(item => `<tr>
             <td><strong class="title">${esc(item.title || '#' + item.movie_id)}</strong></td>
             <td class="mono">${esc(item.first_failed_at)}</td>
@@ -2017,8 +2015,9 @@ async function pageTasks() {
     const status = document.querySelector('#task-status')?.value || '';
     const shown = items.filter(item => (!type || item.type === type) && (!status || item.status === status));
     box.innerHTML = shown.length
-      ? `<div class="table-wrap"><table>
-          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>结果</th><th>错误</th></tr></thead>
+      ? `<div class="table-wrap" tabindex="0" role="region" aria-label="任务记录"><table>
+          <caption class="sr-only">任务记录</caption>
+          <thead><tr><th scope="col">ID</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">开始时间</th><th scope="col">结束时间</th><th scope="col">结果</th><th scope="col">错误</th></tr></thead>
           <tbody>${shown.map(item => `
             <tr>
               <td class="mono">${esc(String(item.id))}</td>
@@ -2349,8 +2348,6 @@ function startScrapePolling() {
 let scrapeState = null;
 
 function closeScrapePreview() {
-  const overlay = document.querySelector('#scrape-overlay');
-  if (overlay) overlay.hidden = true;
   scrapeState = null;
   overlayPop('#scrape-overlay');
 }
@@ -2360,9 +2357,7 @@ function closeScrapePreview() {
 // 不参与自动搜索：首次预览仍由服务端按影片信息精准复用。
 async function openScrapePreview(item, metatubeId) {
   const savedText = metatubeId.valid ? metatubeId.canonical : metatubeId.saved;
-  const overlay = document.querySelector('#scrape-overlay');
   const body = document.querySelector('#scrape-body');
-  overlay.hidden = false;
   overlayPush('#scrape-overlay');
   body.innerHTML = `
     <form id="scrape-manual-search" class="panel">
@@ -2913,8 +2908,9 @@ async function pageScheduled() {
         <div class="panel-actions"><button id="sched-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button></div>
       </div>
       ${items.length ? `
-        <div class="table-wrap scheduled-table"><table>
-          <thead><tr><th>名称</th><th>类型</th><th>表达式</th><th>下次执行</th><th>上次结果</th><th>启用</th><th style="text-align:right">操作</th></tr></thead>
+        <div class="table-wrap scheduled-table" tabindex="0" role="region" aria-label="已配置任务"><table>
+          <caption class="sr-only">已配置任务</caption>
+          <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">表达式</th><th scope="col">下次执行</th><th scope="col">上次结果</th><th scope="col">启用</th><th scope="col" style="text-align:right">操作</th></tr></thead>
           <tbody>${items.map(item => `<tr>
             <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
             <td data-label="类型"><span class="protocol">${esc(types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</span></td>
@@ -3275,247 +3271,32 @@ async function pageScheduled() {
 }
 
 /* ---------------------------------------------------------------- 运行日志 */
-// R4：独立磁盘日志页。数据来自 /api/admin/logs/disk（受限根 + HMAC 游标），
-// 不再混用设置页的 /logs ring 接口；所有内容走 textContent/esc，不渲染 HTML。
-let logsTimer = null;
+let logsStop = null;
 let logsEpoch = 0;
-let logsVisibilityHandler = null;
-let logsRequestStop = null;
 
 function stopLogsPolling() {
-  logsRequestStop?.(); logsRequestStop = null;
-  if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
-  if (logsVisibilityHandler) {
-    document.removeEventListener('visibilitychange', logsVisibilityHandler);
-    logsVisibilityHandler = null;
-  }
   logsEpoch++;
+  logsStop?.();
+  logsStop = null;
 }
 
 async function pageLogs() {
-  const gen = pageGen;
+  stopLogsPolling();
   if (!me || !me.is_admin) {
     content.innerHTML = `<section class="panel">${empty('仅管理员可用', '运行日志只对管理员开放。')}</section>`;
     return;
   }
-  stopLogsPolling();
-  const epoch = ++logsEpoch;
-  const identity = token;
-  const state = {
-    items: [], ids: new Set(), nextAfter: '', nextBefore: '', hasMoreBefore: false,
-    level: '', paused: false, backoff: 1000, loadingEarlier: false
-  };
-
-  content.innerHTML = `
-    <section class="panel" aria-labelledby="disk-logs-title">
-      <div class="panel-head"><h2 id="disk-logs-title">运行日志</h2>
-        <div class="row-actions">
-          <select id="dl-level" aria-label="日志级别筛选">
-            <option value="">全部级别</option><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option>
-          </select>
-          <button id="dl-pause" class="btn btn-sm" type="button">暂停</button>
-          <button id="dl-refresh" class="btn btn-sm" type="button">刷新</button>
-        </div></div>
-      <p class="hint" style="margin:0 0 8px">来源：服务器磁盘 <code>app-YYYY-MM-DD.log</code>（最新在上）· 约 1 秒增量刷新，非 fsync 保证 · 无法确认安全的旧格式行只显示隐藏占位符</p>
-      <p id="dl-status" class="hint" role="status" aria-live="polite">正在连接磁盘日志…</p>
-      <div id="dl-scroll" class="table-wrap" style="max-height:58vh;overflow:auto">
-        <table class="log-table">
-          <thead><tr><th style="width:190px">时间</th><th style="width:74px">级别</th><th>内容</th></tr></thead>
-          <tbody id="dl-body"><tr><td colspan="3">正在加载…</td></tr></tbody>
-        </table>
-      </div>
-      <div class="form-foot"><button id="dl-earlier" class="btn btn-sm" type="button" hidden>加载更早</button></div>
-    </section>`;
-
-  const find = selector => content.querySelector(selector);
-  const scroll = find('#dl-scroll');
-  const body = find('#dl-body');
-  const statusEl = find('#dl-status');
-  const current = () => epoch === logsEpoch && gen === pageGen && identity === token
-    && localStorage.getItem('emby_token') === identity && statusEl.isConnected;
-  const setStatus = (text, error = false) => {
-    if (!current()) return;
-    statusEl.textContent = text;
-    statusEl.setAttribute('role', error ? 'alert' : 'status');
-  };
-
-  const render = () => {
-    if (!current()) return;
-    const filtered = state.items.filter(item => !state.level || String(item.level).toUpperCase() === state.level);
-    body.innerHTML = filtered.length
-      ? filtered.map(item => `<tr><td class="mono">${esc(item.time || '—')}</td><td class="mono">${esc(item.level || '—')}</td><td class="mono">${esc(item.message || '')}</td></tr>`).join('')
-      : `<tr><td colspan="3">${state.level ? '当前已加载范围内没有该级别的日志' : '暂无日志'}</td></tr>`;
-    const earlier = find('#dl-earlier');
-    if (earlier) earlier.hidden = !state.hasMoreBefore || state.loadingEarlier;
-  };
-
-  // 按行 ID 去重；最多渲染 1000 行；始终 newest-first，追加后重新排序。
-  const addItems = (items) => {
-    let added = 0;
-    for (const item of items || []) {
-      if (!item || !item.id || state.ids.has(item.id)) continue;
-      state.ids.add(item.id);
-      state.items.push(item);
-      added++;
-    }
-    if (!added) return 0;
-    state.items.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
-    if (state.items.length > 1000) {
-      state.items.splice(1000).forEach(item => state.ids.delete(item.id));
-    }
-    return added;
-  };
-
-  let controller = null, requestSequence = 0;
-  logsRequestStop = () => { requestSequence++; controller?.abort(); };
-  const request = async (query) => {
-    controller?.abort();
-    const active = new AbortController(), sequence = ++requestSequence;
-    controller = active;
-    const timer = setTimeout(() => active.abort(), 10000);
-    try {
-      const result = await api('/logs/disk' + query, { signal: active.signal });
-      if (sequence !== requestSequence) throw Object.assign(new Error('日志请求已取消'), { name: 'AbortError' });
-      return result;
-    } finally {
-      clearTimeout(timer);
-      if (controller === active) controller = null;
-    }
-  };
-
-  const replaceWithTail = (data, note) => {
-    state.items = [];
-    state.ids.clear();
-    addItems(data.items);
-    state.nextAfter = data.next_after || '';
-    state.nextBefore = data.next_before || '';
-    state.hasMoreBefore = !!data.next_before;
-    state.backoff = 1000;
-    render();
-    setStatus(note, true);
-  };
-
-  const schedule = (delay) => {
-    if (!current() || state.paused || document.hidden) return;
-    if (logsTimer) clearTimeout(logsTimer);
-    logsTimer = setTimeout(poll, delay);
-  };
-
-  const initial = async () => {
-    try {
-      const data = await request('?kind=app&limit=200');
-      if (!current()) return;
-      state.items = [];
-      state.ids.clear();
-      addItems(data.items || []);
-      state.nextAfter = data.next_after || '';
-      state.nextBefore = data.next_before || '';
-      state.hasMoreBefore = !!data.has_more;
-      state.backoff = 1000;
-      render();
-      if (data.reset || data.gap) setStatus('日志已轮转或清理，已从当前尾部重新加载；更早的缺口无法补读。', true);
-      else setStatus('已连接 · 每秒增量刷新');
-      schedule(1000);
-    } catch (e) {
-      if (!current() || e.name === 'AbortError') return;
-      state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
-      setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
-      schedule(state.backoff);
-    }
-  };
-
-  const poll = async () => {
-    logsTimer = null;
-    if (!current()) return;
-    if (document.hidden) return; // 可见性恢复时由 visibilitychange 重新排程
-    if (state.paused) { schedule(2000); return; }
-    try {
-      const query = state.nextAfter
-        ? `?kind=app&after=${encodeURIComponent(state.nextAfter)}&limit=200`
-        : '?kind=app&limit=200';
-      const data = await request(query);
-      if (!current()) return;
-      if (data.reset || data.gap) {
-        replaceWithTail(data, '日志文件已轮转或被清理，已从当前尾部重新加载；缺口无法补读。');
-      } else {
-        const added = addItems(data.items || []);
-        state.nextAfter = data.next_after || state.nextAfter;
-        if (added) {
-          // Always show new entries. Preserve the reader's viewport when below the top.
-          const before = scroll.scrollTop, height = scroll.scrollHeight;
-          render();
-          scroll.scrollTop = before > 8 ? before + Math.max(0, scroll.scrollHeight - height) : 0;
-        }
-        state.backoff = 1000;
-        if (!state.paused) setStatus('已连接 · 每秒增量刷新');
-      }
-      schedule(1000);
-    } catch (e) {
-      if (!current() || e.status === 401 || e.name === 'AbortError') return;
-      state.backoff = Math.min(Math.max(state.backoff * 2, 1000), 30000);
-      setStatus(`连接中断：${e.message || '读取失败'}，${Math.round(state.backoff / 1000)} 秒后重试`, true);
-      schedule(state.backoff);
-    }
-  };
-
-  logsVisibilityHandler = () => {
-    if (!current()) return;
-    if (document.hidden) {
-      if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
-      return;
-    }
-    state.backoff = 1000;
-    schedule(0);
-  };
-  document.addEventListener('visibilitychange', logsVisibilityHandler);
-
-  find('#dl-level').addEventListener('change', event => {
-    state.level = String(event.target.value || '').toUpperCase();
-    render();
-  });
-  find('#dl-pause').addEventListener('click', () => {
-    state.paused = !state.paused;
-    find('#dl-pause').textContent = state.paused ? '继续' : '暂停';
-    find('#dl-pause').setAttribute('aria-pressed', String(state.paused));
-    if (state.paused) {
-      logsRequestStop?.();
-      if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
-      setStatus('已暂停自动刷新；点击「继续」恢复。');
-    } else {
-      setStatus('已恢复增量刷新');
-      schedule(0);
+  const gen = pageGen, epoch = logsEpoch, identity = token;
+  logsStop = mountLogStream(content, {
+    token: identity,
+    current: () => epoch === logsEpoch && gen === pageGen && identity === token
+      && localStorage.getItem('emby_token') === identity,
+    onUnauthorized: () => {
+      stopLogsPolling();
+      localStorage.removeItem('emby_token');
+      location.href = '/';
     }
   });
-  find('#dl-refresh').addEventListener('click', () => {
-    if (logsTimer) { clearTimeout(logsTimer); logsTimer = null; }
-    setStatus('正在重新加载…');
-    void initial();
-  });
-  find('#dl-earlier').addEventListener('click', async () => {
-    if (!current() || state.loadingEarlier || !state.nextBefore) return;
-    state.loadingEarlier = true;
-    render();
-    try {
-      const data = await request(`?kind=app&before=${encodeURIComponent(state.nextBefore)}&limit=200`);
-      if (!current()) return;
-      if (data.reset || data.gap) { replaceWithTail(data, '日志已轮转或清理，无法继续向前读取；已回到当前尾部。'); return; }
-      const before = scroll.scrollTop;
-      addItems(data.items || []);
-      state.nextBefore = data.next_before || state.nextBefore;
-      state.hasMoreBefore = !!data.has_more;
-      render();
-      // 追加在底部，保持用户当前阅读位置。
-      scroll.scrollTop = Math.min(before, scroll.scrollHeight - scroll.clientHeight);
-      setStatus(`已加载更早日志 · 当前已加载 ${state.items.length} 条（仅本页范围，不代表全部磁盘历史）`);
-    } catch (e) {
-      if (current()) setStatus(`加载更早日志失败：${e.message || '读取失败'}`, true);
-    } finally {
-      state.loadingEarlier = false;
-      if (current()) render();
-    }
-  });
-
-  await initial();
 }
 
 let firewallStop = null;
@@ -4103,7 +3884,7 @@ async function refreshUpdate(force) {
     updateCache.notes = result.notes || '';
     setUpdateBadge(updateCache.version);
     const overlay = document.querySelector('#update-overlay');
-    if (overlay && !overlay.hidden) renderUpdate(result);
+    if (overlay && overlay.open) renderUpdate(result);
     return result;
   } catch (error) {
     const overlay = document.querySelector('#update-overlay');
@@ -4119,8 +3900,7 @@ async function refreshUpdate(force) {
 
 async function openUpdateDialog() {
   const overlay = document.querySelector('#update-overlay');
-  if (!overlay || !overlay.hidden) return;
-  overlay.hidden = false;
+  if (!overlay || overlay.open) return;
   overlayPush('#update-overlay');
   showUpdateStatus('');
   renderUpdateProgress(null);
@@ -4136,8 +3916,7 @@ async function openUpdateDialog() {
 
 function closeUpdateDialog() {
   const overlay = document.querySelector('#update-overlay');
-  if (!overlay || overlay.hidden) return;
-  overlay.hidden = true;
+  if (!overlay || !overlay.open) return;
   overlayPop('#update-overlay');
 }
 
@@ -4242,7 +4021,7 @@ async function applyUpdate() {
   await pollUpgrade(target);
 }
 
-function initUpgrade() {
+function initUpgrade(autoCheck = true) {
   const overlay = document.querySelector('#update-overlay');
   const button = document.querySelector('#version-btn');
   if (!button || !overlay) return;
@@ -4253,14 +4032,14 @@ function initUpgrade() {
   document.querySelector('#update-check').addEventListener('click', () => { void refreshUpdate(true); });
   document.querySelector('#update-apply').addEventListener('click', () => { void applyUpdate(); });
   document.querySelector('#update-reload').addEventListener('click', () => window.location.reload());
-  void refreshUpdate(false);
+  if (autoCheck) void refreshUpdate(false);
 }
 
 async function boot() {
   if (!token) { window.location.replace('/'); return; }
   const requestToken = token;
   try {
-    const response = await fetch('/Users/Me', { headers: { 'X-Emby-Token': requestToken } });
+    const response = await fetch('/emby/Users/Me', { headers: { 'X-Emby-Token': requestToken } });
     if (localStorage.getItem('emby_token') !== requestToken) return;
     if (response.status === 401) {
       localStorage.removeItem('emby_token');
@@ -4270,7 +4049,7 @@ async function boot() {
     if (!response.ok) throw new Error('authentication unavailable');
     const dto = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
     if (localStorage.getItem('emby_token') !== requestToken) return;
-    me = dto ? { name: dto.Name || '', is_admin: !!(dto.Policy && dto.Policy.IsAdministrator) } : null;
+    me = dto ? { id: dto.Id, name: dto.Name || '', is_admin: !!(dto.Policy && dto.Policy.IsAdministrator) } : null;
   } catch {
     if (localStorage.getItem('emby_token') !== requestToken) return;
     // A failed validation is not evidence that the stored credential is invalid.
@@ -4295,7 +4074,7 @@ async function boot() {
     versionBtn.disabled = true;
     versionBtn.title = '仅管理员可检查更新';
   }
-  if (me && me.is_admin) initUpgrade();
+  if (me && me.is_admin) initUpgrade(location.hash !== '#items');
   // 导航写 hash 并压入历史，配合 popstate 让浏览器前进/后退在页面间往返。
   document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
     if (location.hash !== '#' + button.dataset.page) location.hash = button.dataset.page;
@@ -4327,19 +4106,8 @@ async function boot() {
     if (event.target.id === 'scrape-overlay') closeScrapePreview();
   });
   document.querySelector('#scrape-close').addEventListener('click', closeScrapePreview);
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Escape') {
-      const top = topOverlaySelector();
-      if (top === '#scrape-overlay') closeScrapePreview();
-      else if (top === '#player-overlay') closePlayer();
-      else if (top === '#detail-overlay') closeDetail();
-      else if (top === '#update-overlay') closeUpdateDialog();
-      return;
-    }
-    overlayTrapTab(event);
-  });
   // 全局扫描观察不阻塞初始页面；首读也经过同一超时/恢复链路。
-  startScanPolling();
+  if (location.hash !== '#items') startScanPolling();
   // 媒体墙渲染后由同一探测观察器恢复，boot不再裸读探测进度。
   const hash = location.hash.replace('#', ''), initial = hash === 'activity' ? 'firewall' : hash;
   page(pages[initial] ? initial : 'overview');

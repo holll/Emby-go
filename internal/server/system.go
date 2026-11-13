@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -14,13 +15,20 @@ import (
 // 版本过低会被部分客户端拒绝连接。本项目对齐 docs/emby_openapi.json 的 4.9.5.0 契约。
 const embyVersion = "4.9.5.0"
 
+// publicInfo 严格按文档的 PublicSystemInfo 七字段输出：
+// LocalAddress / LocalAddresses / WanAddress / RemoteAddresses / ServerName / Version / Id。
+// 不含 ProductName —— 那是本项目的私有字段，官方模型里没有，客户端按严格模式
+// 反序列化时属于未知字段。
 func (a *App) publicInfo(c *gin.Context) {
+	scheme := requestScheme(c)
+	local := scheme + "://" + c.Request.Host
 	c.JSON(http.StatusOK, gin.H{
-		"LocalAddresses":  []string{},
+		"LocalAddress":    local,
+		"LocalAddresses":  []string{local},
+		"WanAddress":      local,
 		"RemoteAddresses": []string{},
 		"ServerName":      a.serverName,
 		"Version":         embyVersion,
-		"ProductName":     "Emby-go",
 		"Id":              a.serverID,
 	})
 }
@@ -45,6 +53,9 @@ func requestScheme(c *gin.Context) string {
 	return "http"
 }
 
+// info 按文档的 SystemInfo 模型补齐全部字段。缺字段会让严格反序列化的客户端
+// 把必填项判空（例如 PackageName/WebSocketPortNumber 为空会被当成异常版本），
+// 因此这里显式列出模型里的每一项，本服务没有对应实现的用零值表达。
 func (a *App) info(c *gin.Context) {
 	scheme := requestScheme(c)
 	osName := map[string]string{"windows": "Windows", "linux": "Linux", "darwin": "macOS"}[runtime.GOOS]
@@ -52,27 +63,46 @@ func (a *App) info(c *gin.Context) {
 		osName = runtime.GOOS
 	}
 	local := scheme + "://" + c.Request.Host
+	// 数据目录与产物目录都挂在数据库同级目录下，这是本项目唯一稳定的路径锚点
+	// （见 openImageDisk / avatar.DefaultDir 的同类约定）。
+	dataDir := filepath.Dir(a.cfg.DBPath)
 	c.JSON(http.StatusOK, gin.H{
-		"Id":                         a.serverID,
-		"ServerName":                 a.serverName,
-		"Version":                    embyVersion,
-		"OperatingSystem":            runtime.GOOS,
-		"OperatingSystemDisplayName": osName,
-		"HasPendingRestart":          false,
-		"IsShuttingDown":             false,
-		"IsInMaintenanceMode":        false,
-		"SupportsHttps":              scheme == "https",
-		"SupportsAutoRunAtStartup":   false,
-		"CanSelfRestart":             false,
-		"CanSelfUpdate":              false,
-		"SupportsLibraryMonitor":     false,
-		"SystemUpdateLevel":          "Release",
-		"LocalAddress":               local,
-		"LocalAddresses":             []string{local},
-		"RemoteAddresses":            []string{},
-		"WanAddress":                 local,
-		"HttpServerPortNumber":       0,
-		"HttpsPortNumber":            0,
+		"Id":                                   a.serverID,
+		"ServerName":                           a.serverName,
+		"Version":                              embyVersion,
+		"OperatingSystem":                      runtime.GOOS,
+		"OperatingSystemDisplayName":           osName,
+		"PackageName":                          "emby-go",
+		"HasPendingRestart":                    false,
+		"IsShuttingDown":                       false,
+		"IsInMaintenanceMode":                  false,
+		"SupportsHttps":                        scheme == "https",
+		"SupportsAutoRunAtStartup":             false,
+		"SupportsLibraryMonitor":               false,
+		"SupportsLocalPortConfiguration":       false,
+		"SupportsWakeServer":                   false,
+		"HasImageEnhancers":                    false,
+		"HasUpdateAvailable":                   false,
+		"CanSelfRestart":                       false,
+		"CanSelfUpdate":                        false,
+		"CanLaunchWebBrowser":                  false,
+		"HardwareAccelerationRequiresPremiere": false,
+		"SystemUpdateLevel":                    "Release",
+		"LocalAddress":                         local,
+		"LocalAddresses":                       []string{local},
+		"RemoteAddresses":                      []string{},
+		"WanAddress":                           local,
+		"HttpServerPortNumber":                 a.cfg.Port,
+		"HttpsPortNumber":                      0,
+		"WebSocketPortNumber":                  a.cfg.Port,
+		"CompletedInstallations":               []gin.H{},
+		"WakeOnLanInfo":                        []gin.H{},
+		"ProgramDataPath":                      dataDir,
+		"ItemsByNamePath":                      dataDir,
+		"CachePath":                            filepath.Join(dataDir, "image-cache"),
+		"LogPath":                              filepath.Join(dataDir, "logs"),
+		"InternalMetadataPath":                 filepath.Join(dataDir, "metadata"),
+		"TranscodingTempPath":                  filepath.Join(dataDir, "transcodes"),
 	})
 }
 
@@ -88,7 +118,9 @@ func (a *App) configuration(c *gin.Context) {
 func (a *App) ping(c *gin.Context) { c.String(http.StatusOK, "Emby Server") }
 
 // noContent 用于客户端「只关心 2xx」的探针型端点（Capabilities 上报、播放 Ping 等）。
-func (a *App) noContent(c *gin.Context) { c.Status(http.StatusNoContent) }
+// 状态码取 200 而非 204：文档 SessionsService/PlaystateService 对这组端点全部写
+// 「200（无返回内容）」，部分客户端按 200 判断成功，拿到 204 会当作异常分支。
+func (a *App) noContent(c *gin.Context) { c.Status(http.StatusOK) }
 
 // endpoint 返回客户端关心的连通性描述（与真实 Emby 形态对齐）。
 func (a *App) endpoint(c *gin.Context) {

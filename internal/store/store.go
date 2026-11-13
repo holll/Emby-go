@@ -1051,6 +1051,7 @@ type AdminQuery struct {
 type MovieListFilter struct {
 	ImageTypes []string
 	HasTmdbID  *bool
+	Played     bool // true requires this user's played flag; false does not restrict.
 }
 
 // SearchScopedVisible 与 SearchScoped 相同，但额外限制用户可见媒体库集合
@@ -1290,6 +1291,10 @@ func (s *Store) search(userID, libraryID int64, visible []int64, term, status, y
 		args = append(args, userID)
 	}
 	for _, f := range filter {
+		if f.Played {
+			where = append(where, "EXISTS (SELECT 1 FROM userdata WHERE userdata.movie_id=movies.id AND userdata.user_id=? AND userdata.played=1)")
+			args = append(args, userID)
+		}
 		if f.HasTmdbID != nil && *f.HasTmdbID {
 			// provider_id 是 MetaTube ID，不能当作 TMDB ID。
 			where = append(where, "1=0")

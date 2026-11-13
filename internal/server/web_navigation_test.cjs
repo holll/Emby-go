@@ -23,7 +23,8 @@ function fixture(matches = true) {
       contains(other) { return other === this; }, querySelectorAll: () => [] };
   }
   ['nav-drawer', 'nav-toggle', 'nav-close', 'nav-backdrop', 'main-content', 'detail-overlay', 'player-overlay', 'scrape-overlay'].forEach(node);
-  ['detail-overlay', 'player-overlay', 'scrape-overlay'].forEach(id => nodes[id].hidden = true);
+  // 媒体浮层是原生 <dialog>：关闭态 open === false。
+  ['detail-overlay', 'player-overlay', 'scrape-overlay'].forEach(id => nodes[id].open = false);
   const first = nodes['nav-close'];
   const last = node('last-link');
   const group = { hidden: false, querySelector: () => group.hasItem ? first : null, hasItem: true };
@@ -79,7 +80,7 @@ test('breakpoint clears modal state; desktop drawer stays accessible', () => {
 });
 
 test('media overlay cannot compete with navigation; empty role groups hide', () => {
-  const f = fixture(); f.open(); f.nodes['detail-overlay'].hidden = false;
+  const f = fixture(); f.open(); f.nodes['detail-overlay'].open = true;
   f.group.hasItem = false; f.mutate();
   assert.equal(f.drawer.inert, true); assert.equal(f.nodes['main-content'].inert, false);
   assert.equal(f.group.hidden, true);
