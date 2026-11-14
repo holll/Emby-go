@@ -403,7 +403,40 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 	// outbound 内部仍拒绝链路本地与保留网段，重定向 ≤3 跳。
 	a.sprites.linkClient = outbound.NewClient(outbound.Options{Timeout: 30 * time.Second, AllowPrivate: true, ResponseHeaderTimeout: 20 * time.Second})
 	a.ipBlocks.publish(blockRules)
-	a.ready.Store(true)
+	// 先完成所有可能失败的初始化，再启动常驻 worker：构造失败时调用方拿不到 App、
+	// 也就无法 Close，提前起的 worker 只能挂到进程退出（CLI 单次启动无感，测试和
+	// 同进程多次构造会累积）。这里只固定次序，不加通用清理框架。
+	// Framework debug redirect output can contain raw URLs outside middleware.
+	// App debug is selected per instance below, not via Gin's global debug mode.
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	// 不信任任何代理头：限流与日志按 TCP 对端 IP 计数，X-Forwarded-For 可被伪造。
+	// 将来若部署在反向代理后，必须先给出可信代理网段并单独评审。
+	for _, cidr := range cfg.InitializeAllowFrom {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("initialize_allow_from 配置无效(%q): %w", cidr, err)
+		}
+		a.initAllow = append(a.initAllow, prefix.Masked())
+	}
+	if len(cfg.TrustedProxies) > 0 {
+		if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("trusted_proxies 配置无效: %w", err)
+		}
+	} else {
+		_ = r.SetTrustedProxies(nil)
+	}
+	if initialized, err := db.HasAdministrator(); err != nil {
+		db.Close()
+		return nil, err
+	} else if initialized {
+		if a.adminName, err = db.AdministratorName(); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	a.rootCtx, a.rootCancel = context.WithCancel(context.Background())
 	// 图片变体预热 worker：常驻到 rootCtx 取消（BeginShutdown 末步）。
 	// 构造时先登记再启动，由 joinBackground 在调用方的关闭预算内收尾。
@@ -475,37 +508,6 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 			slog.Warn("无法回写 server_id 到配置文件", "error", err)
 		}
 	}
-	if initialized, err := db.HasAdministrator(); err != nil {
-		db.Close()
-		return nil, err
-	} else if initialized {
-		if a.adminName, err = db.AdministratorName(); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-	// Framework debug redirect output can contain raw URLs outside middleware.
-	// App debug is selected per instance below, not via Gin's global debug mode.
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	// 不信任任何代理头：限流与日志按 TCP 对端 IP 计数，X-Forwarded-For 可被伪造。
-	// 将来若部署在反向代理后，必须先给出可信代理网段并单独评审。
-	for _, cidr := range cfg.InitializeAllowFrom {
-		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
-		if err != nil {
-			db.Close()
-			return nil, fmt.Errorf("initialize_allow_from 配置无效(%q): %w", cidr, err)
-		}
-		a.initAllow = append(a.initAllow, prefix.Masked())
-	}
-	if len(cfg.TrustedProxies) > 0 {
-		if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("trusted_proxies 配置无效: %w", err)
-		}
-	} else {
-		_ = r.SetTrustedProxies(nil)
-	}
 	if cfg.Debug {
 		slog.Warn("debug 原始请求日志已开启：密码、token、Cookie、请求体将写入 request 日志，请仅临时排障使用")
 	}
@@ -532,6 +534,7 @@ func newApp(cfg config.Config, cacheStore cache.Cache) (*App, error) {
 		slog.Warn("历史日志清理未完成，将在下个日志日重试")
 	}
 	notifierOwned = true
+	a.ready.Store(true)
 	return a, nil
 }
 

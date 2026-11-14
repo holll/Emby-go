@@ -113,7 +113,7 @@ func (a *App) adminLibraryCoverPreview(c *gin.Context) {
 	if !a.admitAdminOperation(c) {
 		return
 	}
-	result, err := a.generateLibraryCover(c.Request.Context(), id, coverOptions{})
+	result, err := a.generateLibraryCover(c.Request.Context(), id, coverPreviewOptions())
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, err.Error())
 		return

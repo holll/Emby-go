@@ -12,8 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 扫描成功后自动补封面的两个开关，默认都关：apply 会写库并替换客户端看到的
-// 封面，属于修改 Emby 数据，不能让默认配置在用户不知情时发生。
+// 扫描成功后自动补封面的两个开关，默认都开：apply 会写库并替换客户端看到的封面，
+// 与 Emby 自己给合集/媒体库出图的行为一致；用户显式写入 false 才关闭，读设置失败时
+// 按关闭处理（读不到状态就不主动改数据）。
 const (
 	settingCollectionCoverAuto = "collection.cover_auto"
 	settingLibraryCoverAuto    = "library.cover_auto"

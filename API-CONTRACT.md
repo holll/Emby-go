@@ -188,7 +188,7 @@
 - 可选高级参数 `root_marker_path` / `root_marker_sha256` 必须成对提供：前者为库根下的相对文件路径，后者为预期内容的 64 位十六进制 SHA-256。标识文件只读且不自动创建；必须在解析符号链接后仍位于库根内，内容最多 64 KiB。缺失、越界、不匹配或扫描中变化使清单不完整，禁止清理。未配置标识时，根目录身份和空库检查不能识别所有远程挂载部分掉线。
 - 任务失败仍保留已提交组的部分 `result`。结果附加 `mode`、`groups_total/groups_done`、`unchanged_groups`、`added/updated/deleted`、`index_changed`、`incomplete`、`cleanup_performed`、`unreadable_nfo` 等字段；`cleanup_performed=true` 表示完成清理检查，不代表必有删除。后续失败不撤销已提交组；有业务提交仍使缓存失效，无变化扫描不推进内容版本。
 - `unreadable_nfo` 统计「NFO 文件存在但解析失败」的条目数（非 `.strm` 读失败）。这类条目**不是**删除指令：已索引的行保留原元数据、演员与可见状态，只跟随文件刷新文件派生列，失败原因写入该影片的 `last_scrape_error`（前缀 `[NFO 不可读]`）；从未索引过的源仍按 pending 入库并带同样原因。NFO 修好后下一次扫描自动恢复并清除该备注。
-- 应用内 `scan` 计划支持 `params.mode` 及上述成对根标识参数；旧计划缺省为 incremental（11000+ 库默认增量）。未知参数与 ETag 条件修改继续保留；计划中的 `allow_empty_removal` 不隐式授权空库删除。前端不创建或启用额外计划；任务记录仍为进程内数据，重启后不恢复运行任务。
+- 应用内 `scan` 计划支持 `params.mode` 及上述成对根标识参数；旧计划缺省为 incremental（11000+ 库默认增量）。未知参数与 ETag 条件修改继续保留；计划中的 `allow_empty_removal` 不隐式授权空库删除。前端不创建或启用额外计划；任务摘要持久化在库（§4.12），但执行状态只在进程内，重启不恢复、不补跑。
 
 ### 4.5 MetaTube 手动识别（刮削预览）
 

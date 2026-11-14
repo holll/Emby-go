@@ -118,6 +118,13 @@ func (req collectionCoverRequest) options(mode string) coverOptions {
 	return coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
 }
 
+// coverPreviewOptions 是预览端点的默认参数：与 run 完全省略可选字段时一致，
+// 只差 Apply（预览不写库）。合集与媒体库预览共用，避免两边各写一套默认值后，
+// 预览出来的图和真正发布的图不是同一张。
+func coverPreviewOptions() coverOptions {
+	return coverOptionsFrom(nil, nil, nil, nil, false, "preview")
+}
+
 func (a *App) adminCollectionCoverRun(c *gin.Context) {
 	req, err := decodeCollectionCoverRequest(c.Request.Body)
 	if err != nil {
@@ -282,7 +289,7 @@ func (a *App) adminCollectionCoverPreview(c *gin.Context) {
 		apiError(c, http.StatusNotFound, "collection not found")
 		return
 	}
-	result, err := a.generateCollectionCover(c.Request.Context(), name, coverOptions{})
+	result, err := a.generateCollectionCover(c.Request.Context(), name, coverPreviewOptions())
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, err.Error())
 		return

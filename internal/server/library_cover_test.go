@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -133,6 +134,36 @@ func TestLibraryCoverGeneratedAndServed(t *testing.T) {
 	waitCollectionCoverTask(t, app)
 	if covers, err := app.db.AppliedLibraryCovers(); err != nil || covers[library.ID].Path != before2 {
 		t.Fatalf("重复生成应复用同一文件: %v %v", err, covers)
+	}
+}
+
+// TestLibraryCoverPreviewMatchesDefaultApply 与合集版对称：默认预览和默认 apply
+// 必须是同一张图，预览只差「不写库」。
+func TestLibraryCoverPreviewMatchesDefaultApply(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true, "c": true})
+	library := onlyLibrary(t, app)
+	status, preview := doJSON(t, ts, "GET", "/api/admin/library-cover/preview?library="+strconv.FormatInt(library.ID, 10), token, "")
+	if status != http.StatusOK {
+		t.Fatalf("preview: %d %s", status, preview)
+	}
+	if status, raw := doJSON(t, ts, "POST", "/api/admin/library-cover/run", token, `{"all":true,"apply":true}`); status != http.StatusAccepted {
+		t.Fatalf("run: %d %s", status, raw)
+	}
+	waitCollectionCoverTask(t, app)
+	covers, err := app.db.AppliedLibraryCovers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cover, ok := covers[library.ID]
+	if !ok {
+		t.Fatalf("应写入媒体库生效记录，实际 %v", covers)
+	}
+	applied, err := os.ReadFile(cover.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(preview, applied) {
+		t.Errorf("默认预览与默认发布不是同一张图：preview=%d applied=%d", len(preview), len(applied))
 	}
 }
 

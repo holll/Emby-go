@@ -35,7 +35,7 @@ ABF-018/
 - 全量：重建全部索引；图片被同大小同时间原地替换时增量可能识别不到，这时改改文件时间或跑一次全量。
 - 扫描中失败会保留已成功部分的结果；空库删除需手动确认，不会自动清。重扫失败不要重复整理同一批。
 
-升级前先停服并自行复制数据库文件（默认 `data/emby.db`）及配置、人工 NFO 和图片；正常退出后再复制，回退必须恢复升级前的整套匹配副本，不能仅更换旧二进制。数据库含密码与 API 密钥摘要，副本应私密存放。`reindex` 始终全量。
+升级前先停服并自行复制数据库文件及配置、人工 NFO 和图片；正常退出后再复制，回退必须恢复升级前的整套匹配副本，不能仅更换旧二进制。数据库位置以配置里的 `db_path` 为准：相对路径按进程启动目录解析，默认 `emby-go.db`；用 `deploy/install.sh` 装好后就是 `/opt/emby-go/emby-go.db`（service 的 WorkingDirectory），不是 `data/emby.db`。恢复验收至少核对四项：能正常登录、媒体库授权还在、续播位置与收藏还在、扫描后索引正常。数据库含密码与 API 密钥摘要，副本应私密存放。`reindex` 始终全量。
 
 ## 播放
 
@@ -177,7 +177,7 @@ TLS 由 Nginx/Caddy 终止，本服务不内置 TLS。公网前必设 `setup_cod
 - **浏览器播不了**：多为混合内容或编码不支持，改用 Emby 客户端。
 - **客户端搜不到/续播空**：先确认账号已授权媒体库；普通用户默认无授权。
 - **图片不显示**：确认目录里有 `poster.jpg`/`landscape.jpg`/`fanart.jpg`（或 `folder/cover`），扫描不转码。
-- **日志里看到密钥**：URL 原样记录所致，关 `debug`、轮换凭据，别外传日志。
+- **日志里看到密钥**：原始请求 URL 不脱敏所致，关 `debug` 只取消请求头/请求体的额外展开，**不会**隐藏 URL 里的 api_key/token；处理方式是轮换凭据、限制日志留存，别外传日志。
 
 ## 开发者与链接
 
@@ -185,6 +185,13 @@ TLS 由 Nginx/Caddy 终止，本服务不内置 TLS。公网前必设 `setup_cod
 - [项目速读（面向 Agent）](<PROJECT-GUIDE.md>)：架构、任务定位、正确性边界与验证命令
 - [配置示例](<config.example.yaml>)
 - 核心 CI 只跑 `gofmt/build/vet/全仓测试`；发布由 `v*` tag 触发，同 SHA 过 CI 才构建。手动专项在 Actions `manual-checks` 按需选 race/web/vuln/coverage。
+- 升级回归基线是 `v2.2.6`：`cmd/metatube/native_upgrade_test.go` 里两个 opt-in 测试用固定旧二进制做「建库→升级→旧程序拒绝新 schema→回退整包恢复」，默认跳过。改了 schema/迁移或发大版本前手动跑一次，并在 release notes 记下结果：
+  ```bash
+  # 二选一：本地旧 tag 构建，或指定固定 release 资产（含 SHA256 校验与 -version 身份核对）
+  EMBY_GO_PREVIOUS_BINARY=/path/to/v2.2.6/emby-go go test ./cmd/metatube -run Upgrade -count=1
+  EMBY_GO_PREVIOUS_RELEASE_BINARY=/path/to/downloaded/emby-go go test ./cmd/metatube -run Upgrade -count=1
+  ```
+  更早的版本没有固化回归样本，升级前先在测试环境拷一份库跑一遍，别直接上生产。
 
 ## 范围与不做
 

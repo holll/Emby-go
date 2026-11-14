@@ -94,8 +94,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 漏洞门禁要最新的补丁版：go.mod 的 1.27.0 不含之后修复的 stdlib CVE。
-          go-version: '1.27.x'
+          # 与 CI/发布用同一份 go.mod 工具链：这里扫的就是实际随包发布的 stdlib。
+          # 出现 stdlib CVE 时先升 go.mod 补丁版，不要只在本任务里换新版本把门禁绕过去。
+          go-version-file: go.mod
           cache: true
 
       # 依赖漏洞门禁：只允许「未被调用」的模块漏洞，调用链命中即失败。
@@ -105,7 +106,8 @@ jobs:
   web:
     if: ${{ inputs.check == 'web' || inputs.check == 'all' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 前端 VM 测试 + 两个 Go 夹具浏览器回归（含 server 包编译），留足冷启动余量。
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -116,6 +118,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Locate required Chromium
         run: |
@@ -130,6 +138,13 @@ jobs:
           # Avoid competing cold Chromium starts on small runners; all files and assertions still run.
           node --test --test-concurrency=1 --test-reporter=tap internal/server/web*_test.cjs 2>&1 | tee /tmp/web-test.log
 
+      # 这组回归由 Go 夹具起真实 App、再用 Node 驱动浏览器，只靠 CHROME_BIN 开启，
+      # 名字不在 web*_test.cjs 的 glob 里：不点名就会一直静默 skip。
+      - name: Go-backed browser fixtures
+        run: |
+          set -o pipefail
+          go test ./internal/server -run '^(TestAdminTasksBrowser|TestAdminUpdateBrowser)$' -count=1 -timeout 8m 2>&1 | tee /tmp/web-go-browser.log
+
       # 将首个失败断言写进公开 annotations，不再只看到 exit code 1。
       - name: Frontend failure details
         if: failure()
@@ -141,6 +156,13 @@ jobs:
             detail=${detail//$'\r'/%0D}
             detail=${detail//$'\n'/%0A}
             echo "::error::$detail"
+          fi
+          if [ -f /tmp/web-go-browser.log ] && grep -qE '^(--- FAIL|FAIL|panic:)' /tmp/web-go-browser.log; then
+            detail=$(grep -E '^(--- FAIL|FAIL|panic:)|_test\.go:[0-9]+:' /tmp/web-go-browser.log | head -20)
+            detail=${detail//%/%25}
+            detail=${detail//$'\r'/%0D}
+            detail=${detail//$'\n'/%0A}
+            echo "::error::Go-backed browser fixtures failed: $detail"
           fi
 
   coverage:

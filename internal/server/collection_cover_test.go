@@ -146,6 +146,31 @@ func TestCollectionCoverPreviewRendersEmbyGeometry(t *testing.T) {
 	}
 }
 
+// TestCollectionCoverPreviewMatchesDefaultApply 默认预览与默认 apply 必须是同一张图：
+// 预览只差「不写库」，不能因为 GET 没传参数就换成另一套渲染参数（reflection）。
+func TestCollectionCoverPreviewMatchesDefaultApply(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true, "c": true})
+	status, preview := doJSON(t, ts, "GET", "/api/admin/collection-cover/preview?collection="+urlQuery("系列A"), token, "")
+	if status != http.StatusOK {
+		t.Fatalf("preview: %d %s", status, preview)
+	}
+	if status, raw := doJSON(t, ts, "POST", "/api/admin/collection-cover/run", token, `{"collections":["系列A"],"apply":true}`); status != http.StatusAccepted {
+		t.Fatalf("run apply: %d %s", status, raw)
+	}
+	waitCollectionCoverTask(t, app)
+	cover, ok, err := app.db.AppliedCover("系列A")
+	if err != nil || !ok {
+		t.Fatalf("生效记录未写入: ok=%v err=%v", ok, err)
+	}
+	applied, err := os.ReadFile(cover.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(preview, applied) {
+		t.Errorf("默认预览与默认发布不是同一张图：preview=%d applied=%d", len(preview), len(applied))
+	}
+}
+
 // TestCollectionCoverPreviewReusesCache 同一合集连续两次预览复用同一个文件。
 func TestCollectionCoverPreviewReusesCache(t *testing.T) {
 	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true})

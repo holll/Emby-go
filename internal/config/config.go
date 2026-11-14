@@ -325,7 +325,7 @@ func (c Config) Addr() string {
 	return fmt.Sprintf(":%d", c.Port)
 }
 
-// Redis 为必选缓存后端：服务启动时即连接并 Ping，连不上直接拒绝启动。
+// Redis 为可选缓存后端：配置了地址才连接并 Ping，连不上回退进程内缓存，不阻断启动。
 func Load(path string) (Config, error) {
 	cfg := Config{Port: 18080, DBPath: "emby-go.db", ServerName: "Emby-go", SessionTTLDays: defaultSessionTTLDays, Webhook: WebhookConfig{TimeoutSeconds: 5}, path: path}
 	cfg.Security.Auth = cfg.Security.Auth.ApplyDefaults()

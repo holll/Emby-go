@@ -114,6 +114,16 @@ func TestCollectionCoverAutoSkipsUnchanged(t *testing.T) {
 	if err != nil || !first.Applied {
 		t.Fatalf("首次生成失败: %+v err=%v", first, err)
 	}
+	// 预置一个明显旧的 AppliedAt：内容没变时连记录都不该重写，只更新 Reason。
+	sentinel := "2001-01-01T00:00:00Z"
+	applied, ok, err := app.db.AppliedCover("系列A")
+	if err != nil || !ok {
+		t.Fatalf("读生效记录失败: ok=%v err=%v", ok, err)
+	}
+	applied.AppliedAt = sentinel
+	if err := app.db.SetAppliedCover(applied); err != nil {
+		t.Fatal(err)
+	}
 	second, err := app.generateCollectionCover(context.Background(), "系列A", opts)
 	if err != nil {
 		t.Fatalf("二次生成失败: %v", err)
@@ -123,6 +133,9 @@ func TestCollectionCoverAutoSkipsUnchanged(t *testing.T) {
 	}
 	if second.SourceHash != first.SourceHash {
 		t.Errorf("同一输入应得到同一 SourceHash：%s vs %s", first.SourceHash, second.SourceHash)
+	}
+	if again, ok, err := app.db.AppliedCover("系列A"); err != nil || !ok || again.AppliedAt != sentinel {
+		t.Errorf("内容未变时不应重写生效记录: %+v ok=%v err=%v", again, ok, err)
 	}
 }
 

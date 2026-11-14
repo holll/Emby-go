@@ -327,8 +327,9 @@ func scheduledScanParams(raw map[string]any) (int64, scanner.ScanMode, error) {
 	return libraryID, mode, nil
 }
 
-// normalizeParams 按任务类型把请求参数整理成规范 JSON：
-// 只保留该类型认识的键，避免把垃圾字段沉淀进库。
+// normalizeParams 按任务类型把请求参数整理成规范 JSON：sprites 只保留认识的键，
+// 避免把垃圾字段沉淀进库；scan/reindex 刻意保留未识别的旧参数（条件编辑与后续选项
+// 往返不能丢），只把已知字段规范化。
 func normalizeParams(kind string, raw map[string]any) (string, error) {
 	out := map[string]any{}
 	switch kind {
