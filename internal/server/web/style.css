@@ -688,6 +688,10 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   /* 移动端详情抽屉全宽（需求 R3b 验收项）。 */
   .detail-drawer { width: 100%; border-left: 0; }
   .detail-hero-body { padding-top: var(--space-64); }
+  /* 剧照浮层在窄屏留更少边距，图片与左右键都吃满可用宽度。 */
+  .stills-overlay[open] { padding: var(--space-12); }
+  .stills-shell { gap: var(--space-8); }
+  .still-thumb { width: 116px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -887,8 +891,8 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .player-stage > div { width: 100%; height: 100%; }
 
 /* 剧照：详情抽屉里的横向缩略图条 + 叠在抽屉之上的大图浮层 */
-.detail-stills { display: flex; gap: var(--space-8); overflow-x: auto; padding-bottom: var(--space-4); }
-.still-thumb { flex: none; width: 132px; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel-2); cursor: pointer; }
+.detail-stills { display: flex; gap: var(--space-8); overflow-x: auto; padding-bottom: var(--space-4); scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.still-thumb { flex: none; width: 132px; scroll-snap-align: start; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel-2); cursor: pointer; }
 .still-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .still-thumb:hover img { opacity: 0.85; }
 .still-thumb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
@@ -898,9 +902,12 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .stills-head { display: flex; align-items: center; gap: var(--space-10); }
 .stills-head strong { font-size: var(--text-14); font-weight: 600; }
 .stills-head .icon-btn { margin-left: auto; }
-.stills-stage { position: relative; display: flex; align-items: center; justify-content: center; gap: var(--space-8); }
-.stills-stage img { max-width: 100%; max-height: calc(100vh - 180px); max-height: calc(100dvh - 180px); object-fit: contain; border-radius: var(--radius-sm); background: #000; }
-.stills-nav { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.72); color: var(--text); cursor: pointer; }
+.stills-stage { position: relative; display: grid; place-items: center; }
+/* 图片吃满可用宽度，左右键叠在图片两侧：窄屏下不再把图挤成一条 */
+.stills-stage img { width: 100%; max-height: calc(100vh - 160px); max-height: calc(100dvh - 160px); object-fit: contain; border-radius: var(--radius-sm); background: #000; }
+.stills-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.72); color: var(--text); cursor: pointer; }
+#stills-prev { left: var(--space-8); }
+#stills-next { right: var(--space-8); }
 .stills-nav svg { width: 22px; height: 22px; }
 .stills-nav:disabled { opacity: 0.35; cursor: default; }
 

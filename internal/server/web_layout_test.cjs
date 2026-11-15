@@ -961,7 +961,7 @@ test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自�
 
 test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {
   if (!available(t)) return;
-  const { evaluate } = await browser(t);
+  const { call, evaluate } = await browser(t);
   await evaluate(`(()=>{window.__detailBackdrops=[{index:0,tag:'t0'},{index:1,tag:'t1'},{index:2,tag:'t2'}];})()`);
   await evaluate(`(async()=>{await openMaintenanceDetail({id:1});for(let i=0;i<100&&!document.querySelector('.still-thumb');i++)await new Promise(r=>setTimeout(r,20));})()`);
   const strip = await evaluate(`(()=>{const thumbs=[...document.querySelectorAll('.still-thumb')];return {count:thumbs.length,srcs:thumbs.map(b=>b.querySelector('img').getAttribute('src')),heading:document.querySelector('.detail-stills')?.closest('.detail-section')?.querySelector('h3')?.textContent.trim()};})()`);
@@ -987,6 +987,25 @@ test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦�
   assert.equal(closed.focus, '1', '焦点回到触发的缩略图');
   assert.equal(closed.detail, true, '只关剧照，详情抽屉还在');
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '看剧照不产生写请求');
+  // 移动端：抽屉全宽、剧照条可横滑、浮层不溢出视口
+  for (const width of [390, 320]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evaluate(`(async()=>{await openMaintenanceDetail({id:1});for(let i=0;i<100&&!document.querySelector('.still-thumb');i++)await new Promise(r=>setTimeout(r,20));document.querySelectorAll('.still-thumb')[0].click();for(let i=0;i<100&&!document.querySelector('#stills-overlay').open;i++)await new Promise(r=>setTimeout(r,20));
+      // fixture 里图片请求不可达，换成真实尺寸的内联图再量布局，否则高度恒为 0。
+      const img=document.querySelector('#stills-image');img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"></svg>');await new Promise(r=>{if(img.complete)return r();img.addEventListener('load',r,{once:true});img.addEventListener('error',r,{once:true});});})()`);
+    const layout = await evaluate(`(()=>{const thumb=document.querySelector('.still-thumb').getBoundingClientRect();const strip=document.querySelector('.detail-stills');const img=document.querySelector('#stills-image').getBoundingClientRect();const shell=document.querySelector('.stills-shell').getBoundingClientRect();const prev=document.querySelector('#stills-prev').getBoundingClientRect();const next=document.querySelector('#stills-next').getBoundingClientRect();const drawer=document.querySelector('#detail-drawer').getBoundingClientRect();return {thumbW:thumb.width,imgW:img.width,imgH:img.height,shellW:shell.width,shellLeft:shell.left,vw:innerWidth,vh:innerHeight,prevW:prev.width,prevLeft:prev.left,nextRight:next.right,drawerW:drawer.width,stripScroll:strip.scrollWidth>strip.clientWidth,pageScroll:document.documentElement.scrollWidth};})()`);
+    assert.ok(layout.thumbW <= width, `${width}px: 缩略图不越过视口`);
+    assert.ok(Math.abs(layout.drawerW - width) <= 1, `${width}px: 抽屉在窄屏占满宽度，实际 ${layout.drawerW}`);
+    assert.equal(layout.stripScroll, true, `${width}px: 剧照条自己横向滚动，不撑破抽屉`);
+    assert.ok(layout.shellLeft >= 0 && layout.shellW <= width + 1, `${width}px: 浮层外壳不溢出`);
+    assert.ok(layout.imgW >= width - 80, `${width}px: 大图吃满可用宽度，实际 ${layout.imgW}`);
+    assert.ok(layout.imgH > 100 && layout.imgH <= layout.vh, `${width}px: 大图高度合理，实际 ${layout.imgH}`);
+    assert.ok(layout.prevW >= 44, '触控目标不小于 44px');
+    assert.ok(layout.prevLeft >= 0 && layout.nextRight <= width, `${width}px: 左右键留在视口内`);
+    assert.ok(layout.pageScroll <= width + 1, `${width}px: 页面不出现横向滚动`);
+    await evaluate(`closeStills();closeDetail();`);
+  }
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   assert.deepEqual(await evaluate('__errors'), []);
   await evaluate(`closeDetail()`);
   await evaluate(`(()=>{window.__detailBackdrops=[];})()`);
