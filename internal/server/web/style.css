@@ -729,6 +729,9 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 
 /* 实体筛选芯片（详情抽屉跳转过来时的当前筛选） */
 .filter-chip { display: inline-flex; align-items: center; gap: var(--space-6); padding: 5px var(--space-10); border-radius: var(--radius-pill); background: var(--accent-soft); border: 1px solid var(--blue-line); color: var(--accent); font-size: var(--text-12); }
+.filter-chip-btn { font-family: inherit; cursor: pointer; }
+.filter-chip-btn:hover { background: var(--blue-halo); }
+.filter-chip-btn svg { width: 12px; height: 12px; }
 .chip-x { background: none; border: 0; color: inherit; cursor: pointer; font-size: var(--text-12); line-height: 1; padding: 0 var(--space-2); }
 
 /* ---------------------------------------------------------------- 详情抽屉 */

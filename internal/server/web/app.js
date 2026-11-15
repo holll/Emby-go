@@ -615,6 +615,14 @@ async function pageItems() {
     ['played', '已看'],
     ['unplayed', '未看']
   ];
+  // Emby 的筛选托盘把「当前生效的筛选」显示成一排可移除气泡；这里同构：
+  // 状态/媒体库/搜索各自一枚，点 × 只清掉自己那一个维度。
+  const activeFilters = [
+    libraryID && activeLib ? { key: 'library', label: `媒体库：${activeLib.Name}` } : null,
+    status ? { key: 'status', label: `状态：${WALL_STATUS_TEXT[status]}` } : null,
+    search ? { key: 'search', label: `搜索：${search}` } : null
+  ].filter(Boolean);
+  const filterChip = ({ key, label }) => `<button type="button" class="filter-chip filter-chip-btn" data-filter-clear="${key}" aria-label="清除筛选：${esc(label)}">${esc(label)}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>`;
   const sorts = collectionView ? [['title', '标题 A–Z'], ['title-desc', '标题 Z–A']]
     : [['datecreated', '最近入库'], ['title', '标题'], ['year', '年份'], ['communityrating', '评分']];
   // 库少时平铺成 Tab，库多（>8）转下拉，避免筛选行被撑爆。
@@ -642,6 +650,7 @@ async function pageItems() {
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
         <button type="button" class="btn btn-sm" id="item-order" aria-label="排序方向：${order === 'asc' ? '升序' : '降序'}" title="切换排序方向">${order === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
       </div>
+      ${activeFilters.length ? `<div class="filters wall-active-filters" id="wall-active-filters" aria-label="当前筛选">${activeFilters.map(filterChip).join('')}</div>` : ''}
       ${collectionList ? '' : `<div class="filters wall-status-filters">
         ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
       </div>`}
@@ -765,6 +774,17 @@ async function pageItems() {
     ENTITY_PARAMS.forEach(([key]) => qs.delete(key));
     pushQuery(qs);
     refreshPage(pageItems, gen);
+  });
+  // 气泡只清自己那一维，焦点回到对应控件而不是整页顶部。
+  document.querySelectorAll('[data-filter-clear]').forEach(button => {
+    button.addEventListener('click', () => {
+      const key = { library: 'library_id', status: 'status', search: 'search' }[button.dataset.filterClear];
+      const qs = new URLSearchParams(location.search);
+      qs.delete(key);
+      pendingWallFocus = { library_id: libraries.length <= 8 ? '[data-lib=""]' : '#item-lib', status: '[data-status=""]', search: '#item-search' }[key];
+      pushQuery(qs);
+      refreshPage(pageItems, gen);
+    });
   });
   document.querySelector('#wall-scrape')?.addEventListener('click', () => { location.hash = '#scrape'; page('scrape'); });
   const probeButton = document.querySelector('#probe-media');

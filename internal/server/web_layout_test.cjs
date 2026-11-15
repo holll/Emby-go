@@ -440,6 +440,23 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
 });
 
+test('媒体墙筛选气泡：显示当前筛选、逐个清除并回到对应控件', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{history.replaceState(null,'',location.pathname+'?status=played&search=abc#items');await page('items');for(let i=0;i<100&&!document.querySelector('#wall-active-filters');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const shown = await evaluate(`(()=>({labels:[...document.querySelectorAll('#wall-active-filters [data-filter-clear]')].map(b=>b.textContent.trim()),pressed:document.querySelector('[data-status="played"]').getAttribute('aria-pressed')}))()`);
+  assert.deepEqual(shown.labels, ['状态：已看', '搜索：abc']);
+  assert.equal(shown.pressed, 'true');
+  const cleared = await evaluate(`(async()=>{document.querySelector('[data-filter-clear="status"]').click();for(let i=0;i<100&&new URLSearchParams(location.search).get('status');i++)await new Promise(r=>setTimeout(r,20));for(let i=0;i<100&&document.querySelector('[data-filter-clear="status"]');i++)await new Promise(r=>setTimeout(r,20));return {search:location.search,focus:document.activeElement?.dataset?.status,chips:[...document.querySelectorAll('#wall-active-filters [data-filter-clear]')].map(b=>b.dataset.filterClear)};})()`);
+  assert.doesNotMatch(cleared.search, /status=/); assert.equal(cleared.focus, '', '焦点回到「全部」状态');
+  assert.deepEqual(cleared.chips, ['search']);
+  const clearedSearch = await evaluate(`(async()=>{document.querySelector('[data-filter-clear="search"]').click();for(let i=0;i<100&&document.querySelector('#wall-active-filters');i++)await new Promise(r=>setTimeout(r,20));return {search:location.search,focus:document.activeElement?.id,row:!!document.querySelector('#wall-active-filters')};})()`);
+  assert.equal(clearedSearch.row, false, '没有筛选时不显示气泡行');
+  assert.doesNotMatch(clearedSearch.search, /search=/); assert.equal(clearedSearch.focus, 'item-search');
+  assert.deepEqual(await evaluate('__errors'), []);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '清除筛选不产生写请求');
+});
+
 test('资料处理整合：响应分组、范围独立、旧入口兼容与防火墙首卡间距', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);

@@ -24,6 +24,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 概览显示正在播放的会话（谁、在播什么、播到哪） | `dashboard.html` 会话区 | `sessionsPanel()` + `GET /Sessions`（10 秒轮询，切页自停） |
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
 | 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
+| 当前筛选显示成一排可移除气泡 | `filtermenu` 的已应用筛选 chip 行 | 媒体墙 `#wall-active-filters`：状态/媒体库/搜索各一枚，点 × 只清自己那一维并把焦点还给对应控件 |
 
 ## 有意保留的差异
 
@@ -36,13 +37,15 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   语义已按本项目 NFO 真源模型固定，不追随 Emby。
 - **列表加载**：Emby 库页是显式 `1-100 of N` 分页；我们用无限滚动。接口侧 `StartIndex/Limit`
   已支持，需要时可加「页码」而不改 DTO。
+- **筛选取值**：Emby 的筛选托盘可同时勾多个状态；我们沿用单值 `Filters`（后端目前只解析
+  `IsPlayed`/`IsFavorite`），多选组合要动契约层语义，故只把「当前生效的筛选」气泡化。
 - **布局与偏好**：不做 Emby 的六种布局、`usersettingsbuilder` 的 localStorage + 服务端 `CustomPrefs` 双写。
   我们的偏好只放 URL（可分享、可回退），不新增服务端用户设置存储。
 - **图片比例**：Emby 按 `PrimaryImageAspectRatio` 自适应卡片；我们不返回该字段，卡片保持 2:3。
 
 ## 待评估（未承诺）
 
-按性价比排序，尚未动手：筛选气泡化、视图切换与偏好持久化、计划任务/任务记录进度与停止、
+按性价比排序，尚未动手：视图切换与偏好持久化、计划任务/任务记录进度与停止、
 日志历史回看（`/api/admin/logs/disk` 游标已实现、前端未接）、活动与告警流。
 
 新增页面能力时，先在这里补「Emby 出处 + 我们的 file:line」，再动代码；不要为了像 Emby 而改
