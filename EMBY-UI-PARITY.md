@@ -24,6 +24,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 概览显示正在播放的会话（谁、在播什么、播到哪） | `dashboard.html` 会话区 | `sessionsPanel()` + `GET /Sessions`（10 秒轮询，切页自停） |
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
 | 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
+| 概览显示最近播放活动（用户、影片、次数、UTC 时间），入口到完整记录 | `dashboard.html`「用户活动」limit 7 | `app.js activityPanel` + `#overview-activity`，数据走 `/api/admin/playback-events` |
 | 媒体墙支持网格/列表两种布局，偏好存浏览器本地，不进 URL | `librarybrowser.js showLayoutMenu`（六种布局） | `app.js wallLayout` + `.wall-list`，localStorage `emby_wall_layout` |
 | 概览显示运行中的任务（类型、已运行时长、查看跳转） | `dashboard.html` 的「运行中任务」区 | `app.js tasksPanel` + `#overview-tasks`，数据走 `/api/admin/tasks` 的实时并集 |
 | 运行日志提供「历史」模式：按游标分页读磁盘 app 日志，暂停实时尾随，可返回实时 | `log.html`（日志文件列表，新窗口打开） | `log-stream.js` 的 `#dl-history` + `loadHistory`，走 `/api/admin/logs/disk` |
@@ -41,6 +42,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   语义已按本项目 NFO 真源模型固定，不追随 Emby。
 - **列表加载**：Emby 库页是显式 `1-100 of N` 分页；我们用无限滚动。接口侧 `StartIndex/Limit`
   已支持，需要时可加「页码」而不改 DTO。
+- **活动流**：只聚合播放记录摘要（同用户同影片合并），没有 Emby 的告警、新闻、设备活动流；
+  首页保持只读，时间按 UTC 原文显示，完整记录在防火墙页。
 - **布局偏好**：Emby 有六种布局并把偏好写到服务端 CustomPrefs；这里只做网格/列表两种，
   偏好只存浏览器 localStorage（换设备不同步），排序/筛选仍走 URL 以便分享。
 - **运行中任务**：Emby 靠 websocket 增量推进度；这里按 10 秒轮询刷新，进度只显示已运行时长，
@@ -57,7 +60,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 
 ## 待评估（未承诺）
 
-按性价比排序，尚未动手：活动与告警流。
+暂无未动手项。活动流只做「最近播放」摘要；Emby 的告警/新闻/设备活动流、TV 录制等不在本项目范围内，
+管理写操作走审计事件接口，不混进首页。
 
 新增页面能力时，先在这里补「Emby 出处 + 我们的 file:line」，再动代码；不要为了像 Emby 而改
 已批准的 API 契约或 NFO 真源语义。

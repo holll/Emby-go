@@ -113,7 +113,7 @@ async function browser(t) {
         data={items:__securityRules,max_rules:256,total_blocked:3,client_ip:'192.0.2.10',stats_since:'2026-10-29T12:00:00Z'};
       }
       else if(p.endsWith('/login-events'))data={total:1,events:[{name:'<img src=x onerror=alert(1)>',ip:'203.0.113.5',success:false,created_at:'2026-10-29'}]};
-      else if(p.endsWith('/playback-events'))data={total:0,items:[]};
+      else if(p.endsWith('/playback-events'))data={total:(window.__playbackEvents||[]).length,items:window.__playbackEvents||[]};
       else if(p.endsWith('/probe'))data={items:[{method:'GET',path:'/Items/123/[redacted:123456789abc]',created_at:'2026-10-29'}]};
       else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),time:'2026-10-29T12:00:00Z',level:'info',message:'auto-log-'+id}],next_after:String(id),next_before:'',has_more:false};}
       else if(p.endsWith('/tasks'))data={items:window.__taskItems||[]};
@@ -438,6 +438,37 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(outside.closed, true); assert.equal(outside.expanded, 'false');
   assert.deepEqual(await evaluate('__errors'), []);
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
+});
+
+test('概览最近活动：显示播放记录摘要、UTC 时间、全量记录入口且只读', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(()=>{window.__playbackEvents=[
+    {user_id:1,user_name:'owner',movie_id:7,movie_title:'测试影片 A',play_count:3,last_at:'2026-11-15T09:12:33Z',position_ticks:600000000,last_kind:'progress'},
+    {user_id:2,user_name:'',movie_id:9,movie_title:'',play_count:1,last_at:'2026-11-14T20:00:00Z',position_ticks:0,last_kind:'start'}
+  ]})()`);
+  await evaluate(`(async()=>{await page('overview');})()`);
+  await new Promise(r => setTimeout(r, 500));
+  const shown = await evaluate(`(()=>{
+    const box = document.querySelector('#overview-activity');
+    const rows = [...box.querySelectorAll('.dash-activity')];
+    return {rows: rows.length,
+      titles: rows.map(r => r.querySelector('strong').textContent),
+      details: rows.map(r => r.querySelector('small').textContent),
+      link: document.querySelector('#overview-activity-title').closest('.dash-panel-head').querySelector('a').getAttribute('href'),
+      posts: __calls.filter(c=>c.method==='POST').length};
+  })()`);
+  assert.equal(shown.rows, 2);
+  assert.deepEqual(shown.titles, ['测试影片 A', '#9']);
+  assert.match(shown.details[0], /^owner · 3 次 · 2026-11-15 09:12 UTC · /);
+  assert.match(shown.details[1], /^已删除用户 · 1 次 · 2026-11-14 20:00 UTC · /);
+  assert.equal(shown.link, '#firewall');
+  assert.equal(shown.posts, 0, '首页保持只读');
+  await evaluate(`(()=>{window.__playbackEvents=[]})()`);
+  await evaluate(`(async()=>{await page('overview');})()`);
+  await new Promise(r => setTimeout(r, 400));
+  assert.match(await evaluate(`document.querySelector('#overview-activity').textContent`), /最近还没有播放记录/);
+  assert.deepEqual(await evaluate('__errors'), []);
 });
 
 test('媒体墙布局切换为列表并记住偏好（不进 URL、不重发列表请求）', { timeout: 60000 }, async t => {

@@ -226,6 +226,22 @@ function tasksPanel(tasks) {
   }).join('')}</ul>`;
 }
 
+// 概览「最近活动」：播放记录摘要（同用户同影片合并），完整列表在防火墙页。
+// 时间为 UTC 原文截断显示——不偷偷做本地时区换算，避免和后台日志对不上。
+function activityTime(value) {
+  const text = String(value || '');
+  return /^\d{4}-\d{2}-\d{2}T/.test(text) ? text.replace('T', ' ').slice(0, 16) + ' UTC' : text;
+}
+
+function activityPanel(events) {
+  if (!events.length) return '<p class="dash-note">最近还没有播放记录。</p>';
+  return `<ul class="dash-activity-list">${events.map(event => {
+    const title = event.movie_title || (event.movie_id ? '#' + event.movie_id : '未知条目');
+    const detail = [event.user_name || '已删除用户', Number(event.play_count) > 0 ? `${event.play_count} 次` : '', activityTime(event.last_at), playbackKindText(event.last_kind)].filter(Boolean).join(' · ');
+    return `<li class="dash-activity"><span class="dash-activity-body"><strong>${esc(title)}</strong><small>${esc(detail)}</small></span></li>`;
+  }).join('')}</ul>`;
+}
+
 async function pageOverview() {
   const gen = pageGen, identity = token;
   stopDashboardPolling();
@@ -245,6 +261,7 @@ async function pageOverview() {
   const sessionsCount = content.querySelector('[data-dash="sessions-count"]');
   const tasksBox = content.querySelector('#overview-tasks');
   const tasksCount = content.querySelector('[data-dash="tasks-count"]');
+  const activityBox = content.querySelector('#overview-activity');
   let sessions = [], runningTasks = [];
   const refresh = async (button, read) => {
     if (!current() || button.getAttribute('aria-disabled') === 'true') return;
@@ -308,6 +325,17 @@ async function pageOverview() {
     if (!current() || !event.target.closest('[data-task-open]')) return;
     location.hash = '#tasks'; page('tasks');
   });
+  const readActivity = async () => {
+    if (!current()) return;
+    try {
+      const data = await api('/playback-events?limit=7');
+      if (!current()) return;
+      activityBox.innerHTML = activityPanel(Array.isArray(data.items) ? data.items : []);
+    } catch (error) {
+      if (!current()) return;
+      activityBox.innerHTML = `<p class="dash-note" role="status">最近活动读取失败：${esc(error.message || '请求失败')}</p>`;
+    }
+  };
   libraryRefresh.addEventListener('click', readLibraries);
   serviceRefresh.addEventListener('click', readService);
   // Emby 用 websocket 推送会话变化；这里按 10 秒轮询，切页或退出后自停。
@@ -315,8 +343,9 @@ async function pageOverview() {
     if (!current()) { stopDashboardPolling(); return; }
     void readSessions();
     void readTasks();
+    void readActivity();
   }, 10000);
-  await Promise.all([readLibraries(), readService(), readSessions(), readTasks()]);
+  await Promise.all([readLibraries(), readService(), readSessions(), readTasks(), readActivity()]);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
