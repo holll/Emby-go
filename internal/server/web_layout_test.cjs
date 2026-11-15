@@ -978,7 +978,7 @@ test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出',
       const rows=[...drawer.querySelectorAll('.detail-meta-row')].map(row=>{const dd=row.querySelector('dd').getBoundingClientRect();return {label:row.querySelector('dt').getBoundingClientRect().width,ddW:dd.width,ddOverflow:row.querySelector('dd').scrollWidth-row.querySelector('dd').clientWidth};});
       const cards=[...drawer.querySelectorAll('.avatar-card')].map(c=>{const r=c.getBoundingClientRect();return {w:r.width,right:r.right};});
       const grids=[...drawer.querySelectorAll('.avatar-grid')].map(g=>g.getBoundingClientRect().width);
-      const wraps=[...drawer.querySelectorAll('.detail-section .table-wrap')].map(w=>({cw:w.clientWidth,sw:w.scrollWidth,right:w.getBoundingClientRect().right,overflowX:getComputedStyle(w).overflowX}));
+      const wraps=[...drawer.querySelectorAll('.detail-section .table-wrap')].map(w=>{const table=w.querySelector('table');const rows=[...w.querySelectorAll('tbody tr')];return {cw:w.clientWidth,sw:w.scrollWidth,right:w.getBoundingClientRect().right,overflowX:getComputedStyle(w).overflowX,minWidth:getComputedStyle(table).minWidth,theadDisplay:getComputedStyle(w.querySelector('thead')).display,rowCount:rows.length,rowDisplay:rows.map(r=>getComputedStyle(r).display),tdLabels:rows[0]?[...rows[0].children].map(td=>({label:getComputedStyle(td,'::before').content,display:getComputedStyle(td).display,whiteSpace:getComputedStyle(td).whiteSpace})):[]};});
       const head=drawer.querySelector('.detail-file-head');
       const path=drawer.querySelector('.detail-path');
       const headKids=[...head.children].map(k=>({right:k.getBoundingClientRect().right,sw:k.scrollWidth-cw(k)}));
@@ -996,18 +996,39 @@ test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出',
       assert.ok(card.right <= m.drawerW, `${width}px: 演员卡不越过抽屉`);
     }
     for (const grid of m.grids) assert.ok(grid <= m.drawerCW, `${width}px: 演员网格不越过抽屉内容区`);
-    assert.ok(m.wraps.length >= 1, `${width}px: 媒体流表格存在`);
+    assert.ok(m.wraps.length >= 1, `${width}px: 媒体流区域存在`);
     for (const wrap of m.wraps) {
-      assert.equal(wrap.overflowX, 'auto', `${width}px: 表格在自己的容器里横向滚动`);
-      assert.ok(wrap.cw <= m.drawerCW, `${width}px: 表格容器不越过抽屉内容区`);
-      assert.ok(wrap.right <= m.drawerW, `${width}px: 表格不越过抽屉`);
-      assert.ok(wrap.sw > wrap.cw, `${width}px: 宽表格确实需要内部滚动，说明内容没被压扁`);
+      // 窄屏下媒体流改成「每条一段」的卡片，不再横滚。
+      assert.equal(wrap.overflowX, 'visible', `${width}px: 媒体流不再依赖横向滚动`);
+      assert.equal(wrap.minWidth, '0px', `${width}px: 不再强制 560px 最小宽度`);
+      assert.equal(wrap.theadDisplay, 'none', `${width}px: 窄屏隐藏表头，改用字段名标签`);
+      assert.ok(wrap.cw <= m.drawerCW, `${width}px: 媒体流容器不越过抽屉内容区`);
+      assert.ok(wrap.right <= m.drawerW, `${width}px: 媒体流不越过抽屉`);
+      assert.ok(wrap.sw <= wrap.cw + 1, `${width}px: 卡片模式不横向溢出（sw ${wrap.sw} / cw ${wrap.cw}）`);
+      assert.equal(wrap.rowCount, 3, `${width}px: 三条流各成一段`);
+      for (const display of wrap.rowDisplay) assert.equal(display, 'block', `${width}px: 每条流是块级卡片`);
+      const labels = wrap.tdLabels.map(td => td.label);
+      for (const want of ['类型', '参数', '标记']) assert.ok(labels.some(label => label.includes(want)), `${width}px: 卡片显示「${want}」字段名，实际 ${labels.join('|')}`);
+      const seq = wrap.tdLabels.find(td => td.label.includes('序号'));
+      assert.ok(seq && seq.display === 'none', `${width}px: 序号行在卡片里隐藏`);
+      for (const td of wrap.tdLabels) assert.equal(td.whiteSpace, 'normal', `${width}px: 卡片内允许换行`);
     }
     for (const kid of m.headKids) assert.ok(kid.right <= width, `${width}px: 文件头各段折行后仍在视口内`);
     assert.equal(m.pathOverflow, 0, `${width}px: 长路径不横向溢出`);
     assert.ok(m.pageScroll <= width + 1, `${width}px: 页面无横向滚动`);
     await evaluate(`closeDetail()`);
   }
+  // 宽屏保持原来的表格 + 内部横滚，不因为窄屏改动而退化。
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`(async()=>{await openMaintenanceDetail({id:1});for(let i=0;i<100&&!document.querySelector('.stream-table');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const wide = await evaluate(`(()=>{const w=document.querySelector('.stream-table');const table=w.querySelector('table');return {overflowX:getComputedStyle(w).overflowX,minWidth:getComputedStyle(table).minWidth,thead:getComputedStyle(w.querySelector('thead')).display,cw:w.clientWidth,sw:w.scrollWidth,tableW:table.getBoundingClientRect().width,rows:[...w.querySelectorAll('tbody tr')].map(r=>getComputedStyle(r).display)};})()`);
+  assert.equal(wide.overflowX, 'auto', '宽屏媒体流仍在容器内横滚');
+  // 560px 的强制最小宽度只在窄屏下用来托住列宽；宽屏由单元格内容自然撑开。
+  assert.equal(wide.minWidth, '0px', '宽屏不套用窄屏的强制最小宽度');
+  assert.notEqual(wide.thead, 'none', '宽屏显示表头');
+  assert.ok(wide.tableW >= 400, `宽屏表格按内容展开，实际 ${wide.tableW}`);
+  for (const display of wide.rows) assert.equal(display, 'table-row', '宽屏每条流仍是表格行');
+  await evaluate(`closeDetail()`);
 });
 
 test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {

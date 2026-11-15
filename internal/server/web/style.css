@@ -665,7 +665,18 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   /* 表格式数据在窄屏内横向滚动，避免列被挤成逐字换行 */
   /* 只有“确实需要横向滚动”的宽表格保留最小宽度；已改为堆叠卡片的不再参与，
      否则 min-width 会把移动端布局视口撑宽（innerWidth > 设备宽度）。 */
-  .table-wrap:not(.security-table):not(.audit-table):not(.scheduled-table) table:not(.user-table) { min-width: 560px; }
+  .table-wrap:not(.security-table):not(.audit-table):not(.scheduled-table):not(.stream-table) table:not(.user-table) { min-width: 560px; }
+  /* 详情抽屉里的媒体流改为「每条一段」的卡片：4K 与多音轨的参数横滚起来没法读。 */
+  .stream-table { overflow: visible; margin: 0; }
+  .stream-table thead { display: none; }
+  .stream-table, .stream-table tbody, .stream-table tr, .stream-table td { display: block; width: auto; }
+  .stream-table table { min-width: 0; }
+  .stream-table tr { border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: var(--space-8) var(--space-10); margin-bottom: var(--space-8); background: rgba(255, 255, 255, 0.015); }
+  .stream-table tr:last-child { margin-bottom: 0; }
+  .stream-table td { border: 0; padding: var(--space-2) 0; overflow-wrap: anywhere; white-space: normal; }
+  .stream-table td::before { content: attr(data-label); display: inline-block; min-width: 64px; color: var(--dim); font: 600 var(--text-11) var(--font-mono); letter-spacing: .1em; }
+  /* 序号对阅读没用，卡片里省掉一行。 */
+  .stream-table td[data-label="序号"] { display: none; }
   /* 活动记录同样改为堆叠卡片：横向滚动会把移动端布局视口撑宽。 */
   .audit-table thead { display: none; }
   .audit-table, .audit-table tbody, .audit-table tr, .audit-table td { display: block; width: auto; }

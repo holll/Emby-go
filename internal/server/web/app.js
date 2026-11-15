@@ -1220,11 +1220,11 @@ function streamTable(streams) {
          s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Profile, s.BitDepth ? `${s.BitDepth}bit` : '']
       : [s.Codec && String(s.Codec).toUpperCase(), s.ChannelLayout || (s.Channels ? `${s.Channels}ch` : ''),
          s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Language, s.SampleRate ? `${s.SampleRate} Hz` : ''];
-    return `<tr><td class="mono">#${esc(s.Index ?? '')}</td><td>${esc(type)}</td>
-      <td class="mono">${esc(detail.filter(Boolean).join(' · ') || '—')}</td>
-      <td class="mono">${esc([s.IsDefault ? '默认' : '', s.IsForced ? '强制' : '', s.IsExternal ? '外挂' : ''].filter(Boolean).join(' ') || '—')}</td></tr>`;
+    return `<tr><td class="mono" data-label="序号">#${esc(s.Index ?? '')}</td><td data-label="类型">${esc(type)}</td>
+      <td class="mono" data-label="参数">${esc(detail.filter(Boolean).join(' · ') || '—')}</td>
+      <td class="mono" data-label="标记">${esc([s.IsDefault ? '默认' : '', s.IsForced ? '强制' : '', s.IsExternal ? '外挂' : ''].filter(Boolean).join(' ') || '—')}</td></tr>`;
   }).join('');
-  return `<div class="table-wrap" tabindex="0" role="region" aria-label="媒体流信息"><table>
+  return `<div class="table-wrap stream-table" tabindex="0" role="region" aria-label="媒体流信息"><table>
     <caption class="sr-only">媒体流信息</caption>
     <thead><tr><th scope="col">#</th><th scope="col">类型</th><th scope="col">参数</th><th scope="col">标记</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
