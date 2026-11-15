@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"emby-go/internal/cache"
+	"emby-go/internal/collage"
 	"emby-go/internal/config"
 	"emby-go/internal/store"
 
@@ -322,6 +324,32 @@ func TestCollectionCoverRevertRestoresRepresentative(t *testing.T) {
 	}
 }
 
+// TestCollectionCoverRevertAllInvalidatesAppliedCache revert 之后进程内「已生效封面」
+// 缓存必须立刻失效：它带着 30 秒 TTL，靠 TTL 兜底会让列表在退掉封面后继续按旧状态出图。
+func TestCollectionCoverRevertAllInvalidatesAppliedCache(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true})
+	if status, raw := doJSON(t, ts, "POST", "/api/admin/collection-cover/run", token, `{"collections":["系列A"],"apply":true}`); status != http.StatusAccepted {
+		t.Fatalf("run apply: %d %s", status, raw)
+	}
+	waitCollectionCoverTask(t, app)
+	if _, ok := app.appliedCovers()["系列A"]; !ok {
+		t.Fatal("apply 后应进入已生效缓存")
+	}
+	status, raw := doJSON(t, ts, "POST", "/api/admin/collection-cover/revert", token, `{"all":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("revert all: %d %s", status, raw)
+	}
+	var resp struct {
+		Reverted int `json:"reverted"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.Reverted != 1 {
+		t.Fatalf("应退掉一条封面: %v %s", err, raw)
+	}
+	if _, ok := app.appliedCovers()["系列A"]; ok {
+		t.Error("revert 后已生效缓存应立即失效")
+	}
+}
+
 // TestCollectionCoverSkipsMissingPosters 没有海报或海报损坏时跳过，不中断整批。
 func TestCollectionCoverSkipsMissingPosters(t *testing.T) {
 	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": false, "b": false})
@@ -449,6 +477,47 @@ func TestCollectionCoverConcurrentPreview(t *testing.T) {
 	}
 	if files := collectionCoverFiles(t, app); len(files) != 1 {
 		t.Errorf("并发只该产出一个文件，实际 %d: %v", len(files), files)
+	}
+}
+
+// TestCoverVariantFollowersDoNotRender 同一 key 只允许 leader 渲染：先占住 leader 位置，
+// 并发的调用必须等 leader 的结果，而不是各自重新解压、拼贴同一批海报。
+// 「只产出一个文件」证不了这一点——同 key 的重复渲染写的是同一个路径。
+func TestCoverVariantFollowersDoNotRender(t *testing.T) {
+	app, _, _ := collectionCoverFixture(t, map[string]bool{"a": true})
+	dir := app.collectionCoverDir()
+	const key = "flight-only-test"
+	dest := filepath.Join(dir, key+".webp")
+	leader, ok := app.beginCoverFlight(dest)
+	if !ok {
+		t.Fatal("测试应拿到 leader 位置")
+	}
+	const workers = 4
+	var started, wg sync.WaitGroup
+	started.Add(workers)
+	paths := make([]string, workers)
+	errs := make([]error, workers)
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started.Done()
+			paths[i], errs[i] = app.coverVariant(context.Background(), dir, key, nil, collage.Layout{Width: 640, Height: 360}, 90, true)
+		}()
+	}
+	// 等所有 goroutine 就绪再给一点时间登记成 follower，然后由 leader 发布结果。
+	started.Wait()
+	time.Sleep(200 * time.Millisecond)
+	app.finishCoverFlight(dest, leader, dest, nil)
+	wg.Wait()
+	for i := range workers {
+		if errs[i] != nil || paths[i] != dest {
+			t.Fatalf("follower %d 应等到 leader 结果: path=%q err=%v", i, paths[i], errs[i])
+		}
+	}
+	// follower 不落盘：这条路径上谁都没渲染。
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("follower 不应写盘: %v", err)
 	}
 }
 

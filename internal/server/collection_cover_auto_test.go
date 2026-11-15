@@ -139,6 +139,31 @@ func TestCollectionCoverAutoSkipsUnchanged(t *testing.T) {
 	}
 }
 
+// TestMaybeAutoCoversMergesCollectionAndLibraryTargets 合集与媒体库目标必须合成一个任务：
+// 分两次启动时第二次必然撞上 errCoverTaskBusy，那批封面会被整批静默跳过（自动触发不排队）。
+func TestMaybeAutoCoversMergesCollectionAndLibraryTargets(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true, "c": true})
+	for _, path := range []string{"/api/admin/collection-cover/settings", "/api/admin/library-cover/settings"} {
+		if status, raw := doJSON(t, ts, "PUT", path, token, `{"auto":true}`); status != http.StatusOK {
+			t.Fatalf("开启自动封面 %s: %d %s", path, status, raw)
+		}
+	}
+	app.maybeAutoCovers()
+	s := waitCollectionCoverTask(t, app)
+	if s.Kind != "mixed" {
+		t.Errorf("合集+媒体库目标应合成 mixed 任务，得到 %q", s.Kind)
+	}
+	if s.Done != 2 || s.Failed != 0 {
+		t.Errorf("两个目标都该生成成功: %+v", s)
+	}
+	if _, ok, err := app.db.AppliedCover("系列A"); err != nil || !ok {
+		t.Errorf("合集封面应写库: ok=%v err=%v", ok, err)
+	}
+	if covers, err := app.db.AppliedLibraryCovers(); err != nil || len(covers) != 1 {
+		t.Errorf("媒体库封面应写库: %v err=%v", covers, err)
+	}
+}
+
 // addCollectionMember 往媒体库里加一部带海报的新片，制造一次真实的索引变更。
 func addCollectionMember(t *testing.T, app *App, name string) {
 	t.Helper()

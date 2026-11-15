@@ -114,10 +114,6 @@ func coverOptionsFrom(quality, width, height *int, reflection *bool, overwrite b
 	return opts
 }
 
-func (req collectionCoverRequest) options(mode string) coverOptions {
-	return coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
-}
-
 // coverPreviewOptions 是预览端点的默认参数：与 run 完全省略可选字段时一致，
 // 只差 Apply（预览不写库）。合集与媒体库预览共用，避免两边各写一套默认值后，
 // 预览出来的图和真正发布的图不是同一张。
@@ -142,7 +138,8 @@ func (a *App) adminCollectionCoverRun(c *gin.Context) {
 	if req.Apply {
 		mode = "apply"
 	}
-	accepted, err := a.startCoverTask(collectionTargets(names), req.options(mode), mode)
+	opts := coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
+	accepted, err := a.startCoverTask(collectionTargets(names), opts, mode)
 	if err != nil {
 		workerGateAPIError(c, err, http.StatusConflict)
 		return
@@ -168,9 +165,7 @@ func (a *App) executeCoverTargets(ctx context.Context, taskID int64, targets []c
 		if s.Error != "" {
 			taskErr = errors.New(s.Error)
 		}
-		if a.coverCancel != nil {
-			a.coverCancel()
-		}
+		a.coverCancel()
 		a.coverCancel = nil
 		if taskID != 0 {
 			a.finishTask(taskID, taskErr)
@@ -261,7 +256,8 @@ func (a *App) adminCollectionCoverCancel(c *gin.Context) {
 		apiError(c, http.StatusNotFound, "cover task not found")
 		return
 	}
-	if !a.coverStatus.Running || a.coverCancel == nil {
+	// coverCancel 与 Running 在 startCoverTask 里同一把锁内一起置位，Running 为真即非空。
+	if !a.coverStatus.Running {
 		apiError(c, http.StatusConflict, "cover task finished")
 		return
 	}

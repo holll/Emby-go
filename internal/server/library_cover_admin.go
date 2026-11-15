@@ -65,10 +65,6 @@ func decodeLibraryCoverRequest(r io.Reader) (libraryCoverRequest, error) {
 	return req, nil
 }
 
-func (req libraryCoverRequest) options(mode string) coverOptions {
-	return coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
-}
-
 func (a *App) adminLibraryCoverRun(c *gin.Context) {
 	req, err := decodeLibraryCoverRequest(c.Request.Body)
 	if err != nil {
@@ -94,7 +90,8 @@ func (a *App) adminLibraryCoverRun(c *gin.Context) {
 	if req.Apply {
 		mode = "apply"
 	}
-	accepted, err := a.startCoverTask(targets, req.options(mode), mode)
+	opts := coverOptionsFrom(req.Quality, req.Width, req.Height, req.Reflection, req.Overwrite, mode)
+	accepted, err := a.startCoverTask(targets, opts, mode)
 	if err != nil {
 		workerGateAPIError(c, err, http.StatusConflict)
 		return

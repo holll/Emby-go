@@ -126,14 +126,27 @@ func TestLibraryCoverGeneratedAndServed(t *testing.T) {
 		t.Fatalf("图片端点应返回生成的拼贴文件: %v", err)
 	}
 
-	// 再跑一次不重写库：内容没变就是同一张图。
-	before2 := cover.Path
+	// 再跑一次不重写库：内容没变就是同一张图。用哨兵 AppliedAt 证明记录真的没被重写，
+	// 而不是「路径恰好相同」——路径只是 key 的派生，rewrite 一样会让它不变。
+	before2, beforeHash := cover.Path, cover.SourceHash
+	sentinel := "2001-01-01T00:00:00Z"
+	cover.AppliedAt = sentinel
+	if err := app.db.SetAppliedLibraryCover(cover); err != nil {
+		t.Fatal(err)
+	}
 	if status, raw := doJSON(t, ts, "POST", "/api/admin/library-cover/run", token, `{"all":true,"apply":true}`); status != http.StatusAccepted {
 		t.Fatalf("rerun: %d %s", status, raw)
 	}
 	waitCollectionCoverTask(t, app)
-	if covers, err := app.db.AppliedLibraryCovers(); err != nil || covers[library.ID].Path != before2 {
-		t.Fatalf("重复生成应复用同一文件: %v %v", err, covers)
+	again, ok, err := app.db.AppliedLibraryCover(library.ID)
+	if err != nil || !ok {
+		t.Fatalf("重复生成后应保留生效记录: ok=%v err=%v", ok, err)
+	}
+	if again.Path != before2 || again.SourceHash != beforeHash || again.AppliedAt != sentinel {
+		t.Errorf("内容未变时不应重写生效记录: %+v", again)
+	}
+	if data, err := os.ReadFile(again.Path); err != nil || !bytes.Equal(data, body) {
+		t.Errorf("重复生成后封面字节应保持不变: %v", err)
 	}
 }
 
