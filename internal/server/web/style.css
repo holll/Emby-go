@@ -769,7 +769,7 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 /* ---------------------------------------------------------------- 详情抽屉 */
 /* 四个浮层已改为原生 <dialog>：清掉 UA 默认的边框、内边距、外边距、白色背景与
    auto 溢出，再按各自的 [open] 布局铺满视口；模态层级由 top layer 决定，不再依赖 z-index。 */
-.detail-overlay, .scrape-overlay, .player-overlay {
+.detail-overlay, .scrape-overlay, .player-overlay, .stills-overlay {
   position: fixed; inset: 0; width: 100%; height: 100%;
   margin: 0; border: 0; padding: 0; max-width: none; max-height: none;
   background: transparent; color: inherit; overflow: hidden;
@@ -885,6 +885,24 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .player-head strong { font-size: var(--text-14); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-stage { aspect-ratio: 16 / 9; max-height: calc(100vh - 140px); max-height: calc(100dvh - 140px); background: #000; flex: 0 0 auto; }
 .player-stage > div { width: 100%; height: 100%; }
+
+/* 剧照：详情抽屉里的横向缩略图条 + 叠在抽屉之上的大图浮层 */
+.detail-stills { display: flex; gap: var(--space-8); overflow-x: auto; padding-bottom: var(--space-4); }
+.still-thumb { flex: none; width: 132px; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel-2); cursor: pointer; }
+.still-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.still-thumb:hover img { opacity: 0.85; }
+.still-thumb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.stills-overlay[open] { display: grid; place-items: center; padding: var(--space-24); }
+.stills-overlay::backdrop { background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(4px); }
+.stills-shell { display: flex; flex-direction: column; gap: var(--space-10); width: min(1200px, 100%); }
+.stills-head { display: flex; align-items: center; gap: var(--space-10); }
+.stills-head strong { font-size: var(--text-14); font-weight: 600; }
+.stills-head .icon-btn { margin-left: auto; }
+.stills-stage { position: relative; display: flex; align-items: center; justify-content: center; gap: var(--space-8); }
+.stills-stage img { max-width: 100%; max-height: calc(100vh - 180px); max-height: calc(100dvh - 180px); object-fit: contain; border-radius: var(--radius-sm); background: #000; }
+.stills-nav { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.72); color: var(--text); cursor: pointer; }
+.stills-nav svg { width: 22px; height: 22px; }
+.stills-nav:disabled { opacity: 0.35; cursor: default; }
 
 /* 触屏设备没有 hover：把悬停才出现的操作/播放按钮改为常显，保证可达 */
 @media (hover: none) {

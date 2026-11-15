@@ -230,6 +230,9 @@
 - `saved` 是已扫描索引里的 `provider_id` 原值（可能带历史 `metatube:` 前缀）；无值为 `""`。
 - `canonical` 是可直接回填搜索的官方格式 `Provider:escaped-ID[:Position[:Update]]`；无法解析时为 `""`。
 - `valid=false` 表示已存内容不是合法身份：调用方只能作文本展示并提示无法精准复用，不得回填搜索或据此发起精准查询。
+- 新增只读派生字段 `backdrops`：`[{"index":0,"tag":"<filetag>"}]`，按 `movieBackdropPaths` 的连续下标
+  列出主背景与 extrafanart 全部图片；`tag` 取自文件本身，换图后自然变化。调用方据此拼
+  `/emby/Items/{id}/Images/Backdrop/{index}`，不要自行猜测数量或下标。无背景图时为空数组。
 - 派生自索引，不读盘、不写入；外部修改 NFO 后须重读/重扫才会反映。
 
 ### 4.7 多背景图磁盘索引（MT-03 分阶段施工）

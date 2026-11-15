@@ -62,7 +62,7 @@ async function browser(t) {
       else if(p.endsWith('/detail')){
         if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
         if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
-        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:[]};
+        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:[],backdrops:window.__detailBackdrops||[]};
       }
       else if(p.endsWith('/scan/progress'))data=window.__scanProgress || {running:true,library_name:'测试媒体库',done:42,total:120};
       else if(p.endsWith('/diagnostics'))data={generated_at:'2026-11-01T08:00:00Z',app:{version:'overview-fixture',commit:'a'.repeat(40)},store:{path:'/data/'+ 'long-path/'.repeat(16),schema_version:22}};
@@ -959,7 +959,40 @@ test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自�
   const errors=await evaluate('__errors');assert.deepEqual(errors,[]);
 });
 
-test('详情固定外壳：加载关闭、错误重试、长详情关闭、背景隔离、持久反馈与焦点归还', {timeout:60000}, async t => {
+test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(()=>{window.__detailBackdrops=[{index:0,tag:'t0'},{index:1,tag:'t1'},{index:2,tag:'t2'}];})()`);
+  await evaluate(`(async()=>{await openMaintenanceDetail({id:1});for(let i=0;i<100&&!document.querySelector('.still-thumb');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const strip = await evaluate(`(()=>{const thumbs=[...document.querySelectorAll('.still-thumb')];return {count:thumbs.length,srcs:thumbs.map(b=>b.querySelector('img').getAttribute('src')),heading:document.querySelector('.detail-stills')?.closest('.detail-section')?.querySelector('h3')?.textContent.trim()};})()`);
+  assert.equal(strip.count, 3, '详情显示全部剧照缩略图');
+  assert.deepEqual(strip.srcs, [
+    '/emby/Items/1/Images/Backdrop/0?maxWidth=320&tag=t0',
+    '/emby/Items/1/Images/Backdrop/1?maxWidth=320&tag=t1',
+    '/emby/Items/1/Images/Backdrop/2?maxWidth=320&tag=t2'
+  ]);
+  assert.equal(strip.heading, '剧照 3 张');
+  // 点第 2 张：浮层打开、大小图地址与计数正确、上一张可用下一张可用
+  const opened = await evaluate(`(async()=>{const thumb=document.querySelectorAll('.still-thumb')[1];thumb.focus();thumb.click();for(let i=0;i<100&&!document.querySelector('#stills-overlay').open;i++)await new Promise(r=>setTimeout(r,20));return {open:document.querySelector('#stills-overlay').open,src:document.querySelector('#stills-image').getAttribute('src'),counter:document.querySelector('#stills-counter').textContent,prev:document.querySelector('#stills-prev').disabled,next:document.querySelector('#stills-next').disabled};})()`);
+  assert.equal(opened.open, true);
+  assert.match(opened.src, /\/emby\/Items\/1\/Images\/Backdrop\/1\?maxWidth=1600&tag=t1$/);
+  assert.equal(opened.counter, '2 / 3');
+  assert.equal(opened.prev, false); assert.equal(opened.next, false);
+  // → 翻到末张，下一张禁用
+  const next = await evaluate(`(async()=>{document.querySelector('#stills-overlay').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));return {counter:document.querySelector('#stills-counter').textContent,src:document.querySelector('#stills-image').getAttribute('src'),next:document.querySelector('#stills-next').disabled};})()`);
+  assert.equal(next.counter, '3 / 3'); assert.match(next.src, /Backdrop\/2\?maxWidth=1600/); assert.equal(next.next, true);
+  // ← 回到第 2 张，Esc 关闭并归还焦点给触发的缩略图
+  const closed = await evaluate(`(async()=>{document.querySelector('#stills-overlay').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));document.querySelector('#stills-overlay').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));document.querySelector('#stills-close').click();for(let i=0;i<100&&document.querySelector('#stills-overlay').open;i++)await new Promise(r=>setTimeout(r,20));return {open:document.querySelector('#stills-overlay').open,focus:document.activeElement?.dataset?.stillIndex,detail:document.querySelector('#detail-overlay').open};})()`);
+  assert.equal(closed.open, false, '浮层关闭');
+  assert.equal(closed.focus, '1', '焦点回到触发的缩略图');
+  assert.equal(closed.detail, true, '只关剧照，详情抽屉还在');
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '看剧照不产生写请求');
+  assert.deepEqual(await evaluate('__errors'), []);
+  await evaluate(`closeDetail()`);
+  await evaluate(`(()=>{window.__detailBackdrops=[];})()`);
+});
+
+test('详情固定外壳：加载关闭、错误重试、长详情关闭、背景隔离、持久反馈与焦点归还' , {timeout:60000}, async t => {
   if (!available(t)) return;
   const {call,evaluate}=await browser(t);
   await call('Emulation.setDeviceMetricsOverride',{width:320,height:740,deviceScaleFactor:1,mobile:true});

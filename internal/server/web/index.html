@@ -113,6 +113,21 @@
   <aside id="detail-drawer" class="detail-drawer"></aside>
 </dialog>
 
+<dialog id="stills-overlay" class="stills-overlay" aria-label="剧照">
+  <div class="stills-shell">
+    <div class="stills-head">
+      <strong id="stills-title">剧照</strong>
+      <span id="stills-counter" class="hint" style="margin:0"></span>
+      <button id="stills-close" class="icon-btn" type="button" title="关闭 (Esc)" aria-label="关闭剧照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="stills-stage">
+      <button id="stills-prev" class="stills-nav" type="button" aria-label="上一张剧照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg></button>
+      <img id="stills-image" alt="">
+      <button id="stills-next" class="stills-nav" type="button" aria-label="下一张剧照"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="player-overlay" class="player-overlay" aria-label="播放器">
   <div class="player-shell">
     <div class="player-head">

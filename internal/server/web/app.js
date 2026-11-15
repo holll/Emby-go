@@ -1107,17 +1107,79 @@ const detailOverlay = document.querySelector('#detail-overlay');
 const detailDrawer = document.querySelector('#detail-drawer');
 
 let detailGen = 0;
+let detailStills = [];
+let detailStillsId = null;
+let stillsIndex = 0;
+let stillsTrigger = null;
 let detailTranslationStop = null;
 let detailArtworkStop = null;
 let detailSpritesStop = null;
 
 function closeDetail() {
+  if (detailStills.length) closeStills();
+  detailStills = []; detailStillsId = null;
   if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
   if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
   if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
   detailGen += 1;
   detailDrawer.innerHTML = '';
   overlayPop('#detail-overlay');
+}
+
+// 剧照浮层：在详情抽屉之上叠一层大图；←/→ 翻页，Esc 逐层关闭。
+// 数据来自 /api/admin/items/:id/detail 的 backdrops（主背景 + extrafanart 连续下标）。
+function stillsURL(still) {
+  return `/emby/Items/${esc(detailStillsId)}/Images/Backdrop/${still.index}?maxWidth=1600${still.tag ? '&tag=' + esc(still.tag) : ''}`;
+}
+
+function showStill(index) {
+  if (!detailStills.length) return;
+  stillsIndex = Math.max(0, Math.min(detailStills.length - 1, index));
+  const image = document.querySelector('#stills-image');
+  image.src = stillsURL(detailStills[stillsIndex]);
+  image.alt = `剧照 ${stillsIndex + 1}/${detailStills.length}`;
+  document.querySelector('#stills-counter').textContent = `${stillsIndex + 1} / ${detailStills.length}`;
+  document.querySelector('#stills-prev').disabled = stillsIndex === 0;
+  document.querySelector('#stills-next').disabled = stillsIndex === detailStills.length - 1;
+}
+
+let stillsOverlayBound = false;
+
+// 浮层事件只在第一次打开时绑定一次；绑定集中在这里，boot 不需要额外 DOM 契约。
+function bindStillsOverlay() {
+  if (stillsOverlayBound) return;
+  stillsOverlayBound = true;
+  const overlay = document.querySelector('#stills-overlay');
+  document.querySelector('#stills-close').addEventListener('click', closeStills);
+  document.querySelector('#stills-prev').addEventListener('click', () => showStill(stillsIndex - 1));
+  document.querySelector('#stills-next').addEventListener('click', () => showStill(stillsIndex + 1));
+  overlay.addEventListener('click', event => { if (event.target.id === 'stills-overlay') closeStills(); });
+  overlay.addEventListener('keydown', event => {
+    if (event.key === 'ArrowLeft') { event.preventDefault(); showStill(stillsIndex - 1); }
+    else if (event.key === 'ArrowRight') { event.preventDefault(); showStill(stillsIndex + 1); }
+  });
+  // 原生 Esc 关闭不经过 closeStills，这里补一次栈同步与焦点归还。
+  overlay.addEventListener('close', () => {
+    const index = openOverlays.indexOf('#stills-overlay');
+    if (index !== -1) openOverlays.splice(index, 1);
+    const trigger = stillsTrigger;
+    stillsTrigger = null;
+    if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) trigger.focus();
+  });
+}
+
+function openStills(index, trigger) {
+  bindStillsOverlay();
+  stillsTrigger = trigger || null;
+  showStill(index);
+  overlayPush('#stills-overlay');
+}
+
+function closeStills() {
+  const trigger = stillsTrigger;
+  stillsTrigger = null;
+  overlayPop('#stills-overlay');
+  if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) trigger.focus();
 }
 
 // gotoEntity 跳到媒体墙并按该实体过滤（单值筛选，URL 可见、抽屉关闭）。
@@ -1317,7 +1379,7 @@ function bindSubtitleMarks(panel, toggle, movieId, isCurrent) {
 
 /* 遮罩焦点：四个浮层都是原生 <dialog>，模态语义（焦点限制、Esc 关闭、背景隔离、
    滚动链）由浏览器承担；这里只维护开启顺序，供 toast 找到最上层反馈条与路由切换时收起。 */
-const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay', '#update-overlay'];
+const OVERLAY_LAYERS = ['#scrape-overlay', '#player-overlay', '#detail-overlay', '#stills-overlay', '#update-overlay'];
 const openOverlays = [];
 
 function overlayVisible(selector) {
@@ -1334,6 +1396,7 @@ function closeOverlaysForNavigation() {
   if (overlayVisible('#update-overlay')) closeUpdateDialog();
   if (overlayVisible('#scrape-overlay')) closeScrapePreview();
   if (overlayVisible('#player-overlay')) closePlayer();
+  if (overlayVisible('#stills-overlay')) closeStills();
   if (overlayVisible('#detail-overlay')) closeDetail();
 }
 
@@ -1410,6 +1473,8 @@ async function openMaintenanceDetail(item) {
   // （id / collection / official_rating / source_path / source_protocol / created_at …），
   // 其余保持 Go 字段名。取值时按接口实际返回的键来写。
   const m = data.movie || {};
+  detailStills = Array.isArray(data.backdrops) ? data.backdrops : [];
+  detailStillsId = m.id;
   const title = movieDisplayTitle(m) || String(item.id);
   const st = m.Status || '';
   const playable = st === 'success' || st === 'manual';
@@ -1537,6 +1602,13 @@ async function openMaintenanceDetail(item) {
           </div>`).join('')}
       </section>
 
+      ${detailStills.length ? `<section class="detail-section"><h3>剧照 <small>${detailStills.length} 张</small></h3>
+        <div class="detail-stills">${detailStills.map((still, index) => `
+          <button type="button" class="still-thumb" data-still-index="${index}" aria-label="查看第 ${index + 1} 张剧照">
+            <img loading="lazy" src="/emby/Items/${esc(m.id)}/Images/Backdrop/${still.index}?maxWidth=320${still.tag ? '&tag=' + esc(still.tag) : ''}" alt="">
+          </button>`).join('')}</div>
+      </section>` : ''}
+
       <section class="detail-section"><h3>文件与时间</h3>
         <dl class="detail-meta">
           ${detailMetaRow('源文件', m.source_path)}
@@ -1549,6 +1621,9 @@ async function openMaintenanceDetail(item) {
       </section>
     </div>`;
 
+  document.querySelectorAll('.still-thumb').forEach(button => {
+    button.addEventListener('click', () => openStills(Number(button.dataset.stillIndex), button));
+  });
   const playBtn = document.querySelector('#detail-play');
   if (playBtn) playBtn.addEventListener('click', () => { closeDetail(); openPlayer(item); });
   document.querySelector('#detail-probe').addEventListener('click', async () => {

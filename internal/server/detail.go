@@ -142,6 +142,7 @@ func (a *App) adminItemDetail(c *gin.Context) {
 		"has_userdata":  hasUserData,
 		"files":         files,
 		"actors":        actors,
+		"backdrops":     a.detailBackdrops(movie),
 		"modified_at":   modifiedAt(movie.SourcePath),
 		"locked_fields": lockedFields,
 		"lock_data":     lockData,
@@ -151,6 +152,18 @@ func (a *App) adminItemDetail(c *gin.Context) {
 			"valid":     validID,
 		},
 	})
+}
+
+// detailBackdrops 返回详情抽屉「剧照」条的数据：下标 + 文件 tag。
+// 主背景与 extrafanart 在 movieBackdropPaths 里是同一串连续下标，前端据此拼
+// /emby/Items/{id}/Images/Backdrop/{index}；tag 用于图片换过之后刷新缓存。
+func (a *App) detailBackdrops(movie store.Movie) []gin.H {
+	paths := movieBackdropPaths(movie)
+	items := make([]gin.H, 0, len(paths))
+	for index, path := range paths {
+		items = append(items, gin.H{"index": index, "tag": a.posterTag(path)})
+	}
+	return items
 }
 
 func fileSize(path string) int64 {

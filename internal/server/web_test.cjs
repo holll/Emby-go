@@ -27,6 +27,8 @@ function sandbox(values = {}) {
     items: [],
     // 抽取的片段里 reloadWall/page 会收卡片菜单；完整页面才提供实现。
     closeCardMenu() {},
+    // 浮层导航收起时按层级关闭；抽取片段没有剧照浮层实现。
+    closeStills() {},
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }

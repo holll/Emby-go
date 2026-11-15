@@ -204,6 +204,43 @@ func TestAdminItemDetail(t *testing.T) {
 }
 
 // TestAdminItemDetailNotProbed 未探测的条目应如实报 probed=false（页面显示「未探测」）。
+// TestAdminItemDetailBackdrops 详情里的「剧照」条：主背景与 extrafanart 共享连续下标，
+// 每项带文件 tag，前端据此拼 /emby/Items/{id}/Images/Backdrop/{index}。
+func TestAdminItemDetailBackdrops(t *testing.T) {
+	root := t.TempDir()
+	app, libDir := detailTestApp(t, root, "<movie><title>ABF-018</title></movie>")
+	writeFile(t, filepath.Join(libDir, "fanart.webp"), "main-backdrop")
+	if err := os.MkdirAll(filepath.Join(libDir, "extrafanart"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(libDir, "extrafanart", "fanart1.webp"), "extra-1")
+	writeFile(t, filepath.Join(libDir, "extrafanart", "fanart2.webp"), "extra-2")
+	if lib, err := app.db.AddLibrary("L", libDir); err != nil || lib.ID == 0 {
+		t.Fatalf("建库: %v", err)
+	}
+
+	ts, token := detailServer(t, app)
+	scanOnce(t, ts, token)
+
+	resp, detail := embyCall(t, ts, "GET", "/api/admin/items/1/detail", token, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("详情接口: %d %v", resp.StatusCode, detail)
+	}
+	backdrops, _ := detail["backdrops"].([]any)
+	if len(backdrops) != 3 {
+		t.Fatalf("backdrops = %v, want 3（主背景 + 2 张 extrafanart）", detail["backdrops"])
+	}
+	for index, raw := range backdrops {
+		item, _ := raw.(map[string]any)
+		if item["index"] != float64(index) {
+			t.Errorf("第 %d 项下标 = %v, want %d", index, item["index"], index)
+		}
+		if tag, _ := item["tag"].(string); tag == "" {
+			t.Errorf("第 %d 项缺少 tag: %v", index, item)
+		}
+	}
+}
+
 func TestAdminItemDetailNotProbed(t *testing.T) {
 	root := t.TempDir()
 	app, libDir := detailTestApp(t, root, "<movie><title>未探测</title></movie>\n")
