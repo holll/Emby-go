@@ -17,11 +17,13 @@ function fixture() {
   doc.hidden = false;
   const host = { ownerDocument: doc, innerHTML: '', querySelector(name) { if (!elements.has(name)) elements.set(name, new Target()); return elements.get(name); } };
   let identity = 'owner', authorized = 0, responseOverride = null;
-  const calls = [], timers = new Map(); let nextTimer = 1;
+  const calls = [], timers = new Map(), routes = []; let nextTimer = 1;
   const context = vm.createContext({ TextDecoder, AbortController, module: { exports: {} }, localStorage: { getItem: () => identity },
     addEventListener: win.addEventListener.bind(win), removeEventListener: win.removeEventListener.bind(win),
     setTimeout(fn) { const id = nextTimer++; timers.set(id, fn); return id; }, clearTimeout(id) { timers.delete(id); },
     fetch: async (url, options) => {
+      const route = routes.find(r => r.match(String(url)));
+      if (route) { calls.push({ url, options }); return route.response; }
       let pending, ended = false; const queue = [];
       const reader = {
         read() { if (queue.length) return Promise.resolve(queue.shift()); if (ended) return Promise.resolve({ done: true }); return new Promise(resolve => { pending = resolve; }); },
@@ -41,6 +43,7 @@ function fixture() {
   vm.runInContext(source, context);
   const stop = () => context.mountLogStream(host, { token: 'owner', current: () => true, onUnauthorized: () => authorized++ });
   return { context, doc, win, calls, timers, host, response(value) { responseOverride = value; }, el: name => host.querySelector('#dl-' + name), mount: stop, identity(value) { identity = value; }, authorized: () => authorized,
+    route(match, value) { routes.push({ match, response: { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => (typeof value === 'function' ? value() : value) } }); },
     retry() { const [id, fn] = timers.entries().next().value; timers.delete(id); fn(); } };
 }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -106,6 +109,50 @@ test('pause and hidden page close stream, resume with cursor, never issue a writ
   assert(f.calls[2].url.includes('after=cursor%2F1'));
   assert(f.calls.every(call => !call.options.method || call.options.method === 'GET'));
   dispose(); assert.equal(f.doc.listeners.size, 0); assert.equal(f.win.listeners.size, 0);
+});
+
+test('history mode reads paged disk logs without mixing in live tail', async () => {
+  const f = fixture();
+  const pages = [
+    { items: [{ id: '2', time: '2026-11-15T00:00:02Z', level: 'info', message: 'second' }], next_before: 'cursor/older-1', has_more: true },
+    { items: [{ id: '1', time: '2026-11-15T00:00:01Z', level: 'warn', message: 'first' }], next_before: '', has_more: false }
+  ];
+  let reads = 0;
+  f.route(url => url.startsWith('/api/admin/logs/disk'), () => pages[Math.min(reads++, pages.length - 1)]);
+  f.mount(); await flush();
+  const body = f.el('body'), earlier = f.el('earlier'), button = f.el('history');
+  f.calls[0].push(frame('live tail\n')); await flush();
+  assert.match(body.textContent, /live tail/);
+  button.emit('click'); await flush();
+  const disk = f.calls.filter(call => String(call.url).startsWith('/api/admin/logs/disk'));
+  assert.equal(disk.length, 1);
+  assert.match(String(disk[0].url), /kind=app&limit=200$/);
+  assert.equal(disk[0].options.headers['X-Emby-Token'], 'owner');
+  assert.equal(disk[0].options.method, undefined);
+  assert.equal(body.textContent, '2026-11-15T00:00:02Z info second\n');
+  assert.equal(button.textContent, '返回实时'); assert.equal(button['aria-pressed'], 'true');
+  assert.equal(earlier.hidden, false);
+  earlier.emit('click'); await flush();
+  const older = f.calls.filter(call => String(call.url).startsWith('/api/admin/logs/disk'))[1];
+  assert.match(String(older.url), /before=cursor(%2F|\/)older-1$/);
+  assert.equal(body.textContent, '2026-11-15T00:00:01Z warn first\n2026-11-15T00:00:02Z info second\n');
+  assert.equal(earlier.hidden, true);
+  assert.match(f.el('gap').textContent, /已加载 2 条/);
+  button.emit('click'); await flush();
+  assert.equal(button.textContent, '历史'); assert.equal(button['aria-pressed'], 'false');
+  assert.equal(body.textContent, '');
+  const streams = f.calls.filter(call => String(call.url).startsWith('/api/admin/logs/stream'));
+  assert.equal(streams.length, 2, '退出历史后重新连接实时尾随');
+});
+
+test('history mode refuses request.log because that file is never exposed by the disk API', async () => {
+  const f = fixture();
+  f.route(url => url.startsWith('/api/admin/logs/disk'), { items: [], next_before: '', has_more: false });
+  f.mount(); await flush();
+  f.el('kind').value = 'request'; f.el('kind').emit('change'); await flush();
+  f.el('history').emit('click'); await flush();
+  assert.equal(f.calls.filter(call => String(call.url).startsWith('/api/admin/logs/disk')).length, 0);
+  assert.match(f.el('status').textContent, /只支持 app\.log/);
 });
 
 test('identity changes clear sensitive text and prevent every reconnect path', async () => {

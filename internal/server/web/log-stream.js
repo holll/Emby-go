@@ -36,9 +36,11 @@
     const doc = host.ownerDocument, identity = options.token;
     let disposed = false, paused = false, terminal = false, generation = 0;
     let controller = null, timer = null, failures = 0, kind = 'app', cursor = '';
+    // 历史模式：按游标读磁盘 app 日志；与 SSE 尾随互斥，避免两个来源抢同一个 pre。
+    let history = null;
     let text = '', gapNote = '', clipped = false;
     const limit = 512 * 1024;
-    host.innerHTML = `<section class="panel" aria-labelledby="dl-title"><div class="panel-head"><h2 id="dl-title">实时日志</h2><div class="row-actions"><label for="dl-kind">日志文件</label><select id="dl-kind"><option value="app">app.log</option><option value="request">requests.log</option></select><button id="dl-pause" class="btn" type="button" aria-pressed="false">暂停</button><button id="dl-refresh" class="btn" type="button">重新连接</button></div></div><p class="hint" id="dl-source"></p><p class="hint">直接显示磁盘原文，不解析或脱敏。requests.log 可能包含敏感 URL，请勿公开分享。</p><p id="dl-status" role="status" aria-atomic="true">正在连接…</p><p id="dl-gap" class="hint"></p><div id="dl-scroll" class="disk-log-scroll" tabindex="0" role="region" aria-label="原始日志"><pre id="dl-body" class="dl-raw-log"></pre></div></section>`;
+    host.innerHTML = `<section class="panel" aria-labelledby="dl-title"><div class="panel-head"><h2 id="dl-title">实时日志</h2><div class="row-actions"><label for="dl-kind">日志文件</label><select id="dl-kind"><option value="app">app.log</option><option value="request">requests.log</option></select><button id="dl-pause" class="btn" type="button" aria-pressed="false">暂停</button><button id="dl-history" class="btn" type="button" aria-pressed="false">历史</button><button id="dl-earlier" class="btn" type="button" hidden>加载更早</button><button id="dl-refresh" class="btn" type="button">重新连接</button></div></div><p class="hint" id="dl-source"></p><p class="hint">直接显示磁盘原文，不解析或脱敏。requests.log 可能包含敏感 URL，请勿公开分享。</p><p id="dl-status" role="status" aria-atomic="true">正在连接…</p><p id="dl-gap" class="hint"></p><div id="dl-scroll" class="disk-log-scroll" tabindex="0" role="region" aria-label="原始日志"><pre id="dl-body" class="dl-raw-log"></pre></div></section>`;
     const el = name => host.querySelector('#dl-' + name);
     const body = el('body'), scroll = el('scroll'), status = el('status');
     const identityMatches = () => global.localStorage.getItem('emby_token') === identity;
@@ -59,22 +61,26 @@
       terminal = true; message('登录失效或权限不足，日志连接已停止。');
       options.onUnauthorized();
     }
+    function paint(next, reset, prepend) {
+      const atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40;
+      let value = reset ? next : prepend ? next + text : text + next;
+      clipped = false;
+      if (value.length > limit) {
+        let offset = value.length - limit;
+        // Never split a UTF-16 surrogate pair while bounding the visible tail.
+        if (value.charCodeAt(offset) >= 0xdc00 && value.charCodeAt(offset) <= 0xdfff) offset++;
+        value = value.slice(offset); clipped = true;
+      }
+      text = value; body.textContent = text;
+      el('gap').textContent = [gapNote, clipped ? '显示长度已达上限，仅保留最近内容；磁盘文件不受影响。' : ''].filter(Boolean).join(' ');
+      if (reset || atEnd) scroll.scrollTop = scroll.scrollHeight;
+    }
     function render(data) {
       if (data.kind !== kind || typeof data.text !== 'string' || typeof data.cursor !== 'string' || typeof data.reset !== 'boolean' || typeof data.gap !== 'boolean') throw new Error('日志响应格式无效');
-      const atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40;
-      if (data.reset) { text = ''; gapNote = '日志已轮转或清理，已重新读取当前尾部；缺口无法补读。'; clipped = false; }
+      if (data.reset) { text = ''; gapNote = '日志已轮转或清理，已重新读取当前尾部；缺口无法补读。'; }
       else if (data.gap) gapNote = '仅加载当前日志尾部，较早内容未包含在本次显示中。';
-      text += data.text;
-      if (text.length > limit) {
-        let offset = text.length - limit;
-        // Never split a UTF-16 surrogate pair while bounding the visible tail.
-        if (text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff) offset++;
-        text = text.slice(offset); clipped = true;
-      }
-      body.textContent = text;
+      paint(data.text, data.reset);
       cursor = data.cursor;
-      el('gap').textContent = [gapNote, clipped ? '显示长度已达上限，仅保留最近内容；磁盘文件不受影响。' : ''].filter(Boolean).join(' ');
-      if (atEnd || data.reset) scroll.scrollTop = scroll.scrollHeight;
       failures = 0; message('已连接 · 原文实时更新');
     }
     async function connect() {
@@ -128,8 +134,62 @@
         }
       }
     }
+    const diskLine = item => item.time + ' ' + item.level + ' ' + item.message;
+    function historyNote(extra) {
+      const base = '历史模式：磁盘 ' + "app-YYYY-MM-DD.log" + '，不含实时新内容；' + extra;
+      el('gap').textContent = [base, clipped ? '显示长度已达上限，仅保留最近内容；磁盘文件不受影响。' : ''].filter(Boolean).join(' ');
+    }
+    async function loadHistory() {
+      if (!history || history.loading || !current()) return;
+      history.loading = true;
+      message(history.items.length ? '正在加载更早的日志…' : '正在读取磁盘日志…');
+      try {
+        const query = '/api/admin/logs/disk?kind=app&limit=200' + (history.before ? '&before=' + encodeURIComponent(history.before) : '');
+        const response = await global.fetch(query, { headers: { 'X-Emby-Token': identity }, cache: 'no-store' });
+        if (!history || !current()) return;
+        if (response.status === 401 || response.status === 403) { history = null; denied(); return; }
+        if (!response.ok) {
+          if (response.status === 400) { history.before = ''; historyNote('游标已失效，已重新读取最近一页。'); }
+          throw new Error('磁盘日志读取失败');
+        }
+        const page = await response.json();
+        if (!history || !current()) return;
+        const items = Array.isArray(page.items) ? page.items : [];
+        const older = items.map(diskLine).join('\n') + (items.length ? '\n' : '');
+        history.items = items.concat(history.items);
+        history.before = page.next_before || '';
+        history.hasMore = !!page.has_more;
+        el('earlier').hidden = !history.hasMore;
+        paint(older, false, true);
+        historyNote(items.length ? '已加载 ' + history.items.length + ' 条' + (history.hasMore ? '，可继续加载更早。' : '，已到最早一页。') : '这一天没有可显示的日志。');
+        message('历史模式 · 已暂停实时尾随');
+      } catch (_) {
+        if (history && current()) historyNote('读取失败，可重试「加载更早」。');
+      } finally {
+        if (history) history.loading = false;
+      }
+    }
+    const onHistory = () => {
+      if (history) {
+        history = null; el('earlier').hidden = true;
+        el('history').textContent = '历史'; el('history').setAttribute('aria-pressed', 'false');
+        text = ''; gapNote = ''; clipped = false; body.textContent = ''; el('gap').textContent = '';
+        if (!terminal && !paused) void connect();
+        return;
+      }
+      if (kind !== 'app') { message('历史回看只支持 app.log；请求日志可能含敏感 URL，不在此接口暴露。'); return; }
+      disconnect();
+      history = { items: [], before: '', hasMore: false, loading: false };
+      el('history').textContent = '返回实时'; el('history').setAttribute('aria-pressed', 'true');
+      el('earlier').hidden = true; gapNote = ''; clipped = false; text = ''; body.textContent = '';
+      message('历史模式 · 已暂停实时尾随');
+      void loadHistory();
+    };
+    const onEarlier = () => { if (history && history.hasMore) void loadHistory(); };
     const onKind = () => {
       disconnect(); kind = el('kind').value; cursor = ''; text = ''; gapNote = ''; clipped = false;
+      history = null; el('history').textContent = '历史'; el('history').setAttribute('aria-pressed', 'false');
+      el('earlier').hidden = true;
       body.textContent = ''; el('gap').textContent = ''; source();
       if (!terminal && !paused) void connect();
     };
@@ -147,6 +207,8 @@
     };
     el('kind').addEventListener('change', onKind);
     el('pause').addEventListener('click', onPause);
+    el('history').addEventListener('click', onHistory);
+    el('earlier').addEventListener('click', onEarlier);
     el('refresh').addEventListener('click', onRefresh);
     doc.addEventListener('visibilitychange', onVisibility);
     global.addEventListener('storage', identityChanged);
@@ -155,6 +217,8 @@
       disposed = true; disconnect();
       el('kind').removeEventListener('change', onKind);
       el('pause').removeEventListener('click', onPause);
+      el('history').removeEventListener('click', onHistory);
+      el('earlier').removeEventListener('click', onEarlier);
       el('refresh').removeEventListener('click', onRefresh);
       doc.removeEventListener('visibilitychange', onVisibility);
       global.removeEventListener('storage', identityChanged);

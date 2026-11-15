@@ -115,7 +115,7 @@ async function browser(t) {
       else if(p.endsWith('/login-events'))data={total:1,events:[{name:'<img src=x onerror=alert(1)>',ip:'203.0.113.5',success:false,created_at:'2026-10-29'}]};
       else if(p.endsWith('/playback-events'))data={total:0,items:[]};
       else if(p.endsWith('/probe'))data={items:[{method:'GET',path:'/Items/123/[redacted:123456789abc]',created_at:'2026-10-29'}]};
-      else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),ts:'2026-10-29T12:00:00Z',level:'info',msg:'auto-log-'+id}],next_after:String(id),next_before:String(id),has_more_before:false};}
+      else if(p.endsWith('/logs/disk')){const id=++__logID;data={items:[{id:String(id),time:'2026-10-29T12:00:00Z',level:'info',message:'auto-log-'+id}],next_after:String(id),next_before:'',has_more:false};}
       else if(p.endsWith('/tasks'))data={items:window.__taskItems||[]};
       else if(p.endsWith('/logs'))data={items:[]};
       else if(p.endsWith('/status'))data={running:false};
@@ -438,6 +438,29 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(outside.closed, true); assert.equal(outside.expanded, 'false');
   assert.deepEqual(await evaluate('__errors'), []);
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
+});
+
+test('运行日志历史模式：读磁盘 app 日志、暂停实时尾随、可返回实时', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{await page('logs');})()`);
+  await evaluate(`new Promise(r=>{const check=()=>document.querySelector('#dl-body').textContent.includes('auto-log-')?r():setTimeout(check,20);check();})`);
+  const live = await evaluate(`document.querySelector('#dl-status').textContent`);
+  assert.match(live, /已连接/);
+  await evaluate(`document.querySelector('#dl-history').click()`);
+  await evaluate(`new Promise(r=>{const check=()=>document.querySelector('#dl-body').textContent.includes('2026-10-29T12:00:00Z info auto-log-')?r():setTimeout(check,20);check();})`);
+  const history = await evaluate(`(()=>({text:document.querySelector('#dl-body').textContent,status:document.querySelector('#dl-status').textContent,pressed:document.querySelector('#dl-history').getAttribute('aria-pressed'),note:document.querySelector('#dl-gap').textContent,earlier:document.querySelector('#dl-earlier').hidden}))()`);
+  assert.match(history.text, /2026-10-29T12:00:00Z info auto-log-/);
+  assert.match(history.status, /历史模式/);
+  assert.equal(history.pressed, 'true');
+  assert.match(history.note, /已加载 1 条/);
+  assert.equal(history.earlier, true, '没有更早一页时不显示「加载更早」');
+  await evaluate(`document.querySelector('#dl-history').click()`);
+  await evaluate(`new Promise(r=>{const check=()=>document.querySelector('#dl-body').textContent.includes('auto-log-')?r():setTimeout(check,20);check();})`);
+  const back = await evaluate(`(()=>({status:document.querySelector('#dl-status').textContent,pressed:document.querySelector('#dl-history').getAttribute('aria-pressed')}))()`);
+  assert.match(back.status, /已连接/);
+  assert.equal(back.pressed, 'false');
+  assert.deepEqual(await evaluate('__errors'), []);
 });
 
 test('计划任务运行态：执行中角标、已运行时长与可停止类型', { timeout: 60000 }, async t => {
