@@ -677,6 +677,12 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   .stream-table td::before { content: attr(data-label); display: inline-block; min-width: 64px; color: var(--dim); font: 600 var(--text-11) var(--font-mono); letter-spacing: .1em; }
   /* 序号对阅读没用，卡片里省掉一行。 */
   .stream-table td[data-label="序号"] { display: none; }
+  /* 补充参数（码率/配置/语言）默认收起，保住卡片密度。 */
+  .stream-table .stream-extra { display: none; }
+  .stream-table tr.is-expanded .stream-extra { display: inline; }
+  .stream-table .stream-more { display: inline-flex; align-items: center; margin-left: var(--space-6); padding: 2px var(--space-8); border: 1px solid var(--line-strong); border-radius: 999px; background: none; color: var(--blue); font: 600 var(--text-11) var(--font-mono); cursor: pointer; }
+  .stream-table .stream-more:hover { background: var(--blue-halo); }
+  .stream-table .stream-more:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   /* 活动记录同样改为堆叠卡片：横向滚动会把移动端布局视口撑宽。 */
   .audit-table thead { display: none; }
   .audit-table, .audit-table tbody, .audit-table tr, .audit-table td { display: block; width: auto; }
@@ -827,6 +833,7 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .avatar-fallback { display: grid; place-items: center; font-size: var(--text-24); color: var(--dim); }
 .avatar-card small { font-size: var(--text-12); text-align: center; overflow: hidden; text-overflow: ellipsis; max-width: 76px; white-space: nowrap; }
 .avatar-card:hover small { color: var(--text); }
+.stream-more { display: none; }
 .detail-file { border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: var(--space-10) var(--space-12); margin-bottom: var(--space-10); background: rgba(255, 255, 255, 0.015); }
 .detail-file-head { display: flex; align-items: center; gap: var(--space-10); flex-wrap: wrap; margin-bottom: var(--space-6); }
 .detail-file-head strong { font-size: var(--text-13); }

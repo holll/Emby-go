@@ -29,6 +29,8 @@ function sandbox(values = {}) {
     closeCardMenu() {},
     // 浮层导航收起时按层级关闭；抽取片段没有剧照浮层实现。
     closeStills() {},
+    // 抽取详情抽屉片段时没有真实抽屉节点，媒体流展开按钮的绑定退化为空。
+    detailDrawer: { querySelectorAll: () => [] },
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }

@@ -1215,13 +1215,17 @@ function streamTable(streams) {
   if (!streams || !streams.length) return '<p class="hint" style="margin:8px 0 0">未探测</p>';
   const rows = streams.map(s => {
     const type = { Video: '视频', Audio: '音频', Subtitle: '字幕' }[s.Type] || s.Type || '—';
-    const detail = s.Type === 'Video'
-      ? [s.Codec && String(s.Codec).toUpperCase(), s.Width && s.Height ? `${s.Width}×${s.Height}` : '',
-         s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Profile, s.BitDepth ? `${s.BitDepth}bit` : '']
-      : [s.Codec && String(s.Codec).toUpperCase(), s.ChannelLayout || (s.Channels ? `${s.Channels}ch` : ''),
-         s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Language, s.SampleRate ? `${s.SampleRate} Hz` : ''];
+    // primary 是判断「这条流是什么」的最小信息，extra 是码率/配置这类补充；窄屏默认只露 primary。
+    const primary = s.Type === 'Video'
+      ? [s.Codec && String(s.Codec).toUpperCase(), s.Width && s.Height ? `${s.Width}×${s.Height}` : '']
+      : [s.Codec && String(s.Codec).toUpperCase(), s.ChannelLayout || (s.Channels ? `${s.Channels}ch` : '')];
+    const extra = s.Type === 'Video'
+      ? [s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Profile, s.BitDepth ? `${s.BitDepth}bit` : '']
+      : [s.BitRate ? `${Math.round(s.BitRate / 1000)} kbps` : '', s.Language, s.SampleRate ? `${s.SampleRate} Hz` : ''];
+    const head = primary.filter(Boolean).map(value => esc(value)).join(' · ');
+    const rest = extra.filter(Boolean).map(value => esc(value)).join(' · ');
     return `<tr><td class="mono" data-label="序号">#${esc(s.Index ?? '')}</td><td data-label="类型">${esc(type)}</td>
-      <td class="mono" data-label="参数">${esc(detail.filter(Boolean).join(' · ') || '—')}</td>
+      <td class="mono" data-label="参数">${head || '—'}${rest ? `<span class="stream-extra"> · ${rest}</span><button type="button" class="stream-more" data-stream-more aria-expanded="false">更多</button>` : ''}</td>
       <td class="mono" data-label="标记">${esc([s.IsDefault ? '默认' : '', s.IsForced ? '强制' : '', s.IsExternal ? '外挂' : ''].filter(Boolean).join(' ') || '—')}</td></tr>`;
   }).join('');
   return `<div class="table-wrap stream-table" tabindex="0" role="region" aria-label="媒体流信息"><table>
@@ -1757,6 +1761,14 @@ async function openMaintenanceDetail(item) {
       saveBtn.disabled = false;
     }
   });
+  // 媒体流补充参数：窄屏默认收起，逐条「更多/收起」展开，宽屏由 CSS 直接显示。
+  detailDrawer.querySelectorAll('[data-stream-more]').forEach(btn => btn.addEventListener('click', () => {
+    const row = btn.closest('tr');
+    const expanded = !row.classList.contains('is-expanded');
+    row.classList.toggle('is-expanded', expanded);
+    btn.setAttribute('aria-expanded', String(expanded));
+    btn.textContent = expanded ? '收起' : '更多';
+  }));
   // 实体跳转：统一委托，演员卡片与元数据里的类型/标签/厂商/合集共用一条路径。
   detailDrawer.querySelectorAll('[data-entity-key]').forEach(el => el.addEventListener('click', () => {
     gotoEntity(el.dataset.entityKey, el.dataset.entityValue);

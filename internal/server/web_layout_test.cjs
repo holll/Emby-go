@@ -1016,6 +1016,17 @@ test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出',
     for (const kid of m.headKids) assert.ok(kid.right <= width, `${width}px: 文件头各段折行后仍在视口内`);
     assert.equal(m.pathOverflow, 0, `${width}px: 长路径不横向溢出`);
     assert.ok(m.pageScroll <= width + 1, `${width}px: 页面无横向滚动`);
+    // 补充参数默认收起，逐条「更多/收起」展开，密度与可读性兼顾。
+    const toggle = await evaluate(`(()=>{const row=document.querySelector('.stream-table tbody tr');const extra=row.querySelector('.stream-extra');const btn=row.querySelector('[data-stream-more]');const before={extra:getComputedStyle(extra).display,btn:getComputedStyle(btn).display,text:btn.textContent,aria:btn.getAttribute('aria-expanded')};btn.click();const after={extra:getComputedStyle(extra).display,text:btn.textContent,aria:btn.getAttribute('aria-expanded'),expanded:row.classList.contains('is-expanded')};btn.click();const closed={extra:getComputedStyle(extra).display,text:btn.textContent};return {before,after,closed};})()`);
+    assert.equal(toggle.before.extra, 'none', `${width}px: 补充参数默认收起`);
+    assert.equal(toggle.before.text, '更多', `${width}px: 收起态按钮文案`);
+    assert.notEqual(toggle.before.btn, 'none', `${width}px: 窄屏显示展开按钮`);
+    assert.equal(toggle.after.extra, 'inline', `${width}px: 展开后补充参数可见`);
+    assert.equal(toggle.after.text, '收起', `${width}px: 展开态按钮文案`);
+    assert.equal(toggle.after.aria, 'true', `${width}px: 展开态 aria-expanded`);
+    assert.equal(toggle.after.expanded, true, `${width}px: 展开标记落在行上`);
+    assert.equal(toggle.closed.extra, 'none', `${width}px: 再次点击收起`);
+    assert.equal(toggle.closed.text, '更多', `${width}px: 收起后按钮文案复位`);
     await evaluate(`closeDetail()`);
   }
   // 宽屏保持原来的表格 + 内部横滚，不因为窄屏改动而退化。
@@ -1027,6 +1038,10 @@ test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出',
   assert.equal(wide.minWidth, '0px', '宽屏不套用窄屏的强制最小宽度');
   assert.notEqual(wide.thead, 'none', '宽屏显示表头');
   assert.ok(wide.tableW >= 400, `宽屏表格按内容展开，实际 ${wide.tableW}`);
+  // 宽屏一次显示全部参数，不出现「更多」按钮。
+  const wideParams = await evaluate(`(()=>{const extra=document.querySelector('.stream-table .stream-extra');const btn=document.querySelector('.stream-table [data-stream-more]');return {extra:getComputedStyle(extra).display,btn:getComputedStyle(btn).display};})()`);
+  assert.equal(wideParams.extra, 'inline', '宽屏直接显示补充参数');
+  assert.equal(wideParams.btn, 'none', '宽屏不显示展开按钮');
   for (const display of wide.rows) assert.equal(display, 'table-row', '宽屏每条流仍是表格行');
   await evaluate(`closeDetail()`);
 });
