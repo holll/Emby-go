@@ -2410,18 +2410,18 @@ async function pageTasks() {
     const status = document.querySelector('#task-status')?.value || '';
     const shown = items.filter(item => (!type || item.type === type) && (!status || item.status === status));
     box.innerHTML = shown.length
-      ? `<div class="table-wrap" tabindex="0" role="region" aria-label="任务记录"><table>
+      ? `<div class="table-wrap task-table" tabindex="0" role="region" aria-label="任务记录"><table>
           <caption class="sr-only">任务记录</caption>
           <thead><tr><th scope="col">ID</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">开始时间</th><th scope="col">结束时间</th><th scope="col">结果</th><th scope="col">错误</th></tr></thead>
           <tbody>${shown.map(item => `
             <tr>
-              <td class="mono">${esc(String(item.id))}</td>
-              <td>${esc(TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</td>
-              <td><span class="badge ${esc(item.status)}">${esc(RUN_STATUS_TEXT[item.status] || item.status)}</span></td>
-              <td class="mono">${esc(fmtTime(item.started_at))}</td>
-              <td class="mono">${esc(fmtTime(item.ended_at))}</td>
-              <td>${esc(taskResultText(item.result))}</td>
-              <td class="mono">${esc(item.error || '—')}</td>
+              <td class="mono" data-label="ID">${esc(String(item.id))}</td>
+              <td data-label="类型">${esc(TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</td>
+              <td data-label="状态"><span class="badge ${esc(item.status)}">${esc(RUN_STATUS_TEXT[item.status] || item.status)}</span></td>
+              <td class="mono" data-label="开始时间">${esc(fmtTime(item.started_at))}</td>
+              <td class="mono" data-label="结束时间">${esc(fmtTime(item.ended_at))}</td>
+              <td data-label="结果">${esc(taskResultText(item.result))}</td>
+              <td class="mono" data-label="错误">${esc(item.error || '—')}</td>
             </tr>`).join('')}</tbody>
         </table></div>`
       : empty('暂无任务', '执行扫描或探测后，这里会出现任务摘要。');

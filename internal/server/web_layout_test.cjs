@@ -1046,6 +1046,78 @@ test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出',
   await evaluate(`closeDetail()`);
 });
 
+test('设置页与任务中心：窄屏表格卡片化后可读、不横向溢出', { timeout: 90000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await evaluate(`(()=>{window.__taskItems=[{id:9,type:'scan',status:'failed',started_at:'2026-11-15T09:00:00Z',ended_at:'2026-11-15T09:01:00Z',error:'扫描失败：目录不可读 /media/library/['+'超长目录名'.repeat(4)+']'},{id:10,type:'probe',status:'success',started_at:'2026-11-15T09:00:00Z',ended_at:'2026-11-15T09:02:00Z',error:''}];})()`);
+  const measure = () => evaluate(`(()=>({page:document.documentElement.scrollWidth,vw:innerWidth,wraps:[...document.querySelectorAll('.table-wrap')].filter(w=>w.getClientRects().length).map(w=>({aria:w.getAttribute('aria-label'),cw:w.clientWidth,sw:w.scrollWidth,right:Math.round(w.getBoundingClientRect().right),ov:getComputedStyle(w).overflowX,thead:w.querySelector('thead')?getComputedStyle(w.querySelector('thead')).display:null,rows:[...w.querySelectorAll('tbody tr')].map(r=>getComputedStyle(r).display),labels:[...w.querySelectorAll('tbody tr:first-child td')].map(td=>td.dataset.label||''),tdWidths:[...w.querySelectorAll('tbody tr:first-child td')].map(td=>Math.round(td.getBoundingClientRect().width)),thWidth:w.querySelector('tbody th')?Math.round(w.querySelector('tbody th').getBoundingClientRect().width):null,minW:getComputedStyle(w.querySelector('table')).minWidth}))}))()`);
+  for (const width of [390, 320]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evaluate(`(async()=>{await page('tasks');await new Promise(r=>setTimeout(r,80));})()`);
+    let m = await measure();
+    assert.equal(m.page, width, `${width}px: 任务中心无横向滚动`);
+    const tasks = m.wraps.find(w => w.aria === '任务记录');
+    assert.ok(tasks, `${width}px: 任务记录存在`);
+    assert.equal(tasks.thead, 'none', `${width}px: 任务记录窄屏隐藏表头`);
+    assert.equal(tasks.minW, '0px', `${width}px: 任务记录不再强制 560px`);
+    assert.equal(tasks.ov, 'visible', `${width}px: 任务记录不再靠横滚`);
+    assert.ok(tasks.sw <= tasks.cw + 1, `${width}px: 任务记录卡片不溢出（sw ${tasks.sw}/cw ${tasks.cw}）`);
+    assert.deepEqual(tasks.rows.slice(0, 2), ['block', 'block'], `${width}px: 每条任务是一张卡片`);
+    for (const label of ['ID', '类型', '状态', '开始时间', '结束时间', '结果', '错误']) assert.ok(tasks.labels.includes(label), `${width}px: 任务卡显示「${label}」字段名`);
+    for (const td of tasks.tdWidths) assert.ok(td <= tasks.cw, `${width}px: 任务卡单元格不超出容器`);
+    const tasksRight = tasks.right; assert.ok(tasksRight <= width, `${width}px: 任务记录不越出视口`);
+
+    const categories = await evaluate(`[...document.querySelectorAll('[data-settings-category]')].map(c=>c.dataset.settingsCategory)`);
+    for (const category of categories) {
+      await evaluate(`(async()=>{document.querySelector('[data-settings-category="${category}"]').click();await new Promise(r=>setTimeout(r,40));})()`);
+      m = await measure();
+      assert.equal(m.page, width, `${width}px/${category}: 设置页无横向滚动`);
+      for (const wrap of m.wraps) {
+        assert.ok(wrap.right <= width, `${width}px/${category}: ${wrap.aria} 不越出视口`);
+        assert.ok(wrap.cw <= width, `${width}px/${category}: ${wrap.aria} 容器不宽于视口`);
+        if (wrap.thead === null || wrap.thead === 'none') {
+          assert.ok(wrap.sw <= wrap.cw + 1, `${width}px/${category}: ${wrap.aria} 卡片模式不横向溢出（sw ${wrap.sw}/cw ${wrap.cw}）`);
+          for (const td of wrap.tdWidths) assert.ok(td <= wrap.cw, `${width}px/${category}: ${wrap.aria} 单元格不超出容器`);
+        } else {
+          assert.equal(wrap.ov, 'auto', `${width}px/${category}: ${wrap.aria} 表格内横滚`);
+          for (const td of wrap.tdWidths) assert.ok(td >= 44, `${width}px/${category}: ${wrap.aria} 列宽可读，实际 ${td}`);
+        }
+        if (wrap.aria === '已有密钥') {
+          assert.equal(wrap.thead, 'none', `${width}px: 密钥表窄屏卡片化`);
+          assert.equal(wrap.minW, '0px', `${width}px: 密钥卡不再被 560px 撑宽`);
+          assert.ok(wrap.tdWidths.every(td => td <= wrap.cw), `${width}px: 密钥卡单元格不溢出`);
+        }
+        if (wrap.aria === '投递历史') {
+          assert.equal(wrap.thead, 'none', `${width}px: 投递历史窄屏卡片化`);
+          for (const label of ['时间', '事件', '目标', '结果']) assert.ok(wrap.labels.includes(label), `${width}px: 投递卡显示「${label}」`);
+        }
+        if (wrap.aria === '图片缓存状态') {
+          assert.equal(wrap.minW, '0px', `${width}px: 键值表不强制 560px`);
+          assert.ok(wrap.sw <= wrap.cw + 1, `${width}px: 键值表按内容收缩，不横向滚动`);
+          assert.ok(wrap.thWidth >= 60 && wrap.thWidth <= 120, `${width}px: 键值表字段列自适应，实际 ${wrap.thWidth}`);
+        }
+      }
+    }
+  }
+  // 宽屏回归：两张表回到表格形态，字段列保持桌面宽度。
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`(async()=>{await page('tasks');await new Promise(r=>setTimeout(r,80));})()`);
+  let wide = await measure();
+  const wideTasks = wide.wraps.find(w => w.aria === '任务记录');
+  assert.notEqual(wideTasks.thead, 'none', '宽屏任务记录显示表头');
+  assert.ok(wideTasks.rows.every(display => display === 'table-row'), '宽屏任务记录仍是表格行');
+  assert.equal(wideTasks.ov, 'auto', '宽屏任务记录可横滚');
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="cache"]').click();await new Promise(r=>setTimeout(r,60));})()`);
+  wide = await measure();
+  const kv = wide.wraps.find(w => w.aria === '图片缓存状态');
+  assert.ok(kv.thWidth >= 150 && kv.thWidth <= 160, `宽屏键值表字段列保持 160px，实际 ${kv.thWidth}`);
+  await evaluate(`(async()=>{await page('settings');document.querySelector('[data-settings-category="notifications"]').click();await new Promise(r=>setTimeout(r,60));})()`);
+  wide = await measure();
+  const delivery = wide.wraps.find(w => w.aria === '投递历史');
+  assert.notEqual(delivery.thead, 'none', '宽屏投递历史显示表头');
+  assert.ok(delivery.rows.every(display => display === 'table-row'), '宽屏投递历史仍是表格行');
+});
+
 test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);

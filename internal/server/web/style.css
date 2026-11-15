@@ -665,7 +665,7 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   /* 表格式数据在窄屏内横向滚动，避免列被挤成逐字换行 */
   /* 只有“确实需要横向滚动”的宽表格保留最小宽度；已改为堆叠卡片的不再参与，
      否则 min-width 会把移动端布局视口撑宽（innerWidth > 设备宽度）。 */
-  .table-wrap:not(.security-table):not(.audit-table):not(.scheduled-table):not(.stream-table) table:not(.user-table) { min-width: 560px; }
+  .table-wrap:not(.security-table):not(.audit-table):not(.scheduled-table):not(.stream-table):not(.apikey-table):not(.task-table):not(.delivery-table):not(.kv-table) table:not(.user-table) { min-width: 560px; }
   /* 详情抽屉里的媒体流改为「每条一段」的卡片：4K 与多音轨的参数横滚起来没法读。 */
   .stream-table { overflow: visible; margin: 0; }
   .stream-table thead { display: none; }
@@ -834,6 +834,7 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .avatar-card small { font-size: var(--text-12); text-align: center; overflow: hidden; text-overflow: ellipsis; max-width: 76px; white-space: nowrap; }
 .avatar-card:hover small { color: var(--text); }
 .stream-more { display: none; }
+.kv-table th { width: 160px; }
 .detail-file { border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: var(--space-10) var(--space-12); margin-bottom: var(--space-10); background: rgba(255, 255, 255, 0.015); }
 .detail-file-head { display: flex; align-items: center; gap: var(--space-10); flex-wrap: wrap; margin-bottom: var(--space-6); }
 .detail-file-head strong { font-size: var(--text-13); }
@@ -1166,6 +1167,20 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .badge.cancelled, .badge.canceled, .badge.unknown { color: #c1c7d0; border-color: #687284; }
 @media (max-width: 650px) {
   .table-wrap.scheduled-table { overflow: visible; border: 0; margin: 0; }
+  /* 任务记录 7 列、投递历史 5 列：窄屏改成逐条卡片，避免拖横条读一行。 */
+  .task-table, .delivery-table { overflow: visible; margin: 0; }
+  .task-table table, .delivery-table table { min-width: 0; }
+  .task-table thead, .delivery-table thead { display: none; }
+  .task-table, .task-table tbody, .task-table tr, .task-table td,
+  .delivery-table, .delivery-table tbody, .delivery-table tr, .delivery-table td { display: block; width: auto; }
+  .task-table tr, .delivery-table tr { border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: var(--space-8) var(--space-10); margin-bottom: var(--space-8); background: rgba(255, 255, 255, 0.015); }
+  .task-table td, .delivery-table td { border: 0; padding: var(--space-2) 0; overflow-wrap: anywhere; white-space: normal; }
+  .task-table td::before, .delivery-table td::before { content: attr(data-label); display: inline-block; min-width: 64px; color: var(--dim); font: 600 var(--text-11) var(--font-mono); letter-spacing: .1em; }
+  /* 键值表（图片缓存状态）：两列本来就窄，窄屏按内容收缩即可。 */
+  .kv-table { overflow: visible; margin: 0; }
+  .kv-table table { min-width: 0; }
+  .kv-table th { width: auto; min-width: 88px; }
+  .kv-table td { overflow-wrap: anywhere; }
   .table-wrap.scheduled-table table:not(.user-table), .scheduled-table tbody { display: block; width: 100%; min-width: 0; }
   .scheduled-table thead { display: none; }
   .scheduled-table tr { display: block; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: var(--space-12); margin-bottom: var(--space-12); }

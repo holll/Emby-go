@@ -37,7 +37,7 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
         </div>
       </div>
       <p class="hint">记录每个目标的投递结果，只保留事件、影片 ID、目标 ID、状态与时间；不保存接收地址、请求体、响应头或响应内容。最多保留 1000 条、7 天。</p>
-      <div id="wh-history-body" class="table-wrap" tabindex="0" role="region" aria-label="投递历史" aria-live="polite"><p class="hint">正在加载投递历史…</p></div>
+      <div id="wh-history-body" class="table-wrap delivery-table" tabindex="0" role="region" aria-label="投递历史" aria-live="polite"><p class="hint">正在加载投递历史…</p></div>
     </section>
     <dialog id="wh-dialog" class="wh-dialog" aria-labelledby="wh-dialog-title" aria-describedby="wh-dialog-hint">
       <form id="wh-dialog-form" method="dialog" novalidate>
@@ -329,12 +329,14 @@ async function mountWebhookSettings(host, apiRequest, isCurrent = () => host.isC
     for (const item of items) {
       const tr = document.createElement('tr');
       const result = historyLabels[item.status] || item.status;
+      const labels = ['时间', '事件', '影片 ID', '目标', '结果'];
       const cells = [item.created_at, item.event, item.item_id || '—', item.target_id, item.error_code ? result + '（' + item.error_code + '）' : result];
-      for (const value of cells) {
+      cells.forEach((value, index) => {
         const td = document.createElement('td');
         td.textContent = String(value);
+        td.dataset.label = labels[index];
         tr.append(td);
-      }
+      });
       body.append(tr);
     }
     table.append(body);

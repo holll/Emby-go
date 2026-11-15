@@ -1142,7 +1142,7 @@ test('任务中心新增五类执行器中文名称，未知type保留并转义�
   await box.pageTasks();
   for (const [type, label] of Object.entries(expected)) {
     assert.ok(content.innerHTML.includes(`<option value="${type}">${label}</option>`));
-    assert.ok(node('#task-table').innerHTML.includes(`<td>${label}</td>`));
+    assert.ok(node('#task-table').innerHTML.includes(`<td data-label="类型">${label}</td>`));
   }
   assert.ok(node('#task-table').innerHTML.includes('future_&lt;img src=x onerror=alert(1)&gt;'));
   assert.equal(node('#task-table').innerHTML.includes(unknown), false);
@@ -1941,7 +1941,7 @@ test('移动端表格：用户卡片化与审计堆叠', async () => {
   assert.match(css, /\.user-table thead \{ display: none; \}/);
   // 宽表格的横向滚动只用于确实需要滚动的表；已卡片化的包装层必须排除，
   // 否则 560px 的最小宽度会把移动端布局视口撑宽（innerWidth > 设备宽度）。
-  assert.match(css, /\.table-wrap:not\(\.security-table\):not\(\.audit-table\):not\(\.scheduled-table\):not\(\.stream-table\) table:not\(\.user-table\) \{ min-width: 560px; \}/);
+  assert.match(css, /\.table-wrap:not\(\.security-table\):not\(\.audit-table\):not\(\.scheduled-table\):not\(\.stream-table\):not\(\.apikey-table\):not\(\.task-table\):not\(\.delivery-table\):not\(\.kv-table\) table:not\(\.user-table\) \{ min-width: 560px; \}/);
   // 详情抽屉的媒体流同样卡片化：窄屏隐藏表头、逐条成段，不再靠横滚。
   assert.match(css, /\.stream-table thead \{ display: none; \}/);
   assert.match(css, /\.stream-table td::before \{ content: attr\(data-label\);/);
