@@ -65,6 +65,10 @@
         <div class="dash-panel-head"><div><p class="dash-kicker">SESSIONS</p><h2 id="overview-sessions-title">正在播放</h2></div><span data-dash="sessions-count">—</span></div>
         <div id="overview-sessions" aria-live="polite">正在读取播放会话…</div>
       </section>
+      <section class="dash-card dash-span" aria-labelledby="overview-tasks-title">
+        <div class="dash-panel-head"><div><p class="dash-kicker">TASKS</p><h2 id="overview-tasks-title">运行中的任务</h2></div><span data-dash="tasks-count">—</span></div>
+        <div id="overview-tasks" aria-live="polite">正在读取任务…</div>
+      </section>
       <section class="dash-card dash-span dash-priority dash-archive"><div class="dash-panel-head"><div><p class="dash-kicker">ARCHIVE</p><h3>媒体档案</h3></div><a href="#items">查看媒体墙 →</a></div><div class="dash-media" data-dash="media">尚未收到数据</div><p class="dash-note" data-dash="media-updated">媒体摘要最多缓存 15 秒；NFO 是元数据真源。</p></section>
       <header class="dash-section-head dash-full">
         <div><h2>运行观测</h2><p class="dash-update"><span class="dash-state" data-dash="state" role="status" aria-live="polite">正在获取运行快照…</span><span data-dash="updated">尚未收到数据</span></p></div>

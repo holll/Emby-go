@@ -24,6 +24,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 概览显示正在播放的会话（谁、在播什么、播到哪） | `dashboard.html` 会话区 | `sessionsPanel()` + `GET /Sessions`（10 秒轮询，切页自停） |
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
 | 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
+| 概览显示运行中的任务（类型、已运行时长、查看跳转） | `dashboard.html` 的「运行中任务」区 | `app.js tasksPanel` + `#overview-tasks`，数据走 `/api/admin/tasks` 的实时并集 |
 | 运行日志提供「历史」模式：按游标分页读磁盘 app 日志，暂停实时尾随，可返回实时 | `log.html`（日志文件列表，新窗口打开） | `log-stream.js` 的 `#dl-history` + `loadHistory`，走 `/api/admin/logs/disk` |
 | 计划任务列表就地显示运行态与已运行时长，有取消端点的类型可直接停止 | `scheduledtaskspage.js`（Running 进度条/百分比、Idle 显示上次结果） | `pageScheduled` 的 `data-scheduled-state/elapsed` + 5 秒轮询；停止复用 `/probe/media/cancel`、`/scrape/cancel` |
 | 当前筛选显示成一排可移除气泡 | `filtermenu` 的已应用筛选 chip 行 | 媒体墙 `#wall-active-filters`：状态/媒体库/搜索各一枚，点 × 只清自己那一维并把焦点还给对应控件 |
@@ -39,6 +40,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   语义已按本项目 NFO 真源模型固定，不追随 Emby。
 - **列表加载**：Emby 库页是显式 `1-100 of N` 分页；我们用无限滚动。接口侧 `StartIndex/Limit`
   已支持，需要时可加「页码」而不改 DTO。
+- **运行中任务**：Emby 靠 websocket 增量推进度；这里按 10 秒轮询刷新，进度只显示已运行时长，
+  不伪造百分比（真实进度仍在任务详情/扫描快照里）。首页保持只读，停止入口留在计划任务页与任务中心。
 - **日志历史**：只对 `app.log` 开放（`requests.log` 可能含敏感 URL，磁盘接口本身也不暴露它），
   历史与实时是两种互斥视图，进入历史会断开 SSE，避免两个来源抢同一个 pre。
 - **任务取消**：扫库/重建索引没有中途停止语义（部分结果会落库），翻译/雪碧图在各自页面停止；

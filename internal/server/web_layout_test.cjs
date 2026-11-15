@@ -440,6 +440,36 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
 });
 
+test('概览运行中任务：显示类型与已运行时长、查看跳任务中心且首页保持只读', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(()=>{window.__taskItems=[
+    {id:41,type:'scan',status:'running',started_at:new Date(Date.now()-65000).toISOString()},
+    {id:42,type:'probe',status:'running',started_at:new Date(Date.now()-5000).toISOString()},
+    {id:40,type:'scan',status:'success',started_at:'2026-11-15T00:00:00Z',ended_at:'2026-11-15T00:01:00Z'}
+  ]})()`);
+  await evaluate(`(async()=>{await page('overview');})()`);
+  await new Promise(r => setTimeout(r, 1300));
+  const shown = await evaluate(`(()=>{
+    const box = document.querySelector('#overview-tasks'), count = document.querySelector('[data-dash="tasks-count"]');
+    const rows = [...box.querySelectorAll('.dash-task')];
+    return {count: count.textContent, countRows: rows.length, labels: rows.map(row => row.querySelector('strong').textContent),
+      elapsed: rows.map(row => row.querySelector('small').textContent),
+      stops: rows.map(row => !!row.querySelector('[data-task-cancel]')),
+      opens: box.querySelectorAll('[data-task-open]').length};
+  })()`);
+  assert.equal(shown.count, '2 个运行中'); assert.equal(shown.countRows, 2);
+  assert.deepEqual(shown.labels, ['扫描媒体库', '媒体信息探测']);
+  assert.match(shown.elapsed[0], /^已运行 1 分 /); assert.match(shown.elapsed[1], /^已运行 \d+ 秒$/);
+  assert.deepEqual(shown.stops, [false, false], '首页保持只读，停止入口留在计划任务页与任务中心');
+  assert.equal(shown.opens, 2);
+  assert.deepEqual(await evaluate("__calls.filter(c=>c.method==='POST').map(c=>c.url)"), []);
+  await evaluate(`document.querySelector('#overview-tasks [data-task-open]').click()`);
+  await evaluate(`new Promise(r=>{const check=()=>location.hash==='#tasks'?r():setTimeout(check,20);check();})`);
+  assert.equal(await evaluate('location.hash'), '#tasks');
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
 test('运行日志历史模式：读磁盘 app 日志、暂停实时尾随、可返回实时', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { evaluate } = await browser(t);

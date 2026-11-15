@@ -212,6 +212,20 @@ function sessionsPanel(sessions) {
   }).join('')}</ul>`;
 }
 
+// 概览「运行中的任务」：数据来自 /tasks 的实时并集（同一 id 以内存状态为准）。
+// 首页保持只读（web_dashboard_test 明确禁止 pageOverview 出现写请求），停止入口留在
+// 计划任务页与任务中心，这里只给「查看」。
+function tasksPanel(tasks) {
+  if (!tasks.length) return '<p class="dash-note">当前没有运行中的任务。</p>';
+  return `<ul class="dash-task-list">${tasks.map(item => {
+    const label = TASK_TYPE_TEXT[item.type] || item.type || '未知任务';
+    return `<li class="dash-task" data-task-id="${esc(item.id)}">
+      <span class="dash-task-body"><strong>${esc(label)}</strong><small>${esc(scheduledElapsed(item.started_at) || '刚启动')}</small></span>
+      <span class="dash-task-actions"><button type="button" class="btn btn-sm" data-task-open>查看</button></span>
+    </li>`;
+  }).join('')}</ul>`;
+}
+
 async function pageOverview() {
   const gen = pageGen, identity = token;
   stopDashboardPolling();
@@ -229,7 +243,9 @@ async function pageOverview() {
   const serviceNote = content.querySelector('#service-status-note');
   const sessionsBox = content.querySelector('#overview-sessions');
   const sessionsCount = content.querySelector('[data-dash="sessions-count"]');
-  let sessions = [];
+  const tasksBox = content.querySelector('#overview-tasks');
+  const tasksCount = content.querySelector('[data-dash="tasks-count"]');
+  let sessions = [], runningTasks = [];
   const refresh = async (button, read) => {
     if (!current() || button.getAttribute('aria-disabled') === 'true') return;
     button.setAttribute('aria-disabled', 'true');
@@ -273,14 +289,34 @@ async function pageOverview() {
     const session = sessions.find(entry => String(entry.NowPlayingItem?.Id) === button.dataset.sessionItem);
     if (session?.NowPlayingItem) openDetail(session.NowPlayingItem);
   });
+  const readTasks = async () => {
+    if (!current()) return;
+    try {
+      const data = await api('/tasks');
+      if (!current()) return;
+      const items = Array.isArray(data.items) ? data.items : [];
+      runningTasks = items.filter(item => item.status === 'running' || item.status === 'queued');
+      tasksBox.innerHTML = tasksPanel(runningTasks);
+      if (tasksCount) tasksCount.textContent = runningTasks.length ? `${runningTasks.length} 个运行中` : '空闲';
+    } catch (error) {
+      if (!current()) return;
+      tasksBox.innerHTML = `<p class="dash-note" role="status">运行任务读取失败：${esc(error.message || '请求失败')}</p>`;
+      if (tasksCount) tasksCount.textContent = '—';
+    }
+  };
+  tasksBox.addEventListener('click', event => {
+    if (!current() || !event.target.closest('[data-task-open]')) return;
+    location.hash = '#tasks'; page('tasks');
+  });
   libraryRefresh.addEventListener('click', readLibraries);
   serviceRefresh.addEventListener('click', readService);
   // Emby 用 websocket 推送会话变化；这里按 10 秒轮询，切页或退出后自停。
   overviewSessionsTimer = globalThis.setInterval(() => {
     if (!current()) { stopDashboardPolling(); return; }
     void readSessions();
+    void readTasks();
   }, 10000);
-  await Promise.all([readLibraries(), readService(), readSessions()]);
+  await Promise.all([readLibraries(), readService(), readSessions(), readTasks()]);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
@@ -2964,7 +3000,9 @@ function runBadge(status) {
 // 计划任务运行态：Emby 的任务列表就地显示进度并提供取消；我们有独立取消
 // 端点的领域（探测、刮削）可以从这一页停止，扫库/重建索引不支持中途停止，
 // 翻译/雪碧图分别到各自页面停止。
-const SCHEDULED_STOP = { probe: '/probe/media/cancel', scrape: '/scrape/cancel' };
+// 领域取消端点：探测与刮削各自维护运行态，「停止」就是调用它们；扫库/重建索引没有停止语义。
+const TASK_CANCEL_ENDPOINT = { probe: '/probe/media/cancel', scrape: '/scrape/cancel' };
+const SCHEDULED_STOP = TASK_CANCEL_ENDPOINT;
 const scheduledStopSupported = item => !!SCHEDULED_STOP[item.type];
 
 function scheduledElapsed(startedAt) {
