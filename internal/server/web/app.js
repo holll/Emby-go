@@ -2942,6 +2942,7 @@ const RUN_STATUS_TEXT = { success: '成功', succeeded: '成功', failed: '失�
 
 let scheduledFocus = null;
 let scheduledWatchStop = null;
+let scheduledRunningTimer = null;
 let scheduledRender = 0;
 // A run endpoint acknowledges dispatch only: suppress repeat submissions during the
 // bounded observation window, including same-page redraws. Never infer completion.
@@ -2958,6 +2959,20 @@ function fmtTime(value) {
 function runBadge(status) {
   if (!status) return '<span class="hint" style="margin:0">—</span>';
   return `<span class="badge ${esc(status)}">${esc(RUN_STATUS_TEXT[status] || status)}</span>`;
+}
+
+// 计划任务运行态：Emby 的任务列表就地显示进度并提供取消；我们有独立取消
+// 端点的领域（探测、刮削）可以从这一页停止，扫库/重建索引不支持中途停止，
+// 翻译/雪碧图分别到各自页面停止。
+const SCHEDULED_STOP = { probe: '/probe/media/cancel', scrape: '/scrape/cancel' };
+const scheduledStopSupported = item => !!SCHEDULED_STOP[item.type];
+
+function scheduledElapsed(startedAt) {
+  const started = Date.parse(startedAt || '');
+  if (Number.isNaN(started)) return '';
+  const total = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const m = Math.floor(total / 60), s = total % 60;
+  return `已运行 ${m ? `${m} 分 ${String(s).padStart(2, '0')} 秒` : `${s} 秒`}`;
 }
 
 // Merge only on same-type edits: hidden supported settings (limit/overwrite)
@@ -3061,6 +3076,7 @@ async function renderServiceStatus(host, note, current) {
 
 async function pageScheduled() {
   scheduledWatchStop?.(); scheduledWatchStop = null;
+  clearInterval(scheduledRunningTimer); scheduledRunningTimer = null;
   const render = ++scheduledRender;
   const gen = pageGen, identity = token;
   const [data, libs] = await Promise.all([api('/scheduled'), api('/libraries')]);
@@ -3094,11 +3110,13 @@ async function pageScheduled() {
             <td data-label="类型"><span class="protocol">${esc(types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</span></td>
             <td data-label="表达式" class="mono">${esc(item.cron)}</td>
             <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
-            <td data-label="上次结果" data-scheduled-result="${esc(item.id)}">${runBadge(item.last_status)}
-              <small class="hint" style="margin:2px 0 0;display:block">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
+            <td data-label="上次结果" data-scheduled-result="${esc(item.id)}"><span data-scheduled-state="${esc(item.id)}">${item.running ? `<span class="badge running">${esc(RUN_STATUS_TEXT.running)}</span>` : runBadge(item.last_status)}</span>
+              <small class="hint mono" data-scheduled-elapsed="${esc(item.id)}"${item.running && item.started_at ? ` data-started="${esc(item.started_at)}"` : ' hidden'}></small>
+              <small class="hint" style="margin:2px 0 0;display:block" data-scheduled-last="${esc(item.id)}">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
             <td data-label="启用"><label class="switch"><input type="checkbox" role="switch" data-role="toggle" data-id="${esc(item.id)}" aria-label="启用计划任务：${esc(item.name || types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}"${item.enabled ? ' checked' : ''}></label></td>
             <td data-label="操作"><div class="row-actions">
-              <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="立即执行一次">${icon('play')}<span>执行</span></button>
+              <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="${item.running ? '任务正在执行' : '立即执行一次'}"${item.running ? ' disabled' : ''}>${icon('play')}<span>执行</span></button>
+              <button class="btn btn-sm" data-role="stop" data-id="${esc(item.id)}" title="${scheduledStopSupported(item) ? '停止本次执行' : '该任务类型不支持中途停止'}"${item.running && scheduledStopSupported(item) ? '' : ' hidden'}>${icon('x')}<span>停止</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>
               <button class="icon-btn danger" data-role="del" data-id="${esc(item.id)}" title="删除">${icon('trash')}</button>
             </div></td>
@@ -3397,8 +3415,7 @@ async function pageScheduled() {
               const latest = await api('/scheduled', { signal: controller.signal });
               if (!current()) return;
               const result = latest.items?.find(item => String(item.id) === String(id));
-              const cell = document.querySelector(`[data-scheduled-result="${id}"]`);
-              if (result && cell) cell.innerHTML = `${runBadge(result.last_status)}<small class="hint">${esc(fmtTime(result.last_run_at))} · ${esc(result.last_message || '')}</small>`;
+              if (result) { applyScheduledState(result); if (result.running) startRunningWatch(); }
             } catch (error) {
               if (!current()) return;
               status.textContent = `请求已接受；观察读取失败：${error.message}。不是执行失败，可手动刷新记录。`;
@@ -3444,8 +3461,60 @@ async function pageScheduled() {
           }
         } catch (e) { toast(e.message, 'error'); }
       });
+    } else if (role === 'stop') {
+      el.addEventListener('click', async () => {
+        const target = items.find(item => String(item.id) === String(id));
+        const endpoint = target && SCHEDULED_STOP[target.type];
+        if (!endpoint) { toast('该任务类型不支持中途停止', 'error'); return; }
+        if (!confirm(`停止正在执行的计划任务「${target.name}」？已完成的部分会保留，未开始的条目会被取消。`)) return;
+        el.disabled = true;
+        try { await api(endpoint, { method: 'POST' }); }
+        catch (e) { el.disabled = false; toast(e.message, 'error'); return; }
+        if (gen !== pageGen || render !== scheduledRender || token !== identity || localStorage.getItem('emby_token') !== identity) return;
+        toast('已请求停止，等待任务退出');
+        startRunningWatch();
+      });
     }
   });
+
+  // 运行态同步：列表里只要有任务在跑就每 5 秒对一次后端真实状态，「已运行」
+  // 每秒走一次；离开页面或重渲染后由 currentRun() 自停，不额外占用定时器。
+  const applyScheduledState = item => {
+    const state = document.querySelector(`[data-scheduled-state="${item.id}"]`);
+    if (state) state.innerHTML = item.running ? `<span class="badge running">${esc(RUN_STATUS_TEXT.running)}</span>` : runBadge(item.last_status);
+    const elapsed = document.querySelector(`[data-scheduled-elapsed="${item.id}"]`);
+    if (elapsed) {
+      if (item.running && item.started_at) { elapsed.dataset.started = item.started_at; elapsed.hidden = false; }
+      else { elapsed.hidden = true; delete elapsed.dataset.started; elapsed.textContent = ''; }
+    }
+    const last = document.querySelector(`[data-scheduled-last="${item.id}"]`);
+    if (last) last.textContent = `${fmtTime(item.last_run_at)}${item.last_message ? ' · ' + item.last_message : ''}`;
+    const run = document.querySelector(`[data-role="run"][data-id="${item.id}"]`);
+    if (run) { run.disabled = !!item.running; run.title = item.running ? '任务正在执行' : '立即执行一次'; }
+    const stop = document.querySelector(`[data-role="stop"][data-id="${item.id}"]`);
+    if (stop) stop.hidden = !(item.running && scheduledStopSupported(item));
+  };
+  const tickElapsed = () => document.querySelectorAll('[data-scheduled-elapsed]:not([hidden])').forEach(el => { el.textContent = scheduledElapsed(el.dataset.started); });
+  const currentRun = () => gen === pageGen && render === scheduledRender && token === identity && localStorage.getItem('emby_token') === identity;
+  function startRunningWatch() {
+    clearInterval(scheduledRunningTimer); scheduledRunningTimer = null;
+    if (!currentRun()) return;
+    let ticks = 0;
+    scheduledRunningTimer = setInterval(async () => {
+      if (!currentRun()) { clearInterval(scheduledRunningTimer); scheduledRunningTimer = null; return; }
+      tickElapsed();
+      if (ticks++ % 5) return;
+      let latest;
+      try { latest = await api('/scheduled'); } catch { return; }
+      if (!currentRun()) { clearInterval(scheduledRunningTimer); scheduledRunningTimer = null; return; }
+      const rows = latest.items || [];
+      rows.forEach(applyScheduledState);
+      tickElapsed();
+      if (!rows.some(item => item.running)) { clearInterval(scheduledRunningTimer); scheduledRunningTimer = null; }
+    }, 1000);
+  }
+  tickElapsed();
+  if (items.some(item => item.running)) startRunningWatch();
 }
 
 /* ---------------------------------------------------------------- 运行日志 */

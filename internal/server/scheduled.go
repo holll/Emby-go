@@ -43,6 +43,10 @@ type scheduledView struct {
 	store.ScheduledTask
 	NextRun    string `json:"next_run,omitempty"`
 	ConfigETag string `json:"config_etag"`
+	// Running/StartedAt 是运行期视图，管理端据此显示「执行中」与已运行时长；
+	// 停止动作复用各领域既有的取消端点（见 web/app.js SCHEDULED_STOP）。
+	Running   bool   `json:"running,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
 }
 
 // —— 执行器：把调度器回调接到具体的服务动作上 ——
@@ -422,11 +426,16 @@ func (a *App) adminScheduledTasks(c *gin.Context) {
 		apiError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	running := a.sched.Running()
 	items := make([]scheduledView, 0, len(tasks))
 	for _, task := range tasks {
 		view := scheduledResponse(task)
 		if next := a.sched.Next(task.ID); !next.IsZero() {
 			view.NextRun = next.Format(time.RFC3339)
+		}
+		if started, ok := running[task.ID]; ok {
+			view.Running = true
+			view.StartedAt = started.UTC().Format(time.RFC3339)
 		}
 		items = append(items, view)
 	}

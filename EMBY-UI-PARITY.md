@@ -24,6 +24,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 概览显示正在播放的会话（谁、在播什么、播到哪） | `dashboard.html` 会话区 | `sessionsPanel()` + `GET /Sessions`（10 秒轮询，切页自停） |
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
 | 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
+| 计划任务列表就地显示运行态与已运行时长，有取消端点的类型可直接停止 | `scheduledtaskspage.js`（Running 进度条/百分比、Idle 显示上次结果） | `pageScheduled` 的 `data-scheduled-state/elapsed` + 5 秒轮询；停止复用 `/probe/media/cancel`、`/scrape/cancel` |
 | 当前筛选显示成一排可移除气泡 | `filtermenu` 的已应用筛选 chip 行 | 媒体墙 `#wall-active-filters`：状态/媒体库/搜索各一枚，点 × 只清自己那一维并把焦点还给对应控件 |
 
 ## 有意保留的差异
@@ -37,6 +38,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   语义已按本项目 NFO 真源模型固定，不追随 Emby。
 - **列表加载**：Emby 库页是显式 `1-100 of N` 分页；我们用无限滚动。接口侧 `StartIndex/Limit`
   已支持，需要时可加「页码」而不改 DTO。
+- **任务取消**：扫库/重建索引没有中途停止语义（部分结果会落库），翻译/雪碧图在各自页面停止；
+  计划任务页只对探测、刮削提供「停止」，避免给出一个「点了不一定停」的按钮。
 - **筛选取值**：Emby 的筛选托盘可同时勾多个状态；我们沿用单值 `Filters`（后端目前只解析
   `IsPlayed`/`IsFavorite`），多选组合要动契约层语义，故只把「当前生效的筛选」气泡化。
 - **布局与偏好**：不做 Emby 的六种布局、`usersettingsbuilder` 的 localStorage + 服务端 `CustomPrefs` 双写。
@@ -45,7 +48,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 
 ## 待评估（未承诺）
 
-按性价比排序，尚未动手：视图切换与偏好持久化、计划任务/任务记录进度与停止、
+按性价比排序，尚未动手：视图切换与偏好持久化、
 日志历史回看（`/api/admin/logs/disk` 游标已实现、前端未接）、活动与告警流。
 
 新增页面能力时，先在这里补「Emby 出处 + 我们的 file:line」，再动代码；不要为了像 Emby 而改

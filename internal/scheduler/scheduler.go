@@ -63,8 +63,10 @@ type Scheduler struct {
 
 	// running 记录正在执行的任务 id：调度器层保证同一任务永不重入，
 	// 即使 Runner 内部的互斥检查存在 TOCTOU 窗口（到点与「立即执行」并发）。
-	runMu   sync.Mutex
-	running map[int64]bool
+	// runningAt 保存每轮开始时间，管理端据此显示「已运行多久」。
+	runMu     sync.Mutex
+	running   map[int64]bool
+	runningAt map[int64]time.Time
 }
 
 // New 创建调度器。ctx 为常驻根 context，进程退出时取消。
@@ -77,6 +79,7 @@ func New(ctx context.Context, st *store.Store, runner Runner) *Scheduler {
 		entries:   make(map[int64]cron.EntryID),
 		schedules: make(map[int64]cron.Schedule),
 		running:   make(map[int64]bool),
+		runningAt: make(map[int64]time.Time),
 		cron: cron.New(
 			cron.WithChain(cron.Recover(slogCronLogger{logger})),
 		),
@@ -146,13 +149,26 @@ func (s *Scheduler) acquire(id int64) bool {
 		return false
 	}
 	s.running[id] = true
+	s.runningAt[id] = time.Now()
 	return true
 }
 
 func (s *Scheduler) release(id int64) {
 	s.runMu.Lock()
 	delete(s.running, id)
+	delete(s.runningAt, id)
 	s.runMu.Unlock()
+}
+
+// Running 返回正在执行的任务 id → 开始时间快照，供管理端展示运行态。
+func (s *Scheduler) Running() map[int64]time.Time {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	out := make(map[int64]time.Time, len(s.runningAt))
+	for id, started := range s.runningAt {
+		out[id] = started
+	}
+	return out
 }
 
 // taskParams 把任务参数渲染成稳定的键值串（json.Marshal 对 map 键排序），

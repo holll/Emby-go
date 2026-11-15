@@ -236,6 +236,39 @@ func TestRunNowRejectsWhileRunning(t *testing.T) {
 	}
 }
 
+// TestRunningReportsActiveTasks 验证管理端能看到「谁在跑、从什么时候开始」。
+func TestRunningReportsActiveTasks(t *testing.T) {
+	st := newTestStore(t)
+	task := mustCreate(t, st, store.ScheduledTask{Name: "长任务", Type: "scan", Cron: "@daily", Enabled: true})
+	started := make(chan struct{}, 1)
+	releaseRun := make(chan struct{})
+	s := New(context.Background(), st, func(context.Context, Task) error {
+		started <- struct{}{}
+		<-releaseRun
+		return nil
+	})
+	defer s.Stop()
+	if running := s.Running(); len(running) != 0 {
+		t.Fatalf("空闲时 Running() = %v, want empty", running)
+	}
+	done := make(chan struct{})
+	go func() { s.fire(toTask(task)); close(done) }()
+	<-started
+	running := s.Running()
+	if len(running) != 1 {
+		t.Fatalf("Running() = %v, want one entry", running)
+	}
+	startedAt, ok := running[task.ID]
+	if !ok || time.Since(startedAt) > time.Minute {
+		t.Fatalf("Running()[%d] = %v (ok=%v), want recent start time", task.ID, startedAt, ok)
+	}
+	close(releaseRun)
+	<-done
+	if running := s.Running(); len(running) != 0 {
+		t.Fatalf("结束后的 Running() = %v, want empty", running)
+	}
+}
+
 // TestSchedulerRunsDifferentTasksConcurrently 验证不同任务互不阻塞。
 func TestSchedulerRunsDifferentTasksConcurrently(t *testing.T) {
 	st := newTestStore(t)

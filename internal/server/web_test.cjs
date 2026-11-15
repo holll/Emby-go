@@ -19,6 +19,12 @@ function sandbox(values = {}) {
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
     stopScanPolling() {}, embyUserPath: () => '/Users/1', WALL_STATUS_TEXT: {}, stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, stopTranslationPolling() {}, scanClose: { hidden: true, addEventListener() {} },
+    // 计划任务页进入时先关掉上一次的运行态定时器；抽取的片段里没有真实定时器。
+    clearInterval() {}, setInterval: () => 0, scheduledRunningTimer: null,
+    // 计划任务行的运行态渲染依赖这几个渲染期常量。
+    SCHEDULED_STOP: {}, scheduledStopSupported: () => false, scheduledElapsed: () => '', RUN_STATUS_TEXT: { running: '进行中' },
+    // 行操作代码段里的停止分支要按 id 回查当前列表；整页渲染时它是函数内局部变量。
+    items: [],
     // 抽取的片段里 reloadWall/page 会收卡片菜单；完整页面才提供实现。
     closeCardMenu() {},
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
@@ -2851,19 +2857,30 @@ test('手动执行禁调度的翻译计划也必须确认范围，保持enabled�
 function scheduledRunFixture({ failure = 0, observeFailure = false, pending = false } = {}) {
   let click, resolvePost, now = 1000, next = 0;
   const timers = new Map(), calls = [], messages = [], signals = [];
-  const status = { textContent: '', isConnected: true }, cell = { innerHTML: '' };
+  const status = { textContent: '', isConnected: true };
+  const state = { innerHTML: '' }, elapsed = { hidden: true, textContent: '', dataset: {} }, last = { textContent: '' };
   const el = { disabled: false, isConnected: true, addEventListener(_, fn) { click = fn; } };
   const box = sandbox({ id: '42', items: [{ id: 42, type: 'scan' }], gen: 1, el,
     Date: { now: () => now }, scheduledRunHolds: new Map(), scheduledWatchStop: null,
     setTimeout(fn, delay) { const id = ++next; timers.set(id, { fn, delay }); return id; }, clearTimeout(id) { timers.delete(id); },
-    document: { querySelector: selector => selector === '#scheduled-observation' ? status : cell },
+    document: {
+      querySelector: selector => selector === '#scheduled-observation' ? status
+        : selector.includes('data-scheduled-state') ? state
+        : selector.includes('data-scheduled-elapsed') ? elapsed
+        : selector.includes('data-scheduled-last') ? last : null,
+      querySelectorAll: () => []
+    },
     api: async (url, options = {}) => { calls.push({ url, options });
       if (url === '/scheduled') { if (options.signal) signals.push(options.signal); if (observeFailure) throw Error('offline'); }
       if (url.endsWith('/run')) { if (pending) await new Promise(resolve => { resolvePost = resolve; }); if (failure) throw Object.assign(Error('rejected'), { status: failure }); return {}; }
       return { items: [{ id: 42, last_status: 'success', last_message: 'latest', last_run_at: '' }] };
     }, runBadge: value => value, esc: String, fmtTime: String, toast: message => messages.push(message) });
   vm.runInContext(section('      const holdKey =', "    } else if (role === 'edit')"), box);
-  return { box, el, status, cell, calls, messages, signals, timers, click: () => click(), resolve: () => resolvePost(),
+  box.scheduledElapsed = () => '';
+  box.scheduledStopSupported = () => false;
+  box.RUN_STATUS_TEXT = { running: '进行中' };
+  vm.runInContext(section('  const applyScheduledState', '  const tickElapsed'), box);
+  return { box, el, status, state, last, calls, messages, signals, timers, click: () => click(), resolve: () => resolvePost(),
     async flush() { for (let i = 0; i < 8; i++) await Promise.resolve(); },
     async tick(delay) { now += delay; const due = [...timers].filter(([, t]) => t.delay === delay); for (const [id, timer] of due) { timers.delete(id); timer.fn(); } await this.flush(); } };
 }
@@ -2874,7 +2891,7 @@ test('计划执行单次POST、接受不等于完成，刷新最近记录并有�
   env.resolve(); await first; await env.flush(); await env.click();
   assert.equal(env.calls.filter(c => c.url.endsWith('/run')).length, 1);
   assert.match(env.status.textContent, /不等于执行成功/); assert.match(env.status.textContent, /不能确认/);
-  assert.match(env.cell.innerHTML, /latest/); assert.equal(env.calls.filter(c => c.url === '/scheduled').length, 1);
+  assert.match(env.last.textContent, /latest/); assert.equal(env.calls.filter(c => c.url === '/scheduled').length, 1);
   await env.tick(5000); assert.equal(env.calls.filter(c => c.url === '/scheduled').length, 2);
   await env.tick(30000); assert.match(env.status.textContent, /观察已结束/);
   assert.equal(env.signals[0].aborted, true); assert.equal(env.box.scheduledWatchStop, null);

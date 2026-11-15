@@ -101,7 +101,7 @@ async function browser(t) {
         if(window.__toggleFail)return {ok:false,status:503,json:async()=>({error:'fixture toggle failure'})};
         window.__scheduledEnabled=!(window.__scheduledEnabled??true);
       }
-      else if(p.endsWith('/scheduled'))data={items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:window.__scheduledEnabled??true,config_etag:'fixture'}],types:{scan:'扫描媒体库',reindex:'重建索引',probe:'媒体信息探测',scrape:'内置刮削',scrape_avatars:'演员头像补全',translate:'独立翻译',sprites:'雪碧图生成'}};
+      else if(p.endsWith('/scheduled'))data=window.__scheduledItems?structuredClone(window.__scheduledItems):{items:[{id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:window.__scheduledEnabled??true,config_etag:'fixture'}],types:{scan:'扫描媒体库',reindex:'重建索引',probe:'媒体信息探测',scrape:'内置刮削',scrape_avatars:'演员头像补全',translate:'独立翻译',sprites:'雪碧图生成'}};
       else if(p.endsWith('/dashboard')){
         // Deliberately synthetic layout fixture; real HTTP telemetry is verified by Go/CDP integration.
         const minutes=Number(new URL(url,'http://fixture').searchParams.get('window')?.replace('m','')||15), now=Date.now();
@@ -438,6 +438,37 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(outside.closed, true); assert.equal(outside.expanded, 'false');
   assert.deepEqual(await evaluate('__errors'), []);
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
+});
+
+test('计划任务运行态：执行中角标、已运行时长与可停止类型', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(()=>{window.__scheduledItems={items:[
+    {id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:true,config_etag:'f1',running:true,started_at:new Date(Date.now()-65000).toISOString()},
+    {id:2,name:'补探测',type:'probe',cron:'0 4 * * *',params:'{}',enabled:true,config_etag:'f2',running:true,started_at:new Date(Date.now()-5000).toISOString()},
+    {id:3,name:'日常刮削',type:'scrape',cron:'0 5 * * *',params:'{}',enabled:true,config_etag:'f3',last_status:'success',last_run_at:'2026-11-15T00:00:00Z',last_message:'完成'}
+  ],types:{scan:'扫描媒体库',probe:'媒体信息探测',scrape:'内置刮削'}}})()`);
+  await evaluate(`(async()=>{await page('scheduled');})()`);
+  await new Promise(r => setTimeout(r, 1300));
+  const shown = await evaluate(`(()=>{
+    const state = id => document.querySelector('[data-scheduled-state="'+id+'"]').textContent.trim();
+    const stop = id => document.querySelector('[data-role="stop"][data-id="'+id+'"]').hidden;
+    const run = id => document.querySelector('[data-role="run"][data-id="'+id+'"]').disabled;
+    const elapsed = id => { const el = document.querySelector('[data-scheduled-elapsed="'+id+'"]'); return el.hidden ? null : el.textContent; };
+    return {scanBadge: state(1), probeBadge: state(2), idleBadge: state(3), scanStop: stop(1), probeStop: stop(2), idleStop: stop(3), scanRun: run(1), idleRun: run(3), scanElapsed: elapsed(1), probeElapsed: elapsed(2), idleElapsed: elapsed(3)};
+  })()`);
+  assert.equal(shown.scanBadge, '进行中'); assert.equal(shown.probeBadge, '进行中'); assert.equal(shown.idleBadge, '成功');
+  assert.equal(shown.scanStop, true, '扫库不支持中途停止'); assert.equal(shown.probeStop, false); assert.equal(shown.idleStop, true);
+  assert.equal(shown.scanRun, true); assert.equal(shown.idleRun, false);
+  assert.match(shown.scanElapsed, /^已运行 1 分 /); assert.match(shown.probeElapsed, /^已运行 \d+ 秒$/); assert.equal(shown.idleElapsed, null);
+  // 「停止」复用领域既有的取消端点，不新增一套任务取消 API。
+  const stopped = await evaluate(`(async()=>{document.querySelector('[data-role="stop"][data-id="2"]').click();for(let i=0;i<100&&!__calls.some(c=>c.url.endsWith('/probe/media/cancel'));i++)await new Promise(r=>setTimeout(r,20));return __calls.filter(c=>c.method==='POST').map(c=>c.url);})()`);
+  assert.deepEqual(stopped, ['/api/admin/probe/media/cancel']);
+  await evaluate(`(()=>{window.__scheduledItems.items[0].running=false;window.__scheduledItems.items[0].last_status='success';window.__scheduledItems.items[1].running=false;})()`);
+  await new Promise(r => setTimeout(r, 5600));
+  const after = await evaluate(`(()=>({badge:document.querySelector('[data-scheduled-state="1"]').textContent.trim(),stop:document.querySelector('[data-role="stop"][data-id="1"]').hidden,run:document.querySelector('[data-role="run"][data-id="1"]').disabled,elapsed:document.querySelector('[data-scheduled-elapsed="1"]').hidden}))()`);
+  assert.deepEqual(after, { badge: '成功', stop: true, run: false, elapsed: true }, '轮询同步结束态并解除禁用');
+  assert.deepEqual(await evaluate('__errors'), []);
 });
 
 test('媒体墙筛选气泡：显示当前筛选、逐个清除并回到对应控件', { timeout: 60000 }, async t => {
