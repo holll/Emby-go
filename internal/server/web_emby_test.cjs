@@ -65,7 +65,7 @@ test('Collection navigation explicitly clears library selection instead of claim
 
 test('Native detail only reads Emby DTOs; userdata mutations and maintenance remain explicit', async () => {
   const nodes = new Map(), calls = []; let maintenance = 0, stored = 'A';
-  const node = id => { if (!nodes.has(id)) nodes.set(id, { hidden: false, innerHTML: '', handlers: {}, setAttribute() {}, addEventListener(type, fn) { this.handlers[type] = fn; }, querySelectorAll: () => [] }); return nodes.get(id); };
+  const node = id => { if (!nodes.has(id)) nodes.set(id, { hidden: false, innerHTML: '', handlers: {}, textContent: '', setAttribute() {}, addEventListener(type, fn) { this.handlers[type] = fn; }, querySelectorAll: () => [], querySelector() { return (this.child ??= { textContent: '' }); } }); return nodes.get(id); };
   const box = loadClient(context({ pageGen: 1, detailGen: 0, wallState: null, localStorage: { getItem: () => stored },
     detailOverlay: node('overlay'), detailDrawer: node('drawer'), document: { querySelector: node }, closeDetail() {}, overlayPush() {}, overlayFocusFirst() {},
     esc: String, icon: () => '', fmtDuration: () => '', fmtSize: () => '', fmtTime: () => '', detailMetaRow: () => '', streamTable: () => '', toast() {},
@@ -83,6 +83,27 @@ test('Native detail only reads Emby DTOs; userdata mutations and maintenance rem
   stored = 'B'; box.token = 'B'; const before = calls.length;
   await node('#detail-favorite').handlers.click(); node('#detail-play').handlers.click(); node('#detail-maintenance').handlers.click();
   assert.equal(calls.length, before, '旧身份DOM不能用新token继续写用户状态'); assert.equal(maintenance, 1);
+});
+
+test('Native detail follows Emby Play/Resume: 继续播放 seeks, 从头播放 starts at zero, drawer stays open', async () => {
+  const nodes = new Map(), played = []; let closed = 0;
+  const node = id => { if (!nodes.has(id)) nodes.set(id, { hidden: false, innerHTML: '', handlers: {}, textContent: '', setAttribute() {}, addEventListener(type, fn) { this.handlers[type] = fn; }, querySelectorAll: () => [], querySelector() { return (this.child ??= { textContent: '' }); } }); return nodes.get(id); };
+  const box = loadClient(context({ pageGen: 1, detailGen: 0, wallState: null, localStorage: { getItem: () => 'A' },
+    detailOverlay: node('overlay'), detailDrawer: node('drawer'), document: { querySelector: node }, closeDetail() { closed++; }, overlayPush() {}, overlayFocusFirst() {},
+    esc: String, icon: () => '', fmtDuration: () => '', fmtSize: () => '', fmtTime: () => '', detailMetaRow: () => '', streamTable: () => '', toast() {},
+    openMaintenanceDetail() {}, reloadWall() {}, openPlayer: (item, options) => { played.push({ item, options }); },
+    fetch: async url => ({ ok: true, status: 200, json: async () => url.endsWith('/Collections') ? { Items: [] }
+      : { Id: '9', Name: 'resume title', UserData: { PlaybackPositionTicks: 200000000 }, People: [], MediaSources: [] } }) }));
+  await box.openDetail({ Id: '9' });
+  closed = 0; // openDetail 自己会先 closeDetail，这里只看点播放时是否还关抽屉。
+  const play = node('#detail-play'), restart = node('#detail-restart');
+  assert.equal(play.child.textContent, '继续播放'); assert.equal(restart.hidden, false);
+  play.handlers.click(); assert.equal(played.length, 1); assert.equal(played[0].options.startTicks, 200000000); assert.equal(closed, 0, '详情抽屉留在播放器下面');
+  restart.handlers.click(); assert.equal(played.length, 2); assert.equal(played[1].options.startTicks, 0);
+  // 播放器关闭后刷新用户状态：按钮回到「播放」，从头播放隐藏。
+  box.embyRequest = async url => ({ Id: '9', Name: 'resume title', UserData: {}, People: [], MediaSources: [] });
+  played[0].options.onClosed(); await tick();
+  assert.equal(play.child.textContent, '播放'); assert.equal(restart.hidden, true);
 });
 
 test('Native detail identity change between reads does not request Collections or render old data', async () => {
@@ -151,4 +172,22 @@ test('Closing during PlaybackInfo suppresses late player construction and no-sou
   const pending = env.box.openPlayer({ Id: '9' }); env.box.closePlayer(); resolve({ PlaySessionId: 'late', MediaSources: [{ DirectStreamUrl: '/Videos/9/stream.mp4' }] }); await pending;
   assert.equal(env.players.length, 0);
   const missing = playerFixture(() => ({ MediaSources: [] })); await missing.box.openPlayer({ Id: '9' }); assert.match(missing.node('#player-stage').innerHTML, /暂无可用播放源/);
+});
+
+test('Player honours an explicit start tick (从头播放) instead of the saved resume position', async () => {
+  const env = playerFixture();
+  await env.box.openPlayer({ Id: '9', Name: 'native', UserData: { PlaybackPositionTicks: 200000000 } }, { startTicks: 0 });
+  env.players[0].events['video:loadedmetadata'](); assert.equal(env.players[0].seek, undefined);
+  const explicit = playerFixture();
+  await explicit.box.openPlayer({ Id: '9', UserData: { PlaybackPositionTicks: 0 } }, { startTicks: 500000000 });
+  explicit.players[0].events['video:loadedmetadata'](); assert.equal(explicit.players[0].seek, 50);
+});
+
+test('Player close callback fires once per player and not for a stale session', async () => {
+  const env = playerFixture(); let closed = 0;
+  await env.box.openPlayer({ Id: '9' }, { onClosed: () => { closed++; } });
+  env.box.closePlayer(); env.box.closePlayer(); assert.equal(closed, 1);
+  await env.box.openPlayer({ Id: '9' }, { onClosed: () => { closed++; } });
+  await env.box.openPlayer({ Id: '9' }); // 新播放器替换旧播放器：旧回调只结算一次，新播放器没有回调
+  env.box.closePlayer(); assert.equal(closed, 2);
 });

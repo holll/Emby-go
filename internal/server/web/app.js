@@ -21,6 +21,7 @@ const icon = name => {
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
     probe: '<path d="M4 12h2.5l2-5.5 3 11 2.5-7 1.5 1.5H20"/>',
     play: '<path d="M8 5v14l11-7z"/>',
+    check: '<path d="m5 13 4 4L19 7"/>',
     'arrow-up': '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
     'arrow-down': '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
@@ -183,10 +184,33 @@ function refreshPage(render, gen) {
 
 /* ---------------------------------------------------------------- 总览 */
 let dashboardStop = null;
+let overviewSessionsTimer = null;
 function stopDashboardPolling() {
   if (typeof dashboardStop === 'function') dashboardStop();
   dashboardStop = null;
+  if (overviewSessionsTimer !== null) globalThis.clearInterval(overviewSessionsTimer);
+  overviewSessionsTimer = null;
 }
+
+// 正在播放会话卡：数据来自 Emby 的 GET /Sessions（本项目只记录播放会话），
+// 与 Emby 控制台一致地展示「谁在播哪部、播到哪」。
+function sessionsPanel(sessions) {
+  if (!sessions.length) return '<p class="dash-note">当前没有正在播放的会话。</p>';
+  return `<ul class="dash-session-list">${sessions.map(session => {
+    const item = session.NowPlayingItem || {};
+    const title = item.Name || '未知条目';
+    const total = Number(item.RunTimeTicks) || 0;
+    const position = Number(session.PlayState?.PositionTicks) || 0;
+    const percent = total > 0 ? Math.min(100, Math.round(position / total * 100)) : 0;
+    const poster = item.ImageTags?.Primary ? embyImageURL(item, 'Primary', 80) : '';
+    const detail = [session.UserName || '未知用户', total ? `${percent}%` : '', position ? ticksToClock(position) : ''].filter(Boolean).join(' · ');
+    return `<li><button type="button" class="dash-session" data-session-item="${esc(item.Id || '')}">
+      ${poster ? `<img class="dash-session-poster" loading="lazy" src="${esc(poster)}" alt="">` : '<span class="dash-session-poster is-empty" aria-hidden="true"></span>'}
+      <span class="dash-session-body"><strong>${esc(title)}</strong><small>${esc(detail)}</small>${total ? `<span class="dash-session-progress"><i style="width:${percent}%"></i></span>` : ''}</span>
+    </button></li>`;
+  }).join('')}</ul>`;
+}
+
 async function pageOverview() {
   const gen = pageGen, identity = token;
   stopDashboardPolling();
@@ -202,6 +226,9 @@ async function pageOverview() {
   const serviceRefresh = content.querySelector('#service-status-refresh');
   const serviceCards = content.querySelector('#overview-service-cards');
   const serviceNote = content.querySelector('#service-status-note');
+  const sessionsBox = content.querySelector('#overview-sessions');
+  const sessionsCount = content.querySelector('[data-dash="sessions-count"]');
+  let sessions = [];
   const refresh = async (button, read) => {
     if (!current() || button.getAttribute('aria-disabled') === 'true') return;
     button.setAttribute('aria-disabled', 'true');
@@ -225,9 +252,34 @@ async function pageOverview() {
     } else scanNote.textContent = '扫描快照：当前无扫描';
   });
   const readService = () => refresh(serviceRefresh, () => renderServiceStatus(serviceCards, serviceNote, current));
+  const readSessions = async () => {
+    if (!current()) return;
+    try {
+      const list = await embyRequest('/Sessions');
+      if (!current() || !Array.isArray(list)) return;
+      sessions = list;
+      sessionsBox.innerHTML = sessionsPanel(list);
+      if (sessionsCount) sessionsCount.textContent = `${list.length} 个会话`;
+    } catch (error) {
+      if (!current()) return;
+      sessionsBox.innerHTML = `<p class="dash-note" role="status">播放会话读取失败：${esc(error.message || '请求失败')}</p>`;
+      if (sessionsCount) sessionsCount.textContent = '—';
+    }
+  };
+  sessionsBox.addEventListener('click', event => {
+    const button = event.target.closest('[data-session-item]');
+    if (!button || !current()) return;
+    const session = sessions.find(entry => String(entry.NowPlayingItem?.Id) === button.dataset.sessionItem);
+    if (session?.NowPlayingItem) openDetail(session.NowPlayingItem);
+  });
   libraryRefresh.addEventListener('click', readLibraries);
   serviceRefresh.addEventListener('click', readService);
-  await Promise.all([readLibraries(), readService()]);
+  // Emby 用 websocket 推送会话变化；这里按 10 秒轮询，切页或退出后自停。
+  overviewSessionsTimer = globalThis.setInterval(() => {
+    if (!current()) { stopDashboardPolling(); return; }
+    void readSessions();
+  }, 10000);
+  await Promise.all([readLibraries(), readService(), readSessions()]);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
@@ -399,7 +451,7 @@ function wallCard(item) {
   return `<article class="wall-card" data-play="${esc(item.Id)}">
     <div class="wall-poster">
       ${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(srcset)}" alt="">` : `<span class="wall-path">${esc(title)}</span>`}
-      <div class="wall-badges">${ud.Played ? '<span class="wall-badge played">已看</span>' : ''}${ud.IsFavorite ? '<span class="wall-badge fav">♥</span>' : ''}${item.PartCount > 1 ? `<span class="wall-badge multi">${item.PartCount} 段</span>` : ''}</div>
+      <div class="wall-badges">${ud.Played ? `<span class="wall-badge played" role="img" aria-label="已看" title="已看">${icon('check')}</span>` : ''}${ud.IsFavorite ? '<span class="wall-badge fav">♥</span>' : ''}${item.PartCount > 1 ? `<span class="wall-badge multi">${item.PartCount} 段</span>` : ''}</div>
       ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
       ${me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${esc(item.Id)}" aria-label="选择翻译：${esc(title)}">选择</label>` : ''}
       ${me?.is_admin ? `<div class="wall-actions"><button class="icon-btn" data-probe="${esc(item.Id)}" aria-label="探测媒体信息" title="探测媒体信息">${icon('probe')}</button><button class="icon-btn" data-reread="${esc(item.Id)}" aria-label="重读源" title="重读源">${icon('refresh')}</button><button class="icon-btn danger" data-delete="${esc(item.Id)}" aria-label="删除索引" title="删除索引">${icon('trash')}</button></div>` : ''}
@@ -503,6 +555,7 @@ async function pageItems() {
       <div class="filters wall-toolbar">
         <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+        <button type="button" class="btn btn-sm" id="item-order" aria-label="排序方向：${order === 'asc' ? '升序' : '降序'}" title="切换排序方向">${order === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
       </div>
       ${collectionList ? '' : `<div class="filters wall-status-filters">
         ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
@@ -607,6 +660,17 @@ async function pageItems() {
     q.set('sort', sortSelect.value);
     q.delete('order');
     pendingWallFocus = '#item-sort';
+    pushQuery(q);
+    refreshPage(pageItems, gen);
+  });
+  // 排序方向与排序字段分开维护（对应 Emby 的 SortBy + SortOrder 两个维度）：
+  // 合集只有「标题正/逆序」一维，切 sort；影片切 order，URL 里始终可回显。
+  const orderButton = document.querySelector('#item-order');
+  if (orderButton) orderButton.addEventListener('click', () => {
+    const q = new URLSearchParams(location.search);
+    if (collectionView) q.set('sort', sort === 'title' ? 'title-desc' : 'title');
+    else q.set('order', order === 'asc' ? 'desc' : 'asc');
+    pendingWallFocus = '#item-order';
     pushQuery(q);
     refreshPage(pageItems, gen);
   });
@@ -1407,6 +1471,8 @@ let artInstance = null;
 let spritePreviewStop = null;
 let playbackStop = null;
 let playerGen = 0;
+// 关闭播放器后的回调（详情页用它刷新用户状态）；closePlayer 是唯一出口，所以在此处统一清空。
+let playerOnClosed = null;
 
 function closePlayer() {
   playerGen += 1;
@@ -1414,6 +1480,8 @@ function closePlayer() {
   spritePreviewStop?.(); spritePreviewStop = null;
   if (artInstance) { artInstance.destroy(); artInstance = null; }
   overlayPop('#player-overlay');
+  const onClosed = playerOnClosed; playerOnClosed = null;
+  onClosed?.();
 }
 
 // Video elements cannot send authentication headers; Emby stream URLs carry api_key.
@@ -1421,9 +1489,10 @@ function streamURL(id, kind) {
   return '/emby/Videos/' + encodeURIComponent(id) + '/' + kind + '?api_key=' + encodeURIComponent(token || '');
 }
 
-async function openPlayer(item) {
+async function openPlayer(item, options = {}) {
   closePlayer();
   const session = ++playerGen, identity = token;
+  playerOnClosed = typeof options.onClosed === 'function' ? options.onClosed : null;
   const current = () => session === playerGen && token === identity && localStorage.getItem('emby_token') === identity;
   const id = String(item.Id || item.id);
   const overlay = document.querySelector('#player-overlay');
@@ -1460,8 +1529,10 @@ async function openPlayer(item) {
       if (started) report('Stopped', 'Stop');
     };
     playbackStop = stop;
+    // 起点由调用方决定（详情页按「继续播放/从头播放」传入），未指定时沿用已有进度。
+    const startTicks = Number(options.startTicks ?? item.UserData?.PlaybackPositionTicks ?? 0) || 0;
     instance.on('video:loadedmetadata', () => {
-      const position = (item.UserData?.PlaybackPositionTicks || 0) / 10000000;
+      const position = startTicks / 10000000;
       if (position > 0 && position < instance.duration) instance.seek = position;
     });
     instance.on('video:playing', () => {

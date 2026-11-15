@@ -34,6 +34,7 @@ async function browser(t) {
       }
       let data={};
       if(p.endsWith('/Users/Me'))data={Id:'1',Name:'owner',Policy:{IsAdministrator:true}};
+      else if(p==='/emby/Sessions')data=window.__sessions||[];
       else if(p==='/emby/Users/1/Views'){const items=window.__nativeViews||[{Id:'1000000000001',Name:'测试媒体库',CollectionType:'movies'}];data={Items:items,TotalRecordCount:items.length};}
       else if(p==='/emby/Users/1/Items'){
         const query=new URL(url,location.origin).searchParams;
@@ -329,7 +330,7 @@ test('首页分组：六库紧凑展示、数据表独立边界与服务自然�
       return {root:box(root),scroll:document.documentElement.scrollWidth,first:cards.slice(0,2).map(e=>e.querySelector('h2,h3').textContent),tasks:!!root.querySelector('[data-dash="tasks"]'),libraries:[...list.children].map(e=>({box:box(e),visible:e.getClientRects().length>0})),libraryColumns:getComputedStyle(list).gridTemplateColumns.split(' ').length,mainRow:getComputedStyle(main).gridRowStart,dataParent:data.parentElement===root,data:box(data),caption:{text:data.querySelector('caption').textContent,position:getComputedStyle(data.querySelector('caption')).position,width:box(data.querySelector('caption')).width},groups:[...root.querySelectorAll('.dash-service-stack')].map(e=>({label:e.getAttribute('aria-label'),titles:[...e.querySelectorAll('h3')].map(h=>h.textContent)})),order:[...root.querySelectorAll('h2,h3')].map(e=>e.textContent),columns:getComputedStyle(root.querySelector('.dash-service-cards')).gridTemplateColumns.split(' ').length};
     })()`);
     assert.ok(geometry.scroll <= width + 1, `no page overflow at ${width}`);
-    assert.deepEqual(geometry.first, ['媒体库状态', '媒体档案']);
+    assert.deepEqual(geometry.first, ['媒体库状态', '正在播放']);
     assert.equal(geometry.tasks, false);
     assert.equal(geometry.libraries.length, 6);
     assert.ok(geometry.libraries.every(row=>row.visible && row.box.left>=geometry.root.left-1 && row.box.right<=geometry.root.right+1));
@@ -372,6 +373,48 @@ test('首页分组：六库紧凑展示、数据表独立边界与服务自然�
     }
     assert.deepEqual(await evaluate('__errors'),[]);
   }
+});
+
+test('概览正在播放：会话卡显示用户与进度，点开进详情，无会话时给出空状态', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await call('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion', value:'reduce' }] });
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  const empty = await evaluate(`(async()=>{await page('overview');await new Promise(r=>setTimeout(r,150));return {text:document.querySelector('#overview-sessions').textContent.trim(),count:document.querySelector('[data-dash="sessions-count"]').textContent};})()`);
+  assert.match(empty.text, /当前没有正在播放的会话/);
+  assert.equal(empty.count, '0 个会话');
+  await evaluate(`window.__sessions=[{Id:'s1',UserName:'alice',PlayState:{PositionTicks:250000000},NowPlayingItem:{Id:'1',Name:'长详情验证',RunTimeTicks:1000000000,ImageTags:{Primary:'tag1'},UserData:{}}}]`);
+  const card = await evaluate(`(async()=>{await page('overview');for(let i=0;i<100&&!document.querySelector('[data-session-item]');i++)await new Promise(r=>setTimeout(r,20));
+    const button=document.querySelector('[data-session-item]'), poster=button.querySelector('img'), bar=button.querySelector('.dash-session-progress i');
+    return {count:document.querySelector('[data-dash="sessions-count"]').textContent, title:button.querySelector('strong').textContent,
+      detail:button.querySelector('small').textContent, width:bar.style.width, poster:!!poster, item:button.dataset.sessionItem};})()`);
+  assert.equal(card.count, '1 个会话');
+  assert.equal(card.title, '长详情验证');
+  assert.match(card.detail, /alice · 25% · \d\d:\d\d:\d\d/);
+  assert.equal(card.width, '25%');
+  assert.equal(card.poster, true, '有 Primary 标签时显示海报');
+  assert.equal(card.item, '1');
+  const opened = await evaluate(`(async()=>{document.querySelector('[data-session-item]').click();await new Promise(r=>setTimeout(r,150));const open=document.querySelector('#detail-overlay').open;document.querySelector('#detail-play').click();await new Promise(r=>setTimeout(r,150));const stacked=document.querySelector('#player-overlay').open&&document.querySelector('#detail-overlay').open;closePlayer();await new Promise(r=>setTimeout(r,80));const drawer=document.querySelector('#detail-overlay').open;closeDetail();return {open,stacked,drawer};})()`);
+  assert.equal(opened.open, true, '会话卡可进详情');
+  assert.equal(opened.stacked, true, '播放器叠在详情抽屉之上');
+  assert.equal(opened.drawer, true, '关闭播放器后详情仍在');
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
+test('媒体墙排序方向：与排序字段分开、URL 回显、刷新后保留', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate("page('items')");
+  const initial = await evaluate(`(()=>{const s=new URLSearchParams(location.search);return {sort:s.get('sort'),order:s.get('order'),label:document.querySelector('#item-order').textContent};})()`);
+  assert.equal(initial.sort, null, '默认排序不写进 URL'); assert.equal(initial.order, null); assert.equal(initial.label, '↓ 降序');
+  const toggled = await evaluate(`(async()=>{document.querySelector('#item-order').click();await new Promise(r=>setTimeout(r,200));const s=new URLSearchParams(location.search);return {sort:s.get('sort'),order:s.get('order'),label:document.querySelector('#item-order').textContent,sortValue:document.querySelector('#item-sort').value};})()`);
+  assert.equal(toggled.order, 'asc'); assert.equal(toggled.label, '↑ 升序');
+  assert.equal(toggled.sort, null, '切方向不改排序字段'); assert.equal(toggled.sortValue, 'datecreated');
+  const persisted = await evaluate(`(async()=>{await page('libraries');await page('items');for(let i=0;i<100&&!document.querySelector('#item-order');i++)await new Promise(r=>setTimeout(r,20));return document.querySelector('#item-order').textContent;})()`);
+  assert.equal(persisted, '↑ 升序', 'URL 里的方向在重新进入页面后回显');
+  const fromScratch = await evaluate(`(async()=>{history.replaceState(null,'',location.pathname+'?sort=year#items');await page('items');for(let i=0;i<100&&!document.querySelector('#item-order');i++)await new Promise(r=>setTimeout(r,20));return document.querySelector('#item-order').textContent;})()`);
+  assert.equal(fromScratch, '↓ 降序', '年份等字段默认降序');
+  assert.deepEqual(await evaluate('__errors'), []);
 });
 
 test('资料处理整合：响应分组、范围独立、旧入口兼容与防火墙首卡间距', { timeout: 60000 }, async t => {

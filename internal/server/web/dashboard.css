@@ -95,6 +95,18 @@
 .dashboard .dash-library-list strong { flex-shrink: 0; }
 .dashboard .dash-library-foot { margin-top: var(--space-8); }
 .dashboard .dash-service-cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); align-items: start; min-width: 0; }
+/* 正在播放会话：与 Emby 控制台一致，一行一个会话，海报+标题+用户/进度+进度条。 */
+.dashboard .dash-session-list { display: grid; gap: var(--space-8); list-style: none; padding: 0; margin: 0; }
+.dashboard .dash-session { display: flex; align-items: center; gap: var(--space-12); width: 100%; padding: var(--space-8); border: 1px solid var(--dash-line); border-radius: var(--radius-xs); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.dashboard .dash-session:hover { border-color: var(--blue-line); }
+.dashboard .dash-session:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.dashboard .dash-session-poster { width: 40px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; background: var(--panel-2); flex-shrink: 0; }
+.dashboard .dash-session-poster.is-empty { display: block; border: 1px solid var(--dash-line); }
+.dashboard .dash-session-body { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.dashboard .dash-session-body strong { font-size: var(--text-13); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard .dash-session-body small { color: var(--dash-muted); font-size: var(--text-12); font-variant-numeric: tabular-nums; }
+.dashboard .dash-session-progress { display: block; height: 4px; margin-top: var(--space-4); border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+.dashboard .dash-session-progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .dashboard .dash-service-stack { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .dashboard .dash-fields > div { margin-bottom: var(--space-8); }
 .dashboard .dash-disclosure { border-top: 1px solid var(--dash-line); margin-top: var(--space-8); }

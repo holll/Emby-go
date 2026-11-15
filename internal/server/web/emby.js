@@ -77,7 +77,7 @@ async function openDetail(item) {
     const actors = (m.People || []).filter(person => person.Type === 'Actor');
     document.querySelector('#detail-content').innerHTML = `
       <div class="detail-hero">${backdrop ? `<img class="detail-backdrop" src="${esc(backdrop)}" srcset="${esc(backdropSrcset)}" alt="">` : ''}<div class="detail-hero-body">${poster ? `<img class="detail-poster" width="104" height="156" src="${esc(poster)}" srcset="${esc(posterSrcset)}" alt="">` : ''}<div class="detail-hero-text"><h2>${esc(m.Name)}</h2><p class="detail-sub">${esc([m.ProductionYear, fmtDuration((m.RunTimeTicks || 0) / 10000000), m.CommunityRating ? '★ ' + m.CommunityRating : ''].filter(Boolean).join(' · '))}</p></div></div></div><div class="detail-body">
-      <div class="detail-actions"><button id="detail-play" class="btn btn-accent">${icon('play')}<span>播放</span></button><button id="detail-favorite" class="btn"></button><button id="detail-played" class="btn"></button><button id="detail-like" class="btn"></button><button id="detail-dislike" class="btn"></button></div>
+      <div class="detail-actions"><button id="detail-play" class="btn btn-accent">${icon('play')}<span>播放</span></button><button id="detail-restart" class="btn" hidden>从头播放</button><button id="detail-favorite" class="btn"></button><button id="detail-played" class="btn"></button><button id="detail-like" class="btn"></button><button id="detail-dislike" class="btn"></button></div>
       ${me.is_admin ? '<button id="detail-maintenance" class="btn">维护与元数据编辑</button>' : ''}
       ${m.Overview ? `<section class="detail-section"><h3>简介</h3><p class="detail-plot">${esc(m.Overview)}</p></section>` : ''}
       <section class="detail-section"><h3>元数据</h3><dl class="detail-meta">${detailMetaRow('原名', m.OriginalTitle)}${detailMetaRow('分级', m.OfficialRating)}${detailMetaRow('类型', m.Genres, 'genre')}${detailMetaRow('标签', m.Tags, 'tag')}${detailMetaRow('厂商', (m.Studios || []).map(studio => studio.Name), 'studio')}${detailMetaRow('导演', (m.People || []).filter(person => person.Type === 'Director').map(person => person.Name))}</dl>
@@ -87,11 +87,16 @@ async function openDetail(item) {
       <section class="detail-section"><h3>文件与时间</h3><dl class="detail-meta">${detailMetaRow('源文件', m.Path)}${detailMetaRow('入库时间', fmtTime(m.DateCreated))}${detailMetaRow('最后修改', fmtTime(m.DateModified))}</dl></section></div>`;
     const favorite = document.querySelector('#detail-favorite'), played = document.querySelector('#detail-played');
     const like = document.querySelector('#detail-like'), dislike = document.querySelector('#detail-dislike');
+    const play = document.querySelector('#detail-play'), restart = document.querySelector('#detail-restart');
     const updateButtons = () => {
       for (const [button, active, label] of [[favorite, ud.IsFavorite, '收藏'], [played, ud.Played, '已看'], [like, ud.Likes === true, '喜欢'], [dislike, ud.Likes === false, '不喜欢']]) {
         button.textContent = (active ? '取消' : '') + label;
         button.setAttribute('aria-pressed', String(!!active));
       }
+      // Emby 的 Play/Resume 规则：有播放进度时主按钮变「继续播放」，并另给一个「从头播放」。
+      const resume = Number(ud.PlaybackPositionTicks) || 0;
+      play.querySelector('span').textContent = resume > 0 ? '继续播放' : '播放';
+      restart.hidden = resume <= 0;
     };
     updateButtons();
     for (const [button, path, active] of [
@@ -110,7 +115,24 @@ async function openDetail(item) {
       } catch (error) { if (current()) toast(error.message, 'error'); }
       finally { if (current()) button.disabled = false; }
     });
-    document.querySelector('#detail-play').addEventListener('click', () => { if (!current()) return; closeDetail(); void openPlayer(m); });
+    // 播放器叠在详情抽屉之上（与 Emby 详情页一致）；播放结束后刷新用户状态，
+    // 让「继续播放/从头播放」和进度回到最新值。
+    const refreshUserData = async () => {
+      try {
+        const next = await embyRequest(embyUserPath() + '/Items/' + encodeURIComponent(m.Id) + '/UserData');
+        if (!current()) return;
+        ud = next; updateButtons();
+        if (wallState) reloadWall();
+      } catch (error) { if (current()) toast('播放状态刷新失败：' + error.message, 'error'); }
+    };
+    play.addEventListener('click', () => {
+      if (!current()) return;
+      void openPlayer(m, { startTicks: Number(ud.PlaybackPositionTicks) || 0, onClosed: () => { if (current()) void refreshUserData(); } });
+    });
+    restart.addEventListener('click', () => {
+      if (!current()) return;
+      void openPlayer(m, { startTicks: 0, onClosed: () => { if (current()) void refreshUserData(); } });
+    });
     document.querySelector('#detail-maintenance')?.addEventListener('click', () => { if (current()) openMaintenanceDetail({ id: m.Id }); });
     detailDrawer.querySelectorAll('[data-entity-key]').forEach(button => button.addEventListener('click', () => { if (current()) gotoEntity(button.dataset.entityKey, button.dataset.entityValue); }));
     overlayFocusFirst('#detail-overlay');
