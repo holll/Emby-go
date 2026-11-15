@@ -417,6 +417,29 @@ test('媒体墙排序方向：与排序字段分开、URL 回显、刷新后保�
   assert.deepEqual(await evaluate('__errors'), []);
 });
 
+test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走既有入口', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{await page('items');for(let i=0;i<100&&!document.querySelector('.wall-card [data-more]');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const opened = await evaluate(`(()=>{const b=document.querySelector('.wall-card [data-more]');b.focus();b.click();const menu=document.querySelector('#card-menu'),rect=menu.getBoundingClientRect();return {open:!!menu,expanded:b.getAttribute('aria-expanded'),role:menu.getAttribute('role'),items:[...menu.querySelectorAll('[role="menuitem"]')].map(i=>i.textContent.trim()),focused:document.activeElement?.dataset.cardAction,left:rect.left,right:rect.right,viewport:innerWidth};})()`);
+  assert.equal(opened.open, true); assert.equal(opened.expanded, 'true'); assert.equal(opened.role, 'menu');
+  assert.deepEqual(opened.items, ['打开详情', '播放', '探测媒体信息', '重读源', '删除索引']);
+  assert.equal(opened.focused, 'detail', '打开后焦点落在首个菜单项');
+  assert.ok(opened.left >= 8 && opened.right <= opened.viewport - 7, `菜单不得溢出视口：${JSON.stringify(opened)}`);
+  const keyboard = await evaluate(`(()=>{document.querySelector('#card-menu [data-card-action="play"]').focus();document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));const next=document.activeElement.dataset.cardAction;document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return {next,closed:!document.querySelector('#card-menu'),expanded:document.querySelector('.wall-card [data-more]').getAttribute('aria-expanded'),restored:document.activeElement?.dataset.more!==undefined};})()`);
+  assert.equal(keyboard.next, 'probe', '方向键在菜单项间移动');
+  assert.equal(keyboard.closed, true); assert.equal(keyboard.expanded, 'false'); assert.equal(keyboard.restored, true, 'Esc 关闭后焦点回到触发按钮');
+  const context = await evaluate(`(()=>{const card=document.querySelector('.wall-card'),r=card.getBoundingClientRect();card.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+40,clientY:r.top+40}));const menu=document.querySelector('#card-menu'),rect=menu.getBoundingClientRect();return {open:!!menu,left:Math.round(rect.left),top:Math.round(rect.top),x:Math.round(r.left+40),y:Math.round(r.top+40)};})()`);
+  assert.equal(context.open, true, '右键唤出同一菜单');
+  assert.ok(Math.abs(context.left - context.x) <= 1 && Math.abs(context.top - context.y) <= 1, `右键菜单贴着指针：${JSON.stringify(context)}`);
+  const detail = await evaluate(`(async()=>{document.querySelector('#card-menu [data-card-action="detail"]').click();for(let i=0;i<100&&!document.querySelector('#detail-overlay')?.open;i++)await new Promise(r=>setTimeout(r,20));const state={open:document.querySelector('#detail-overlay').open,menuGone:!document.querySelector('#card-menu')};closeDetail();return state;})()`);
+  assert.equal(detail.open, true); assert.equal(detail.menuGone, true);
+  const outside = await evaluate(`(()=>{const b=document.querySelector('.wall-card [data-more]');b.click();document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));return {closed:!document.querySelector('#card-menu'),expanded:b.getAttribute('aria-expanded')};})()`);
+  assert.equal(outside.closed, true); assert.equal(outside.expanded, 'false');
+  assert.deepEqual(await evaluate('__errors'), []);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
+});
+
 test('资料处理整合：响应分组、范围独立、旧入口兼容与防火墙首卡间距', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);
@@ -498,8 +521,8 @@ test('完整前端：桌面与移动端页面布局、渐进表单和触控导�
       assert.ok(expanded <= width + 1, `expanded ${name} at ${width}: ${expanded}`);
       if (name === 'items') {
         await evaluate(`document.querySelector('.wall-maintenance').open=true;document.querySelector('#wall-translate-toggle').click()`);
-        const hits = await evaluate(`(()=>{return [...document.querySelectorAll('.wall-card:first-child [data-probe],.wall-card:first-child [data-reread],.wall-card:first-child [data-delete],.wall-card:first-child [data-translate-select]')].map(b=>{b.scrollIntoView({block:'center'});const target=b.matches('input')?b.closest('label'):b;target.scrollIntoView({block:'center'});const r=target.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {ok:hit===target||target.contains(hit),width:r.width,height:r.height,button:b.tagName==='BUTTON'};});})()`);
-        assert.equal(hits.length,4);if(width<=860)assert.ok(hits.every(h=>h.ok),`card hit targets at ${width}: ${JSON.stringify(hits)}`);
+        const hits = await evaluate(`(()=>{return [...document.querySelectorAll('.wall-card:first-child [data-more],.wall-card:first-child [data-translate-select]')].map(b=>{b.scrollIntoView({block:'center'});const target=b.matches('input')?b.closest('label'):b;target.scrollIntoView({block:'center'});const r=target.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {ok:hit===target||target.contains(hit),width:r.width,height:r.height,button:b.tagName==='BUTTON'};});})()`);
+        assert.equal(hits.length,2);if(width<=860)assert.ok(hits.every(h=>h.ok),`card hit targets at ${width}: ${JSON.stringify(hits)}`);
         if(width<=860)assert.ok(hits.filter(h=>h.button).every(h=>h.width>=43.99&&h.height>=43.99),`card touch dimensions at ${width}`);
         const detail = await evaluate(`(async()=>{await openMaintenanceDetail({id:1});const maintenance=document.querySelector('.detail-maintenance');if(!maintenance)return {missing:true};const collapsed=!maintenance.open;maintenance.open=true;document.querySelector('#detail-edit-toggle').click();await new Promise(r=>setTimeout(r,20));const result={collapsed,scroll:document.documentElement.scrollWidth,shown:!document.querySelector('#detail-edit').hidden};document.querySelector('#detail-close').click();return result;})()`);
         assert.equal(detail.missing, undefined);assert.equal(detail.collapsed,true);assert.equal(detail.shown,true);assert.ok(detail.scroll<=width+1,`detail editor at ${width}: ${detail.scroll}`);
@@ -553,7 +576,7 @@ test('合集浏览：封面卡片进成员列表、返回恢复、隐藏影片�
     return {count:cards.length,tags:cards.map(c=>c.tagName),labels:cards.map(c=>c.dataset.collection),
       marks:cards.map(c=>c.querySelector('.collection-mark')?.textContent),
       movieOnly:!!document.querySelector('.wall-maintenance'),
-      quick:cards.some(c=>c.querySelector('[data-quickplay],[data-probe],[data-reread]')),
+      quick:cards.some(c=>c.querySelector('[data-quickplay],[data-more]')),
       switchActive:document.querySelector('[data-wall-view="collections"]').getAttribute('aria-pressed'),
       url:location.search};
   })()`);
@@ -562,7 +585,7 @@ test('合集浏览：封面卡片进成员列表、返回恢复、隐藏影片�
   assert.match(listed.labels[0],/^boxset:/);
   assert.ok(listed.marks.every(mark=>mark==='合集'));
   assert.equal(listed.movieOnly,false,'纯合集列表不显示影片批量维护');
-  assert.equal(listed.quick,false,'合集卡片没有快捷播放/探测/重读入口');
+  assert.equal(listed.quick,false,'合集卡片没有快捷播放/更多操作入口');
   assert.equal(listed.switchActive,'true');
   assert.match(listed.url,/view=collections/);
   await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});

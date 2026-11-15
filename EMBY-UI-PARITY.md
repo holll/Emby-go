@@ -23,6 +23,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 卡片「已看」是圆底对勾，进度条细条贴底 | `librarybrowser` 卡片模板（`.cardIndicators` + `.itemProgressBar`） | `wallCard` 的 `wall-badge played`（`icon('check')`）+ `.wall-progress` 4px |
 | 概览显示正在播放的会话（谁、在播什么、播到哪） | `dashboard.html` 会话区 | `sessionsPanel()` + `GET /Sessions`（10 秒轮询，切页自停） |
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
+| 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
 
 ## 有意保留的差异
 
@@ -41,8 +42,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 
 ## 待评估（未承诺）
 
-按性价比排序，尚未动手：卡片操作收进「更多」+ 右键菜单、筛选气泡化、视图切换与偏好持久化、
-计划任务/任务记录进度与停止、日志历史回看（`/api/admin/logs/disk` 游标已实现、前端未接）、活动与告警流。
+按性价比排序，尚未动手：筛选气泡化、视图切换与偏好持久化、计划任务/任务记录进度与停止、
+日志历史回看（`/api/admin/logs/disk` 游标已实现、前端未接）、活动与告警流。
 
 新增页面能力时，先在这里补「Emby 出处 + 我们的 file:line」，再动代码；不要为了像 Emby 而改
 已批准的 API 契约或 NFO 真源语义。

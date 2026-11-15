@@ -19,6 +19,8 @@ function sandbox(values = {}) {
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
     stopScanPolling() {}, embyUserPath: () => '/Users/1', WALL_STATUS_TEXT: {}, stopLogsPolling() {}, stopTasksPolling() {}, stopLibrarySprites() {}, stopSecurity() {}, stopTranslationPolling() {}, scanClose: { hidden: true, addEventListener() {} },
+    // 抽取的片段里 reloadWall/page 会收卡片菜单；完整页面才提供实现。
+    closeCardMenu() {},
     scanFirstRead: true, scanWallRefresh: null, scanObservedRuns: new Set(), scanNotifiedRuns: new Set(),
     localStorage: { getItem: () => values.token ?? 'fixture-token' }, ...values });
 }
@@ -623,6 +625,7 @@ async function wallKeyboardFixture() {
     openDetail: item => calls.push(['detail', item.Id]),
     openPlayer: item => calls.push(['play', item.Id]),
     probeItem: id => calls.push(['probe', id]),
+    openCardMenu: (item, options) => calls.push(['menu', item.Id, !!options?.trigger]),
     confirm: () => true, toast() {}, STATUS_TEXT: {}, refreshPage() {} });
   vm.runInContext(section('async function deleteIndexedItem(', 'const STATUS_TEXT ='), box);
   vm.runInContext(section('async function pageItems()', '// reloadWall'), box);
@@ -681,10 +684,9 @@ test('点击标题按钮与整卡都打开详情，内部按钮仍只执行自�
     stopPropagation() {},
   });
   assert.deepEqual(env.calls, [['detail', 7]]);
-  // 内部动作按钮不会被详情分支截获。
+  // 内部动作按钮不会被详情分支截获；影片管理动作已收进「更多」菜单。
   for (const [field, expected] of [
-    ['probe', ['probe', '7']], ['reread', ['/items/7/reread', 'POST']],
-    ['delete', ['/items/7', 'DELETE']], ['quickplay', ['play', 7]]
+    ['more', ['menu', 7, true]], ['quickplay', ['play', 7]]
   ]) {
     env.calls.length = 0;
     const button = { dataset: { [field]: '7' }, closest(selector) {
@@ -2593,7 +2595,7 @@ test('刮削inspect失败保留已有候选并提供重试，首次失败同样�
   }
 });
 
-test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位，标题与播放可聚焦', async t => {
+test('Chromium真实CSS：管理菜单按钮命中不再播放，hidden字段不占位，标题与播放可聚焦', async t => {
   const { available, probe } = require('./web_browser_helper.cjs');
   if (!available(t)) return;
   const box = sandbox({ me: { is_admin: true }, esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {} });
@@ -2602,14 +2604,14 @@ test('Chromium真实CSS：管理按钮命中不再播放，hidden字段不占位
   const card = box.wallCard({ Id: '1', Name: 'test' }, null);
   const css = fs.readFileSync(path.join(__dirname, 'web/style.css'), 'utf8');
   const doc = `<!doctype html><meta charset="utf-8"><style>${css}</style><div class="wall is-selecting" style="margin:20px;width:260px">${card}<div class="field" hidden id="f">probe<input></div></div><script>
-    const f=document.querySelector('#f'); const hits=['probe','reread','delete'].map(k=>{const b=document.querySelector('[data-'+k+']'),r=b.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===b;});
+    const f=document.querySelector('#f'); const hits=['more'].map(k=>{const b=document.querySelector('[data-'+k+']'),r=b.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===b;});
     const title=document.querySelector('.wall-title'),play=document.querySelector('.wall-play'); title.focus();const titleFocus=document.activeElement===title;play.focus();
     const selected=document.querySelector('[data-translate-select]'),r=selected.getBoundingClientRect(),selectionHit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===selected;
     const out={width:innerWidth,selectionHit,display:getComputedStyle(f).display,height:f.getBoundingClientRect().height,hits,titleFocus,playFocus:document.activeElement===play};document.head.innerHTML='';document.body.innerHTML='<pre id="result"></pre>';document.querySelector('#result').textContent=JSON.stringify(out);</script>`;
   const widths = [1280, 500];
   const results = await probe(t, doc, widths);
   for (const [i, actual] of results.entries()) {
-    assert.equal(actual.width, widths[i]); assert.deepEqual(actual.hits, [true,true,true]); assert.equal(actual.selectionHit, true);
+    assert.equal(actual.width, widths[i]); assert.deepEqual(actual.hits, [true]); assert.equal(actual.selectionHit, true);
     assert.equal(actual.display, 'none'); assert.equal(actual.height, 0); assert.equal(actual.titleFocus, true); assert.equal(actual.playFocus, true);
   }
 });

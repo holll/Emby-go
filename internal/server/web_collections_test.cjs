@@ -229,7 +229,7 @@ test('合集卡片只有合集角标与数量，没有快捷播放/管理按钮'
   assert.match(html, /collection-mark/);
   assert.match(html, /Images\/Primary\?maxWidth=200/);
   assert.doesNotMatch(html, /data-quickplay/, '合集卡片不能直接播放');
-  assert.doesNotMatch(html, /data-probe|data-reread|data-delete|data-translate-select/, '合集卡片不带影片管理入口');
+  assert.doesNotMatch(html, /data-more|data-translate-select/, '合集卡片不带影片管理入口');
   assert.doesNotMatch(html, /wall-badge|wall-progress/);
   const bare = box.wallCard({ Id: 'boxset:YQ', Name: '空合集', Type: 'BoxSet' });
   assert.match(bare, /collection-placeholder/);

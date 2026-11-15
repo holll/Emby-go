@@ -858,6 +858,14 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   .wall-play svg { width: 30px; height: 30px; }
 }
 
+/* 卡片操作菜单：「更多」按钮与卡片右键共用同一份菜单，位置由 app.js 计算。 */
+.card-menu { position: fixed; z-index: 70; min-width: 168px; max-width: 240px; padding: var(--space-4); border-radius: var(--radius-sm); border: 1px solid var(--line-strong); background: rgba(24, 24, 27, 0.96); box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55); backdrop-filter: blur(24px); display: grid; gap: 2px; }
+.card-menu button { display: flex; align-items: center; gap: var(--space-8); min-height: 36px; padding: 0 var(--space-10); border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text); font: inherit; font-size: var(--text-13); text-align: left; cursor: pointer; }
+.card-menu button svg { width: 16px; height: 16px; color: var(--dim); flex: none; }
+.card-menu button:hover { background: var(--surface-hover); }
+.card-menu button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.card-menu button[data-danger], .card-menu button[data-danger] svg { color: #ff9b93; }
+
 .wall-more { text-align: center; color: var(--dim); font-size: var(--text-12); padding: 18px 0 var(--space-4); min-height: 22px; }
 /* 翻译选择独立命中区：不覆盖右上管理按钮或中央/右下播放。 */
 .wall-select { display: none; position: absolute; left: 4px; bottom: 4px; z-index: 1; min-height: 44px; padding: var(--space-6); align-items: center; gap: var(--space-4); background: var(--panel); border-radius: var(--radius-xs); cursor: pointer; }

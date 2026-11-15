@@ -21,6 +21,7 @@ const icon = name => {
     search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
     probe: '<path d="M4 12h2.5l2-5.5 3 11 2.5-7 1.5 1.5H20"/>',
     play: '<path d="M8 5v14l11-7z"/>',
+    more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
     check: '<path d="m5 13 4 4L19 7"/>',
     'arrow-up': '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
     'arrow-down': '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
@@ -454,7 +455,7 @@ function wallCard(item) {
       <div class="wall-badges">${ud.Played ? `<span class="wall-badge played" role="img" aria-label="已看" title="已看">${icon('check')}</span>` : ''}${ud.IsFavorite ? '<span class="wall-badge fav">♥</span>' : ''}${item.PartCount > 1 ? `<span class="wall-badge multi">${item.PartCount} 段</span>` : ''}</div>
       ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
       ${me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${esc(item.Id)}" aria-label="选择翻译：${esc(title)}">选择</label>` : ''}
-      ${me?.is_admin ? `<div class="wall-actions"><button class="icon-btn" data-probe="${esc(item.Id)}" aria-label="探测媒体信息" title="探测媒体信息">${icon('probe')}</button><button class="icon-btn" data-reread="${esc(item.Id)}" aria-label="重读源" title="重读源">${icon('refresh')}</button><button class="icon-btn danger" data-delete="${esc(item.Id)}" aria-label="删除索引" title="删除索引">${icon('trash')}</button></div>` : ''}
+      <div class="wall-actions"><button class="icon-btn" data-more="${esc(item.Id)}" aria-haspopup="menu" aria-expanded="false" aria-label="更多操作：${esc(title)}" title="更多操作">${icon('more')}</button></div>
       <button class="wall-play" data-quickplay="${esc(item.Id)}" aria-label="直接播放" title="直接播放">${icon('play')}</button>
     </div>
     <div class="wall-meta"><button type="button" class="wall-title" data-open="${esc(item.Id)}" title="${esc(title)}">${esc(title)}</button><small>${esc([item.ProductionYear, item.OriginalTitle].filter(Boolean).join(' · '))}</small></div>
@@ -467,6 +468,90 @@ const WALL_STATUS_TEXT = { favorite: '收藏', played: '已看', unplayed: '未�
 let pendingWallFocus = '';
 let wallState = null;
 let wallGen = 0; // 列表请求代号，单调递增；用于丢弃被新搜索/筛选作废的过期响应
+
+/* ------------------------------------------------------------ 卡片操作菜单 */
+// Emby 的库页把卡片操作收在悬浮菜单里，右键唤起的是同一份菜单（librarybrowser）。
+// 这里用一个「更多」按钮 + 卡片右键共用菜单，避免卡片右上角堆图标。
+let cardMenu = null; // { el, trigger, outside }
+function cardMenuCommands(item) {
+  const commands = [
+    { key: 'detail', label: '打开详情', name: 'film', run: () => openDetail(item) },
+    { key: 'play', label: Number(item.UserData?.PlaybackPositionTicks) > 0 ? '继续播放' : '播放', name: 'play', run: () => openPlayer(item) }
+  ];
+  if (!me?.is_admin) return commands;
+  const id = String(item.Id);
+  commands.push(
+    { key: 'probe', label: '探测媒体信息', name: 'probe', run: () => probeItem(id) },
+    { key: 'reread', label: '重读源', name: 'refresh', run: async () => {
+      try { const r = await api('/items/' + id + '/reread', { method: 'POST' }); toast(`状态已更新：${STATUS_TEXT[r.status] || r.status}`); refreshPage(pageItems, pageGen); }
+      catch (e) { toast(e.message, 'error'); }
+    } },
+    { key: 'delete', label: '删除索引', name: 'trash', danger: true, run: async () => {
+      if (!confirm('删除该影片索引？如已启用删除 Webhook，接收端可能同时删除远端整个目录，且无法撤销。继续？')) return;
+      try { await deleteIndexedItem(id); refreshPage(pageItems, pageGen); }
+      catch (e) { toast(e.message, 'error'); }
+    } }
+  );
+  return commands;
+}
+
+function closeCardMenu(focusBack = false) {
+  if (!cardMenu) return;
+  const { el, trigger, outside } = cardMenu;
+  cardMenu = null;
+  document.removeEventListener('pointerdown', outside, true);
+  window.removeEventListener('resize', closeCardMenuProxy);
+  el.remove();
+  trigger?.setAttribute('aria-expanded', 'false');
+  if (focusBack && trigger) trigger.focus();
+}
+function closeCardMenuProxy() { closeCardMenu(false); }
+
+function openCardMenu(item, { trigger = null, x = null, y = null } = {}) {
+  closeCardMenu(false);
+  const el = document.createElement('div');
+  el.className = 'card-menu';
+  el.id = 'card-menu';
+  el.setAttribute('role', 'menu');
+  el.setAttribute('aria-label', '卡片操作');
+  el.innerHTML = cardMenuCommands(item).map(command =>
+    `<button type="button" role="menuitem" data-card-action="${command.key}"${command.danger ? ' data-danger' : ''}>${icon(command.name)}<span>${esc(command.label)}</span></button>`).join('');
+  document.body.appendChild(el);
+  trigger?.setAttribute('aria-expanded', 'true');
+  const rect = trigger?.getBoundingClientRect();
+  const width = el.offsetWidth, height = el.offsetHeight;
+  const anchored = x === null || y === null;
+  let left = anchored ? rect.right - width : x;
+  let top = anchored ? rect.bottom + 6 : y;
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  const outside = event => { if (!el.contains(event.target)) closeCardMenu(false); };
+  document.addEventListener('pointerdown', outside, true);
+  window.addEventListener('resize', closeCardMenuProxy);
+  el.addEventListener('keydown', event => {
+    const items = [...el.querySelectorAll('[role="menuitem"]')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') { event.preventDefault(); closeCardMenu(true); return; }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length]?.focus();
+      return;
+    }
+    if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); items[event.key === 'Home' ? 0 : items.length - 1]?.focus(); return; }
+    if (event.key === 'Tab') closeCardMenu(false);
+  });
+  const commands = cardMenuCommands(item);
+  el.querySelectorAll('[data-card-action]').forEach(button => button.addEventListener('click', () => {
+    const command = commands.find(c => c.key === button.dataset.cardAction);
+    closeCardMenu(false);
+    void command?.run();
+  }));
+  cardMenu = { el, trigger, outside };
+  el.querySelector('[role="menuitem"]')?.focus();
+}
 
 async function pageItems() {
   const gen = pageGen;
@@ -705,7 +790,7 @@ async function pageItems() {
     });
   }
   // 事件委托：卡片按页追加，统一在容器上处理，避免每页重新绑定。
-  document.querySelector('#wall').addEventListener('click', async event => {
+  document.querySelector('#wall').addEventListener('click', event => {
     const selection = event.target.closest('[data-translate-select], .wall-select');
     if (selection) {
       event.stopPropagation();
@@ -718,25 +803,11 @@ async function pageItems() {
       document.querySelector('#wall-translate-count').textContent = `已选 ${wallState.translateSelection.size} 部（最多1000）`;
       return;
     }
-    const probe = event.target.closest('[data-probe]');
-    if (probe) {
+    const more = event.target.closest('[data-more]');
+    if (more) {
       event.stopPropagation();
-      probeItem(probe.dataset.probe);
-      return;
-    }
-    const reread = event.target.closest('[data-reread]');
-    if (reread) {
-      event.stopPropagation();
-      try { const r = await api('/items/' + reread.dataset.reread + '/reread', { method: 'POST' }); toast(`状态已更新：${STATUS_TEXT[r.status] || r.status}`); refreshPage(pageItems, gen); }
-      catch (e) { toast(e.message, 'error'); }
-      return;
-    }
-    const remove = event.target.closest('[data-delete]');
-    if (remove) {
-      event.stopPropagation();
-      if (!confirm('删除该影片索引？如已启用删除 Webhook，接收端可能同时删除远端整个目录，且无法撤销。继续？')) return;
-      try { await deleteIndexedItem(remove.dataset.delete); refreshPage(pageItems, gen); }
-      catch (e) { toast(e.message, 'error'); }
+      const target = wallState.items.find(m => String(m.Id) === more.dataset.more);
+      if (target) openCardMenu(target, { trigger: more });
       return;
     }
     // hover 播放图标 = 快捷播放；点卡片其它位置 = 打开详情抽屉。
@@ -770,12 +841,22 @@ async function pageItems() {
     const item = wallState.items.find(m => String(m.Id) === card.dataset.play);
     if (item) openDetail(item);
   });
+  // 右键与「更多」按钮共用同一菜单；右键位置贴指针，按钮位置贴卡片角。
+  document.querySelector('#wall').addEventListener('contextmenu', event => {
+    const card = event.target.closest('.wall-card[data-play]');
+    if (!card) return;
+    const target = wallState?.items.find(m => String(m.Id) === card.dataset.play);
+    if (!target) return;
+    event.preventDefault();
+    openCardMenu(target, { trigger: card.querySelector('[data-open]'), x: event.clientX, y: event.clientY });
+  });
   await loadWallPage();
 }
 
 // reloadWall 只重置列表并重新拉取，保留筛选栏与搜索框焦点（搜索输入走此路径，避免整页重渲染打断输入）。
 function reloadWall() {
   if (!wallState) return;
+  closeCardMenu(false);
   wallGen += 1; // 作废尚未返回的旧请求
   // 已显式展开维护区时，搜索换代同步恢复管理观察；正常浏览不启动。
   if (document.querySelector('.wall-maintenance')?.open) startProbePolling();
@@ -3410,6 +3491,7 @@ async function page(name) {
   stopScrapePolling();
   stopLogsPolling();
   stopTasksPolling();
+  closeCardMenu(false);
   if (typeof stopTranslationPolling === 'function') stopTranslationPolling();
   stopProbePolling();
   // 切页即换 DOM：旧页面挂着的延时句柄（探测面板/扫描面板自动收起）必须作废，
