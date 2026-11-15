@@ -57,6 +57,7 @@ async function browser(t) {
         if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
         data={Id:'1',Name:'长详情验证',Overview:'长简介与文件路径 '.repeat(800),People:[],MediaSources:[],UserData:{}};
       }
+      else if(p.includes('/PlaybackInfo')){data={PlaySessionId:'ps-1',MediaSources:[{Id:'src-1',Container:'mp4',DirectStreamUrl:'/Videos/1/stream?Static=true'}]};}
       else if(p.endsWith('/libraries')){const items=window.__libraryItems||[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}];data={total:items.length,items};}
       else if(p.endsWith('/items'))data={total:2,items:[{id:1,status:'success',Title:'示例影片：移动端资料管理',Number:'TEST-001',source_path:'/media/测试/TEST-001.strm'},{id:2,status:'pending',Title:'等待处理的影片',source_path:'/media/待处理/TEST-002.strm'}]};
       else if(p.endsWith('/detail')){
@@ -1116,6 +1117,61 @@ test('设置页与任务中心：窄屏表格卡片化后可读、不横向溢�
   const delivery = wide.wraps.find(w => w.aria === '投递历史');
   assert.notEqual(delivery.thead, 'none', '宽屏投递历史显示表头');
   assert.ok(delivery.rows.every(display => display === 'table-row'), '宽屏投递历史仍是表格行');
+});
+
+test('播放器浮层：竖屏/横屏都在视口内、16:9 舞台不被裁切、标题截断、关闭键 44px', { timeout: 90000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  // 测试页刻意不加载 vendor/Artplayer：这里只验证外壳几何，第三方控件不参与断言。
+  const open = `(async()=>{await openPlayer({Id:'1',Name:'很长的影片标题'+'·重复'.repeat(20),RunTimeTicks:36000000000});for(let i=0;i<100&&!document.querySelector('#player-stage p, #player-stage video, #player-stage .art-video-player');i++)await new Promise(r=>setTimeout(r,20));await new Promise(r=>setTimeout(r,120));})()`;
+  const measure = () => evaluate(`(()=>{const o=document.querySelector('#player-overlay'),s=document.querySelector('.player-shell'),st=document.querySelector('#player-stage'),hd=document.querySelector('.player-head'),cl=document.querySelector('#player-close'),ti=document.querySelector('#player-title');
+    const r=e=>{const b=e.getBoundingClientRect();return {w:Math.round(b.width*10)/10,h:Math.round(b.height*10)/10,left:Math.round(b.left),top:Math.round(b.top),right:Math.round(b.right),bottom:Math.round(b.bottom)};};
+    return {open:o.open,page:document.documentElement.scrollWidth,vw:innerWidth,vh:innerHeight,shell:r(s),stage:r(st),head:r(hd),close:r(cl),title:{sw:ti.scrollWidth,cw:ti.clientWidth,overflow:getComputedStyle(ti).overflow,whiteSpace:getComputedStyle(ti).whiteSpace,textOverflow:getComputedStyle(ti).textOverflow},coarse:matchMedia('(pointer: coarse)').matches};})()`);
+  const ratio = (m) => m.stage.h / m.stage.w;
+  for (const [width, height] of [[390, 844], [320, 568]]) {
+    await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+    await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: true });
+    await evaluate(open);
+    const m = await measure();
+    assert.ok(m.open, `${width}x${height}: 播放器浮层已打开`);
+    assert.equal(m.page, width, `${width}x${height}: 页面无横向滚动`);
+    assert.ok(m.shell.left >= 0 && m.shell.right <= width, `${width}x${height}: 外壳不越出视口（${m.shell.left}..${m.shell.right}）`);
+    assert.ok(m.shell.top >= 0 && m.shell.bottom <= height, `${width}x${height}: 外壳不越出视口（${m.shell.top}..${m.shell.bottom}）`);
+    assert.ok(m.stage.h > 0 && m.stage.w > 0, `${width}x${height}: 舞台有尺寸`);
+    assert.ok(Math.abs(ratio(m) - 9 / 16) < 0.012, `${width}x${height}: 舞台保持 16:9（实际 ${ratio(m).toFixed(3)}）`);
+    assert.ok(m.head.bottom <= m.stage.top + 1, `${width}x${height}: 标题栏与舞台不重叠`);
+    assert.ok(m.stage.bottom <= m.shell.bottom + 1, `${width}x${height}: 舞台不被外壳裁切`);
+    assert.equal(m.close.w, 44, `${width}x${height}: 关闭键触控宽度 44px`);
+    assert.equal(m.close.h, 44, `${width}x${height}: 关闭键触控高度 44px`);
+    assert.ok(m.close.right <= m.shell.right, `${width}x${height}: 关闭键在壳内`);
+    assert.equal(m.title.overflow, 'hidden', `${width}x${height}: 标题溢出裁剪`);
+    assert.equal(m.title.whiteSpace, 'nowrap', `${width}x${height}: 标题单行`);
+    assert.equal(m.title.textOverflow, 'ellipsis', `${width}x${height}: 标题省略号`);
+    assert.ok(m.title.sw > m.title.cw, `${width}x${height}: 长标题确实被截断（${m.title.sw}/${m.title.cw}）`);
+    assert.equal(m.coarse, true, `${width}x${height}: 触控指针`);
+    await evaluate('closePlayer()');
+    assert.equal(await evaluate(`document.querySelector('#player-overlay').open`), false, `${width}x${height}: 关闭后浮层收起`);
+  }
+  // 手机横屏：舞台受 dvh 上限约束，不能再按 16:9 顶着视口。
+  await call('Emulation.setDeviceMetricsOverride', { width: 844, height: 390, deviceScaleFactor: 1, mobile: true });
+  await evaluate(open);
+  const land = await measure();
+  assert.ok(land.shell.left >= 0 && land.shell.right <= 844, '横屏: 外壳不越出视口');
+  assert.ok(land.shell.top >= 0 && land.shell.bottom <= 390, `横屏: 外壳不越出视口（${land.shell.top}..${land.shell.bottom}）`);
+  assert.ok(land.stage.h <= 390 - 140 + 1, `横屏: 舞台高度受 dvh 上限约束（${land.stage.h}）`);
+  assert.ok(land.stage.bottom <= land.shell.bottom + 1, '横屏: 舞台不被外壳裁切');
+  assert.ok(ratio(land) < 9 / 16 - 0.01, `横屏: 舞台让位于视口高度（实际 ${ratio(land).toFixed(3)}）`);
+  await evaluate('closePlayer()');
+  // 桌面回归：外壳宽度封顶 1100，仍居中且 16:9。
+  await call('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await evaluate(open);
+  const wide = await measure();
+  assert.ok(wide.shell.w <= 1100, `桌面: 外壳宽度封顶 1100（实际 ${wide.shell.w}）`);
+  assert.ok(Math.abs(ratio(wide) - 9 / 16) < 0.012, `桌面: 舞台保持 16:9（实际 ${ratio(wide).toFixed(3)}）`);
+  const center = await evaluate(`(()=>{const o=document.querySelector('#player-overlay').getBoundingClientRect();return Math.round(o.left+o.width/2);})()`);
+  assert.ok(Math.abs((wide.shell.left + wide.shell.right) / 2 - center) <= 1, `桌面: 外壳水平居中（壳 ${(wide.shell.left + wide.shell.right) / 2} / 浮层 ${center}）`);
+  await evaluate('closePlayer()');
 });
 
 test('防火墙与媒体库：窄屏卡片可读、触控目标达标、长标题不撑破', { timeout: 90000 }, async t => {
