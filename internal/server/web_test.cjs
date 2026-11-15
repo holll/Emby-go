@@ -14,7 +14,7 @@ function section(start, end) {
   return source.slice(from, to);
 }
 function sandbox(values = {}) {
-  return vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, AbortController, token: 'fixture-token', me: null,
+  return vm.createContext({ wallLayout: () => 'poster', WALL_LAYOUT_TEXT: { poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, AbortController, token: 'fixture-token', me: null,
     TRANSLATE_HINT: '翻译来源提示',
     pageGen: 1, render: 1, scheduledRender: 1, identity: values.token ?? 'fixture-token',
     // 抽取的页面/身份代码段不包含完整模块；没有挂载日志或媒体库编辑器时清理为空操作。
@@ -1750,9 +1750,10 @@ test('探测文件成功但版本刷新失败保持错误面板，不生成成�
 });
 
 test('图片请求带宽度预算与 1x/2x srcset（FE-11）', () => {
-  // 媒体墙：200/400 两档；详情海报 120/240；详情背景 540/1080；详情海报带尺寸避免 CLS。
-  assert.match(source, /embyImageURL\(item, kind, 200\)/);
-  assert.match(source, /embyImageURL\(item, kind, 400\)\} 2x/);
+  // 媒体墙：海报 200/400，缩略图布局 320/640；详情海报 120/240；详情背景 540/1080；详情海报带尺寸避免 CLS。
+  assert.match(source, /embyImageURL\(item, posterKind, posterWidth\)/);
+  assert.match(source, /const posterWidth = thumb \? 320 : 200;/);
+  assert.match(source, /embyImageURL\(item, posterKind, posterWidth \* 2\)\} 2x/);
   assert.match(embySource, /embyImageURL\(m, posterKind, 120\)/);
   assert.match(embySource, /embyImageURL\(m, backdropKind, 540\)/);
   assert.match(source, /class="detail-poster" width="104" height="156"/);

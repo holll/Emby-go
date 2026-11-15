@@ -471,31 +471,88 @@ test('概览最近活动：显示播放记录摘要、UTC 时间、全量记录�
   assert.deepEqual(await evaluate('__errors'), []);
 });
 
-test('媒体墙布局切换为列表并记住偏好（不进 URL、不重发列表请求）', { timeout: 60000 }, async t => {
+test('媒体墙布局引擎：五种布局、卡片变体把标题压到图上、切换不重发请求并记住偏好', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { evaluate } = await browser(t);
   await evaluate(`(async()=>{await page('items');})()`);
-  const before = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
+  const wallRequests = `__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).length`;
+  const before = await evaluate(`(()=>({
+    value:document.querySelector('#item-layout').value,
+    options:[...document.querySelectorAll('#item-layout option')].map(o=>o.value),
+    layout:document.querySelector('#wall').className,
     stored:localStorage.getItem('emby_wall_layout'),
-    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed')),
-    requests:__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).length}))()`);
-  assert.equal(before.list, false); assert.equal(before.stored, null);
-  assert.deepEqual(before.pressed, ['true', 'false']);
-  await evaluate(`document.querySelector('[data-wall-layout="list"]').click()`);
-  const after = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
+    requests:${wallRequests},
+    metas:document.querySelectorAll('#wall .wall-card .wall-meta').length}))()`);
+  assert.equal(before.value, 'poster');
+  assert.deepEqual(before.options, ['poster', 'posterCard', 'thumb', 'thumbCard', 'list']);
+  assert.match(before.layout, /wall-layout-poster/);
+  assert.equal(before.stored, null);
+  assert.ok(before.metas > 0, '默认海报布局的标题在图片下方');
+  await evaluate(`(()=>{const select=document.querySelector('#item-layout');select.value='thumbCard';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  const after = await evaluate(`(()=>({
+    layout:document.querySelector('#wall').className,
     stored:localStorage.getItem('emby_wall_layout'),
-    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed')),
-    focused:document.activeElement?.dataset?.wallLayout,
+    focused:document.activeElement?.id,
     url:location.search,
-    requests:__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).length}))()`);
-  assert.equal(after.list, true); assert.equal(after.stored, 'list');
-  assert.deepEqual(after.pressed, ['false', 'true']);
-  assert.equal(after.focused, 'list'); assert.equal(after.url, '');
+    requests:${wallRequests},
+    thumbs:document.querySelectorAll('#wall .wall-poster.is-thumb').length,
+    captions:document.querySelectorAll('#wall .wall-card.has-caption .wall-caption').length,
+    metas:document.querySelectorAll('#wall .wall-card .wall-meta').length,
+    captionTitle:document.querySelector('#wall .wall-caption .wall-title')?.textContent}))()`);
+  assert.match(after.layout, /wall-layout-thumbCard/);
+  assert.equal(after.stored, 'thumbCard');
+  assert.equal(after.focused, 'item-layout');
+  assert.equal(after.url, '', '布局偏好不进 URL');
   assert.equal(after.requests, before.requests, '切布局不应重发列表请求');
+  assert.ok(after.thumbs > 0 && after.captions > 0, '缩略图卡片应换成 16:9 并带标题层');
+  assert.equal(after.metas, 0, '卡片变体的标题只出现一次');
+  assert.ok(after.captionTitle && after.captionTitle.length > 0);
+  await evaluate(`(()=>{const select=document.querySelector('#item-layout');select.value='list';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  const listed = await evaluate(`(()=>({layout:document.querySelector('#wall').className, stored:localStorage.getItem('emby_wall_layout')}))()`);
+  assert.match(listed.layout, /wall-list/);
+  assert.equal(listed.stored, 'list');
+  // 老版本存的是 grid；升级后回落到 poster，不把老用户丢进不存在的布局。
+  await evaluate(`(()=>{localStorage.setItem('emby_wall_layout','grid');})()`);
   await evaluate(`(async()=>{await page('items');})()`);
-  const remembered = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
-    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed'))}))()`);
-  assert.equal(remembered.list, true); assert.deepEqual(remembered.pressed, ['false', 'true']);
+  const legacy = await evaluate(`(()=>({value:document.querySelector('#item-layout').value, layout:document.querySelector('#wall').className}))()`);
+  assert.equal(legacy.value, 'poster');
+  assert.match(legacy.layout, /wall-layout-poster/);
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
+test('媒体墙筛选多选：收藏与播放状态同时生效、URL 与气泡回显、旧链接自动迁移', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  const wallUrls = `__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).map(c=>decodeURIComponent(c.url))`;
+  await evaluate(`(async()=>{history.replaceState(null,'',location.pathname+'?status=played&favorite=1#items');await page('items');for(let i=0;i<100&&!document.querySelector('#wall-active-filters');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const shown = await evaluate(`(()=>({
+    played:document.querySelector('[data-status="played"]').getAttribute('aria-pressed'),
+    favorite:document.querySelector('[data-favorite]').getAttribute('aria-pressed'),
+    chips:[...document.querySelectorAll('#wall-active-filters .filter-chip')].map(c=>c.textContent),
+    url:location.search,
+    filtered:${wallUrls}.filter(u=>u.includes('Filters='))}))()`);
+  assert.equal(shown.played, 'true');
+  assert.equal(shown.favorite, 'true');
+  assert.ok(shown.chips.some(text => text.includes('状态：已看')), '状态气泡应显示当前值');
+  assert.ok(shown.chips.some(text => text.includes('收藏：仅收藏')), '收藏应有独立气泡');
+  assert.equal(shown.url, '?status=played&favorite=1');
+  assert.ok(shown.filtered.some(url => /Filters=(IsFavorite,IsPlayed|IsPlayed,IsFavorite)/.test(url)), '两个维度应落成一组 AND 的 Filters');
+  // 只关掉收藏，播放状态继续生效。
+  await evaluate(`document.querySelector('[data-favorite]').click()`);
+  await new Promise(r => setTimeout(r, 400));
+  const cleared = await evaluate(`(()=>({
+    favorite:document.querySelector('[data-favorite]').getAttribute('aria-pressed'),
+    url:location.search,
+    filtered:${wallUrls}}))()`);
+  assert.equal(cleared.favorite, 'false');
+  assert.ok(!cleared.url.includes('favorite'), 'URL 里不再保留 favorite');
+  assert.match(cleared.filtered[cleared.filtered.length - 1], /Filters=IsPlayed/);
+  assert.ok(!cleared.filtered[cleared.filtered.length - 1].includes('IsFavorite'));
+  // 旧书签 ?status=favorite 迁移成 ?favorite=1，语义不丢。
+  await evaluate(`(async()=>{history.replaceState(null,'',location.pathname+'?status=favorite#items');await page('items');for(let i=0;i<100&&!document.querySelector('[data-favorite]');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const legacy = await evaluate(`(()=>({favorite:document.querySelector('[data-favorite]').getAttribute('aria-pressed'), url:location.search}))()`);
+  assert.equal(legacy.favorite, 'true');
+  assert.equal(legacy.url, '?favorite=1');
   assert.deepEqual(await evaluate('__errors'), []);
 });
 

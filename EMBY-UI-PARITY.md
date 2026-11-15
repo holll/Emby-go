@@ -25,7 +25,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 详情背景图回退：Backdrop → Thumb → Primary | `itemdetails.html` 背景链 | `emby.js` `backdropKind` |
 | 卡片操作收进悬浮菜单，右键唤起同一份菜单 | `librarybrowser` 卡片模板（hover FAB、右键菜单） | `app.js` `openCardMenu`：`[data-more]` 按钮与 `#wall` 右键共用一份菜单，支持方向键/Esc/焦点归还 |
 | 概览显示最近播放活动（用户、影片、次数、UTC 时间），入口到完整记录 | `dashboard.html`「用户活动」limit 7 | `app.js activityPanel` + `#overview-activity`，数据走 `/api/admin/playback-events` |
-| 媒体墙支持网格/列表两种布局，偏好存浏览器本地，不进 URL | `librarybrowser.js showLayoutMenu`（六种布局） | `app.js wallLayout` + `.wall-list`，localStorage `emby_wall_layout` |
+| 媒体墙布局引擎：海报/海报卡片/缩略图/缩略图卡片/列表，偏好存浏览器本地、不进 URL | `librarybrowser.js showLayoutMenu`（List/Poster/PosterCard/Thumb/ThumbCard） | `app.js WALL_LAYOUT_TEXT` + `wallCard(item, layout)` + `repaintWall` + `#item-layout`，localStorage `emby_wall_layout` |
+| 筛选按「播放状态」「收藏」两个维度同时生效，URL 与气泡可回显 | `filtermenu`/`filterdialog` 多选，`Filters` 逗号列表（AND） | `app.js` 的 `status`/`favorite` 参数 + `wallEmbyQuery` 拼 `Filters=IsFavorite,IsPlayed` |
 | 概览显示运行中的任务（类型、已运行时长、查看跳转） | `dashboard.html` 的「运行中任务」区 | `app.js tasksPanel` + `#overview-tasks`，数据走 `/api/admin/tasks` 的实时并集 |
 | 运行日志提供「历史」模式：按游标分页读磁盘 app 日志，暂停实时尾随，可返回实时 | `log.html`（日志文件列表，新窗口打开） | `log-stream.js` 的 `#dl-history` + `loadHistory`，走 `/api/admin/logs/disk` |
 | 计划任务列表就地显示运行态与已运行时长，有取消端点的类型可直接停止 | `scheduledtaskspage.js`（Running 进度条/百分比、Idle 显示上次结果） | `pageScheduled` 的 `data-scheduled-state/elapsed` + 5 秒轮询；停止复用 `/probe/media/cancel`、`/scrape/cancel` |
@@ -44,17 +45,17 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   已支持，需要时可加「页码」而不改 DTO。
 - **活动流**：只聚合播放记录摘要（同用户同影片合并），没有 Emby 的告警、新闻、设备活动流；
   首页保持只读，时间按 UTC 原文显示，完整记录在防火墙页。
-- **布局偏好**：Emby 有六种布局并把偏好写到服务端 CustomPrefs；这里只做网格/列表两种，
-  偏好只存浏览器 localStorage（换设备不同步），排序/筛选仍走 URL 以便分享。
+- **布局引擎**：只做 Emby 的五个视图（Poster/PosterCard/Thumb/ThumbCard/List），不复制六种布局之外的
+  自适应密度；偏好只存浏览器 localStorage（换设备不同步），排序/筛选仍走 URL 以便分享。
 - **运行中任务**：Emby 靠 websocket 增量推进度；这里按 10 秒轮询刷新，进度只显示已运行时长，
   不伪造百分比（真实进度仍在任务详情/扫描快照里）。首页保持只读，停止入口留在计划任务页与任务中心。
 - **日志历史**：只对 `app.log` 开放（`requests.log` 可能含敏感 URL，磁盘接口本身也不暴露它），
   历史与实时是两种互斥视图，进入历史会断开 SSE，避免两个来源抢同一个 pre。
 - **任务取消**：扫库/重建索引没有中途停止语义（部分结果会落库），翻译/雪碧图在各自页面停止；
   计划任务页只对探测、刮削提供「停止」，避免给出一个「点了不一定停」的按钮。
-- **筛选取值**：Emby 的筛选托盘可同时勾多个状态；我们沿用单值 `Filters`（后端目前只解析
-  `IsPlayed`/`IsFavorite`），多选组合要动契约层语义，故只把「当前生效的筛选」气泡化。
-- **布局与偏好**：不做 Emby 的六种布局、`usersettingsbuilder` 的 localStorage + 服务端 `CustomPrefs` 双写。
+- **筛选多选**：把 Emby 的多选托盘收敛成「播放状态 + 收藏」两个正交维度，底层仍是单次
+  `Filters` 逗号列表（AND）；不做「已看 + 未看」这种互斥组合，也不开放任意 ItemFilter。
+- **布局与偏好**：不做 `usersettingsbuilder` 的 localStorage + 服务端 `CustomPrefs` 双写。
   我们的偏好只放 URL（可分享、可回退），不新增服务端用户设置存储。
 - **图片比例**：Emby 按 `PrimaryImageAspectRatio` 自适应卡片；我们不返回该字段，卡片保持 2:3。
 

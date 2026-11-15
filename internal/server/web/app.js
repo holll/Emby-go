@@ -499,31 +499,44 @@ function movieDisplayTitle(item) {
 }
 
 /* ---------------------------------------------------------------- 媒体墙 */
-function wallCard(item) {
+function wallCard(item, layout = 'poster') {
   const title = movieDisplayTitle(item) || '—';
+  // Emby 3.5 的布局菜单（librarybrowser.showLayoutMenu）给出 List/Poster/PosterCard/Thumb/ThumbCard：
+  // poster/thumb 标题在图片下方，*Card 变体把标题压在图片底部的渐隐层上，list 复用同一份标记由 CSS 压成行。
+  const thumb = layout === 'thumb' || layout === 'thumbCard';
+  const caption = layout === 'posterCard' || layout === 'thumbCard';
+  const posterKind = thumb
+    ? (item.ImageTags?.Thumb ? 'Thumb' : item.BackdropImageTags?.length ? 'Backdrop' : item.ImageTags?.Primary ? 'Primary' : 'Thumb')
+    : (item.ImageTags?.Primary ? 'Primary' : 'Thumb');
+  const posterWidth = thumb ? 320 : 200;
   if (item.Type === 'BoxSet') {
-    const poster = embyImageURL(item, 'Primary', 200);
-    return `<button type="button" class="wall-card collection-card" data-collection="${esc(item.Id)}" aria-label="打开合集：${esc(title)}">
-      <span class="wall-poster">${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(poster)} 1x, ${esc(embyImageURL(item, 'Primary', 400))} 2x" alt="">` : `<span class="collection-placeholder" aria-hidden="true">${icon('library')}</span>`}<span class="collection-mark">合集</span></span>
-      <span class="wall-meta"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${Number.isInteger(item.ChildCount) ? `${item.ChildCount} 部影片` : '查看影片'}</small></span>
+    const poster = embyImageURL(item, posterKind, posterWidth);
+    const srcset = poster ? `${poster} 1x, ${embyImageURL(item, posterKind, posterWidth * 2)} 2x` : '';
+    const sub = Number.isInteger(item.ChildCount) ? `${item.ChildCount} 部影片` : '查看影片';
+    return `<button type="button" class="wall-card collection-card${thumb ? ' is-thumb' : ''}${caption ? ' has-caption' : ''}" data-collection="${esc(item.Id)}" aria-label="打开合集：${esc(title)}">
+      <span class="wall-poster${thumb ? ' is-thumb' : ''}">${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(srcset)}" alt="">` : `<span class="collection-placeholder" aria-hidden="true">${icon('library')}</span>`}<span class="collection-mark">合集</span>${caption ? `<span class="wall-caption"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${esc(sub)}</small></span>` : ''}</span>
+      ${caption ? '' : `<span class="wall-meta"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${esc(sub)}</small></span>`}
     </button>`;
   }
   const ud = item.UserData || {};
-  const kind = item.ImageTags?.Primary ? 'Primary' : 'Thumb';
-  const poster = embyImageURL(item, kind, 200);
-  const srcset = poster ? `${poster} 1x, ${embyImageURL(item, kind, 400)} 2x` : '';
+  const poster = embyImageURL(item, posterKind, posterWidth);
+  const srcset = poster ? `${poster} 1x, ${embyImageURL(item, posterKind, posterWidth * 2)} 2x` : '';
   const progress = item.RunTimeTicks > 0 && ud.PlaybackPositionTicks > 0
     ? Math.min(100, Math.round(ud.PlaybackPositionTicks / item.RunTimeTicks * 100)) : 0;
-  return `<article class="wall-card" data-play="${esc(item.Id)}">
-    <div class="wall-poster">
+  const subtitle = esc([item.ProductionYear, item.OriginalTitle].filter(Boolean).join(' · '));
+  const selected = typeof wallState !== 'undefined' && wallState?.translateSelection?.has(String(item.Id)) ? ' checked' : '';
+  const titleButton = `<button type="button" class="wall-title" data-open="${esc(item.Id)}" title="${esc(title)}">${esc(title)}</button>`;
+  return `<article class="wall-card${thumb ? ' is-thumb' : ''}${caption ? ' has-caption' : ''}" data-play="${esc(item.Id)}">
+    <div class="wall-poster${thumb ? ' is-thumb' : ''}">
       ${poster ? `<img loading="lazy" src="${esc(poster)}" srcset="${esc(srcset)}" alt="">` : `<span class="wall-path">${esc(title)}</span>`}
       <div class="wall-badges">${ud.Played ? `<span class="wall-badge played" role="img" aria-label="已看" title="已看">${icon('check')}</span>` : ''}${ud.IsFavorite ? '<span class="wall-badge fav">♥</span>' : ''}${item.PartCount > 1 ? `<span class="wall-badge multi">${item.PartCount} 段</span>` : ''}</div>
       ${progress ? `<div class="wall-progress"><i style="width:${progress}%"></i></div>` : ''}
-      ${me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${esc(item.Id)}" aria-label="选择翻译：${esc(title)}">选择</label>` : ''}
+      ${me?.is_admin ? `<label class="wall-select"><input type="checkbox" data-translate-select="${esc(item.Id)}" aria-label="选择翻译：${esc(title)}"${selected}>选择</label>` : ''}
       <div class="wall-actions"><button class="icon-btn" data-more="${esc(item.Id)}" aria-haspopup="menu" aria-expanded="false" aria-label="更多操作：${esc(title)}" title="更多操作">${icon('more')}</button></div>
       <button class="wall-play" data-quickplay="${esc(item.Id)}" aria-label="直接播放" title="直接播放">${icon('play')}</button>
+      ${caption ? `<div class="wall-caption">${titleButton}<small>${subtitle}</small></div>` : ''}
     </div>
-    <div class="wall-meta"><button type="button" class="wall-title" data-open="${esc(item.Id)}" title="${esc(title)}">${esc(title)}</button><small>${esc([item.ProductionYear, item.OriginalTitle].filter(Boolean).join(' · '))}</small></div>
+    ${caption ? '' : `<div class="wall-meta">${titleButton}<small>${subtitle}</small></div>`}
   </article>`;
 }
 
@@ -532,9 +545,14 @@ const WALL_STATUS_TEXT = { favorite: '收藏', played: '已看', unplayed: '未�
 // 布局偏好：Emby 有六种布局并存服务端 CustomPrefs；这里只做网格/列表两种，
 // 存 localStorage（个人偏好，不进 URL），避免和可分享的筛选状态搅在一起。
 const WALL_LAYOUT_KEY = 'emby_wall_layout';
-const WALL_LAYOUT_TEXT = { grid: '网格', list: '列表' };
+const WALL_LAYOUT_TEXT = {
+  poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表'
+};
+// 旧版本存的是 grid；升级后映射回 poster，不让老用户掉回默认值。
 function wallLayout() {
-  return localStorage.getItem(WALL_LAYOUT_KEY) === 'list' ? 'list' : 'grid';
+  const saved = localStorage.getItem(WALL_LAYOUT_KEY);
+  if (saved === 'grid') return 'poster';
+  return Object.prototype.hasOwnProperty.call(WALL_LAYOUT_TEXT, saved) ? saved : 'poster';
 }
 // 筛选后整页重绘会丢焦点；记录触发控件选择器，重绘后还原（P1-9）。
 let pendingWallFocus = '';
@@ -636,7 +654,14 @@ async function pageItems() {
   const params = new URLSearchParams(location.search);
   const view = params.get('view') === 'collections' || params.get('collection') ? 'collections' : 'movies';
   const collectionList = view === 'collections' && !params.get('collection');
-  const status = !collectionList && ['favorite', 'played', 'unplayed'].includes(params.get('status')) ? params.get('status') : '';
+  // 收藏从「状态」里独立出来：Emby 的过滤器是「播放状态」「收藏」两个维度可以同时生效。
+  if (params.get('status') === 'favorite') {
+    params.delete('status');
+    params.set('favorite', '1');
+    history.replaceState(history.state, '', location.pathname + '?' + params.toString() + location.hash);
+  }
+  const status = !collectionList && ['played', 'unplayed'].includes(params.get('status')) ? params.get('status') : '';
+  const favorite = !collectionList && params.get('favorite') === '1';
   if (!status && params.has('status')) { params.delete('status'); history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash); }
   const search = params.get('search') || '';
   // 合集侧（列表与成员）只提供标题升降序，避免和影片默认的「最近入库」互相穿插。
@@ -676,7 +701,7 @@ async function pageItems() {
     if (gen !== pageGen || requestGen !== wallGen) return;
   }
   wallState = {
-    view, layout, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
+    view, layout, favorite, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
     entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: []
   };
 
@@ -684,15 +709,15 @@ async function pageItems() {
   // 使用 Emby 用户状态；未刮削与失败候选由显式刮削管理入口提供。
   const pills = [
     ['', '全部'],
-    ['favorite', '收藏'],
-    ['played', '已看'],
-    ['unplayed', '未看']
+    ['unplayed', '未看'],
+    ['played', '已看']
   ];
   // Emby 的筛选托盘把「当前生效的筛选」显示成一排可移除气泡；这里同构：
   // 状态/媒体库/搜索各自一枚，点 × 只清掉自己那一个维度。
   const activeFilters = [
     libraryID && activeLib ? { key: 'library', label: `媒体库：${activeLib.Name}` } : null,
     status ? { key: 'status', label: `状态：${WALL_STATUS_TEXT[status]}` } : null,
+    favorite ? { key: 'favorite', label: '收藏：仅收藏' } : null,
     search ? { key: 'search', label: `搜索：${search}` } : null
   ].filter(Boolean);
   const filterChip = ({ key, label }) => `<button type="button" class="filter-chip filter-chip-btn" data-filter-clear="${key}" aria-label="清除筛选：${esc(label)}">${esc(label)}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>`;
@@ -722,11 +747,16 @@ async function pageItems() {
         <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
         <button type="button" class="btn btn-sm" id="item-order" aria-label="排序方向：${order === 'asc' ? '升序' : '降序'}" title="切换排序方向">${order === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
-        <div class="wall-layout-switch" role="group" aria-label="布局">${['grid', 'list'].map(name => `<button type="button" class="btn btn-sm" data-wall-layout="${name}" aria-pressed="${layout === name}" title="${WALL_LAYOUT_TEXT[name]}布局">${WALL_LAYOUT_TEXT[name]}</button>`).join('')}</div>
+        <select id="item-layout" aria-label="布局">${Object.entries(WALL_LAYOUT_TEXT).map(([value, label]) => `<option value="${value}" ${layout === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
       </div>
       ${activeFilters.length ? `<div class="filters wall-active-filters" id="wall-active-filters" aria-label="当前筛选">${activeFilters.map(filterChip).join('')}</div>` : ''}
       ${collectionList ? '' : `<div class="filters wall-status-filters">
-        ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
+        <div class="pill-group" role="group" aria-label="播放状态">
+          ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
+        </div>
+        <div class="pill-group" role="group" aria-label="收藏">
+          <button class="pill ${favorite ? 'is-active' : ''}" data-favorite="1" aria-pressed="${favorite}">仅收藏</button>
+        </div>
       </div>`}
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
@@ -738,7 +768,7 @@ async function pageItems() {
 <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
       ${typeof me !== 'undefined' && me?.is_admin ? `<div class="filters"><button type="button" class="btn" id="wall-translate-toggle" aria-expanded="false" aria-controls="wall-translate-panel">选择影片仅翻译</button><span id="wall-translate-count" role="status">已选 0 部（最多1000）</span></div><section id="wall-translate-panel" hidden>${translationWidget('wall-translate')}</section>` : ''}
       </div></details>`}
-      <div class="wall${layout === 'list' ? ' wall-list' : ''}" id="wall"></div>
+      <div class="wall wall-layout-${layout}${layout === 'list' ? ' wall-list' : ''}" id="wall"></div>
       <div id="wall-empty"></div>
       <div id="wall-more" class="wall-more"></div>
       <p class="hint">点击海报打开详情抽屉（抽屉内可播放、刮削、探测、编辑元数据）；海报上的播放图标为快捷播放。非 http(s) 源的 .strm 在扫描时直接跳过，不会出现在这里。</p>
@@ -781,7 +811,7 @@ async function pageItems() {
     history.replaceState({}, '', location.pathname + '?' + qs.toString() + '#items');
     refreshPage(pageItems, gen);
   });
-  // 状态筛选：一排互斥，点第二次取消回「全部」（与库筛选同款 toggle 语义）。
+  // 播放状态与收藏是两个独立维度，可以同时生效（Emby 的过滤器也是并列勾选）。
   document.querySelectorAll('.pill[data-status]').forEach(button => button.addEventListener('click', () => {
     const qs = new URLSearchParams(location.search);
     const value = button.dataset.status;
@@ -790,6 +820,13 @@ async function pageItems() {
     // 选中状态时清掉旧的 scrape 参数（早期书签可能两个都在）。
     qs.delete('scrape');
     pendingWallFocus = '[data-status="' + (qs.get('status') || '') + '"]';
+    pushQuery(qs);
+    refreshPage(pageItems, gen);
+  }));
+  document.querySelectorAll('[data-favorite]').forEach(button => button.addEventListener('click', () => {
+    const qs = new URLSearchParams(location.search);
+    if (favorite) qs.delete('favorite'); else qs.set('favorite', '1');
+    pendingWallFocus = '[data-favorite]';
     pushQuery(qs);
     refreshPage(pageItems, gen);
   }));
@@ -833,17 +870,16 @@ async function pageItems() {
   });
   // 排序方向与排序字段分开维护（对应 Emby 的 SortBy + SortOrder 两个维度）：
   // 合集只有「标题正/逆序」一维，切 sort；影片切 order，URL 里始终可回显。
-  // 布局切换只改容器类名与偏好，不重发列表请求；焦点停在按下的那个按钮上。
-  document.querySelectorAll('[data-wall-layout]').forEach(button => {
-    button.addEventListener('click', () => {
-      const next = button.dataset.wallLayout;
-      if (!WALL_LAYOUT_TEXT[next] || next === layout) return;
-      localStorage.setItem(WALL_LAYOUT_KEY, next);
-      layout = next;
-      document.querySelector('#wall')?.classList.toggle('wall-list', next === 'list');
-      document.querySelectorAll('[data-wall-layout]').forEach(other => other.setAttribute('aria-pressed', String(other.dataset.wallLayout === next)));
-      button.focus();
-    });
+  // 布局切换只重绘已加载的卡片并记住偏好，不重发列表请求（Emby 的布局菜单同样是纯前端切换）。
+  const layoutSelect = document.querySelector('#item-layout');
+  if (layoutSelect) layoutSelect.addEventListener('change', () => {
+    const next = layoutSelect.value;
+    if (!Object.prototype.hasOwnProperty.call(WALL_LAYOUT_TEXT, next) || next === layout) return;
+    localStorage.setItem(WALL_LAYOUT_KEY, next);
+    layout = next;
+    if (wallState) wallState.layout = next;
+    repaintWall();
+    layoutSelect.focus();
   });
   const orderButton = document.querySelector('#item-order');
   if (orderButton) orderButton.addEventListener('click', () => {
@@ -864,10 +900,10 @@ async function pageItems() {
   // 气泡只清自己那一维，焦点回到对应控件而不是整页顶部。
   document.querySelectorAll('[data-filter-clear]').forEach(button => {
     button.addEventListener('click', () => {
-      const key = { library: 'library_id', status: 'status', search: 'search' }[button.dataset.filterClear];
+      const key = { library: 'library_id', status: 'status', favorite: 'favorite', search: 'search' }[button.dataset.filterClear];
       const qs = new URLSearchParams(location.search);
       qs.delete(key);
-      pendingWallFocus = { library_id: libraries.length <= 8 ? '[data-lib=""]' : '#item-lib', status: '[data-status=""]', search: '#item-search' }[key];
+      pendingWallFocus = { library_id: libraries.length <= 8 ? '[data-lib=""]' : '#item-lib', status: '[data-status=""]', favorite: '[data-favorite]', search: '#item-search' }[key];
       pushQuery(qs);
       refreshPage(pageItems, gen);
     });
@@ -1010,7 +1046,7 @@ async function loadWallPage() {
     wallState.done = items.length === 0 || wallState.offset >= data.total;
     if (items.length) {
       document.querySelector('#wall').insertAdjacentHTML('beforeend',
-        items.map(item => wallCard(item)).join(''));
+        items.map(item => wallCard(item, wallState.layout)).join(''));
     }
     const count = document.querySelector('#wall-count');
     const scope = [
@@ -1050,6 +1086,14 @@ async function loadWallPage() {
       wallMaybeLoadMore();
     }
   }
+}
+
+// 切换布局只重绘已加载的卡片：Emby 的布局菜单是纯前端切换，不该为一个视图偏好重发列表请求。
+function repaintWall() {
+  const wall = document.querySelector('#wall');
+  if (!wall || !wallState) return;
+  wall.className = 'wall wall-layout-' + wallState.layout + (wallState.layout === 'list' ? ' wall-list' : '');
+  wall.innerHTML = wallState.items.map(item => wallCard(item, wallState.layout)).join('');
 }
 
 /* ------------------------------------------------------------ 详情抽屉 */

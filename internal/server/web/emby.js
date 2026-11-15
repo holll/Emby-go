@@ -44,8 +44,13 @@ function wallEmbyQuery(state) {
   }
   if (state.search) query.set('SearchTerm', state.search);
   if (state.libraryID) query.set('ParentId', state.libraryID);
-  const filter = ({ favorite: 'IsFavorite', played: 'IsPlayed', unplayed: 'IsUnplayed' })[state.status];
-  if (filter) query.set('Filters', filter);
+  // Emby 的 Filters 是逗号分隔的 ItemFilter 列表，多个值之间是 AND：
+  // 收藏与播放状态各算一个维度，可以同时传（后端 parseMovieQueryOptions 也是逐项叠加）。
+  const filters = [];
+  if (state.favorite) filters.push('IsFavorite');
+  if (state.status === 'played') filters.push('IsPlayed');
+  if (state.status === 'unplayed') filters.push('IsUnplayed');
+  if (filters.length) query.set('Filters', filters.join(','));
   if (state.entity) {
     const [kind, , value] = state.entity;
     const key = ({ person: 'Person', genre: 'Genres', tag: 'Tags', studio: 'Studios' })[kind];

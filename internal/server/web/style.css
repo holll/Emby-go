@@ -715,8 +715,19 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .wall-title:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 3px; }
 .wall-title:hover { text-decoration: underline; }
 .wall-meta small { color: var(--dim); font-size: var(--text-12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 布局引擎：Emby 的 Poster/Thumb 系列不改网格语义，只换图片比例与标题位置。
+   缩略图按 16:9 拉宽列宽，卡片变体把标题压进图片底部的渐隐层。 */
+.wall.wall-layout-thumb, .wall.wall-layout-thumbCard { grid-template-columns: repeat(auto-fill, minmax(248px, 1fr)); }
+.wall .wall-poster.is-thumb { aspect-ratio: 16 / 9; }
+.wall-caption { position: absolute; inset: auto 0 0; display: grid; gap: 2px; padding: 30px var(--space-10) var(--space-10); background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.4) 58%, transparent); pointer-events: none; }
+.wall-caption .wall-title { color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75); pointer-events: auto; }
+.wall-caption small { color: rgba(255, 255, 255, 0.74); font-size: var(--text-11); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wall-list .wall-caption { display: none; }
+/* 播放状态与收藏是两组独立筛选，中间留出比组内更大的间距。 */
+.wall-status-filters { gap: var(--space-16); flex-wrap: wrap; }
+.pill-group { display: flex; gap: var(--space-4); }
+
 /* 布局偏好「列表」：Emby 的列表视图在这里压成一行一张，海报缩到 56px。 */
-.wall-layout-switch { display: flex; gap: var(--space-4); }
 .wall.wall-list { display: flex; flex-direction: column; gap: var(--space-8); }
 .wall.wall-list .wall-card { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: var(--space-12); padding: var(--space-8); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); }
 .wall.wall-list .wall-card:hover { border-color: var(--blue-line); }

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(`${__dirname}/web/app.js`, 'utf8');
-const context = vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {}, me: { is_admin: false }, embyImageURL: () => '' });
+const context = vm.createContext({ wallLayout: () => 'poster', WALL_LAYOUT_TEXT: { poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  esc: String, icon: () => '', numberUnlessInTitle: () => '', STATUS_TEXT: {}, me: { is_admin: false }, embyImageURL: () => '' });
 vm.runInContext(source.slice(source.indexOf('function cleanDisplayName('), source.indexOf('const WALL_PAGE_SIZE')), context);
 
 test('display names strip only terminal valid CD parts and retain source fields', () => {

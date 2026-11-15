@@ -52,7 +52,7 @@ function wallSandbox({ search = '?view=collections', state = null, me = { id: '7
   documentRef = dom(), history: historyRef = { state: {}, pushed: [], replaced: [], back() { this.backed = (this.backed || 0) + 1; },
     pushState(state, _, url) { this.state = state; this.pushed.push(url); }, replaceState(state, _, url) { this.state = state; this.replaced.push(url); } },
   embyRequest: embyRequestRef = async () => ({ Items: [], TotalRecordCount: 0 }), collections = [] } = {}) {
-  const box = vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} }, 
+  const box = vm.createContext({ wallLayout: () => 'poster', WALL_LAYOUT_TEXT: { poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} }, 
     URLSearchParams, Set, JSON,
     token: 'A', me, pageGen: 1, wallGen: 0, wallState: state, view, collection,
     WALL_PAGE_SIZE: 48, WALL_STATUS_TEXT: { favorite: '收藏', played: '已看', unplayed: '未看' }, pendingWallFocus: '',
@@ -222,7 +222,7 @@ test('合集卡片打开成员列表：编码进 URL 并保留 hash，不触发�
 
 test('合集卡片只有合集角标与数量，没有快捷播放/管理按钮', () => {
   const box = wallSandbox({ me: { id: '7', is_admin: true } });
-  vm.runInContext(section('function wallCard(item) {', 'const WALL_PAGE_SIZE'), box);
+  vm.runInContext(section("function wallCard(item, layout = 'poster') {", 'const WALL_PAGE_SIZE'), box);
   const html = box.wallCard({ Id: 'boxset:YQ', Name: '系列合集', Type: 'BoxSet', ChildCount: 3, ImageTags: { Primary: 'v1' } });
   assert.match(html, /data-collection="boxset:YQ"/);
   assert.match(html, /3 部影片/);
@@ -238,14 +238,14 @@ test('合集卡片只有合集角标与数量，没有快捷播放/管理按钮'
 
 test('合集封面缺失时回落到占位图而不是空 src', () => {
   const box = wallSandbox();
-  vm.runInContext(section('function wallCard(item) {', 'const WALL_PAGE_SIZE'), box);
+  vm.runInContext(section("function wallCard(item, layout = 'poster') {", 'const WALL_PAGE_SIZE'), box);
   const html = box.wallCard({ Id: 'boxset:YQ', Name: '无封面', Type: 'BoxSet', ImageTags: {} });
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /collection-placeholder/);
 });
 
 test('Emby 查询构造：合集列表与成员列表的参数互不串味', () => {
-  const box = vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, WALL_PAGE_SIZE: 48, entityIdOf: (kind, value) => `${kind}:${value}` });
+  const box = vm.createContext({ wallLayout: () => 'poster', WALL_LAYOUT_TEXT: { poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, WALL_PAGE_SIZE: 48, entityIdOf: (kind, value) => `${kind}:${value}` });
   vm.runInContext(embySource, box);
   const list = box.wallEmbyQuery({ view: 'collections', entity: null, offset: 0, sort: 'title', order: 'asc', search: '', libraryID: '', status: '' });
   assert.equal(list.get('IncludeItemTypes'), 'BoxSet');

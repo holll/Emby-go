@@ -8,7 +8,7 @@ const client = fs.readFileSync(path.join(__dirname, 'web/emby.js'), 'utf8');
 const app = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
 const tick = () => new Promise(setImmediate);
 function context(values = {}) {
-  return vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, token: 'A', me: { id: '7', is_admin: true },
+  return vm.createContext({ wallLayout: () => 'poster', WALL_LAYOUT_TEXT: { poster: '海报', posterCard: '海报卡片', thumb: '缩略图', thumbCard: '缩略图卡片', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, token: 'A', me: { id: '7', is_admin: true },
     localStorage: { getItem: () => 'A' }, WALL_PAGE_SIZE: 100, ...values });
 }
 function loadClient(box) { vm.runInContext(client, box); return box; }
@@ -50,7 +50,10 @@ test('Native wall query combines paging, sorting, library, entity and user Filte
   assert.equal(query.get('StartIndex'), '100'); assert.equal(query.get('Limit'), '100');
   assert.equal(query.get('SortBy'), 'ProductionYear'); assert.equal(query.get('SortOrder'), 'Ascending');
   assert.equal(query.get('SearchTerm'), 'A B'); assert.equal(query.get('ParentId'), '1000000000001'); assert.equal(query.get('Genres'), '剧情');
-  for (const [status, filter] of [['favorite', 'IsFavorite'], ['played', 'IsPlayed'], ['unplayed', 'IsUnplayed']]) assert.equal(box.wallEmbyQuery({ ...base, status }).get('Filters'), filter);
+  for (const [status, filter] of [['played', 'IsPlayed'], ['unplayed', 'IsUnplayed']]) assert.equal(box.wallEmbyQuery({ ...base, status }).get('Filters'), filter);
+  // 收藏是独立维度：两个维度同时生效时拼成一个 AND 的 Filters 列表。
+  assert.equal(box.wallEmbyQuery({ ...base, status: '', favorite: true }).get('Filters'), 'IsFavorite');
+  assert.equal(box.wallEmbyQuery({ ...base, status: 'unplayed', favorite: true }).get('Filters'), 'IsFavorite,IsUnplayed');
   assert.equal(box.wallEmbyQuery({ ...base, libraryID: '', entity: ['collection', '合集', 'boxset:YQ'] }).get('ParentId'), 'boxset:YQ');
   assert.equal(query.has('library_id'), false); assert.equal(query.has('status'), false);
 });
