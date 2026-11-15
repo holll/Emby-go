@@ -3228,32 +3228,48 @@ async function pageScheduled() {
   }
 
   const libOptions = libraries.map(lib => `<option value="${esc(lib.Id)}">${esc(lib.Name)}</option>`).join('');
-  content.innerHTML = `
-    <section class="panel">
-      <div class="panel-head"><h2>已配置任务</h2>
-        <div class="panel-actions"><button id="sched-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button></div>
-      </div>
-      ${items.length ? `
-        <div class="table-wrap scheduled-table" tabindex="0" role="region" aria-label="已配置任务"><table>
-          <caption class="sr-only">已配置任务</caption>
-          <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">表达式</th><th scope="col">下次执行</th><th scope="col">上次结果</th><th scope="col">启用</th><th scope="col" style="text-align:right">操作</th></tr></thead>
-          <tbody>${items.map(item => `<tr>
-            <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
-            <td data-label="类型"><span class="protocol">${esc(types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}</span></td>
-            <td data-label="表达式" class="mono">${esc(item.cron)}</td>
-            <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
-            <td data-label="上次结果" data-scheduled-result="${esc(item.id)}"><span data-scheduled-state="${esc(item.id)}">${item.running ? `<span class="badge running">${esc(RUN_STATUS_TEXT.running)}</span>` : runBadge(item.last_status)}</span>
+  // 已配置任务支持「表格 / 卡片」两种视图：Emby 的计划任务页是卡片式，表格保留给需要横向对比的场景。
+  // 运行态与停止按钮在两套标记里共用同一组 data-* 锚点，applyScheduledState 不用区分视图。
+  const scheduledLayout = localStorage.getItem('emby_scheduled_layout') === 'card' ? 'card' : 'table';
+  const typeName = item => esc(types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务');
+  const scheduledState = item => `<span data-scheduled-state="${esc(item.id)}">${item.running ? `<span class="badge running">${esc(RUN_STATUS_TEXT.running)}</span>` : runBadge(item.last_status)}</span>
               <small class="hint mono" data-scheduled-elapsed="${esc(item.id)}"${item.running && item.started_at ? ` data-started="${esc(item.started_at)}"` : ' hidden'}></small>
-              <small class="hint" style="margin:2px 0 0;display:block" data-scheduled-last="${esc(item.id)}">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small></td>
-            <td data-label="启用"><label class="switch"><input type="checkbox" role="switch" data-role="toggle" data-id="${esc(item.id)}" aria-label="启用计划任务：${esc(item.name || types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}"${item.enabled ? ' checked' : ''}></label></td>
-            <td data-label="操作"><div class="row-actions">
+              <small class="hint" style="margin:2px 0 0;display:block" data-scheduled-last="${esc(item.id)}">${esc(fmtTime(item.last_run_at))}${item.last_message ? ' · ' + esc(item.last_message) : ''}</small>`;
+  const scheduledToggle = item => `<label class="switch"><input type="checkbox" role="switch" data-role="toggle" data-id="${esc(item.id)}" aria-label="启用计划任务：${esc(item.name || types[item.type] || TASK_TYPE_TEXT[item.type] || item.type || '未知任务')}"${item.enabled ? ' checked' : ''}></label>`;
+  const scheduledActions = item => `<div class="row-actions">
               <button class="btn btn-sm" data-role="run" data-id="${esc(item.id)}" title="${item.running ? '任务正在执行' : '立即执行一次'}"${item.running ? ' disabled' : ''}>${icon('play')}<span>执行</span></button>
               <button class="btn btn-sm" data-role="stop" data-id="${esc(item.id)}" title="${scheduledStopSupported(item) ? '停止本次执行' : '该任务类型不支持中途停止'}"${item.running && scheduledStopSupported(item) ? '' : ' hidden'}>${icon('x')}<span>停止</span></button>
               <button class="btn btn-sm" data-role="edit" data-id="${esc(item.id)}">编辑</button>
               <button class="icon-btn danger" data-role="del" data-id="${esc(item.id)}" title="删除">${icon('trash')}</button>
-            </div></td>
-          </tr>`).join('')}</tbody>
-        </table></div>` : empty('还没有计划任务', '展开下方“新建计划任务”配置；立即执行已有任务无需新建。')}
+            </div>`;
+  const scheduledRow = item => `<tr>
+            <td data-label="名称"><strong class="title">${esc(item.name)}</strong></td>
+            <td data-label="类型"><span class="protocol">${typeName(item)}</span></td>
+            <td data-label="表达式" class="mono">${esc(item.cron)}</td>
+            <td data-label="下次执行" class="mono">${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</td>
+            <td data-label="上次结果" data-scheduled-result="${esc(item.id)}">${scheduledState(item)}</td>
+            <td data-label="启用">${scheduledToggle(item)}</td>
+            <td data-label="操作">${scheduledActions(item)}</td>
+          </tr>`;
+  const scheduledCard = item => `<article class="sched-card">
+            <div class="sched-card-head"><strong class="title">${esc(item.name)}</strong><span class="protocol">${typeName(item)}</span>${scheduledToggle(item)}</div>
+            <div class="sched-card-meta"><span class="mono">${esc(item.cron)}</span><span class="mono">下次：${esc(item.enabled ? fmtTime(item.next_run) : '已禁用')}</span></div>
+            <div class="sched-card-state" data-scheduled-result="${esc(item.id)}">${scheduledState(item)}</div>
+            ${scheduledActions(item)}
+          </article>`;
+  const scheduledList = scheduledLayout === 'card'
+    ? `<div class="sched-cards">${items.map(scheduledCard).join('')}</div>`
+    : `<div class="table-wrap scheduled-table" tabindex="0" role="region" aria-label="已配置任务"><table>
+          <caption class="sr-only">已配置任务</caption>
+          <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">表达式</th><th scope="col">下次执行</th><th scope="col">上次结果</th><th scope="col">启用</th><th scope="col" style="text-align:right">操作</th></tr></thead>
+          <tbody>${items.map(scheduledRow).join('')}</tbody>
+        </table></div>`;
+  content.innerHTML = `
+    <section class="panel">
+      <div class="panel-head"><h2>已配置任务</h2>
+        <div class="panel-actions"><select id="sched-layout" aria-label="布局"><option value="table"${scheduledLayout === 'table' ? ' selected' : ''}>表格</option><option value="card"${scheduledLayout === 'card' ? ' selected' : ''}>卡片</option></select><button id="sched-refresh" class="btn btn-sm">${icon('refresh')}<span>刷新</span></button></div>
+      </div>
+      ${items.length ? scheduledList : empty('还没有计划任务', '展开下方“新建计划任务”配置；立即执行已有任务无需新建。')}
     </section>
 
 
@@ -3400,6 +3416,11 @@ async function pageScheduled() {
     document.querySelector('#sched-cancel').addEventListener('click', () => { scheduledFocus = `[data-role="edit"][data-id="${editing.id}"]`; scheduledEditId = null; refreshPage(pageScheduled, gen); });
   }
   document.querySelector('#sched-refresh').addEventListener('click', pageScheduled);
+  document.querySelector('#sched-layout').addEventListener('change', event => {
+    localStorage.setItem('emby_scheduled_layout', event.target.value === 'card' ? 'card' : 'table');
+    scheduledFocus = '#sched-layout';
+    refreshPage(pageScheduled, gen);
+  });
 
   document.querySelector('#sched-form').addEventListener('submit', async event => {
     event.preventDefault();

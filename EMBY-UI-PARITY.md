@@ -30,6 +30,7 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
 | 概览显示运行中的任务（类型、已运行时长、查看跳转） | `dashboard.html` 的「运行中任务」区 | `app.js tasksPanel` + `#overview-tasks`，数据走 `/api/admin/tasks` 的实时并集 |
 | 运行日志提供「历史」模式：按游标分页读磁盘 app 日志，暂停实时尾随，可返回实时 | `log.html`（日志文件列表，新窗口打开） | `log-stream.js` 的 `#dl-history` + `loadHistory`，走 `/api/admin/logs/disk` |
 | 计划任务列表就地显示运行态与已运行时长，有取消端点的类型可直接停止 | `scheduledtaskspage.js`（Running 进度条/百分比、Idle 显示上次结果） | `pageScheduled` 的 `data-scheduled-state/elapsed` + 5 秒轮询；停止复用 `/probe/media/cancel`、`/scrape/cancel` |
+| 计划任务页支持「表格 / 卡片」两种布局，偏好存浏览器、不进 URL | `scheduledtaskspage.js` 本身就是卡片列表 | `pageScheduled` 的 `#sched-layout` + `scheduledRow/scheduledCard`，localStorage `emby_scheduled_layout` |
 | 当前筛选显示成一排可移除气泡 | `filtermenu` 的已应用筛选 chip 行 | 媒体墙 `#wall-active-filters`：状态/媒体库/搜索各一枚，点 × 只清自己那一维并把焦点还给对应控件 |
 
 ## 有意保留的差异
@@ -55,6 +56,8 @@ Emby 前端是压缩过的 AMD 模块，引用时给到页面/脚本级位置即
   计划任务页只对探测、刮削提供「停止」，避免给出一个「点了不一定停」的按钮。
 - **筛选多选**：把 Emby 的多选托盘收敛成「播放状态 + 收藏」两个正交维度，底层仍是单次
   `Filters` 逗号列表（AND）；不做「已看 + 未看」这种互斥组合，也不开放任意 ItemFilter。
+- **计划任务布局**：Emby 只有卡片一种形态，我们保留表格（便于横向比对 cron 与状态）再加卡片，
+  两种视图共用同一组 `data-scheduled-*` 锚点，所以运行态、停止和轮询不需要写两遍。
 - **布局与偏好**：不做 `usersettingsbuilder` 的 localStorage + 服务端 `CustomPrefs` 双写。
   我们的偏好只放 URL（可分享、可回退），不新增服务端用户设置存储。
 - **图片比例**：Emby 按 `PrimaryImageAspectRatio` 自适应卡片；我们不返回该字段，卡片保持 2:3。

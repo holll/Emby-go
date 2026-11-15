@@ -390,6 +390,15 @@ td strong.title.is-path { font-family: var(--font-mono); font-size: var(--text-1
 td .sub { display: block; color: var(--dim); font-size: var(--text-12); }
 .row-actions { display: flex; gap: var(--space-6); justify-content: flex-end; }
 
+/* 计划任务卡片视图：与表格视图并存，偏好记在浏览器 */
+.sched-cards { display: grid; gap: var(--space-12); grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.sched-card { display: grid; gap: var(--space-8); padding: var(--space-12); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); }
+.sched-card-head { display: flex; align-items: center; gap: var(--space-8); }
+.sched-card-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-12); color: var(--dim); font-size: var(--text-12); }
+.sched-card-state { display: grid; gap: 2px; }
+.sched-card .row-actions { justify-content: flex-start; }
+
 /* 媒体库排序：上/下两个箭头竖排 */
 .lib-order { display: grid; gap: var(--space-2); }
 .lib-order .icon-btn { width: 26px; height: 22px; border-radius: var(--radius-xs); }

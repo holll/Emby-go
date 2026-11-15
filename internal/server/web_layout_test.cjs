@@ -640,6 +640,37 @@ test('计划任务运行态：执行中角标、已运行时长与可停止类�
   assert.deepEqual(await evaluate('__errors'), []);
 });
 
+test('计划任务布局：表格与卡片互换、偏好记忆、运行态沿用同一套锚点', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(()=>{localStorage.removeItem('emby_scheduled_layout');window.__scheduledItems={items:[
+    {id:1,name:'夜间扫描',type:'scan',cron:'0 3 * * *',params:'{}',enabled:true,config_etag:'f1',running:true,started_at:new Date(Date.now()-5000).toISOString()},
+    {id:2,name:'补探测',type:'probe',cron:'0 4 * * *',params:'{}',enabled:true,config_etag:'f2',running:true,started_at:new Date(Date.now()-5000).toISOString()}
+  ],types:{scan:'扫描媒体库',probe:'媒体信息探测'}}})()`);
+  await evaluate(`(async()=>{await page('scheduled');})()`);
+  const initial = await evaluate(`(()=>({select:document.querySelector('#sched-layout').value,table:!!document.querySelector('.table-wrap.scheduled-table'),cards:document.querySelectorAll('.sched-card').length}))()`);
+  assert.deepEqual(initial, { select: 'table', table: true, cards: 0 }, '默认沿用表格视图');
+  await evaluate(`(async()=>{const el=document.querySelector('#sched-layout');el.value='card';el.dispatchEvent(new Event('change'));for(let i=0;i<100&&!document.querySelector('.sched-card');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  const cards = await evaluate(`(()=>({cards:document.querySelectorAll('.sched-card').length,table:!!document.querySelector('.table-wrap.scheduled-table'),stored:localStorage.getItem('emby_scheduled_layout'),focus:document.activeElement?.id,scanBadge:document.querySelector('[data-scheduled-state="1"]').textContent.trim(),scanStop:document.querySelector('[data-role="stop"][data-id="1"]').hidden,probeStop:document.querySelector('[data-role="stop"][data-id="2"]').hidden,url:location.search}))()`);
+  assert.equal(cards.cards, 2);
+  assert.equal(cards.table, false, '卡片视图不再渲染表格');
+  assert.equal(cards.stored, 'card');
+  assert.equal(cards.focus, 'sched-layout', '切换后焦点留在布局选择上');
+  assert.equal(cards.scanBadge, '进行中', '运行态锚点在卡片里同样生效');
+  assert.equal(cards.scanStop, true); assert.equal(cards.probeStop, false);
+  assert.equal(cards.url, '', '布局偏好不进 URL');
+  // 重新进入页面仍记住卡片视图
+  await evaluate(`(async()=>{await page('overview');await page('scheduled');for(let i=0;i<100&&!document.querySelector('.sched-card');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  assert.equal(await evaluate(`document.querySelector('#sched-layout').value`), 'card');
+  assert.equal(await evaluate(`document.querySelectorAll('.sched-card').length`), 2);
+  // 切回表格
+  await evaluate(`(async()=>{const el=document.querySelector('#sched-layout');el.value='table';el.dispatchEvent(new Event('change'));for(let i=0;i<100&&!document.querySelector('.table-wrap.scheduled-table');i++)await new Promise(r=>setTimeout(r,20));})()`);
+  assert.equal(await evaluate(`document.querySelectorAll('.sched-card').length`), 0);
+  assert.equal(await evaluate(`localStorage.getItem('emby_scheduled_layout')`), 'table');
+  assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '切换布局不产生写请求');
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
 test('媒体墙筛选气泡：显示当前筛选、逐个清除并回到对应控件', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { evaluate } = await browser(t);
