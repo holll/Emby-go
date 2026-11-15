@@ -1118,6 +1118,70 @@ test('设置页与任务中心：窄屏表格卡片化后可读、不横向溢�
   assert.ok(delivery.rows.every(display => display === 'table-row'), '宽屏投递历史仍是表格行');
 });
 
+test('防火墙与媒体库：窄屏卡片可读、触控目标达标、长标题不撑破', { timeout: 90000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await evaluate(`(()=>{
+    window.__playbackEvents=[{movie_id:1,movie_title:'长片名'+'很长的电影标题'.repeat(6),user_name:'owner',play_count:3,last_kind:'play',last_played_at:'2026-11-15T09:12:00Z'}];
+    window.__libraryItems=[{Id:1,Name:'媒体库'+'超长名称'.repeat(10),Path:'/media/['+'超长目录名'.repeat(8)+']',count:12345},{Id:2,Name:'第二个库',Path:'/media/b',count:2}];
+    window.__securityRules=[{network:'203.0.113.0/24',note:'超长备注'.repeat(12),created_at:'2026-11-15T09:00:00Z',blocked:12}];
+  })()`);
+  const measure = () => evaluate(`(()=>({page:document.documentElement.scrollWidth,vw:innerWidth,coarse:matchMedia('(pointer: coarse)').matches,
+    wraps:[...document.querySelectorAll('.table-wrap')].filter(w=>w.getClientRects().length).map(w=>({aria:w.getAttribute('aria-label'),cw:w.clientWidth,sw:w.scrollWidth,right:Math.round(w.getBoundingClientRect().right),ov:getComputedStyle(w).overflowX,thead:w.querySelector('thead')?getComputedStyle(w.querySelector('thead')).display:null,tds:[...w.querySelectorAll('tbody tr:first-child td')].map(td=>Math.round(td.getBoundingClientRect().width)),rows:[...w.querySelectorAll('tbody tr')].map(r=>getComputedStyle(r).display)})),
+    cards:[...document.querySelectorAll('.library-card')].map(c=>({w:Math.round(c.getBoundingClientRect().width),right:Math.round(c.getBoundingClientRect().right),top:Math.round(c.getBoundingClientRect().top),left:Math.round(c.getBoundingClientRect().left),titleSw:c.querySelector('.library-title').scrollWidth,titleCw:c.querySelector('.library-title').clientWidth})),
+    buttons:[...document.querySelectorAll('#content button, #content a.btn')].map(b=>({text:(b.textContent||'').trim().slice(0,8),h:Math.round(b.getBoundingClientRect().height),w:Math.round(b.getBoundingClientRect().width),right:Math.round(b.getBoundingClientRect().right)})).filter(b=>b.w>0)}))()`);
+  for (const width of [390, 320]) {
+    await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evaluate(`(async()=>{await page('firewall');await new Promise(r=>setTimeout(r,120));})()`);
+    let m = await measure();
+    assert.equal(m.page, width, `${width}px: 防火墙无横向滚动`);
+    const block = m.wraps.find(w => w.aria === 'IP 黑名单规则');
+    assert.ok(block, `${width}px: 黑名单规则表存在`);
+    assert.equal(block.thead, 'none', `${width}px: 黑名单窄屏卡片化`);
+    assert.equal(block.ov, 'visible', `${width}px: 黑名单不再靠横滚`);
+    assert.ok(block.sw <= block.cw + 1, `${width}px: 黑名单卡片不溢出（sw ${block.sw}/cw ${block.cw}）`);
+    assert.ok(block.tds.every(td => td <= block.cw), `${width}px: 黑名单单元格不超出容器`);
+    assert.ok(block.rows.every(display => display === 'block'), `${width}px: 每条规则一张卡`);
+    for (const aria of ['登录记录', '播放记录']) {
+      const audit = m.wraps.find(w => w.aria === aria);
+      assert.ok(audit, `${width}px: ${aria}存在`);
+      assert.equal(audit.thead, 'none', `${width}px: ${aria}卡片化`);
+      assert.ok(audit.sw <= audit.cw + 1, `${width}px: ${aria}不溢出`);
+    }
+    for (const button of m.buttons) {
+      assert.ok(button.h >= 44, `${width}px: 触控目标「${button.text}」高度 ${button.h}`);
+      assert.ok(button.right <= width, `${width}px: 按钮「${button.text}」不越出视口`);
+    }
+    assert.equal(m.coarse, true, `${width}px: 模拟触控指针`);
+
+    await evaluate(`(async()=>{await page('libraries');await new Promise(r=>setTimeout(r,120));})()`);
+    m = await measure();
+    assert.equal(m.page, width, `${width}px: 媒体库页无横向滚动`);
+    assert.equal(m.cards.length, 2, `${width}px: 媒体库两张卡片都在`);
+    assert.equal(m.cards[0].top === m.cards[1].top, false, `${width}px: 媒体库单列堆叠`);
+    for (const card of m.cards) {
+      assert.ok(card.right <= width, `${width}px: 媒体库卡片不越出视口`);
+      assert.ok(card.titleSw <= card.titleCw + 1, `${width}px: 超长库名在卡片内折行（sw ${card.titleSw}/cw ${card.titleCw}）`);
+    }
+    for (const button of m.buttons) assert.ok(button.h >= 44, `${width}px: 媒体库触控目标「${button.text}」高度 ${button.h}`);
+  }
+  // 桌面回归：关闭触控模拟后恢复紧凑密度，卡片网格仍多列。
+  await call('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`(async()=>{await page('libraries');await new Promise(r=>setTimeout(r,120));})()`);
+  const wide = await measure();
+  assert.equal(wide.coarse, false, '桌面指针为精确指针');
+  assert.equal(wide.cards.length, 2, '宽屏媒体库两张卡片都在');
+  assert.equal(wide.cards[0].top, wide.cards[1].top, '宽屏媒体库并排多列');
+  const smallest = Math.min(...wide.buttons.map(b => b.h));
+  assert.ok(smallest <= 40, `桌面保留紧凑按钮高度，最小 ${smallest}`);
+  await evaluate(`(async()=>{await page('firewall');await new Promise(r=>setTimeout(r,120));})()`);
+  const wideFirewall = await measure();
+  const wideBlock = wideFirewall.wraps.find(w => w.aria === 'IP 黑名单规则');
+  assert.notEqual(wideBlock.thead, 'none', '宽屏黑名单显示表头');
+});
+
 test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { call, evaluate } = await browser(t);
