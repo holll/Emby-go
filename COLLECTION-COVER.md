@@ -175,6 +175,36 @@ curl -X PUT -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
 自己变（库早就扫完了、成员没动），需要点一次设置页的「立即生成全部合集」或调
 `POST /api/admin/collection-cover/run` 做存量回填。
 
+### 重新生成与跳过原因
+
+升级到带拼贴封面的版本**不会**自动重算：`library_covers` / `collection_covers` 里没有生效记录时，
+客户端仍然拿到旧的代表图（库内最新入库影片的海报），看起来就是「封面还是单部影片」。
+
+重新生成有两条路，任选其一：
+
+1. 设置页 →「合集封面」→「立即生成全部合集」/「立即生成全部媒体库」（等价于
+   `POST /api/admin/{collection,library}-cover/run` body `{"all":true,"apply":true}`）；
+2. 让一轮扫描真的提交索引变更（新增/改名/删除一部片），自动触发才会排任务。
+
+只想知道会生成什么、先不写库，用预览端点（当场出图、不落库、不改 Emby 数据）：
+
+```bash
+curl -H "X-Emby-Token: $TOKEN" -o preview.webp \
+  'http://127.0.0.1:18080/api/admin/library-cover/preview?library=1'
+curl -H "X-Emby-Token: $TOKEN" -o preview.webp \
+  'http://127.0.0.1:18080/api/admin/collection-cover/preview?collection=系列A'
+```
+
+任务结束时 `status` 会给每个被跳过的目标一条 `skip_notes: [{"name":..,"reason":..}]`，
+设置页会把前三条原因直接显示出来。原因与处理方式：
+
+| reason | 含义 | 怎么办 |
+| --- | --- | --- |
+| `custom cover kept` | 媒体库：库根目录存在 `poster/folder/cover/default` 图或上传过 `library-cover.webp`；合集：已有非本算法的自定义封面 | 想用拼贴就删掉/改名那张库根图，或在媒体库卡片点「移除封面」后重跑；合集先 `POST .../revert` 再跑 |
+| `up to date` | 缓存键（算法+成员海报 tag）没变，已有生效封面就是最新的 | 无需处理；换了海报/成员会自动重算 |
+| `no posters` | 目标成员里没有任何可用海报路径 | 先刮削/下载海报再跑 |
+| `no decodable posters` | 有海报文件但解码失败（损坏、格式不支持） | 检查对应文件，必要时重新下载 |
+
 ### 媒体库封面（960×540）
 
 生成参数与合集相同（同一 `coverOptions`，默认尺寸换成 960×540），取片用
@@ -182,7 +212,7 @@ curl -X PUT -H "X-Emby-Token: $TOKEN" -H 'Content-Type: application/json' \
 
 生效后媒体库封面的解析优先级（`internal/server/library.go` 的 `libraryCoverPath`）：
 
-1. 管理端上传的库封面（库根目录 `cover.*`）
+1. 管理端上传的库封面（库根目录 `library-cover.webp`）
 2. 库根目录自带的 `poster/folder/cover/default` 图片
 3. **自动拼贴封面**（`library_covers` 生效记录，960×540）
 4. 库内最新入库影片的代表图

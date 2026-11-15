@@ -361,6 +361,9 @@ func TestCollectionCoverSkipsMissingPosters(t *testing.T) {
 	if s.Skipped != 1 || s.Failed != 0 {
 		t.Errorf("无海报应跳过：%+v", s)
 	}
+	if len(s.SkipNotes) != 1 || s.SkipNotes[0].Name != "系列A" || s.SkipNotes[0].Reason != "no posters" {
+		t.Errorf("应写明跳过原因：%+v", s.SkipNotes)
+	}
 	if _, ok, _ := app.db.AppliedCover("系列A"); ok {
 		t.Error("跳过时不该写生效记录")
 	}

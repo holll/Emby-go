@@ -230,6 +230,29 @@ func TestCollectionCoverFallsBackToLandscape(t *testing.T) {
 	}
 }
 
+// TestLibraryCoverSkipNotes 库根目录已有 poster 图时生成直接跳过，
+// 并把「为什么跳过」回报进任务状态：只给一个跳过计数，用户无从判断
+// 该删库根图还是该重跑生成。
+func TestLibraryCoverSkipNotes(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, map[string]bool{"a": true, "b": true})
+	library := onlyLibrary(t, app)
+	writePNGImage(t, filepath.Join(library.Path, "poster.png"), 320, 480)
+
+	if status, raw := doJSON(t, ts, "POST", "/api/admin/library-cover/run", token, `{"all":true,"apply":true}`); status != http.StatusAccepted {
+		t.Fatalf("run: %d %s", status, raw)
+	}
+	s := waitCollectionCoverTask(t, app)
+	if s.Skipped != 1 || s.Success != 0 || len(s.SkipNotes) != 1 {
+		t.Fatalf("应跳过并记录原因：%+v", s)
+	}
+	if s.SkipNotes[0].Name != library.Name || s.SkipNotes[0].Reason != "custom cover kept" {
+		t.Errorf("跳过原因不对：%+v", s.SkipNotes)
+	}
+	if _, ok, err := app.db.AppliedLibraryCover(library.ID); err != nil || ok {
+		t.Fatalf("跳过时不该写生效记录: %v %v", ok, err)
+	}
+}
+
 // onlyLibrary 返回唯一一个媒体库，测试 fixture 只会建一个。
 func onlyLibrary(t *testing.T, app *App) store.Library {
 	t.Helper()

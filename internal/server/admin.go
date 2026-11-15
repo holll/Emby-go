@@ -482,7 +482,7 @@ func (a *App) scanLibraries(libraryID, taskID int64, mode scanner.ScanMode, allo
 		a.cache.Clear()
 	}
 	// 索引确实变了才轮到自动补封面：没变化时成员与海报都没动，重跑只会
-	// 逐个合集判 up to date。开关默认关，关掉时这里什么都不做。
+	// 逐个合集判 up to date。两个开关默认开，显式关掉时这里什么都不做。
 	if scanErr == nil && result.IndexChanged {
 		a.maybeAutoCovers()
 	}

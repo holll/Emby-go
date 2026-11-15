@@ -97,6 +97,21 @@ async function mountCollectionCoverSettings(host, apiRequest, isCurrent = () => 
   find('#cc-run').onclick = runAll('/collection-cover', '合集');
   find('#lc-run').onclick = runAll('/library-cover', '媒体库');
 
+  // 跳过不是失败：多数是「保留现有自定义封面」或「内容没变」。把后端给的
+  // 原因翻成人话附在结果里，用户才知道该删库根图还是该点覆盖生成。
+  const SKIP_REASON_TEXT = {
+    'custom cover kept': '保留现有自定义封面',
+    'up to date': '内容没有变化',
+    'no posters': '没有可用海报',
+    'no decodable posters': '海报无法解码',
+  };
+  const skipNotes = data => {
+    const notes = (data.skip_notes || []);
+    if (!notes.length) return '';
+    const shown = notes.slice(0, 3).map(note => `${note.name}：${SKIP_REASON_TEXT[note.reason] || note.reason}`).join('；');
+    return `（跳过原因：${shown}${notes.length > 3 ? ` 等 ${notes.length} 项` : ''}）`;
+  };
+
   async function waitForCoverTask(base, task) {
     const path = `${base}/status?task_id=${encodeURIComponent(task.task_id)}&instance_id=${encodeURIComponent(task.instance_id)}`;
     for (let i = 0; i < 600; i++) {
@@ -114,8 +129,8 @@ async function mountCollectionCoverSettings(host, apiRequest, isCurrent = () => 
         await new Promise(resolve => setTimeout(resolve, 1000));
         continue;
       }
-      if (data.error) { status(`完成但有失败：成功 ${data.success}，跳过 ${data.skipped}，失败 ${data.failed}（${data.error}）`, true); return; }
-      status(`完成：成功 ${data.success}，跳过 ${data.skipped}，失败 ${data.failed}。`);
+      if (data.error) { status(`完成但有失败：成功 ${data.success}，跳过 ${data.skipped}，失败 ${data.failed}（${data.error}）${skipNotes(data)}`, true); return; }
+      status(`完成：成功 ${data.success}，跳过 ${data.skipped}，失败 ${data.failed}${skipNotes(data)}`);
       return;
     }
     status('等待任务结束超时，请到「任务」页查看结果。', true);

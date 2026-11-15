@@ -33,6 +33,15 @@ type coverTaskStatus struct {
 	Cancelled   bool     `json:"cancelled"`
 	Error       string   `json:"error,omitempty"`
 	FinishedAt  string   `json:"finished_at,omitempty"`
+	// SkipNotes 逐条记下被跳过的目标与原因。只给计数时用户看到「跳过 3」无从下手，
+	// 而跳过的真实原因（保留自定义封面、没有海报、内容没变）决定了他该做什么。
+	SkipNotes []coverSkipNote `json:"skip_notes,omitempty"`
+}
+
+// coverSkipNote 是单个目标的跳过原因，name 是库名或合集名。
+type coverSkipNote struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
 }
 
 // collectionCoverRequest 是 run 端点的请求体。
@@ -194,6 +203,7 @@ func (a *App) executeCoverTargets(ctx context.Context, taskID int64, targets []c
 			s.Failed++
 		case result.Skipped:
 			s.Skipped++
+			s.SkipNotes = append(s.SkipNotes, coverSkipNote{Name: target.Name, Reason: result.Reason})
 		default:
 			s.Success++
 		}
