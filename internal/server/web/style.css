@@ -715,6 +715,18 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .wall-title:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 3px; }
 .wall-title:hover { text-decoration: underline; }
 .wall-meta small { color: var(--dim); font-size: var(--text-12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 布局偏好「列表」：Emby 的列表视图在这里压成一行一张，海报缩到 56px。 */
+.wall-layout-switch { display: flex; gap: var(--space-4); }
+.wall.wall-list { display: flex; flex-direction: column; gap: var(--space-8); }
+.wall.wall-list .wall-card { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: var(--space-12); padding: var(--space-8); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); }
+.wall.wall-list .wall-card:hover { border-color: var(--blue-line); }
+.wall.wall-list .wall-poster { width: 56px; aspect-ratio: 2 / 3; }
+.wall.wall-list .wall-card:hover .wall-poster { transform: none; box-shadow: none; }
+.wall.wall-list .wall-actions { position: static; opacity: 1; }
+.wall.wall-list .wall-play { display: none; }
+.wall.wall-list .wall-badges { top: 2px; left: 2px; }
+.wall.wall-list .wall-meta { min-width: 0; }
+.wall.wall-list .wall-select { display: none; }
 
 /* 合集卡片沿用影片卡片的网格与海报尺寸，只额外提供「合集」角标和占位图。 */
 .wall-card.collection-card { all: unset; cursor: pointer; display: grid; gap: var(--space-8); }

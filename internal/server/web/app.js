@@ -500,6 +500,13 @@ function wallCard(item) {
 
 const WALL_PAGE_SIZE = 100;
 const WALL_STATUS_TEXT = { favorite: '收藏', played: '已看', unplayed: '未看' };
+// 布局偏好：Emby 有六种布局并存服务端 CustomPrefs；这里只做网格/列表两种，
+// 存 localStorage（个人偏好，不进 URL），避免和可分享的筛选状态搅在一起。
+const WALL_LAYOUT_KEY = 'emby_wall_layout';
+const WALL_LAYOUT_TEXT = { grid: '网格', list: '列表' };
+function wallLayout() {
+  return localStorage.getItem(WALL_LAYOUT_KEY) === 'list' ? 'list' : 'grid';
+}
 // 筛选后整页重绘会丢焦点；记录触发控件选择器，重绘后还原（P1-9）。
 let pendingWallFocus = '';
 let wallState = null;
@@ -605,6 +612,7 @@ async function pageItems() {
   const search = params.get('search') || '';
   // 合集侧（列表与成员）只提供标题升降序，避免和影片默认的「最近入库」互相穿插。
   const collectionView = view === 'collections';
+  let layout = wallLayout();
   let sort = collectionView ? (params.get('sort') === 'title-desc' ? 'title-desc' : 'title') : (params.get('sort') || 'datecreated');
   let order = params.get('order') || (sort === 'title' || sort === 'title-desc' ? (sort === 'title-desc' ? 'desc' : 'asc') : 'desc');
   if (collectionView && (params.has('sort') || params.has('order')) && !['title', 'title-desc'].includes(params.get('sort') || '')) {
@@ -639,7 +647,7 @@ async function pageItems() {
     if (gen !== pageGen || requestGen !== wallGen) return;
   }
   wallState = {
-    view, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
+    view, layout, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
     entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: []
   };
 
@@ -685,6 +693,7 @@ async function pageItems() {
         <input id="item-search" aria-label="搜索媒体" placeholder="搜索标题 / 番号 / 原名" value="${esc(search)}">
         <select id="item-sort" aria-label="排序方式">${sorts.map(([value, label]) => `<option value="${value}" ${sort === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
         <button type="button" class="btn btn-sm" id="item-order" aria-label="排序方向：${order === 'asc' ? '升序' : '降序'}" title="切换排序方向">${order === 'asc' ? '↑ 升序' : '↓ 降序'}</button>
+        <div class="wall-layout-switch" role="group" aria-label="布局">${['grid', 'list'].map(name => `<button type="button" class="btn btn-sm" data-wall-layout="${name}" aria-pressed="${layout === name}" title="${WALL_LAYOUT_TEXT[name]}布局">${WALL_LAYOUT_TEXT[name]}</button>`).join('')}</div>
       </div>
       ${activeFilters.length ? `<div class="filters wall-active-filters" id="wall-active-filters" aria-label="当前筛选">${activeFilters.map(filterChip).join('')}</div>` : ''}
       ${collectionList ? '' : `<div class="filters wall-status-filters">
@@ -700,7 +709,7 @@ async function pageItems() {
 <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
       ${typeof me !== 'undefined' && me?.is_admin ? `<div class="filters"><button type="button" class="btn" id="wall-translate-toggle" aria-expanded="false" aria-controls="wall-translate-panel">选择影片仅翻译</button><span id="wall-translate-count" role="status">已选 0 部（最多1000）</span></div><section id="wall-translate-panel" hidden>${translationWidget('wall-translate')}</section>` : ''}
       </div></details>`}
-      <div class="wall" id="wall"></div>
+      <div class="wall${layout === 'list' ? ' wall-list' : ''}" id="wall"></div>
       <div id="wall-empty"></div>
       <div id="wall-more" class="wall-more"></div>
       <p class="hint">点击海报打开详情抽屉（抽屉内可播放、刮削、探测、编辑元数据）；海报上的播放图标为快捷播放。非 http(s) 源的 .strm 在扫描时直接跳过，不会出现在这里。</p>
@@ -795,6 +804,18 @@ async function pageItems() {
   });
   // 排序方向与排序字段分开维护（对应 Emby 的 SortBy + SortOrder 两个维度）：
   // 合集只有「标题正/逆序」一维，切 sort；影片切 order，URL 里始终可回显。
+  // 布局切换只改容器类名与偏好，不重发列表请求；焦点停在按下的那个按钮上。
+  document.querySelectorAll('[data-wall-layout]').forEach(button => {
+    button.addEventListener('click', () => {
+      const next = button.dataset.wallLayout;
+      if (!WALL_LAYOUT_TEXT[next] || next === layout) return;
+      localStorage.setItem(WALL_LAYOUT_KEY, next);
+      layout = next;
+      document.querySelector('#wall')?.classList.toggle('wall-list', next === 'list');
+      document.querySelectorAll('[data-wall-layout]').forEach(other => other.setAttribute('aria-pressed', String(other.dataset.wallLayout === next)));
+      button.focus();
+    });
+  });
   const orderButton = document.querySelector('#item-order');
   if (orderButton) orderButton.addEventListener('click', () => {
     const q = new URLSearchParams(location.search);

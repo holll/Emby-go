@@ -52,7 +52,7 @@ function wallSandbox({ search = '?view=collections', state = null, me = { id: '7
   documentRef = dom(), history: historyRef = { state: {}, pushed: [], replaced: [], back() { this.backed = (this.backed || 0) + 1; },
     pushState(state, _, url) { this.state = state; this.pushed.push(url); }, replaceState(state, _, url) { this.state = state; this.replaced.push(url); } },
   embyRequest: embyRequestRef = async () => ({ Items: [], TotalRecordCount: 0 }), collections = [] } = {}) {
-  const box = vm.createContext({
+  const box = vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} }, 
     URLSearchParams, Set, JSON,
     token: 'A', me, pageGen: 1, wallGen: 0, wallState: state, view, collection,
     WALL_PAGE_SIZE: 48, WALL_STATUS_TEXT: { favorite: '收藏', played: '已看', unplayed: '未看' }, pendingWallFocus: '',
@@ -245,7 +245,7 @@ test('合集封面缺失时回落到占位图而不是空 src', () => {
 });
 
 test('Emby 查询构造：合集列表与成员列表的参数互不串味', () => {
-  const box = vm.createContext({ URLSearchParams, WALL_PAGE_SIZE: 48, entityIdOf: (kind, value) => `${kind}:${value}` });
+  const box = vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, WALL_PAGE_SIZE: 48, entityIdOf: (kind, value) => `${kind}:${value}` });
   vm.runInContext(embySource, box);
   const list = box.wallEmbyQuery({ view: 'collections', entity: null, offset: 0, sort: 'title', order: 'asc', search: '', libraryID: '', status: '' });
   assert.equal(list.get('IncludeItemTypes'), 'BoxSet');

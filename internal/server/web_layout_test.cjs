@@ -440,6 +440,34 @@ test('卡片更多菜单：按钮与右键共用、键盘可开合、动作走�
   assert.equal(await evaluate(`__calls.filter(c=>c.method!=='GET').length`), 0, '打开/关闭菜单不产生写请求');
 });
 
+test('媒体墙布局切换为列表并记住偏好（不进 URL、不重发列表请求）', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{await page('items');})()`);
+  const before = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
+    stored:localStorage.getItem('emby_wall_layout'),
+    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed')),
+    requests:__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).length}))()`);
+  assert.equal(before.list, false); assert.equal(before.stored, null);
+  assert.deepEqual(before.pressed, ['true', 'false']);
+  await evaluate(`document.querySelector('[data-wall-layout="list"]').click()`);
+  const after = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
+    stored:localStorage.getItem('emby_wall_layout'),
+    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed')),
+    focused:document.activeElement?.dataset?.wallLayout,
+    url:location.search,
+    requests:__calls.filter(c=>c.url.includes('/emby/Users/1/Items')).length}))()`);
+  assert.equal(after.list, true); assert.equal(after.stored, 'list');
+  assert.deepEqual(after.pressed, ['false', 'true']);
+  assert.equal(after.focused, 'list'); assert.equal(after.url, '');
+  assert.equal(after.requests, before.requests, '切布局不应重发列表请求');
+  await evaluate(`(async()=>{await page('items');})()`);
+  const remembered = await evaluate(`(()=>({list:document.querySelector('#wall').classList.contains('wall-list'),
+    pressed:[...document.querySelectorAll('[data-wall-layout]')].map(b=>b.getAttribute('aria-pressed'))}))()`);
+  assert.equal(remembered.list, true); assert.deepEqual(remembered.pressed, ['false', 'true']);
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
 test('概览运行中任务：显示类型与已运行时长、查看跳任务中心且首页保持只读', { timeout: 60000 }, async t => {
   if (!available(t)) return;
   const { evaluate } = await browser(t);

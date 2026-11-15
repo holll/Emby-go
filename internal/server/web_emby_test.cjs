@@ -8,7 +8,7 @@ const client = fs.readFileSync(path.join(__dirname, 'web/emby.js'), 'utf8');
 const app = fs.readFileSync(path.join(__dirname, 'web/app.js'), 'utf8');
 const tick = () => new Promise(setImmediate);
 function context(values = {}) {
-  return vm.createContext({ URLSearchParams, token: 'A', me: { id: '7', is_admin: true },
+  return vm.createContext({ wallLayout: () => 'grid', WALL_LAYOUT_TEXT: { grid: '网格', list: '列表' }, WALL_LAYOUT_KEY: 'emby_wall_layout', localStorage: { getItem: () => null, setItem() {} },  URLSearchParams, token: 'A', me: { id: '7', is_admin: true },
     localStorage: { getItem: () => 'A' }, WALL_PAGE_SIZE: 100, ...values });
 }
 function loadClient(box) { vm.runInContext(client, box); return box; }
