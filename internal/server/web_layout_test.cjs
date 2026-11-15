@@ -62,7 +62,7 @@ async function browser(t) {
       else if(p.endsWith('/detail')){
         if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
         if(window.__detailFail)return {ok:false,status:503,json:async()=>({error:'详情暂不可用，请重试'})};
-        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:[],backdrops:window.__detailBackdrops||[]};
+        data={movie:{id:1,Title:'长详情验证',Status:'success',Plot:'长简介与文件路径 '.repeat(800)},metatube_id:{saved:'',canonical:'',valid:false},files:window.__detailFiles||[],actors:window.__detailActors||[],backdrops:window.__detailBackdrops||[]};
       }
       else if(p.endsWith('/scan/progress'))data=window.__scanProgress || {running:true,library_name:'测试媒体库',done:42,total:120};
       else if(p.endsWith('/diagnostics'))data={generated_at:'2026-11-01T08:00:00Z',app:{version:'overview-fixture',commit:'a'.repeat(40)},store:{path:'/data/'+ 'long-path/'.repeat(16),schema_version:22}};
@@ -957,6 +957,57 @@ test('报告回归：预览弹窗、深色选项、雪碧图计划、日志自�
   const paused=await evaluate(`(()=>{document.querySelector('#dl-pause').click();return __logID;})()`);await evaluate('new Promise(r=>setTimeout(r,1300))');assert.equal(await evaluate('__logID'),paused);
   await evaluate("document.querySelector('#dl-pause').click()");await evaluate('new Promise(r=>setTimeout(r,1400))');assert.ok(await evaluate('__logID')>paused);await shot('logs-auto-1280');
   const errors=await evaluate('__errors');assert.deepEqual(errors,[]);
+});
+
+test('详情抽屉：窄屏下元数据、演员与媒体流表格都不溢出', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { call, evaluate } = await browser(t);
+  await evaluate(`(()=>{
+    window.__detailActors=[{name:'演员名字很长很长的一位',has_image:false},{name:'二号演员',has_image:false},{name:'三号演员',has_image:false}];
+    window.__detailFiles=[{role:'main',index:0,name:'very-long-file-name-'+'x'.repeat(60)+'.mkv',size:1234567,probed:true,path:'/media/library/['+'超长目录名'.repeat(6)+']/very-long-'+'y'.repeat(80)+'.mkv',streams:[
+      {Index:0,Type:'Video',Codec:'hevc',Width:3840,Height:2160,BitRate:12345678,Profile:'Main 10',BitDepth:10},
+      {Index:1,Type:'Audio',Codec:'eac3',Channels:6,ChannelLayout:'5.1(side)',BitRate:640000,Language:'jpn',SampleRate:48000},
+      {Index:2,Type:'Subtitle',Codec:'pgs',Language:'chi',IsDefault:true,IsExternal:true}]}];
+  })()`);
+  for (const width of [390, 320]) {
+    await evaluate(`(async()=>{closeDetail();await openMaintenanceDetail({id:1});for(let i=0;i<100&&!document.querySelector('.avatar-card');i++)await new Promise(r=>setTimeout(r,20));})()`);
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+    const m = await evaluate(`(()=>{
+      const drawer=document.querySelector('#detail-drawer');
+      const dr=drawer.getBoundingClientRect();
+      const rows=[...drawer.querySelectorAll('.detail-meta-row')].map(row=>{const dd=row.querySelector('dd').getBoundingClientRect();return {label:row.querySelector('dt').getBoundingClientRect().width,ddW:dd.width,ddOverflow:row.querySelector('dd').scrollWidth-row.querySelector('dd').clientWidth};});
+      const cards=[...drawer.querySelectorAll('.avatar-card')].map(c=>{const r=c.getBoundingClientRect();return {w:r.width,right:r.right};});
+      const grids=[...drawer.querySelectorAll('.avatar-grid')].map(g=>g.getBoundingClientRect().width);
+      const wraps=[...drawer.querySelectorAll('.detail-section .table-wrap')].map(w=>({cw:w.clientWidth,sw:w.scrollWidth,right:w.getBoundingClientRect().right,overflowX:getComputedStyle(w).overflowX}));
+      const head=drawer.querySelector('.detail-file-head');
+      const path=drawer.querySelector('.detail-path');
+      const headKids=[...head.children].map(k=>({right:k.getBoundingClientRect().right,sw:k.scrollWidth-cw(k)}));
+      function cw(el){return el.clientWidth;}
+      return {drawerW:dr.width,drawerSW:drawer.scrollWidth,drawerCW:drawer.clientWidth,rows,cards,grids,wraps,headKids,pathOverflow:path.scrollWidth-path.clientWidth,pageScroll:document.documentElement.scrollWidth,width:innerWidth};
+    })()`);
+    assert.equal(m.drawerW, width, `${width}px: 抽屉占满视口宽度`);
+    assert.ok(m.drawerSW <= m.drawerCW + 1, `${width}px: 抽屉内部不横向溢出（sw ${m.drawerSW} / cw ${m.drawerCW}）`);
+    for (const row of m.rows) {
+      assert.equal(row.ddOverflow, 0, `${width}px: 元数据值不撑破行`);
+      assert.ok(row.ddW >= 120, `${width}px: 元数据值仍有可读宽度，实际 ${row.ddW}`);
+    }
+    for (const card of m.cards) {
+      assert.ok(card.w >= 76, `${width}px: 演员卡不小于最小列宽，实际 ${card.w}`);
+      assert.ok(card.right <= m.drawerW, `${width}px: 演员卡不越过抽屉`);
+    }
+    for (const grid of m.grids) assert.ok(grid <= m.drawerCW, `${width}px: 演员网格不越过抽屉内容区`);
+    assert.ok(m.wraps.length >= 1, `${width}px: 媒体流表格存在`);
+    for (const wrap of m.wraps) {
+      assert.equal(wrap.overflowX, 'auto', `${width}px: 表格在自己的容器里横向滚动`);
+      assert.ok(wrap.cw <= m.drawerCW, `${width}px: 表格容器不越过抽屉内容区`);
+      assert.ok(wrap.right <= m.drawerW, `${width}px: 表格不越过抽屉`);
+      assert.ok(wrap.sw > wrap.cw, `${width}px: 宽表格确实需要内部滚动，说明内容没被压扁`);
+    }
+    for (const kid of m.headKids) assert.ok(kid.right <= width, `${width}px: 文件头各段折行后仍在视口内`);
+    assert.equal(m.pathOverflow, 0, `${width}px: 长路径不横向溢出`);
+    assert.ok(m.pageScroll <= width + 1, `${width}px: 页面无横向滚动`);
+    await evaluate(`closeDetail()`);
+  }
 });
 
 test('详情剧照：抽屉缩略图、大图浮层键盘翻页、Esc 归还焦点', { timeout: 60000 }, async t => {
