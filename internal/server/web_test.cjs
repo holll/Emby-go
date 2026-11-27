@@ -860,19 +860,19 @@ test('进度401/403停止观察并标示读取受限，不伪造后台终态', a
 
 test('刮削观察错误可见且切页停止，旧代回调不能更改当前页面', async () => {
   let callbacks, stops = 0, renders = 0;
-  const detail = { textContent: '', setAttribute(name, value) { this[name] = value; } };
+  const detail = { textContent: '' }, title = { textContent: '' };
   const panel = { hidden: true };
   const controls = Object.fromEntries(['#scrape-start', '#avatar-start', '#scrape-cancel'].map(id => [id, { disabled: false }]));
   const box = sandbox({ pageGen: 1, scrapeTimer: null, document: { querySelector: id => controls[id] },
     startProgressPolling: (path, progress, unavailable) => { callbacks = { path, progress, unavailable }; return () => { stops++; }; },
-    renderScrapeProgress: () => { renders++; }, scrapeEls: () => ({ panel, detail }),
+    renderScrapeProgress: () => { renders++; }, scrapeEls: () => ({ panel, detail, title, fill: { removeAttribute() {} } }),
     stopProbePolling() {}, cancelProbeHide() {}, cancelScanHide() {}, setMeta() {}, content: {},
     skeletonPanel: () => '', pages: { fixture: async () => {} } });
   vm.runInContext(section('function observeScrapeProgress(', '/* ------------------------------------------------------------ 单条刮削预览'), box);
   box.startScrapePolling();
   assert.equal(callbacks.path, '/scrape/progress');
   callbacks.unavailable(3000);
-  assert.equal(panel.hidden, false); assert.equal(detail.role, 'status');
+  assert.equal(panel.hidden, false); assert.match(title.textContent, /状态未确认/);
   assert.match(detail.textContent, /未确认.*3秒后自动重试/);
   assert.ok(Object.values(controls).every(control => control.disabled));
   callbacks.progress({ running: true }); assert.equal(renders, 1);
@@ -899,9 +899,10 @@ async function scrapePageFixture(progress, post = async () => ({}), { translatio
   let next = 0;
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, { value: '0', checked: id.includes('data-translate-field="title"'), hidden: true,
-      textContent: '', innerHTML: '', style: {}, classList: { toggle() {} }, handlers: {},
+      textContent: '', innerHTML: '', style: {}, children: [], classList: { toggle() {} }, handlers: {},
       querySelector: selector => node(id + ' ' + selector),
       setAttribute(name, value) { this[name] = value; },
+       removeAttribute(name) { delete this[name]; },
       addEventListener(type, callback) { this.handlers[type] = callback; } });
     return nodes.get(id);
   }
@@ -1184,7 +1185,7 @@ function probePageFixture(progress = async () => ({ running: false }), post = as
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, { value: '', disabled: false, hidden: true, textContent: '', innerHTML: '',
       style: {}, handlers: {}, dataset: {}, classList: { toggle() {} },
-      querySelector: () => node(id + ':span'), setAttribute(name, value) { this[name] = value; },
+      children: [], querySelector: part => node(id + ':' + part), setAttribute(name, value) { this[name] = value; },
       removeAttribute(name) { delete this[name]; },
       addEventListener(type, fn) { this.handlers[type] = fn; } });
     return nodes.get(id);
@@ -1247,7 +1248,7 @@ test('真实媒体墙首次503/network/畸形恢复只观察GET，未知不释�
     await probeReady(env); assert.equal(env.gets().length, 0);
     await env.fire(0);
     assert.equal(env.node('#probe-progress').hidden, false);
-    assert.equal(env.node('#probe-progress-detail').role, 'status');
+    assert.equal(env.node('#probe-progress-announcement').textContent, '');
     assert.match(env.node('#probe-progress-title').textContent, /状态未确认/);
     assert.match(env.node('#probe-progress-detail').textContent, /未确认.*3秒/);
     assert.equal(env.node('#probe-media').disabled, true); assert.deepEqual(env.toasts, []);
@@ -1299,9 +1300,10 @@ test('probe观察到running后明确终态才通知，失败示例/中止保留�
     assert.equal(env.node('#probe-media').disabled, true); assert.deepEqual(env.toasts, []);
     await env.fire(1500);
     assert.equal(env.node('#probe-media').disabled, false);
-    assert.match(env.toasts[0][0], extra.cancelled ? /探测已中止/ : /探测完成/);
-    assert.equal(env.toasts.length, extra.failed ? 2 : 1);
-    if (extra.failed) { assert.equal(env.toasts[0][1], 'error'); assert.match(env.toasts[1][0], /fixture failure/); assert.equal(env.timers.size, 0); }
+    const announcement = env.node('#probe-progress-announcement').textContent;
+    assert.match(announcement, extra.cancelled ? /探测已中止/ : extra.failed ? /存在错误.*失败 1/ : /探测完成/);
+    assert.deepEqual(env.toasts, []);
+    if (extra.failed) { assert.match(env.node('#probe-failures:ul').innerHTML, /fixture failure/); assert.equal(env.timers.size, 0); }
     env.box.stopProbePolling(); assert.equal(env.timers.size, 0);
   }
 });
@@ -1384,7 +1386,7 @@ test('probe当前POST成功确认后即使首读终态也通知，无total不再
     assert.equal(post.path, '/probe/media'); assert.deepEqual(JSON.parse(post.options.body), { only_missing: true });
     if (response.total) {
       assert.equal(env.timers.size, 1); assert.equal(env.node('#probe-media').disabled, true);
-      await env.fire(0); assert.match(env.toasts[1][0], /探测完成/);
+      await env.fire(0); assert.match(env.node('#probe-progress-announcement').textContent, /探测完成/);
     } else {
       assert.equal(env.timers.size, 0); assert.equal(env.node('#probe-progress').hidden, true);
       assert.equal(env.gets().length, 0); assert.match(env.toasts[0][0], /没有可探测/);
@@ -1410,7 +1412,7 @@ test('probe当前POST503/network失败重新观察，不宣称后台失败终态
       assert.equal(env.timers.size, 1); await env.fire(0);
       assert.equal(env.node('#probe-media').disabled, true);
       await env.fire(1500); assert.equal(env.node('#probe-media').disabled, false);
-      assert.match(env.toasts.at(-1)[0], /探测完成/);
+      assert.match(env.node('#probe-progress-announcement').textContent, /探测完成/);
     }
     env.box.stopProbePolling(); assert.equal(env.timers.size, 0);
   }
@@ -1463,7 +1465,7 @@ function scanFixture(progress = async () => ({ running: false }), post = async (
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, { hidden: true, disabled: false, textContent: '', innerHTML: '',
       style: {}, handlers: {}, dataset: {}, classList: { toggle() {} },
-      querySelector: () => node(id + ':span'), setAttribute(name, value) { this[name] = value; },
+      children: [], querySelector: part => node(id + ':' + part), setAttribute(name, value) { this[name] = value; },
       removeAttribute(name) { delete this[name]; },
       addEventListener(type, fn) { this.handlers[type] = fn; } });
     return nodes.get(id);
@@ -1749,8 +1751,10 @@ test('探测文件成功但版本刷新失败保持错误面板，不生成成�
     assert.match(env.node('#probe-progress-detail').textContent, /文件已保存.*刷新未确认/);
     assert.equal(env.has(8000), false);
     assert.equal(env.timers.size, 0);
-    assert.equal(env.toasts.length, announced ? 1 : 0);
-    if (announced) { assert.equal(env.toasts[0][1], 'error'); assert.match(env.toasts[0][0], /刷新未确认/); }
+    const announcement = env.node('#probe-progress-announcement').textContent;
+    assert.deepEqual(env.toasts, []);
+    if (announced) assert.match(announcement, /存在错误.*刷新未确认/);
+    else assert.equal(announcement, '');
   }
 });
 

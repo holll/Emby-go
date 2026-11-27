@@ -15,19 +15,19 @@ function functionSource(name) {
 
 function element() {
   return {
-    hidden: true, textContent: '', innerHTML: '', style: {}, dataset: {}, attributes: {}, classes: {},
+    hidden: true, textContent: '', innerHTML: '', dataset: {}, attributes: {}, children: [],
     setAttribute(name, value) { this.attributes[name] = value; },
-    removeAttribute(name) { delete this.attributes[name]; },
-    classList: { toggle(name, value) { this.owner.classes[name] = !!value; } }
+    removeAttribute(name) { delete this.attributes[name]; }
   };
 }
 
 function harness(kind) {
-  const els = Object.fromEntries(['panel', 'title', 'count', 'fill', 'detail', 'failures', 'start', 'avatars', 'cancel'].map(key => {
+  const els = Object.fromEntries(['panel', 'title', 'count', 'fill', 'detail', 'failures', 'announcement', 'start', 'avatars', 'cancel'].map(key => {
     const el = element();
-    el.classList.owner = el;
     return [key, el];
   }));
+  const children = { summary: element(), ul: element() };
+  els.failures.querySelector = name => children[name];
   const context = vm.createContext({
     document: {
       querySelector(selector) {
@@ -43,7 +43,7 @@ function harness(kind) {
     scanFill: els.fill, scanDetail: els.detail, scanClose: els.close || element(),
     esc: value => String(value)
   });
-  vm.runInContext(['progressCounts', 'scrapeEls', 'probeEls', 'baseName',
+  vm.runInContext(['progressCounts', 'renderTaskProgress', 'scrapeEls', 'probeEls', 'baseName',
     'renderScrapeProgress', 'renderProbeProgress', 'setScanIndicator', 'renderScanProgress']
     .map(functionSource).join('\n'), context);
   return { els, counts: context.progressCounts, render: context[`render${kind[0].toUpperCase() + kind.slice(1)}Progress`] };
@@ -79,7 +79,7 @@ for (const c of cases) {
 }
 
 for (const kind of ['scrape', 'probe', 'scan']) {
-  test(`${kind}: count, width and indeterminate DOM boundaries`, () => {
+  test(`${kind}: count, value and indeterminate DOM boundaries`, () => {
     const { els, render } = harness(kind);
     for (const c of cases) {
       for (const running of [true, false]) {
@@ -93,8 +93,9 @@ for (const kind of ['scrape', 'probe', 'scan']) {
           assert.equal(els.panel.dataset.state, running ? 'running' : 'complete');
         } else {
           assert.equal(els.count.textContent, c.count, c.name);
-          assert.equal(els.fill.style.width, `${c.percent}%`, c.name);
-          assert.equal(els.fill.classes['is-indeterminate'], !c.total && running, c.name);
+          const unknown = !c.total || !Number.isFinite(c.percent);
+          const value = Number.isFinite(c.percent) ? Math.max(0, c.percent) : 100;
+          assert.equal(els.fill.attributes.value, running && unknown ? undefined : String(value), c.name);
         }
       }
     }
@@ -138,7 +139,7 @@ test('task-specific titles and details remain distinct', () => {
     render({ running: true });
     assert.equal(els.detail.textContent, { scrape: '正在处理…', probe: '正在读取源信息…', scan: '正在读取目录…' }[kind]);
     render({ running: false, finished_at: 'finished', cancelled: true, error: 'oops' });
-    assert.equal(els.title.textContent, { scrape: '刮削结束', probe: '探测已中止', scan: '扫描结束（存在错误） 媒体库' }[kind]);
+    assert.equal(els.title.textContent, { scrape: '刮削已中止', probe: '探测已中止', scan: '扫描结束（存在错误） 媒体库' }[kind]);
   }
 });
 

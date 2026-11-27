@@ -515,18 +515,17 @@ function movieDisplayTitle(item) {
 /* ---------------------------------------------------------------- 媒体墙 */
 function wallCard(item, layout = 'poster') {
   const title = movieDisplayTitle(item) || '—';
-  if (item.Status === 'pending') {
-    const thumb = layout === 'thumb' || layout === 'thumbCard';
-    const status = item.last_scrape_at || item.last_scrape_error ? 'needs_attention' : 'unscraped';
-    return `<button type="button" class="wall-card collection-card" data-edit-pending="${item.id}" aria-label="编辑元数据：${esc(title)}">
-      <span class="wall-poster${thumb ? ' is-thumb' : ''}"><span class="wall-path">${esc(title)}</span></span>
-      <span class="wall-meta"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${STATUS_TEXT[status]} · 编辑元数据</small></span>
-    </button>`;
-  }
-  // Emby 3.5 的布局菜单（librarybrowser.showLayoutMenu）给出 List/Poster/PosterCard/Thumb/ThumbCard：
-  // poster/thumb 标题在图片下方，*Card 变体把标题压在图片底部的渐隐层上，list 复用同一份标记由 CSS 压成行。
+  // *Card 布局把标题压在图片底部；其余布局把标题放在图片之外。
   const thumb = layout === 'thumb' || layout === 'thumbCard';
   const caption = layout === 'posterCard' || layout === 'thumbCard';
+  if (item.Status === 'pending') {
+    const status = item.last_scrape_at || item.last_scrape_error ? 'needs_attention' : 'unscraped';
+    const label = `<span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${STATUS_TEXT[status]} · 编辑元数据</small>`;
+    return `<button type="button" class="wall-card pending-card${thumb ? ' is-thumb' : ''}${caption ? ' has-caption' : ''}" data-edit-pending="${item.id}" aria-label="编辑元数据：${esc(title)}">
+      <span class="wall-poster${thumb ? ' is-thumb' : ''}">${caption ? `<span class="wall-caption">${label}</span>` : `<span class="wall-path">${esc(title)}</span>`}</span>
+      ${caption ? '' : `<span class="wall-meta">${label}</span>`}
+    </button>`;
+  }
   const posterKind = thumb
     ? (item.ImageTags?.Thumb ? 'Thumb' : item.BackdropImageTags?.length ? 'Backdrop' : item.ImageTags?.Primary ? 'Primary' : 'Thumb')
     : (item.ImageTags?.Primary ? 'Primary' : 'Thumb');
@@ -784,9 +783,11 @@ async function pageItems() {
       </div>`}
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
-        <div class="scan-progress-bar"><i id="probe-progress-fill"></i></div>
+        <progress class="task-progress-fill" id="probe-progress-fill" max="100" aria-labelledby="probe-progress-title" aria-describedby="probe-progress-count">媒体信息探测进度</progress>
         <small id="probe-progress-detail"></small>
+        <details id="probe-failures" hidden><summary>失败样例</summary><ul></ul></details>
       </div>
+      <div id="probe-progress-announcement" class="sr-only" role="status" aria-atomic="true"></div>
       ${collectionView ? '' : `<details class="disclosure wall-maintenance"><summary class="disclosure-summary">批量维护与翻译</summary><div class="disclosure-body">
 <button class="btn" id="wall-scrape">未刮削与需处理：打开刮削管理</button>
 <button class="btn" id="probe-media" title="调用系统 ffprobe 读取码率/分辨率/编码等真实参数并写回 NFO（与扫库相互独立）">${icon('probe')}<span>探测媒体信息</span></button>
@@ -2539,9 +2540,11 @@ async function pageScrape() {
       <section id="scrape-progress" class="panel scrape-shared-progress" aria-label="刮削与头像共用任务进度" hidden>
         <div class="panel-head"><h2>当前刮削 / 头像任务</h2><button id="scrape-cancel" class="btn btn-sm" disabled>中止当前任务</button></div>
         <div class="scan-progress-head"><strong id="scrape-progress-title">刮削中…</strong><span id="scrape-progress-count"></span></div>
-        <div class="scan-progress-bar"><i id="scrape-progress-fill"></i></div>
+        <progress class="task-progress-fill" id="scrape-progress-fill" max="100" aria-labelledby="scrape-progress-title" aria-describedby="scrape-progress-count">刮削进度</progress>
         <small id="scrape-progress-detail"></small>
-      <div id="scrape-failures"></div></section>
+        <details id="scrape-failures" hidden><summary>失败/待确认样例</summary><ul></ul></details>
+      </section>
+      <div id="scrape-progress-announcement" class="sr-only" role="status" aria-atomic="true"></div>
     <details class="panel disclosure scrape-configuration" id="scrape-configuration">
       <summary class="disclosure-summary">服务连接与刮削策略（含共享翻译服务）</summary>
       <div class="disclosure-body">
@@ -2646,7 +2649,7 @@ async function pageScrape() {
     try {
       const result = await api('/scrape/run', { method: 'POST', body: JSON.stringify(body) });
       toast(`刮削已启动（${result.total} 条）`);
-      if (gen === pageGen) startScrapePolling();
+      if (gen === pageGen) startScrapePolling(true);
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelector('#avatar-form').addEventListener('submit', async event => {
@@ -2654,7 +2657,7 @@ async function pageScrape() {
     try {
       const result = await api('/scrape/avatars', { method: 'POST', body: JSON.stringify({ library_id: Number(document.querySelector('#avatar-library').value) || 0, limit: Number(document.querySelector('#avatar-limit').value) || 0 }) });
       toast(`头像任务已启动（${result.total} 个演员）`);
-      if (gen === pageGen) startScrapePolling();
+      if (gen === pageGen) startScrapePolling(true);
     } catch (e) { toast(e.message, 'error'); }
   });
   document.querySelector('#scrape-cancel').addEventListener('click', async () => {
@@ -2665,7 +2668,6 @@ async function pageScrape() {
   // 首次查询也走有超时/鉴权分类的观察器，不能在页面初始化外单独悬挂。
   const progressEls = scrapeEls();
   progressEls.panel.hidden = false;
-  progressEls.detail.setAttribute('role', 'status');
   progressEls.detail.textContent = '正在读取进度，任务状态未确认…';
   startScrapePolling();
 }
@@ -2679,7 +2681,8 @@ function scrapeEls() {
     count: document.querySelector('#scrape-progress-count'),
     fill: document.querySelector('#scrape-progress-fill'),
     detail: document.querySelector('#scrape-progress-detail'),
-    failures: document.querySelector('#scrape-failures')
+    failures: document.querySelector('#scrape-failures'),
+    announcement: document.querySelector('#scrape-progress-announcement')
   };
 }
 
@@ -2691,7 +2694,32 @@ function progressCounts(p) {
   return { total, done, percent };
 }
 
-function renderScrapeProgress(p) {
+function renderTaskProgress(el, p, fallback, sampleLabel, announce) {
+  const { total, done, percent } = progressCounts(p);
+  el.count.textContent = total ? `${done}/${total}` : String(done);
+  if (p.running && (!total || !Number.isFinite(percent))) el.fill.removeAttribute('value');
+  else el.fill.setAttribute('value', String(Number.isFinite(percent) ? Math.max(0, percent) : 100));
+  const parts = [];
+  if (p.success) parts.push(`成功 ${p.success}`);
+  if (p.skipped) parts.push(`跳过 ${p.skipped}`);
+  if (p.failed) parts.push(`失败 ${p.failed}`);
+  if (p.running && p.current) parts.push(`当前 ${p.current}`);
+  if (p.error) parts.push(`错误：${p.error}`);
+  el.detail.textContent = parts.join(' · ') || (p.running ? fallback : '');
+  const samples = p.failures || [];
+  el.failures.hidden = !samples.length;
+  const summary = el.failures.querySelector('summary');
+  const title = `${sampleLabel}（${samples.length}）`;
+  if (summary.textContent !== title) summary.textContent = title;
+  const list = el.failures.querySelector('ul');
+  if (list.children.length !== samples.length || samples.some((line, index) => list.children[index].textContent !== line)) {
+    list.innerHTML = samples.map(line => `<li class="mono">${esc(line)}</li>`).join('');
+  }
+  if (announce) el.announcement.textContent = [el.title.textContent, ...parts].join(' · ');
+  else if (p.running && el.announcement.textContent) el.announcement.textContent = '';
+}
+
+function renderScrapeProgress(p, announce = false) {
   const el = scrapeEls();
   if (!el.panel) return;
   document.querySelector('#scrape-start').disabled = !p || p.running;
@@ -2699,25 +2727,11 @@ function renderScrapeProgress(p) {
   document.querySelector('#scrape-cancel').disabled = !p?.running;
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
-  el.title.textContent = p.kind === 'scrape_avatars' ? (p.running ? '正在补演员头像' : '头像补全结束') : (p.running ? '正在刮削' : '刮削结束');
-  const { total, done, percent } = progressCounts(p);
-  el.count.textContent = total ? `${done}/${total}` : String(done);
-  el.fill.classList.toggle('is-indeterminate', !total && p.running);
-  el.fill.style.width = `${percent}%`;
-  const parts = [];
-  if (p.success) parts.push(`成功 ${p.success}`);
-  if (p.skipped) parts.push(`跳过 ${p.skipped}`);
-  if (p.failed) parts.push(`失败 ${p.failed}`);
-  if (p.running && p.current) parts.push(`当前 ${p.current}`);
-  if (p.error) parts.push(`错误：${p.error}`);
-  el.detail.textContent = parts.join(' · ') || (p.running ? '正在处理…' : '');
-  if (el.failures) {
-    const samples = p.failures || [];
-    el.failures.innerHTML = samples.length
-      ? `<details class="scrape-fail-samples"><summary>失败/待确认样例（${samples.length}）</summary>
-          <ul>${samples.map(line => `<li class="mono">${esc(line)}</li>`).join('')}</ul></details>`
-      : '';
-  }
+  const avatar = p.kind === 'scrape_avatars';
+  const label = avatar ? '头像补全' : '刮削';
+  el.title.textContent = p.running ? (avatar ? '正在补演员头像' : '正在刮削')
+    : `${label}${p.cancelled ? '已中止' : (p.error || p.failed ? '结束（存在错误）' : '结束')}`;
+  renderTaskProgress(el, p, '正在处理…', '失败/待确认样例', announce);
 }
 
 // 每次请求完成后才安排下一次；stop仅停止观察，不取消后台任务。
@@ -2814,11 +2828,15 @@ function observeScrapeProgress(onProgress, onUnavailable) {
 
 function stopScrapePolling() { if (scrapeTimer) { scrapeTimer(); scrapeTimer = null; } }
 
-function startScrapePolling() {
+function startScrapePolling(launched = false) {
   stopScrapePolling();
   const gen = pageGen;
+  let observedRunning = launched;
+  if (launched) scrapeEls().announcement.textContent = '';
   scrapeTimer = observeScrapeProgress(p => {
-    if (gen === pageGen) renderScrapeProgress(p);
+    if (gen !== pageGen) return;
+    renderScrapeProgress(p, !p.running && !!p.finished_at && observedRunning);
+    observedRunning = p.running;
   }, delay => {
     if (gen !== pageGen) return;
     const el = scrapeEls();
@@ -2827,7 +2845,8 @@ function startScrapePolling() {
     document.querySelector('#scrape-start').disabled = true;
     document.querySelector('#avatar-start').disabled = true;
     document.querySelector('#scrape-cancel').disabled = true;
-    el.detail.setAttribute('role', 'status');
+    el.title.textContent = '刮削状态未确认';
+    el.fill.removeAttribute('value');
     el.detail.textContent = delay === null
       ? '进度读取受限，任务状态未确认。请检查登录或权限后重新进入此页。'
       : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
@@ -3950,7 +3969,9 @@ function probeEls() {
     title: document.querySelector('#probe-progress-title'),
     count: document.querySelector('#probe-progress-count'),
     fill: document.querySelector('#probe-progress-fill'),
-    detail: document.querySelector('#probe-progress-detail')
+    detail: document.querySelector('#probe-progress-detail'),
+    failures: document.querySelector('#probe-failures'),
+    announcement: document.querySelector('#probe-progress-announcement')
   };
 }
 
@@ -3970,23 +3991,13 @@ function hideProbePanelLater() {
   }, 8000);
 }
 
-function renderProbeProgress(p) {
+function renderProbeProgress(p, announce = false) {
   const el = probeEls();
   if (!el.panel) return; // 不在媒体墙页面时只保持轮询，不渲染
   if (!p || (!p.running && !p.finished_at)) { el.panel.hidden = true; return; }
   el.panel.hidden = false;
-  el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : (p.error ? '探测结束（存在错误）' : '探测完成'));
-  const { total, done, percent } = progressCounts(p);
-  el.count.textContent = total ? `${done}/${total}` : String(done);
-  el.fill.classList.toggle('is-indeterminate', !total && p.running);
-  el.fill.style.width = `${percent}%`;
-  const parts = [];
-  if (p.success) parts.push(`成功 ${p.success}`);
-  if (p.skipped) parts.push(`跳过 ${p.skipped}`);
-  if (p.failed) parts.push(`失败 ${p.failed}`);
-  if (p.running && p.current) parts.push(`当前 ${p.current}`);
-  if (p.error) parts.push(`错误：${p.error}`);
-  el.detail.textContent = parts.join(' · ') || (p.running ? '正在读取源信息…' : '');
+  el.title.textContent = p.running ? '正在探测媒体信息' : (p.cancelled ? '探测已中止' : (p.error || p.failed ? '探测结束（存在错误）' : '探测完成'));
+  renderTaskProgress(el, p, '正在读取源信息…', '失败样例', announce);
 }
 
 function stopProbePolling() {
@@ -4007,7 +4018,7 @@ function probeProgressUnavailable(delay) {
   if (!el.panel) return;
   el.panel.hidden = false;
   el.title.textContent = '探测状态未确认';
-  el.detail.setAttribute('role', 'status');
+  el.fill.removeAttribute('value');
   el.detail.textContent = delay === null
     ? '进度读取受限，任务状态未确认。请检查登录或权限后重新进入媒体墙。'
     : `进度暂不可用，任务状态未确认；${delay / 1000}秒后自动重试。`;
@@ -4021,17 +4032,11 @@ function startProbePolling(announced = false) {
   setProbeButton(true);
   probeTimer = startProgressPolling('/probe/media/progress', p => {
     if (gen !== pageGen || requestGen !== wallGen) return;
-    renderProbeProgress(p);
+    // 初读的历史终态不是本次任务完成通知；未知状态也不生成终态。
+    renderProbeProgress(p, !p.running && !!p.finished_at && observedRunning);
     if (p.running) { observedRunning = true; setProbeButton(true); return; }
     stopProbePolling();
     setProbeButton(false);
-    // 初读的历史终态不是本次任务完成通知；未知状态也不生成终态。
-    if (p.finished_at && observedRunning) {
-      if (p.cancelled) toast(`探测已中止：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`);
-      else if (p.error) toast(`探测结束：${p.error}`, 'error');
-      else toast(`探测完成：成功 ${p.success} / 跳过 ${p.skipped} / 失败 ${p.failed}`, p.failed ? 'error' : 'ok');
-      if (p.failures && p.failures.length) toast(`失败示例：${p.failures[0]}`, 'error');
-    }
     if (p.finished_at && !p.failed && !p.error) hideProbePanelLater();
   }, delay => {
     if (gen !== pageGen || requestGen !== wallGen) return;
@@ -4045,8 +4050,15 @@ async function runProbeAll() {
   stopProbePolling();
   setProbeButton(true);
   const el = probeEls();
-  if (el.panel) el.panel.hidden = false;
-  if (el.title) el.title.textContent = '正在启动探测…';
+  if (el.panel) {
+    el.panel.hidden = false;
+    el.title.textContent = '正在启动探测…';
+    el.count.textContent = '';
+    el.detail.textContent = '';
+    el.fill.removeAttribute('value');
+    el.failures.hidden = true;
+    el.announcement.textContent = '';
+  }
   try {
     // 默认只补缺：已含 streamdetails 的条目跳过，避免每次全库重探（远程探测很慢）。
     const r = await api('/probe/media', { method: 'POST', body: JSON.stringify({ only_missing: true }) });

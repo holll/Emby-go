@@ -33,7 +33,7 @@ function wallEmbyQuery(state) {
   const query = new URLSearchParams({
     IncludeItemTypes: 'Movie', Recursive: 'true', Limit: String(WALL_PAGE_SIZE),
     StartIndex: String(state.offset), SortBy: ({ title: 'SortName', 'title-desc': 'SortName', year: 'ProductionYear', communityrating: 'CommunityRating' })[state.sort] || 'DateCreated',
-    SortOrder: state.order === 'asc' ? 'Ascending' : 'Descending', Fields: 'DateCreated,MediaSources'
+    SortOrder: state.order === 'asc' ? 'Ascending' : 'Descending', Fields: 'DateCreated'
   });
   if (state.view === 'collections' && !state.entity) {
     query.set('IncludeItemTypes', 'BoxSet');

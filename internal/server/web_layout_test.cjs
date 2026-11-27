@@ -587,6 +587,25 @@ test('媒体墙未刮削：保留库与搜索，点击条目直接编辑并保�
   assert.equal(scope.library_id, '1000000000001');
   assert.equal(scope.search, '录入');
   assert.equal(scope.status, 'pending');
+  const cardLayouts = await evaluate(`(async()=>{
+    const results = [];
+    for (const layout of ['poster','posterCard','thumb','thumbCard','list']) {
+      localStorage.setItem('emby_wall_layout',layout);
+      await page('items');
+      for(let i=0;i<100&&!document.querySelector('[data-edit-pending="91"]');i++)await new Promise(r=>setTimeout(r,20));
+      const card=document.querySelector('[data-edit-pending="91"]');
+      const caption=card.querySelector('.wall-poster .wall-caption .wall-title');
+      const meta=card.querySelector('.wall-meta .wall-title');
+      results.push({title:caption?'caption':meta?'meta':null,thumb:card.querySelector('.wall-poster').classList.contains('is-thumb'),
+        editOnly:card.tagName==='BUTTON' && card.getAttribute('aria-label').startsWith('编辑元数据：') && !card.matches('[data-play]') && !card.querySelector('[data-quickplay]')});
+    }
+    return results;
+  })()`);
+  assert.deepEqual(cardLayouts, [
+    {title:'meta',thumb:false,editOnly:true}, {title:'caption',thumb:false,editOnly:true},
+    {title:'meta',thumb:true,editOnly:true}, {title:'caption',thumb:true,editOnly:true},
+    {title:'meta',thumb:false,editOnly:true}
+  ]);
   await evaluate(`(async()=>{
     document.querySelector('[data-edit-pending="91"]').click();
     for(let i=0;i<100&&!document.querySelector('#e-title');i++)await new Promise(r=>setTimeout(r,20));
@@ -632,17 +651,34 @@ test('刮削进度 SSE：消费快照，断流回退 GET，切页关闭连接', 
   const progress = await evaluate(`(async()=>{
     window.__useScrapeStream=true;
     location.hash='#scrape'; await page('scrape');
-    __emitScrapeProgress({running:true,kind:'scrape',done:2,total:3});
+    const bar=document.querySelector('#scrape-progress-fill');
+    const announcement=document.querySelector('#scrape-progress-announcement');
+    window.__scrapeAnnouncements=[];
+    new MutationObserver(()=>__scrapeAnnouncements.push(announcement.textContent)).observe(announcement,{childList:true});
+    __emitScrapeProgress({running:true,kind:'scrape',done:0,total:0,failures:['初始样例']});
     await new Promise(r=>setTimeout(r,0));
-    return {count:document.querySelector('#scrape-progress-count').textContent, token:__scrapeStreamToken===localStorage.getItem('emby_token'), polls:__calls.filter(c=>c.url==='/api/admin/scrape/progress').length};
+    const details=document.querySelector('#scrape-failures'), summary=details.querySelector('summary');
+    const indeterminate=bar instanceof HTMLProgressElement && bar.position===-1 && !bar.hasAttribute('value');
+    details.open=true;
+    summary.focus();
+    __emitScrapeProgress({running:true,kind:'scrape',done:2,total:3,failures:['初始样例','新增样例']});
+    await new Promise(r=>setTimeout(r,0));
+    return {indeterminate, value:bar.value, max:bar.max,
+      labelled:document.getElementById(bar.getAttribute('aria-labelledby')).textContent==='正在刮削',
+      count:document.getElementById(bar.getAttribute('aria-describedby')).textContent,
+      stable:details===document.querySelector('#scrape-failures') && details.open && document.activeElement===summary,
+      samples:[...details.querySelectorAll('li')].map(li=>li.textContent), live:__scrapeAnnouncements.length,
+      token:__scrapeStreamToken===localStorage.getItem('emby_token'), polls:__calls.filter(c=>c.url==='/api/admin/scrape/progress').length};
   })()`);
-  assert.deepEqual(progress, {count:'2/3', token:true, polls:0});
+  assert.deepEqual(progress, {indeterminate:true,value:67,max:100,labelled:true,count:'2/3',stable:true,samples:['初始样例','新增样例'],live:0,token:true,polls:0});
   await evaluate(`(async()=>{
-    window.__scrapeProgress={running:false,kind:'scrape',done:3,total:3,finished_at:new Date().toISOString()};
+    window.__scrapeProgress={running:false,kind:'scrape',done:3,total:3,success:2,failed:1,failures:['初始样例','新增样例'],finished_at:new Date().toISOString()};
     __breakScrapeStream();
     for(let i=0;i<100&&document.querySelector('#scrape-progress-count').textContent!=='3/3';i++)await new Promise(r=>setTimeout(r,20));
   })()`);
   assert.equal(await evaluate(`document.querySelector('#scrape-progress-count').textContent`), '3/3');
+  assert.deepEqual(await evaluate('__scrapeAnnouncements'), ['刮削结束（存在错误） · 成功 2 · 失败 1']);
+  assert.equal(await evaluate(`document.querySelector('#scrape-failures').open && document.activeElement === document.querySelector('#scrape-failures summary')`), true);
   assert.equal(await evaluate(`__calls.filter(c=>c.url==='/api/admin/scrape/progress').length`), 1);
   assert.equal(await evaluate(`__calls.filter(c=>c.method==='POST').length`), 0);
   const aborted = await evaluate(`(async()=>{

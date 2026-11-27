@@ -552,9 +552,6 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .scan-progress-head strong { font-weight: 600; }
 
 .scan-progress-head span { color: var(--muted); font-family: var(--font-mono); font-size: var(--text-12); }
-.scan-progress-bar { height: 6px; border-radius: var(--radius-pill); background: rgba(255, 255, 255, 0.08); overflow: hidden; }
-.scan-progress-bar i { display: block; height: 100%; width: 0; background: var(--accent); box-shadow: 0 0 12px var(--blue-glow); transition: width 0.25s ease; }
-.scan-progress-bar i.is-indeterminate { width: 40% !important; animation: scan-indeterminate 1.1s ease-in-out infinite; }
 .scan-progress-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 24px; }
 .scan-progress-label { color: var(--scan-color); font-size: var(--text-12); font-weight: 600; letter-spacing: .04em; }
 .scan-progress-top .icon-btn { width: 44px; height: 44px; flex: 0 0 44px; margin: -10px -10px -10px 0; }
@@ -563,13 +560,13 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .scan-progress-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: var(--space-4) var(--space-12); color: var(--muted); font-size: var(--text-12); line-height: 1.5; }
 #scan-progress-count { color: var(--text); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .scan-progress small { display: block; color: var(--muted); font-size: var(--text-12); line-height: 1.6; overflow-wrap: anywhere; max-height: 24vh; overflow: auto; }
-#scan-progress-fill { display: block; appearance: none; border: 0; border-radius: var(--radius-pill); width: 100%; height: 6px; overflow: hidden; background: #3a3a3c; color: var(--scan-color); accent-color: var(--scan-color); }
-#scan-progress-fill[hidden] { display: none; }
-#scan-progress-fill::-webkit-progress-bar { background: #3a3a3c; border-radius: var(--radius-pill); }
-#scan-progress-fill::-webkit-progress-value { background: var(--scan-color); border-radius: var(--radius-pill); }
-#scan-progress-fill::-moz-progress-bar { background: var(--scan-color); border-radius: var(--radius-pill); }
-#scan-progress-fill:not([value])::-webkit-progress-bar { background: linear-gradient(90deg, #3a3a3c 35%, var(--scan-color) 50%, #3a3a3c 65%); background-size: 240% 100%; animation: scan-progress-pending 1.6s linear infinite; }
-#scan-progress-fill:indeterminate::-moz-progress-bar { background: var(--scan-color); opacity: .65; }
+:is(#scan-progress-fill, .task-progress-fill) { display: block; appearance: none; border: 0; border-radius: var(--radius-pill); width: 100%; height: 6px; overflow: hidden; background: #3a3a3c; color: var(--scan-color, var(--accent)); accent-color: var(--scan-color, var(--accent)); }
+:is(#scan-progress-fill, .task-progress-fill)[hidden] { display: none; }
+:is(#scan-progress-fill, .task-progress-fill)::-webkit-progress-bar { background: #3a3a3c; border-radius: var(--radius-pill); }
+:is(#scan-progress-fill, .task-progress-fill)::-webkit-progress-value { background: var(--scan-color, var(--accent)); border-radius: var(--radius-pill); }
+:is(#scan-progress-fill, .task-progress-fill)::-moz-progress-bar { background: var(--scan-color, var(--accent)); border-radius: var(--radius-pill); }
+:is(#scan-progress-fill, .task-progress-fill):not([value])::-webkit-progress-bar { background: linear-gradient(90deg, #3a3a3c 35%, var(--scan-color, var(--accent)) 50%, #3a3a3c 65%); background-size: 240% 100%; animation: scan-progress-pending 1.6s linear infinite; }
+:is(#scan-progress-fill, .task-progress-fill):indeterminate::-moz-progress-bar { background: var(--scan-color, var(--accent)); opacity: .65; }
 .scan-progress[data-state="complete"] { --scan-color: #67d991; }
 .scan-progress[data-state="error"], .scan-progress[data-state="unavailable"] { --scan-color: #ffbd69; }
 @keyframes scan-progress-pending { from { background-position: 100% 0; } to { background-position: -100% 0; } }
@@ -577,9 +574,8 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
   .scan-progress { --scan-inset: 16px; padding: var(--space-14) var(--space-16); }
 }
 @media (prefers-reduced-motion: reduce) {
-  #scan-progress-fill:not([value])::-webkit-progress-bar { animation: none; background-position: 50% 0; }
+  :is(#scan-progress-fill, .task-progress-fill):not([value])::-webkit-progress-bar { animation: none; background-position: 50% 0; }
 }
-@keyframes scan-indeterminate { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
 
 /* 探测进度内嵌在媒体墙面板中（不复用左下角浮层，避免与扫描进度互相遮挡） */
 .probe-progress {
@@ -770,8 +766,8 @@ input:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacit
 .wall.wall-list .wall-select { display: none; }
 
 /* 合集卡片沿用影片卡片的网格与海报尺寸，只额外提供「合集」角标和占位图。 */
-.wall-card.collection-card { all: unset; cursor: pointer; display: grid; gap: var(--space-8); }
-.wall-card.collection-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: var(--radius-sm); }
+.wall-card:is(.collection-card, .pending-card) { all: unset; cursor: pointer; display: grid; gap: var(--space-8); }
+.wall-card:is(.collection-card, .pending-card):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: var(--radius-sm); }
 .collection-mark { position: absolute; bottom: 6px; left: 6px; font-size: var(--text-11); padding: var(--space-2) 7px; border-radius: var(--radius-pill); background: rgba(0, 0, 0, 0.72); border: 1px solid var(--line-strong); color: var(--accent); backdrop-filter: blur(6px); }
 .collection-placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
 .collection-placeholder svg { width: 44px; height: 44px; opacity: 0.55; }
