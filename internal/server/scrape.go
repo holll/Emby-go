@@ -134,6 +134,7 @@ func (a *App) beginScrape(kind string, total int) error {
 	ctx, cancel := context.WithCancel(a.rootCtx)
 	a.scrapeCtx, a.scrapeCancel = ctx, cancel
 	a.scrapeStatus = scrapeStatus{Running: true, Kind: kind, Total: total, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	a.notifyScrapeLocked()
 	return nil
 }
 
@@ -144,6 +145,7 @@ func (a *App) updateScrapeProgress(progress scraper.Progress) {
 	status.Total, status.Done = progress.Total, progress.Done
 	status.Success, status.Skipped, status.Failed = progress.Success, progress.Skipped, progress.Failed
 	status.Current = progress.Current
+	a.notifyScrapeLocked()
 }
 
 func (a *App) addScrapeFailure(sample string) {
@@ -153,6 +155,7 @@ func (a *App) addScrapeFailure(sample string) {
 		return
 	}
 	a.scrapeStatus.Failures = append(a.scrapeStatus.Failures, sample)
+	a.notifyScrapeLocked()
 }
 
 func (a *App) endScrape(err error) {
@@ -183,6 +186,7 @@ func (a *App) endScrape(err error) {
 	}
 	a.scrapeCancel = nil
 	a.scrapeCtx = nil
+	a.notifyScrapeLocked()
 	a.scrapeTaskMu.Unlock()
 }
 
@@ -333,6 +337,7 @@ func (a *App) executeScrape(cfg scraper.Config, opts scraper.RunOptions) error {
 		if _, scanErr := a.scanLibraries(0, 0, scanner.ScanModeFull, false); scanErr != nil {
 			a.scrapeTaskMu.Lock()
 			a.scrapeStatus.IndexRefreshFailed = true
+			a.notifyScrapeLocked()
 			a.scrapeTaskMu.Unlock()
 			err = errors.Join(err, errScrapeIndexRefresh)
 			slog.Warn("刮削后整库扫描失败，索引刷新未确认")

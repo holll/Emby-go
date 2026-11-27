@@ -350,8 +350,8 @@
 
 - Web 媒体墙正常浏览直接使用 `/emby` 前缀的兼容端点及原生 DTO：`Users/Me`、用户 `Views` / `Items`、单条详情 / `Collections` 和 `Items/{id}/Images/*`。搜索、分类、排序与分页使用 Emby 查询参数，不再由 `/api/admin/items` 适配浏览结果。
 - 收藏、已看和喜好通过当前用户的 `FavoriteItems` / `PlayedItems` / `Items/{id}/Rating` 写入；播放通过 `PlaybackInfo` 协商，使用返回的直流地址，并按顺序发送 `Sessions/Playing`、`Progress`、`Stopped`。视频预览使用现有 `ThumbnailSet` / `Images/Thumbnail` 兼容端点。
-- 管理字段（未刮削、需处理、NFO 锁、索引维护等）不冒充 Emby 字段；媒体墙显示全部 / 收藏 / 已看 / 未看，待处理素材由显式刮削管理入口处理。展开维护或点击管理操作后仍使用 `/api/admin`，兼容 API 的可见性约束及管理鉴权均不改变。
-- 日志 SSE 仅用于单向文本更新。管理写操作仍为普通 HTTP，断线恢复不能自动重放写入；总览与防火墙保留既有低频轮询。
+- 管理字段（未刮削、需处理、NFO 锁、索引维护等）不冒充 Emby 字段。管理员在影片媒体墙点「未刮削」时，改用 `/api/admin/items?status=pending`，包含尚未刮削和刮削后仍待处理的条目；`library_id` 接受内部 ID 或 Emby 媒体库 ID。点卡片直接进入原有元数据编辑表单；保存仍走管理端 PATCH 与既有 NFO 索引恢复语义。普通 Emby 浏览的可见性不变。
+- 日志 SSE 仍只更新文本。批量刮削与头像补全共用 `GET /api/admin/scrape/progress/stream`：管理员会话经 `X-Emby-Token` 读取 `event: progress`（与 `/scrape/progress` 相同的完整快照），首发当前状态、随后状态变化时推送，可合并中间更新，空闲或任务结束后关闭，不提供游标或重放。运行中发送心跳并复核会话和管理员权限；非鉴权断流回退原进度轮询。管理写操作仍为普通 HTTP，断线不自动重放；总览与防火墙保留低频轮询，总览的会话、任务和最近活动卡片在后台标签暂停刷新。
 
 ### 4.18 Web 媒体墙合集浏览（2026-11-12）
 

@@ -185,12 +185,12 @@ function refreshPage(render, gen) {
 
 /* ---------------------------------------------------------------- 总览 */
 let dashboardStop = null;
-let overviewSessionsTimer = null;
+let overviewCardsStop = null;
 function stopDashboardPolling() {
   if (typeof dashboardStop === 'function') dashboardStop();
   dashboardStop = null;
-  if (overviewSessionsTimer !== null) globalThis.clearInterval(overviewSessionsTimer);
-  overviewSessionsTimer = null;
+  overviewCardsStop?.();
+  overviewCardsStop = null;
 }
 
 // 正在播放会话卡：数据来自 Emby 的 GET /Sessions（本项目只记录播放会话），
@@ -338,14 +338,28 @@ async function pageOverview() {
   };
   libraryRefresh.addEventListener('click', readLibraries);
   serviceRefresh.addEventListener('click', readService);
-  // Emby 用 websocket 推送会话变化；这里按 10 秒轮询，切页或退出后自停。
-  overviewSessionsTimer = globalThis.setInterval(() => {
-    if (!current()) { stopDashboardPolling(); return; }
-    void readSessions();
-    void readTasks();
-    void readActivity();
-  }, 10000);
-  await Promise.all([readLibraries(), readService(), readSessions(), readTasks(), readActivity()]);
+  // 后台标签不发起新一轮请求，恢复可见立即刷新；上一轮未完成时不叠加。
+  let timer, refreshing = false, disposed = false;
+  const refreshCards = async () => {
+    if (disposed || !current() || document.hidden || refreshing) return;
+    refreshing = true;
+    try { await Promise.all([readSessions(), readTasks(), readActivity()]); }
+    finally {
+      refreshing = false;
+      if (!disposed && current() && !document.hidden) timer = setTimeout(refreshCards, 10000);
+    }
+  };
+  const onVisibility = () => {
+    clearTimeout(timer);
+    if (!document.hidden) void refreshCards();
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  overviewCardsStop = () => {
+    disposed = true;
+    clearTimeout(timer);
+    document.removeEventListener('visibilitychange', onVisibility);
+  };
+  await Promise.all([readLibraries(), readService(), refreshCards()]);
 }
 
 /* ---------------------------------------------------------------- 媒体库 */
@@ -501,6 +515,14 @@ function movieDisplayTitle(item) {
 /* ---------------------------------------------------------------- 媒体墙 */
 function wallCard(item, layout = 'poster') {
   const title = movieDisplayTitle(item) || '—';
+  if (item.Status === 'pending') {
+    const thumb = layout === 'thumb' || layout === 'thumbCard';
+    const status = item.last_scrape_at || item.last_scrape_error ? 'needs_attention' : 'unscraped';
+    return `<button type="button" class="wall-card collection-card" data-edit-pending="${item.id}" aria-label="编辑元数据：${esc(title)}">
+      <span class="wall-poster${thumb ? ' is-thumb' : ''}"><span class="wall-path">${esc(title)}</span></span>
+      <span class="wall-meta"><span class="wall-title" title="${esc(title)}">${esc(title)}</span><small>${STATUS_TEXT[status]} · 编辑元数据</small></span>
+    </button>`;
+  }
   // Emby 3.5 的布局菜单（librarybrowser.showLayoutMenu）给出 List/Poster/PosterCard/Thumb/ThumbCard：
   // poster/thumb 标题在图片下方，*Card 变体把标题压在图片底部的渐隐层上，list 复用同一份标记由 CSS 压成行。
   const thumb = layout === 'thumb' || layout === 'thumbCard';
@@ -660,9 +682,10 @@ async function pageItems() {
     params.set('favorite', '1');
     history.replaceState(history.state, '', location.pathname + '?' + params.toString() + location.hash);
   }
+  const pending = view === 'movies' && typeof me !== 'undefined' && me?.is_admin && params.get('status') === 'pending';
   const status = !collectionList && ['played', 'unplayed'].includes(params.get('status')) ? params.get('status') : '';
-  const favorite = !collectionList && params.get('favorite') === '1';
-  if (!status && params.has('status')) { params.delete('status'); history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash); }
+  const favorite = !collectionList && !pending && params.get('favorite') === '1';
+  if (!pending && !status && params.has('status')) { params.delete('status'); history.replaceState(history.state, '', location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash); }
   const search = params.get('search') || '';
   // 合集侧（列表与成员）只提供标题升降序，避免和影片默认的「最近入库」互相穿插。
   const collectionView = view === 'collections';
@@ -701,12 +724,12 @@ async function pageItems() {
     if (gen !== pageGen || requestGen !== wallGen) return;
   }
   wallState = {
-    view, layout, favorite, collection, status, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
+    view, layout, favorite, collection, status, pending, search, sort, order, libraryID, libraryName: activeLib ? activeLib.Name : '',
     entity, offset: 0, total: 0, loading: false, failed: false, done: false, items: []
   };
 
   wallState.translateSelection = new Set();
-  // 使用 Emby 用户状态；未刮削与失败候选由显式刮削管理入口提供。
+  // 播放筛选走 Emby；未刮削（含待处理）只走管理接口。
   const pills = [
     ['', '全部'],
     ['unplayed', '未看'],
@@ -752,11 +775,12 @@ async function pageItems() {
       ${activeFilters.length ? `<div class="filters wall-active-filters" id="wall-active-filters" aria-label="当前筛选">${activeFilters.map(filterChip).join('')}</div>` : ''}
       ${collectionList ? '' : `<div class="filters wall-status-filters">
         <div class="pill-group" role="group" aria-label="播放状态">
-          ${pills.map(([value, label]) => `<button class="pill ${status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${status === value}">${esc(label)}</button>`).join('')}
+          ${pills.map(([value, label]) => `<button class="pill ${!pending && status === value ? 'is-active' : ''}" data-status="${value}" aria-pressed="${!pending && status === value}">${esc(label)}</button>`).join('')}
         </div>
-        <div class="pill-group" role="group" aria-label="收藏">
+        ${pending ? '' : `<div class="pill-group" role="group" aria-label="收藏">
           <button class="pill ${favorite ? 'is-active' : ''}" data-favorite="1" aria-pressed="${favorite}">仅收藏</button>
-        </div>
+        </div>`}
+        ${view === 'movies' && typeof me !== 'undefined' && me?.is_admin ? `<button type="button" class="pill ${pending ? 'is-active' : ''}" data-status="pending" aria-pressed="${!!pending}">未刮削</button>` : ''}
       </div>`}
       <div id="probe-progress" class="probe-progress" hidden>
         <div class="scan-progress-head"><strong id="probe-progress-title">探测中…</strong><span id="probe-progress-count"></span></div>
@@ -816,7 +840,8 @@ async function pageItems() {
     const qs = new URLSearchParams(location.search);
     const value = button.dataset.status;
     if (!value || qs.get('status') === value) qs.delete('status'); else qs.set('status', value);
-    qs.delete('search');
+    if (value === 'pending') qs.delete('favorite');
+    else if (!pending) qs.delete('search');
     // 选中状态时清掉旧的 scrape 参数（早期书签可能两个都在）。
     qs.delete('scrape');
     pendingWallFocus = '[data-status="' + (qs.get('status') || '') + '"]';
@@ -933,6 +958,11 @@ async function pageItems() {
   }
   // 事件委托：卡片按页追加，统一在容器上处理，避免每页重新绑定。
   document.querySelector('#wall').addEventListener('click', event => {
+    const pendingCard = event.target.closest('[data-edit-pending]');
+    if (pendingCard) {
+      void openMaintenanceDetail({ id: pendingCard.dataset.editPending }, true);
+      return;
+    }
     const selection = event.target.closest('[data-translate-select], .wall-select');
     if (selection) {
       event.stopPropagation();
@@ -1035,9 +1065,18 @@ async function loadWallPage() {
   const more = document.querySelector('#wall-more');
   if (more) more.textContent = '加载中…';
   try {
-    const query = wallEmbyQuery(wallState);
-    const result = await embyRequest(embyUserPath() + '/Items?' + query.toString());
-    const data = { items: result.Items, total: result.TotalRecordCount };
+    let data;
+    if (wallState.pending) {
+      const { search, sort, order, libraryID, offset, entity } = wallState;
+      const query = new URLSearchParams({ status: 'pending', search, sort, order, limit: WALL_PAGE_SIZE, offset });
+      if (libraryID) query.set('library_id', libraryID);
+      if (entity) query.set(entity[0], entity[2]);
+      data = await api('/items?' + query);
+    } else {
+      const query = wallEmbyQuery(wallState);
+      const result = await embyRequest(embyUserPath() + '/Items?' + query.toString());
+      data = { items: result.Items, total: result.TotalRecordCount };
+    }
     if (!wallState || wallGen !== gen) return; // 已被新的搜索/筛选作废，丢弃过期响应
     wallState.total = data.total;
     const items = data.items || [];
@@ -1063,7 +1102,7 @@ async function loadWallPage() {
         : wallState.view === 'collections' ? '合集'
         : (wallState.libraryName ? `「${wallState.libraryName}」的影片` : '影片');
       emptyBox.innerHTML = data.total === 0
-        ? empty(wallState.status ? `没有 ${WALL_STATUS_TEXT[wallState.status] || wallState.status} 的${what}` : `没有符合条件的${what}`,
+        ? empty(wallState.pending ? '没有未刮削或需处理的影片' : wallState.status ? `没有 ${WALL_STATUS_TEXT[wallState.status] || wallState.status} 的${what}` : `没有符合条件的${what}`,
             wallState.search ? '试试其它关键词。' : (wallState.view === 'collections' && !wallState.collection ? '还没有自动合集，至少需要 2 部同系列影片。' : '添加媒体库并扫描后再来看看。'))
         : '';
     }
@@ -1452,7 +1491,7 @@ function overlayPop(selector) {
 }
 /* 遮罩焦点结束 */
 
-async function openMaintenanceDetail(item) {
+async function openMaintenanceDetail(item, edit = false) {
   if (typeof detailTranslationStop !== 'undefined') { detailTranslationStop?.(); detailTranslationStop = null; }
   if (typeof detailArtworkStop !== 'undefined') { detailArtworkStop?.(); detailArtworkStop = null; }
   if (typeof detailSpritesStop !== 'undefined') { detailSpritesStop?.(); detailSpritesStop = null; }
@@ -1469,7 +1508,7 @@ async function openMaintenanceDetail(item) {
   } catch (error) {
     if (!isCurrent()) return;
     document.querySelector('#detail-content').innerHTML = `<div class="detail-body"><p role="alert">${esc(error.message || error)}</p><button id="detail-retry" class="btn">重试加载</button></div>`;
-    document.querySelector('#detail-retry').addEventListener('click', () => openMaintenanceDetail(item));
+    document.querySelector('#detail-retry').addEventListener('click', () => openMaintenanceDetail(item, edit));
     return;
   }
   if (!isCurrent()) return;
@@ -1709,6 +1748,10 @@ async function openMaintenanceDetail(item) {
       editSection.hidden = !editSection.hidden;
       editToggle.setAttribute('aria-expanded', String(!editSection.hidden));
     });
+    if (edit) {
+      editToggle.closest('details').open = true;
+      editToggle.click();
+    }
   }
   const editCancel = document.querySelector('#detail-edit-cancel');
   if (editCancel) editCancel.addEventListener('click', () => {
@@ -2717,12 +2760,64 @@ function startProgressPolling(path, onProgress, onUnavailable, keepObserving = (
   return stop;
 }
 
+function observeScrapeProgress(onProgress, onUnavailable) {
+  const poll = () => startProgressPolling('/scrape/progress', onProgress, onUnavailable);
+  if (typeof ReadableStream === 'undefined') return poll();
+  const controller = new AbortController(), identity = token;
+  let stopped = false, terminal = false, denied = false, deadline, stopFallback;
+  const current = () => !stopped && token === identity && localStorage.getItem('emby_token') === identity;
+  const armDeadline = () => {
+    clearTimeout(deadline);
+    deadline = setTimeout(() => controller.abort(), 15000);
+  };
+  void (async () => {
+    armDeadline();
+    try {
+      const response = await fetch('/api/admin/scrape/progress/stream', {
+        headers: { 'X-Emby-Token': identity }, cache: 'no-store', signal: controller.signal
+      });
+      if (!current()) return;
+      denied = response.status === 401 || response.status === 403;
+      if (!response.ok || !response.headers.get('Content-Type')?.startsWith('text/event-stream') || !response.body) return;
+      const reader = response.body.getReader();
+      const decode = new TextDecoder();
+      const parse = createSSEParser((event, raw) => {
+        if (!current() || terminal || denied) return;
+        const data = JSON.parse(raw);
+        if (event === 'error') {
+          denied = ['AUTH_INVALID', 'ADMIN_REQUIRED', 'API_KEY_SCOPE'].includes(data.code);
+          throw new Error('progress stream ended');
+        }
+        if (event !== 'progress' || typeof data.running !== 'boolean') return;
+        terminal = !data.running;
+        onProgress(data);
+      });
+      try {
+        while (current() && !terminal) {
+          const { done, value } = await reader.read();
+          if (done || !current()) break;
+          armDeadline(); // includes server heartbeat comments
+          parse(decode.decode(value, { stream: true }));
+        }
+      } finally { reader.releaseLock(); }
+    } catch {
+      // A broken or buffered stream is read-only; fall back without retrying a mutation.
+    } finally {
+      clearTimeout(deadline);
+      controller.abort();
+      if (current() && denied) onUnavailable(null);
+      else if (current() && !terminal) stopFallback = poll();
+    }
+  })();
+  return () => { stopped = true; clearTimeout(deadline); controller.abort(); stopFallback?.(); };
+}
+
 function stopScrapePolling() { if (scrapeTimer) { scrapeTimer(); scrapeTimer = null; } }
 
 function startScrapePolling() {
   stopScrapePolling();
   const gen = pageGen;
-  scrapeTimer = startProgressPolling('/scrape/progress', p => {
+  scrapeTimer = observeScrapeProgress(p => {
     if (gen === pageGen) renderScrapeProgress(p);
   }, delay => {
     if (gen !== pageGen) return;

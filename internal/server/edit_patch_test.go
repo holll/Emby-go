@@ -62,6 +62,43 @@ func TestManualPatchClearAndLegacyCompatibility(t *testing.T) {
 	}
 }
 
+func TestPendingLibraryMovieCanBeEdited(t *testing.T) {
+	app, ts, token := collectionCoverFixture(t, nil)
+	lib := onlyLibrary(t, app)
+	file := filepath.Join(lib.Path, "pending.strm")
+	writeFile(t, file, "http://media.test/pending.mp4\n")
+	scanOnce(t, ts, token)
+	id, err := app.db.MovieIDByPath(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := "/api/admin/items?status=pending&library_id="
+	assertCount := func(path string, want int) {
+		t.Helper()
+		resp, body := embyCall(t, ts, "GET", path, token, "")
+		if resp.StatusCode != 200 || body["total"] != float64(want) {
+			t.Fatalf("list %s = %d %+v; want %d items", path, resp.StatusCode, body, want)
+		}
+	}
+	assertCount(list+externalLibraryID(lib.ID), 1)
+	assertCount(list+externalLibraryID(lib.ID+1), 0)
+	item := strconv.FormatInt(id, 10)
+	if resp, body := embyCall(t, ts, "GET", "/emby/Users/1/Items/"+item, token, ""); resp.StatusCode != 404 {
+		t.Fatalf("pending movie visible via Emby: %d %+v", resp.StatusCode, body)
+	}
+	if resp, body := embyCall(t, ts, "PATCH", "/api/admin/items/"+item, token, `{"title":"人工填写"}`); resp.StatusCode != 200 || body["indexed"] != true {
+		t.Fatalf("cannot edit pending: %d %+v", resp.StatusCode, body)
+	}
+	assertCount(list+externalLibraryID(lib.ID), 0)
+	meta, err := nfo.Read(filepath.Join(lib.Path, "pending.nfo"))
+	if err != nil || meta.Title != "人工填写" {
+		t.Fatalf("expected new NFO: %+v %v", meta, err)
+	}
+	if resp, body := embyCall(t, ts, "GET", "/emby/Users/1/Items/"+item, token, ""); resp.StatusCode != 200 || body["Name"] != "人工填写" {
+		t.Fatalf("manual movie missing via Emby: %d %+v", resp.StatusCode, body)
+	}
+}
+
 func TestManualPatchRejectsBeforeWriting(t *testing.T) {
 	app, media := detailTestApp(t, t.TempDir(), patchFixture)
 	ts, token := detailServer(t, app)

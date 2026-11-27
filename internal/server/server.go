@@ -169,10 +169,11 @@ type App struct {
 
 	// 刮削任务状态。scratchCtx 挂在 rootCtx 之下，与探测任务同样的理由：
 	// 任务在 goroutine 里跑，不能用请求 context（handler 返回即取消）。
-	scrapeTaskMu sync.RWMutex
-	scrapeStatus scrapeStatus
-	scrapeCtx    context.Context
-	scrapeCancel context.CancelFunc
+	scrapeTaskMu  sync.RWMutex
+	scrapeStatus  scrapeStatus
+	scrapeChanged chan struct{} // scrapeTaskMu protects the current stream notification.
+	scrapeCtx     context.Context
+	scrapeCancel  context.CancelFunc
 
 	translation translationState
 	artwork     artworkState
@@ -776,6 +777,7 @@ func (a *App) routes() {
 	admin.POST("/scrape/run", a.adminScrapeRun)
 	admin.POST("/scrape/avatars", a.adminScrapeAvatars)
 	admin.GET("/scrape/progress", a.adminScrapeProgress)
+	admin.GET("/scrape/progress/stream", a.adminScrapeStream)
 	admin.POST("/scrape/cancel", a.adminScrapeCancel)
 	admin.POST("/translate/run", a.adminTranslationRun)
 	admin.GET("/translate/status", a.adminTranslationStatus)

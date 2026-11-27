@@ -577,6 +577,7 @@ func (a *App) adminItems(c *gin.Context) {
 	}
 	// library_id 为 0/缺省表示「全部媒体库」——媒体墙的库筛选 Tab 走这里。
 	libraryID, _ := strconv.ParseInt(c.Query("library_id"), 10, 64)
+	libraryID, _ = parseLibraryExternal(libraryID)
 	// 状态筛选直接透传：status=needs_attention 由 store 翻译成「pending 且刮削出错」，
 	// 与 scrape=failed 时代不同，这里不再需要先把 status 提升为「不限状态」。
 	// genre/tag/studio/person/collection 来自详情抽屉的实体跳转（点演员/类型/厂商/合集）。

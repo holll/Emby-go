@@ -224,6 +224,7 @@
       global.removeEventListener('storage', identityChanged);
     };
   }
+  global.createSSEParser = createSSEParser;
   global.mountLogStream = mountLogStream;
   if (typeof module !== 'undefined' && module.exports) module.exports = { createSSEParser, mountLogStream };
 })(typeof window === 'undefined' ? globalThis : window);

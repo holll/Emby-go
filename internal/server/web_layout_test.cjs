@@ -32,6 +32,15 @@ async function browser(t) {
         },cancel(){clearInterval(timer);closed=true;}});
         return new Response(stream,{headers:{'Content-Type':'text/event-stream'}});
       }
+      if(p==='/api/admin/scrape/progress/stream' && window.__useScrapeStream){
+        window.__scrapeStreamToken=options.headers['X-Emby-Token'];
+        const stream=new ReadableStream({start(controller){
+          window.__emitScrapeProgress=data=>controller.enqueue(new TextEncoder().encode('event: progress\\ndata: '+JSON.stringify(data)+'\\n\\n'));
+          window.__breakScrapeStream=()=>controller.error(Error('fixture disconnect'));
+          options.signal.addEventListener('abort',()=>{window.__scrapeStreamAborted=true;},{once:true});
+        }});
+        return new Response(stream,{headers:{'Content-Type':'text/event-stream'}});
+      }
       let data={};
       if(p.endsWith('/Users/Me'))data={Id:'1',Name:'owner',Policy:{IsAdministrator:true}};
       else if(p==='/emby/Sessions')data=window.__sessions||[];
@@ -59,6 +68,11 @@ async function browser(t) {
       }
       else if(p.includes('/PlaybackInfo')){data={PlaySessionId:'ps-1',MediaSources:[{Id:'src-1',Container:'mp4',DirectStreamUrl:'/Videos/1/stream?Static=true'}]};}
       else if(p.endsWith('/libraries')){const items=window.__libraryItems||[{Id:1,Name:'测试媒体库',Path:'/media/'+ 'long-path/'.repeat(12),count:1}];data={total:items.length,items};}
+      else if(p==='/api/admin/items/91/detail')data={movie:{id:91,Title:'待录入影视',Status:'pending'},metatube_id:{saved:'',canonical:'',valid:false}};
+      else if(p==='/api/admin/items/91'&&options.method==='PATCH'){window.__manualSaved=JSON.parse(options.body);data={status:'success'};}
+      else if(p==='/api/admin/items'&&new URL(url,'http://fixture').searchParams.get('status')==='pending'){
+        const items=window.__manualSaved?[]:[{id:91,Title:'待录入影视',Status:'pending'}];data={items,total:items.length};
+      }
       else if(p.endsWith('/items'))data={total:2,items:[{id:1,status:'success',Title:'示例影片：移动端资料管理',Number:'TEST-001',source_path:'/media/测试/TEST-001.strm'},{id:2,status:'pending',Title:'等待处理的影片',source_path:'/media/待处理/TEST-002.strm'}]};
       else if(p.endsWith('/detail')){
         if(window.__detailDelay)await new Promise(r=>window.__resolveDetail=r);
@@ -69,7 +83,7 @@ async function browser(t) {
       else if(p.endsWith('/diagnostics'))data={generated_at:'2026-11-01T08:00:00Z',app:{version:'overview-fixture',commit:'a'.repeat(40)},store:{path:'/data/'+ 'long-path/'.repeat(16),schema_version:22}};
       else if(p.endsWith('/scrape/settings'))data={metatube_url:'https://metatube.invalid',timeout_seconds:30,concurrency:2,translate:{title:false,summary:false,target_lang:'ZH',api_url:'https://translate.invalid'}};
       else if(p.endsWith('/scrape/candidates'))data={total:12};
-      else if(p.endsWith('/scrape/progress'))data={running:false,kind:'scrape',done:0,total:0,failed:0,failures:[]};
+      else if(p.endsWith('/scrape/progress'))data=window.__scrapeProgress||{running:false,kind:'scrape',done:0,total:0,failed:0,failures:[]};
       else if(p.endsWith('/scrape/avatars'))data={total:2};
       else if(p.endsWith('/translate/run')){window.__translationTask=7;data={task_id:7,total:1};}
       else if(p.endsWith('/translate/status'))data={running:false,task_id:window.__translationTask||0,done:0,total:0,success:0,failed:0,skipped:0,failures:[]};
@@ -554,6 +568,90 @@ test('媒体墙筛选多选：收藏与播放状态同时生效、URL 与气泡�
   const legacy = await evaluate(`(()=>({favorite:document.querySelector('[data-favorite]').getAttribute('aria-pressed'), url:location.search}))()`);
   assert.equal(legacy.favorite, 'true');
   assert.equal(legacy.url, '?favorite=1');
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
+test('媒体墙未刮削：保留库与搜索，点击条目直接编辑并保存', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  await evaluate(`(async()=>{
+    history.replaceState(null,'',location.pathname+'?library_id=1000000000001&search=录入#items');
+    await page('items');
+    document.querySelector('[data-status="pending"]').click();
+    for(let i=0;i<100&&!document.querySelector('[data-edit-pending="91"]');i++)await new Promise(r=>setTimeout(r,20));
+  })()`);
+  const scope = await evaluate(`(()=>{
+    const request=__calls.find(call=>call.url.startsWith('/api/admin/items?'));
+    return Object.fromEntries(new URL(request.url,'http://fixture').searchParams);
+  })()`);
+  assert.equal(scope.library_id, '1000000000001');
+  assert.equal(scope.search, '录入');
+  assert.equal(scope.status, 'pending');
+  await evaluate(`(async()=>{
+    document.querySelector('[data-edit-pending="91"]').click();
+    for(let i=0;i<100&&!document.querySelector('#e-title');i++)await new Promise(r=>setTimeout(r,20));
+  })()`);
+  assert.equal(await evaluate(`document.querySelector('.detail-maintenance').open && !document.querySelector('#detail-edit').hidden`), true);
+  await evaluate(`(async()=>{
+    document.querySelector('#e-title').value='人工填写标题';
+    document.querySelector('#detail-edit-form').requestSubmit();
+    for(let i=0;i<100&&!document.querySelector('#wall-empty')?.textContent.includes('没有未刮削');i++)await new Promise(r=>setTimeout(r,20));
+  })()`);
+  assert.equal(await evaluate(`__manualSaved.title`), '人工填写标题');
+  assert.equal(await evaluate(`document.querySelector('[data-edit-pending="91"]') === null`), true);
+  assert.equal(await evaluate(`__calls.filter(call=>call.method==='PATCH').length`), 1);
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
+test('概览卡片：隐藏时跳过轮询，恢复时只发一轮请求', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  const counts = await evaluate(`(async()=>{
+    const count=()=>__calls.filter(c=>c.url==='/emby/Sessions').length;
+    const before=count();
+    let hidden=true;
+    Object.defineProperty(document,'hidden',{configurable:true,get:()=>hidden});
+    await page('overview');
+    const hiddenCount=count()-before;
+    hidden=false;
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await new Promise(r=>setTimeout(r,0));
+    const visibleCount=count()-before;
+    await page('libraries');
+    document.dispatchEvent(new Event('visibilitychange'));
+    return {hiddenCount,visibleCount,afterNavigation:count()-before};
+  })()`);
+  assert.deepEqual(counts, {hiddenCount:0, visibleCount:1, afterNavigation:1});
+  assert.deepEqual(await evaluate('__errors'), []);
+});
+
+test('刮削进度 SSE：消费快照，断流回退 GET，切页关闭连接', { timeout: 60000 }, async t => {
+  if (!available(t)) return;
+  const { evaluate } = await browser(t);
+  const progress = await evaluate(`(async()=>{
+    window.__useScrapeStream=true;
+    location.hash='#scrape'; await page('scrape');
+    __emitScrapeProgress({running:true,kind:'scrape',done:2,total:3});
+    await new Promise(r=>setTimeout(r,0));
+    return {count:document.querySelector('#scrape-progress-count').textContent, token:__scrapeStreamToken===localStorage.getItem('emby_token'), polls:__calls.filter(c=>c.url==='/api/admin/scrape/progress').length};
+  })()`);
+  assert.deepEqual(progress, {count:'2/3', token:true, polls:0});
+  await evaluate(`(async()=>{
+    window.__scrapeProgress={running:false,kind:'scrape',done:3,total:3,finished_at:new Date().toISOString()};
+    __breakScrapeStream();
+    for(let i=0;i<100&&document.querySelector('#scrape-progress-count').textContent!=='3/3';i++)await new Promise(r=>setTimeout(r,20));
+  })()`);
+  assert.equal(await evaluate(`document.querySelector('#scrape-progress-count').textContent`), '3/3');
+  assert.equal(await evaluate(`__calls.filter(c=>c.url==='/api/admin/scrape/progress').length`), 1);
+  assert.equal(await evaluate(`__calls.filter(c=>c.method==='POST').length`), 0);
+  const aborted = await evaluate(`(async()=>{
+    window.__scrapeStreamAborted=false;
+    await page('scrape');
+    await page('overview');
+    return __scrapeStreamAborted;
+  })()`);
+  assert.equal(aborted, true);
   assert.deepEqual(await evaluate('__errors'), []);
 });
 

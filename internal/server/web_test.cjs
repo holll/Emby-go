@@ -329,7 +329,8 @@ test('筛选、计划任务与编辑展开暴露可访问名称和状态', () =>
     'id="item-sort" aria-label="排序方式"',
     'id="item-lib" aria-label="媒体库"',
     'data-lib="" aria-pressed="${libraryID === \x27\x27}"',
-    'data-status="${value}" aria-pressed="${status === value}"',
+    'data-status="${value}" aria-pressed="${!pending && status === value}"',
+    'data-status="pending" aria-pressed="${!!pending}"',
     'id="entity-clear" title="清除该筛选" aria-label="清除筛选"',
     'id="detail-edit-toggle" class="btn" aria-expanded="false" aria-controls="detail-edit"',
     "editToggle.setAttribute('aria-expanded', String(!editSection.hidden))",
@@ -867,7 +868,7 @@ test('刮削观察错误可见且切页停止，旧代回调不能更改当前�
     renderScrapeProgress: () => { renders++; }, scrapeEls: () => ({ panel, detail }),
     stopProbePolling() {}, cancelProbeHide() {}, cancelScanHide() {}, setMeta() {}, content: {},
     skeletonPanel: () => '', pages: { fixture: async () => {} } });
-  vm.runInContext(section('function stopScrapePolling()', '/* ------------------------------------------------------------ 单条刮削预览'), box);
+  vm.runInContext(section('function observeScrapeProgress(', '/* ------------------------------------------------------------ 单条刮削预览'), box);
   box.startScrapePolling();
   assert.equal(callbacks.path, '/scrape/progress');
   callbacks.unavailable(3000);
