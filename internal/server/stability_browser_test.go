@@ -16,6 +16,7 @@ import (
 // Unlike the static layout fixture this exercises embedded assets and real HTTP
 // mutations. Everything belongs to t.TempDir and an ephemeral loopback listener.
 func TestStabilityLiveMobileManagement(t *testing.T) {
+	requireLocalBrowser(t)
 	if testing.Short() {
 		t.Skip("live browser integration")
 	}

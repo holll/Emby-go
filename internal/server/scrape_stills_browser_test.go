@@ -24,6 +24,7 @@ import (
 // through Chromium. Only the local MetaTube upstream is fake; no browser API,
 // overlay, refresh handler, scraper, scanner, image endpoint or store is replaced.
 func TestScrapeStillsBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	chrome := os.Getenv("CHROME_BIN")
 	if chrome == "" {
 		t.Skip("set CHROME_BIN to an existing Chromium executable for full-stack scrape stills browser regression")

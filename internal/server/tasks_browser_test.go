@@ -10,6 +10,7 @@ import (
 
 // TestAdminTasksBrowser 验证单独任务中心页：导航、表格列、筛选与刷新按钮可用。
 func TestAdminTasksBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	chrome := os.Getenv("CHROME_BIN")
 	if chrome == "" {
 		t.Skip("set CHROME_BIN to an existing Chromium executable for the tasks browser regression")

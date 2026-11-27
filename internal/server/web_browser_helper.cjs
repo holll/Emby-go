@@ -6,18 +6,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const chrome = process.env.CHROME_BIN || [
+const localBrowser = process.env.GITHUB_ACTIONS !== 'true' && process.env.EMBY_GO_BROWSER_TESTS === '1';
+const chrome = localBrowser ? (process.env.CHROME_BIN || [
   '/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome',
   '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
-].find(file => fs.existsSync(file));
+].find(file => fs.existsSync(file))) : undefined;
+const localOnly = 'real browser tests are local-only; set EMBY_GO_BROWSER_TESTS=1 locally';
 
 function available(t) {
-  if (chrome && fs.existsSync(chrome) && typeof WebSocket === 'function') return true;
-  const message = `Real Chromium tests require an existing browser and Node WebSocket; CHROME_BIN=${chrome || 'not found'}`;
-  // Optional local browser installation remains optional, never CI coverage.
-  if (process.env.CI || process.env.CHROME_BIN) assert.fail(message);
-  t.skip(message);
-  return false;
+  if (!localBrowser) {
+    t.skip(localOnly);
+    return false;
+  }
+  assert.ok(chrome && fs.existsSync(chrome) && typeof WebSocket === 'function',
+    `Real Chromium tests require an existing browser and Node WebSocket; CHROME_BIN=${chrome || 'not found'}`);
+  return true;
 }
 
 function browserEnvironment(dir) {
@@ -44,6 +47,8 @@ function browserEnvironment(dir) {
   return env;
 }
 
+// Real-browser callers opt in via available() or their Go fixture. The explicit
+// executable also lets pure Node tests exercise launch failures with fake programs.
 async function browser(t, executable = chrome) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emby-browser-'));
   let env;

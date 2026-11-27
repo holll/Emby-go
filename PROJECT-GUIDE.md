@@ -61,7 +61,8 @@ go test ./... -count=1
 ```
 
 - **手动启动：**按 [配置示例](<config.example.yaml>) 使用临时配置、临时数据库和测试媒体目录，不复用生产数据。配置选择顺序是 `-c` → `EMBY_CONFIG` → `config.yaml`。监听端口按配置设置；默认监听所有网卡，验证时使用隔离环境。
-- **前端回归：**用 `node --test internal/server/web*_test.cjs`；其中有真实浏览器场景，运行前检查本机浏览器依赖。Go 侧的 [Nov10 浏览器测试](<internal/server/nov10_browser_test.go>) 需 `NOV10_BROWSER=1`、Python Playwright 和 Chromium；未启用造成的跳过不能算浏览器验收通过。
+- **前端回归：**`node --test internal/server/web*_test.cjs` 默认只跑不需要浏览器的用例。真实浏览器用例仅在本地显式开启，GitHub Actions 即使预装 Chromium 也不会启动它。
+- **本地 Chromium：**用 `EMBY_GO_BROWSER_TESTS=1 CHROME_BIN=/path/to/chromium node --test --test-concurrency=1 internal/server/web*_test.cjs`；Go 全栈浏览器夹具可用 `EMBY_GO_BROWSER_TESTS=1 CHROME_BIN=/path/to/chromium go test ./internal/server -run '^(TestAdminTasksBrowser|TestAdminUpdateBrowser|TestScrapeStillsBrowser|TestScrapeAutoMarksBrowser)$' -count=1`。这些 Node 夹具需要原生 WebSocket；Python Playwright 专项仍需对应开关（如 [Nov10 浏览器测试](<internal/server/nov10_browser_test.go>) 的 `NOV10_BROWSER=1`）和本地依赖。跳过不算浏览器验收通过。
 - **CI 与发布：**核心门禁见 [CI 工作流](<.github/workflows/ci.yml>)；`v*` 标签会触发 [发布工作流](<.github/workflows/release.yml>)，不是普通测试操作。未经授权不要部署、打标签或推送。
 
 接到任务时，先核对 `git status --short --branch`；只读对应链路和回归测试。交付时说明改了哪个边界、跑了哪些检查，以及哪些场景没有验证。

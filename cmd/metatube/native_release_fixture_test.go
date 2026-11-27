@@ -14,16 +14,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
 func TestNativeReleaseFixtureIgnoresDeveloperBuildFlags(t *testing.T) {
-	// This regression must exercise the compiler, even during same-binary runs.
-	t.Setenv("EMBY_GO_NATIVE_BINARY", "")
-	t.Setenv("EMBY_GO_NATIVE_SHA256", "")
-	t.Setenv("EMBY_GO_NATIVE_VERSION", "")
-	t.Setenv("EMBY_GO_NATIVE_COMMIT", "")
-	t.Setenv("EMBY_GO_NATIVE_BUILD_TIME", "")
+	// Exercise the compiler directly, even when a shared or pinned candidate exists.
 	root := t.TempDir()
 	goenv := filepath.Join(root, "go.env")
 	const persisted = "GOFLAGS=-gcflags=all=-N -tags=fixture_persisted\nGOEXPERIMENT=fixture_invalid\nGOAMD64=v3\nGOARM64=v9.0\n"
@@ -35,7 +31,11 @@ func TestNativeReleaseFixtureIgnoresDeveloperBuildFlags(t *testing.T) {
 	t.Setenv("GOEXPERIMENT", "fixture_invalid")
 	t.Setenv("GOAMD64", "v3")
 	t.Setenv("GOARM64", "v9.0")
-	buildNativeReleaseFixture(t, filepath.Join(root, "emby-go"))
+	binary := filepath.Join(root, "emby-go")
+	if err := compileNativeReleaseFixture(binary); err != nil {
+		t.Fatal(err)
+	}
+	verifyNativeReleaseFixture(t, binary, defaultNativeReleaseFixture)
 }
 
 func TestNativeCandidateRejectsInvalidInput(t *testing.T) {
@@ -119,12 +119,32 @@ type nativeReleaseFixture struct {
 	Version, Commit, BuildTime string
 }
 
-// Apply the native release profile, or verify a pinned prebuilt candidate.
+var (
+	defaultNativeReleaseFixture = nativeReleaseFixture{Version: "native-rehearsal", Commit: "fixture", BuildTime: "fixture"}
+	nativeBuildOnce             sync.Once
+	nativeBuildImage            []byte
+	nativeBuildErr              error
+)
+
+func compileNativeReleaseFixture(binary string) error {
+	const flags = "-s -w -X main.version=native-rehearsal -X main.commit=fixture -X main.buildTime=fixture"
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", flags, "-o", binary, ".")
+	// Ignore developer flags, including persisted go env settings.
+	build.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=", "GOEXPERIMENT=",
+		"CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH, "GOAMD64=v1", "GOARM64=v8.0")
+	if out, err := build.CombinedOutput(); err != nil {
+		return fmt.Errorf("release-profile fixture build: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// Reuse one local build per test process, or verify a pinned prebuilt candidate.
 // Explicit metadata is an expected identity, not source/release authentication.
 func buildNativeReleaseFixture(t *testing.T, binary string) nativeReleaseFixture {
 	t.Helper()
 	candidate, digest := os.Getenv("EMBY_GO_NATIVE_BINARY"), os.Getenv("EMBY_GO_NATIVE_SHA256")
-	fixture := nativeReleaseFixture{Version: "native-rehearsal", Commit: "fixture", BuildTime: "fixture"}
+	fixture := defaultNativeReleaseFixture
+	var data []byte
 	version, commit, built := os.Getenv("EMBY_GO_NATIVE_VERSION"), os.Getenv("EMBY_GO_NATIVE_COMMIT"), os.Getenv("EMBY_GO_NATIVE_BUILD_TIME")
 	if version != "" || commit != "" || built != "" {
 		if candidate == "" || digest == "" || version == "" || commit == "" || built == "" {
@@ -137,7 +157,7 @@ func buildNativeReleaseFixture(t *testing.T, binary string) nativeReleaseFixture
 		if candidate == "" || err != nil || len(want) != sha256.Size {
 			t.Fatal("candidate requires EMBY_GO_NATIVE_BINARY and a 64-hex EMBY_GO_NATIVE_SHA256")
 		}
-		data, err := os.ReadFile(candidate)
+		data, err = os.ReadFile(candidate)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,23 +165,35 @@ func buildNativeReleaseFixture(t *testing.T, binary string) nativeReleaseFixture
 		if !bytes.Equal(sum[:], want) {
 			t.Fatalf("candidate SHA256=%x want=%x (refusing execution)", sum, want)
 		}
-		// Copy verified bytes, not a second read of the external path. Each
-		// existing fixture retains its own install/cleanup directory.
-		if err := os.WriteFile(binary, data, 0o755); err != nil {
-			t.Fatal(err)
-		}
 		t.Logf("reusing pinned candidate SHA256=%x; not rebuilding this scenario", sum)
 	} else {
-		const flags = "-s -w -X main.version=native-rehearsal -X main.commit=fixture -X main.buildTime=fixture"
-		build := exec.Command("go", "build", "-trimpath", "-ldflags", flags, "-o", binary, ".")
-		// Ignore developer flags, including go env -w settings. Match the workflow's
-		// default architecture levels rather than inheriting this host's tuning.
-		build.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=", "GOEXPERIMENT=",
-			"CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH, "GOAMD64=v1", "GOARM64=v8.0")
-		if out, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("release-profile fixture build: %v\n%s", err, out)
+		builtHere := false
+		nativeBuildOnce.Do(func() {
+			builtHere = true
+			path := filepath.Join(t.TempDir(), "emby-go")
+			nativeBuildErr = compileNativeReleaseFixture(path)
+			if nativeBuildErr == nil {
+				nativeBuildImage, nativeBuildErr = os.ReadFile(path)
+			}
+		})
+		if nativeBuildErr != nil {
+			t.Fatal(nativeBuildErr)
 		}
+		if builtHere {
+			t.Log("built shared native release fixture")
+		}
+		data = nativeBuildImage
 	}
+	// Every scenario gets its own file; upgrade/install tests can replace
+	// that file without affecting any other scenario.
+	if err := os.WriteFile(binary, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return verifyNativeReleaseFixture(t, binary, fixture)
+}
+
+func verifyNativeReleaseFixture(t *testing.T, binary string, fixture nativeReleaseFixture) nativeReleaseFixture {
+	t.Helper()
 	info, err := buildinfo.ReadFile(binary)
 	if err != nil {
 		t.Fatal(err)

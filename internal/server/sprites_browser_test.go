@@ -20,6 +20,7 @@ import (
 // produce the sprites through GenerateSprite's real disk+CAS pipeline; actual
 // browser playback is a small real MP4 served by the isolated HTTP fixture.
 func TestSpritesBrowserMobile(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("SPRITES_BROWSER") != "1" {
 		t.Skip("set SPRITES_BROWSER=1 for isolated mobile browser integration")
 	}

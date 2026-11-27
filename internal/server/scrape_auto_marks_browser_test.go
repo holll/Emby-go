@@ -46,6 +46,7 @@ func (w *autoMarksBrowserResponse) Write(p []byte) (int, error) {
 // TestScrapeAutoMarksBrowser covers the real production partial-success page.
 // Only MetaTube and the SQLite failure triggers are fixtures, not browser APIs.
 func TestScrapeAutoMarksBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	chrome := os.Getenv("CHROME_BIN")
 	if chrome == "" {
 		t.Skip("set CHROME_BIN to an existing Chromium executable for full-stack auto marks browser regression")

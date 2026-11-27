@@ -14,6 +14,7 @@ import (
 // the browser is the real application: real router, auth tokens, activity log,
 // blocklist persistence and probe store. No product behaviour is stubbed here.
 func TestReportFindingsBrowserMobile(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("REPORT_BROWSER") != "1" {
 		t.Skip("set REPORT_BROWSER=1 for isolated report-fix browser verification")
 	}

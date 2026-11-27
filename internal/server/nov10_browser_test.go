@@ -11,6 +11,7 @@ import (
 // Opt-in Chromium regression. Every URL is fulfilled from read-only local web
 // assets or in-memory fixtures; no server, credentials or production writes.
 func TestNov10Browser(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("NOV10_BROWSER") != "1" {
 		t.Skip("set NOV10_BROWSER=1; requires Python playwright and Chromium")
 	}

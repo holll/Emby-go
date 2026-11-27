@@ -22,6 +22,7 @@ import (
 // only upstream candidate data and media execution are mocked. All runtime
 // evidence is written under /tmp, never into the repository or reports.
 func TestArtworkBrowserMobile(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("ARTWORK_BROWSER") != "1" {
 		t.Skip("set ARTWORK_BROWSER=1 to run isolated Chromium mobile integration")
 	}

@@ -184,7 +184,8 @@ TLS 由 Nginx/Caddy 终止，本服务不内置 TLS。公网前必设 `setup_cod
 - [API 契约](<API-CONTRACT.md>)：对外端点/字段/错误码，Emby 兼容版本 4.9.5.0
 - [项目速读（面向 Agent）](<PROJECT-GUIDE.md>)：架构、任务定位、正确性边界与验证命令
 - [配置示例](<config.example.yaml>)
-- 核心 CI 只跑 `gofmt/build/vet/全仓测试`；发布由 `v*` tag 触发，同 SHA 过 CI 才构建。手动专项在 Actions `manual-checks` 按需选 race/web/vuln/coverage。
+- 核心 CI 只跑 Go 格式、构建、静态检查和非浏览器测试；发布由 `v*` tag 触发，同 SHA 过 CI 才构建。Actions `manual-checks` 可按需选 race/web/vuln/coverage，其中 Web 专项只跑纯 Node 测试。Chromium 回归保留为[本地验证](<PROJECT-GUIDE.md#L64-L65>)。
+- GC CPU 占比和收集次数只作为按需性能测量，不阻断 CI。可在同一机器上用 `go test ./internal/server -run '^$' -bench '^BenchmarkGCShareWorkload$' -benchmem -count=5` 比较 GOGC 100/200；GC 配置功能测试仍随普通测试运行。
 - 升级回归基线是 `v2.2.6`：`cmd/metatube/native_upgrade_test.go` 里两个 opt-in 测试用固定旧二进制做「建库→升级→旧程序拒绝新 schema→回退整包恢复」，默认跳过。改了 schema/迁移或发大版本前手动跑一次，并在 release notes 记下结果：
   ```bash
   # 二选一：本地旧 tag 构建，或指定固定 release 资产（含 SHA256 校验与 -version 身份核对）

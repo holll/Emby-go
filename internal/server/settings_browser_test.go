@@ -9,6 +9,7 @@ import (
 // Opt-in browser regression using only local assets and an in-memory API.
 // No listener, live credentials, network requests or production writes are needed.
 func TestWebhookSettingsBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("SETTINGS_BROWSER") != "1" {
 		t.Skip("set SETTINGS_BROWSER=1; requires Python playwright and Chromium")
 	}

@@ -15,6 +15,7 @@ import (
 // 左下角徽标、更新面板，以及下载失败时面板内可读的失败原因。
 // 只有本地存在 Chromium 时才跑；Go 夹具用假 Release，Node 不访问 GitHub。
 func TestAdminUpdateBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	chrome := os.Getenv("CHROME_BIN")
 	if chrome == "" {
 		t.Skip("set CHROME_BIN to an existing Chromium executable for the upgrade browser regression")

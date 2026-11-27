@@ -25,6 +25,7 @@ import (
 // Explicit opt-in keeps Chromium optional for ordinary Go tests. Once opted in,
 // missing runtime prerequisites and Node skips are failures, not coverage.
 func TestSubtitleMarksBrowser(t *testing.T) {
+	requireLocalBrowser(t)
 	if os.Getenv("SUBTITLE_MARKS_BROWSER") != "1" {
 		t.Skip("set SUBTITLE_MARKS_BROWSER=1 for real App/Chromium subtitle marks acceptance")
 	}
