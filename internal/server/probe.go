@@ -330,7 +330,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 		finish := func(status, code string) {
 			a.emitProbeProgress(0, item, status, code, done, len(targets))
 		}
-		url, readErr := scanner.ReadSource(item.Path)
+		url, hash, readErr := scanner.ReadSourceWithHash(item.Path)
 		if readErr != nil {
 			failures = append(failures, item.label()+"：无法读取 .strm ("+readErr.Error()+")")
 			finish("failed", "READ_SOURCE_FAILED")
@@ -348,7 +348,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 			continue
 		}
 		if item.Primary {
-			if err = a.writeProbeNFO(movie, url, result.Info); err != nil {
+			if err = a.writeProbeNFO(movie, url, hash, result.Info); err != nil {
 				failures = append(failures, item.label()+"：写入 NFO 失败 ("+err.Error()+")")
 				finish("failed", "NFO_WRITE_FAILED")
 				continue
@@ -356,7 +356,7 @@ func (a *App) adminProbeMediaItem(c *gin.Context) {
 			firstInfo = result.Info
 		}
 		// 缓存写入失败不视为探测失败：NFO 已带版本与直链，去重不受影响。
-		if err = saveMediaInfo(item.Path, url, result.Raw); err != nil {
+		if err = saveMediaInfo(item.Path, url, hash, result.Raw); err != nil {
 			slog.Warn("写入 mediainfo.json 失败", "path", item.Path, "error", err)
 		}
 		finish("success", "PROBED")
@@ -577,7 +577,7 @@ func (a *App) probeOne(ctx context.Context, taskID int64, ffprobe string, target
 		a.completeProbe(taskID, target, outcome)
 	}()
 
-	url, err := scanner.ReadSource(target.Path)
+	url, hash, err := scanner.ReadSourceWithHash(target.Path)
 	if err != nil {
 		outcome = probeOutcome{Status: "failed", SafeErrorCode: "READ_SOURCE_FAILED", Detail: "读取 .strm 失败: " + err.Error()}
 		return
@@ -587,15 +587,15 @@ func (a *App) probeOne(ctx context.Context, taskID int64, ffprobe string, target
 		return
 	}
 	if onlyMissing {
-		file, hasCache := loadMediaInfo(target.Path, url)
+		file, hasCache := loadMediaInfo(target.Path, url, hash)
 		cacheCurrent := hasCache && file.ProbeVersion >= probeVersion
 		// 主文件额外认 NFO 标记：兼容本次改动前就已探测、尚无 mediainfo.json 的条目，
 		// 避免升级后触发一次全库重探。
-		nfoCurrent := target.Primary && nfoProbeState(movie.NFOPath).isCurrent(url)
+		nfoCurrent := target.Primary && nfoProbeState(movie.NFOPath).isCurrent(url, hash)
 		switch {
 		case cacheCurrent || nfoCurrent:
 			// 数据已就绪。但主文件的 NFO 可能落后（外部改动/丢失），有本地原始数据就顺手回填，不联网。
-			if target.Primary && !nfoCurrent && hasCache && a.backfillFromMediaInfo(target, file) {
+			if target.Primary && !nfoCurrent && hasCache && a.backfillFromMediaInfo(target, file, url, hash) {
 				touched <- movie.LibraryID
 				outcome = probeOutcome{Status: "success", SafeErrorCode: "BACKFILLED_LOCAL"}
 				return
@@ -608,7 +608,7 @@ func (a *App) probeOne(ctx context.Context, taskID int64, ffprobe string, target
 			return
 		case hasCache:
 			// 缓存版本偏低（探测逻辑升级）：本地重新映射即可。
-			if a.backfillFromMediaInfo(target, file) {
+			if a.backfillFromMediaInfo(target, file, url, hash) {
 				touched <- movie.LibraryID
 				outcome = probeOutcome{Status: "success", SafeErrorCode: "BACKFILLED_LOCAL"}
 				return
@@ -624,14 +624,14 @@ func (a *App) probeOne(ctx context.Context, taskID int64, ffprobe string, target
 	}
 	// 主文件的 NFO 是权威产物，写入失败即整体失败。
 	if target.Primary {
-		if err := a.writeProbeNFO(movie, url, result.Info); err != nil {
+		if err := a.writeProbeNFO(movie, url, hash, result.Info); err != nil {
 			outcome = probeOutcome{Status: "failed", SafeErrorCode: "NFO_WRITE_FAILED", Detail: "写入 NFO 失败: " + err.Error()}
 			return
 		}
 	}
 	// mediainfo.json 是辅助缓存：写不进去只损失「本地回填」能力，
 	// 去重仍由 NFO 标记（主文件）保证，不该因此把已成功的探测判为失败。
-	if err := saveMediaInfo(target.Path, url, result.Raw); err != nil {
+	if err := saveMediaInfo(target.Path, url, hash, result.Raw); err != nil {
 		slog.Warn("写入 mediainfo.json 失败（不影响去重，仅失去本地回填）", "path", target.Path, "error", err)
 	}
 	touched <- movie.LibraryID
@@ -759,8 +759,8 @@ func cleanProbeLabel(value string, limit int) string {
 }
 
 // writeProbeNFO 把探测结果写入 NFO，并记录版本与直链（后者用于识别换源）。
-func (a *App) writeProbeNFO(movie store.Movie, url string, info probe.Info) error {
-	meta := nfo.FileInfoMeta{Size: info.SizeBytes, ProbeVersion: probeVersion, ProbeURL: url}
+func (a *App) writeProbeNFO(movie store.Movie, url, hash string, info probe.Info) error {
+	meta := nfo.FileInfoMeta{Size: info.SizeBytes, ProbeVersion: probeVersion, ProbeURL: url, ProbeHash: hash}
 	if err := nfo.SaveFileInfo(movie.NFOPath, meta, streamDetailsFromProbe(info)); err != nil {
 		return err
 	}
@@ -770,7 +770,7 @@ func (a *App) writeProbeNFO(movie store.Movie, url string, info probe.Info) erro
 
 // backfillFromMediaInfo 用 mediainfo.json 里的原始输出重写产物（不联网）。
 // 返回是否成功；失败时调用方会回退到真实探测，因此缓存损坏不影响最终结果。
-func (a *App) backfillFromMediaInfo(target probeTarget, file mediaInfoFile) bool {
+func (a *App) backfillFromMediaInfo(target probeTarget, file mediaInfoFile, url, hash string) bool {
 	info, err := infoFromMediaInfo(file)
 	if err != nil {
 		// 缓存的原始数据已不可解析：删掉它，让下次走真实探测。
@@ -778,14 +778,14 @@ func (a *App) backfillFromMediaInfo(target probeTarget, file mediaInfoFile) bool
 		return false
 	}
 	if target.Primary {
-		if err := a.writeProbeNFO(target.Movie, file.Source, info); err != nil {
+		if err := a.writeProbeNFO(target.Movie, url, hash, info); err != nil {
 			return false
 		}
 	}
 	// 缓存版本偏低时同步提升，避免每次都走这条回填路径；已是最新则不动它，
 	// 免得平白刷新 probed_at 造成文件 churn。
-	if file.ProbeVersion < probeVersion {
-		_ = saveMediaInfo(target.Path, file.Source, file.FFProbe)
+	if file.ProbeVersion < probeVersion || file.SourceHash == "" {
+		_ = saveMediaInfo(target.Path, url, hash, file.FFProbe)
 	}
 	return true
 }
@@ -811,6 +811,7 @@ func (a *App) evictNFOStreams() {
 type probeState struct {
 	Version int
 	URL     string
+	Hash    string
 }
 
 // nfoProbeState 读出 NFO 记录的探测版本与探测时的直链；读不到时返回零值。
@@ -826,16 +827,12 @@ func nfoProbeState(path string) probeState {
 	if err != nil || meta.FileInfo == nil {
 		return probeState{}
 	}
-	return probeState{Version: meta.FileInfo.ProbeVersion, URL: strings.TrimSpace(meta.FileInfo.ProbeURL)}
+	return probeState{Version: meta.FileInfo.ProbeVersion, URL: strings.TrimSpace(meta.FileInfo.ProbeURL), Hash: meta.FileInfo.ProbeHash}
 }
 
-// isCurrent 判断该状态对当前直链是否仍然有效。
-// URL 为空表示条目由旧版本写入、未记录直链，此时只认版本号（避免升级后全库重探）。
-func (s probeState) isCurrent(target string) bool {
-	if s.Version < probeVersion {
-		return false
-	}
-	return s.URL == "" || s.URL == target
+// isCurrent requires both a current probe version and a verifiable source.
+func (s probeState) isCurrent(url, hash string) bool {
+	return s.Version >= probeVersion && (nfo.FileInfo{ProbeVersion: s.Version, ProbeURL: s.URL, ProbeHash: s.Hash}).MatchesSource(url, hash)
 }
 
 // streamDetailsFromProbe 把探测结果映射为 NFO 的 streamdetails 结构。

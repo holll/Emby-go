@@ -90,7 +90,7 @@ func TestMetaTubeIdentityDTO(t *testing.T) {
 		{"", ""},
 	} {
 		t.Run(tc.raw, func(t *testing.T) {
-			dto := (&App{}).embyItemActors(store.Movie{ID: 1, ProviderID: tc.raw}, store.UserData{}, nil, true)
+			dto, _ := (&App{}).embyItemActors(store.Movie{ID: 1, ProviderID: tc.raw}, store.UserData{}, nil, true)
 			ids, _ := dto["ProviderIds"].(gin.H)
 			if tc.raw == "" {
 				if ids != nil {

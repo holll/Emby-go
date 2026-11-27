@@ -23,6 +23,7 @@ import (
 	"emby-go/internal/imageutil"
 	"emby-go/internal/logging"
 	"emby-go/internal/metatube"
+	"emby-go/internal/nfo"
 	"emby-go/internal/outbound"
 	"emby-go/internal/scheduler"
 	"emby-go/internal/store"
@@ -294,6 +295,9 @@ type tagEntry struct {
 	neg bool
 }
 type nfoCacheEntry struct {
+	source  nfo.FileInfo
+	runtime int64 // independent top-level NFO runtime in seconds
+	stale   bool
 	streams []gin.H
 	size    int64 // NFO <fileinfo><size>：媒体文件字节数（探测写入）
 	probed  bool  // NFO 里有可用的 <streamdetails>（详情页「是否已探测」）

@@ -132,14 +132,8 @@ const libraryIDBase int64 = 1_000_000_000_000
 
 func externalLibraryID(id int64) string { return strconv.FormatInt(libraryIDBase+id, 10) }
 
-// Isolate responses created before Movie.ParentId used resolvable external IDs.
-// Redis may survive a binary restart; media-content versions alone do not change
-// when the DTO contract changes. Keep other cache families and DB versions intact.
-const movieDTOCacheRevision = "parent-v1"
-
-func movieDetailCacheKey(version string, userID int64, id string) string {
-	return "item:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(userID, 10) + ":" + id
-}
+// Redis may survive a restart: isolate cached DTOs that predate runtime validation.
+const movieDTOCacheRevision = "source-runtime-v2"
 
 // parseLibraryExternal 判断一个数值 id 是否落在媒体库外部 id 区间；命中返回内部库 id。
 // 区间外的数值视为普通影片/旧内部库 id（兼容旧客户端把库 id 直接当 ParentId）。
@@ -878,9 +872,11 @@ func (a *App) similar(c *gin.Context) {
 	grantKey := libraryScopeCacheKey(visible, admin)
 	fields := requestedFields(c)
 	simKey := "similar:" + movieDTOCacheRevision + ":" + version + ":" + strconv.FormatInt(a.currentUserID(c), 10) + ":" + grantKey + ":" + strconv.FormatInt(id, 10) + ":" + strconv.Itoa(limit) + ":" + fields.key()
-	if b, ok := a.cachedBody(simKey); ok {
-		respondMediaJSON(c, b)
-		return
+	if !fields.sourceBound() {
+		if b, ok := a.cachedBody(simKey); ok {
+			respondMediaJSON(c, b)
+			return
+		}
 	}
 	// 候选与特征重合度打分都在 SQL 的倒排表上完成（类型/标签/厂商/导演/演员/系列），
 	// 这里再按可解释的层级与影片级信号重排，见 similarTier。
@@ -978,14 +974,18 @@ func (a *App) similar(c *gin.Context) {
 		return
 	}
 	out := make([]gin.H, 0, len(results))
+	cacheable := !fields.sourceBound()
 	for _, r := range results {
-		item := a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true)
+		item, bound := a.embyItemActors(r.movie, dataMap[r.movie.ID], actorMap[r.movie.ID], true)
+		cacheable = cacheable && !bound
 		// Shared cache entries must not contain the requesting session's token.
 		a.applyItemFields(item, r.movie, fields, nil)
 		out = append(out, item)
 	}
 	body, _ := json.Marshal(gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
-	a.cachePut(simKey, body, 20*time.Second)
+	if cacheable {
+		a.cachePut(simKey, body, 20*time.Second)
+	}
 	respondMediaJSON(c, body)
 }
 
@@ -1184,12 +1184,13 @@ func (a *App) peopleOfActors(m store.Movie, actors []store.ActorRef, loaded bool
 // embyItem 把 DB 影片映射为 BaseItemDto（Movie）。字段名与真实 Emby 对齐，
 // 并保证 iPlay 等脆弱客户端必须的 UserData / ImageTags / BackdropImageTags 恒存在。
 func (a *App) embyItem(m store.Movie, d store.UserData) gin.H {
-	return a.embyItemActors(m, d, nil, false)
+	item, _ := a.embyItemActors(m, d, nil, false)
+	return item
 }
 
 // embyItemActors 与 embyItem 相同，但允许传入批量预取的演员列表避免逐片查库。
 // loaded=true 表示 actors 已由调用方批量取回（可为空，不再单条回查）。
-func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.ActorRef, loaded bool) gin.H {
+func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.ActorRef, loaded bool) (gin.H, bool) {
 	id := strconv.FormatInt(m.ID, 10)
 	v := gin.H{
 		"Id": id, "Name": m.DisplayTitle(), "SortName": m.DisplaySortName(),
@@ -1200,9 +1201,6 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 		"CanDelete": false, "CanDownload": false, "SupportsSync": false,
 		// 条目级 UserData 必须带 ItemId/Key/ServerId（文档 UserItemDataDto）。
 		"UserData": a.userDataJSON(m.ID, d),
-	}
-	if m.RuntimeSeconds > 0 {
-		v["RunTimeTicks"] = m.RuntimeSeconds * 10000000
 	}
 	if len(m.AdditionalParts) > 0 {
 		v["PartCount"] = len(m.AdditionalParts) + 1
@@ -1289,11 +1287,34 @@ func (a *App) embyItemActors(m store.Movie, d store.UserData, actors []store.Act
 	// 二者必须恒为对象/数组（内容可空），缺失即列表页 NPE。
 	v["ImageTags"] = imageTags
 	v["BackdropImageTags"] = backdrops
-	if m.RuntimeSeconds > 0 && d.PositionTicks > 0 {
-		d.PlayedPercentage = float64(d.PositionTicks) / float64(m.RuntimeSeconds*10000000) * 100
-		v["UserData"] = a.userDataJSON(m.ID, d)
+	runtime := m.RuntimeSeconds
+	bound := false
+	if runtime > 0 && m.NFOPath != "" {
+		entry := a.cachedNFOEntry(m.NFOPath)
+		if entry.runtime > 0 {
+			runtime = entry.runtime // top-level NFO runtime is independent of the probe
+		} else if entry.hasProbeSource() {
+			bound = true
+			if !entry.matchesSTRM(m.SourcePath) {
+				runtime = 0
+			}
+		}
 	}
-	return v
+	setItemRuntime(v, runtime*10000000)
+	return v, bound
+}
+
+func setItemRuntime(item gin.H, ticks int64) {
+	data := item["UserData"].(gin.H)
+	data["PlayedPercentage"] = float64(0)
+	if ticks <= 0 {
+		delete(item, "RunTimeTicks")
+		return
+	}
+	item["RunTimeTicks"] = ticks
+	if position := data["PlaybackPositionTicks"].(int64); position > 0 {
+		data["PlayedPercentage"] = float64(position) / float64(ticks) * 100
+	}
 }
 
 // normalizeDate 把 NFO 常见的 "2006-01-02" 规整为 Emby 契约的全时间格式；
@@ -1414,7 +1435,7 @@ func (a *App) latest(c *gin.Context) {
 	fields := requestedFields(c)
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
-		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
+		item, _ := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
 		a.applyItemFields(item, m, fields, c)
 		out = append(out, item)
 	}
@@ -1446,7 +1467,8 @@ func (a *App) suggestions(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(movies))
 	for _, m := range movies {
-		out = append(out, a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true))
+		item, _ := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
+		out = append(out, item)
 	}
 	respondItemJSON(c, gin.H{"Items": out, "TotalRecordCount": len(out), "StartIndex": 0})
 }
@@ -1709,9 +1731,11 @@ func (a *App) itemsQuery(c *gin.Context) {
 		grantKey = strings.Join(parts, ",")
 	}
 	key := strings.Join([]string{movieDTOCacheRevision, a.db.Version("g:version"), strconv.FormatInt(a.currentUserID(c), 10), grantKey, strconv.FormatInt(lib, 10), options.term, options.years, options.genre, options.tags, options.studios, options.person, c.Query("Filters"), c.Query("ImageTypes"), c.Query("HasTmdbId"), options.ids, strconv.FormatBool(options.excludeMovie), options.sortBy, c.Query("SortOrder"), fields.key(), strconv.Itoa(start), strconv.Itoa(limit), strconv.FormatBool(options.filter.Played)}, "|")
-	if b, ok := a.cachedBody("items:" + key); ok {
-		respondMediaJSON(c, b)
-		return
+	if !fields.sourceBound() {
+		if b, ok := a.cachedBody("items:" + key); ok {
+			respondMediaJSON(c, b)
+			return
+		}
 	}
 	ms, total, e := a.db.SearchScopedVisible(a.currentUserID(c), lib, visible, "", options.term, options.years, options.genre, options.tags, options.studios, options.person, options.unplayed, options.favorite, options.sortBy, options.desc, limit, start, options.ids, options.filter)
 	if e != nil {
@@ -1732,6 +1756,9 @@ type itemFields struct {
 	mediaStreams bool
 	imageRatio   bool
 }
+
+// Source-dependent fields can change on disk without an index write.
+func (f itemFields) sourceBound() bool { return f.mediaSources || f.mediaStreams || f.size }
 
 // key 返回可用于缓存键的稳定标识。
 func (f itemFields) key() string {
@@ -1807,6 +1834,7 @@ func (a *App) applyItemFields(item gin.H, m store.Movie, fields itemFields, c *g
 	if !fields.mediaSources {
 		return
 	}
+	setItemRuntime(item, source["RunTimeTicks"].(int64))
 	item["MediaSources"] = []gin.H{source}
 	for _, name := range []string{"Bitrate", "Container", "Size"} {
 		if value, ok := source[name]; ok {
@@ -1866,15 +1894,17 @@ func (a *App) respondItemsWithFields(c *gin.Context, ms []store.Movie, total, st
 		return
 	}
 	out := make([]gin.H, 0, len(ms))
+	cacheable := cacheKey != "" && !fields.sourceBound()
 	for _, m := range ms {
-		item := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
+		item, bound := a.embyItemActors(m, dataMap[m.ID], actorMap[m.ID], true)
+		cacheable = cacheable && !bound
 		// 缓存共享 DTO 时不放入会话凭据，响应时再补。
 		a.applyItemFields(item, m, fields, nil)
 		out = append(out, item)
 	}
 	v := gin.H{"Items": out, "TotalRecordCount": total, "StartIndex": start}
 	b, _ := json.Marshal(v)
-	if cacheKey != "" {
+	if cacheable {
 		// b 交给缓存后只读使用，因此可以让缓存直接持有这块内存（P2-5）。
 		a.cachePut("items:"+cacheKey, b, 15*time.Second)
 	}
@@ -2219,15 +2249,9 @@ func (a *App) item(c *gin.Context) {
 		apiError(c, 404, "not found")
 		return
 	}
-	// 详情恒含 MediaSources，但流地址是相对路径，缓存键无需按宿主分桶。
-	key := movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), rawID)
-	if b, ok := a.cachedBody(key); ok {
-		respondMediaJSON(c, b)
-		return
-	}
+	// A STRM may change outside this process, without bumping the DB version.
 	d, _ := a.db.DataUser(a.currentUserID(c), id)
 	b, _ := json.Marshal(a.embyItemDetail(m, d, nil))
-	a.cachePut(key, b, time.Hour)
 	respondMediaJSON(c, b)
 }
 
@@ -2256,6 +2280,7 @@ func (a *App) embyItemDetail(m store.Movie, d store.UserData, c *gin.Context) gi
 	}
 
 	source := a.mediaSourceFor(m, strconv.FormatInt(m.ID, 10), m.SourcePath, c)
+	setItemRuntime(item, source["RunTimeTicks"].(int64))
 	item["MediaSources"] = []gin.H{source}
 	// 顶层 MediaStreams 与首个媒体的 MediaStreams 同源（实测两者相等）。
 	streams, _ := source["MediaStreams"].([]gin.H)

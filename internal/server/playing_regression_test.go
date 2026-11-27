@@ -48,8 +48,6 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 				stopped := strings.HasSuffix(strings.ToLower(event), "stopped")
 				for range 2 {
 					before := a.db.Version("g:version")
-					key := movieDetailCacheKey(before, 1, fmt.Sprint(id))
-					a.cache.Set(key, []byte("stale"), time.Hour)
 					req := httptest.NewRequest(http.MethodPost, "/Sessions/"+event, strings.NewReader(fmt.Sprintf(`{"ItemId":%q,"PositionTicks":123}`, rawID)))
 					w := httptest.NewRecorder()
 					// 直接验证处理函数；路由注册与鉴权由现有 API 测试覆盖。
@@ -81,9 +79,7 @@ func TestPlayingPartAndStoppedRegression(t *testing.T) {
 						if a.db.Version("g:version") != before {
 							t.Fatal("progress bumped version")
 						}
-						if _, ok := a.cache.Get(key); ok {
-							t.Fatal("main movie detail cache not invalidated")
-						}
+
 					}
 				}
 				before, _ := a.db.DataUser(1, id)

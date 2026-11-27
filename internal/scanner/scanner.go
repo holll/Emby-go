@@ -226,7 +226,7 @@ func scanGroup(s *store.Store, lib store.Library, group []candidate, opts scanOp
 func scanCandidate(s *store.Store, lib store.Library, item candidate, additionalParts []string, opts scanOptions, result *Result, paths map[string]struct{}) error {
 	paths[item.path] = struct{}{}
 	movie := store.Movie{LibraryID: lib.ID, SourcePath: item.path, OutputDir: filepath.Dir(item.path), Status: "pending", AdditionalParts: additionalParts}
-	line, err := ReadSource(item.path)
+	line, hash, err := ReadSourceWithHash(item.path)
 	if err != nil {
 		if errors.Is(err, ErrSourceTooLarge) || errors.Is(err, regularfile.ErrNotRegular) {
 			return err
@@ -288,7 +288,7 @@ func scanCandidate(s *store.Store, lib store.Library, item candidate, additional
 		return nil
 	}
 	if nfoErr == nil {
-		applyMeta(&movie, meta, nfoPath)
+		applyMeta(&movie, meta, nfoPath, line, hash)
 		// NFO 的 <actor><thumb> 是头像真源：一并带进索引，删库重建后仍可恢复。
 		for _, actor := range meta.Actors {
 			actors = append(actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
@@ -348,13 +348,16 @@ func nfoNote(path string, err error) string {
 	return note
 }
 
-func applyMeta(movie *store.Movie, meta nfo.MovieMeta, nfoPath string) {
+func applyMeta(movie *store.Movie, meta nfo.MovieMeta, nfoPath, url, hash string) {
 	movie.Status, movie.NFOPath = "success", nfoPath
 	movie.Number, movie.Title, movie.OriginalTitle, movie.Plot = meta.Number, meta.Title, meta.OriginalTitle, meta.Plot
 	movie.Year, movie.Premiere, movie.Rating = meta.Year, firstNonEmpty(meta.Premiered, meta.ReleaseDate), meta.Rating
 	movie.Director, movie.Series, movie.Maker, movie.Label = meta.Director, meta.Series, meta.Maker, meta.Label
 	movie.Collection, movie.OfficialRating, movie.SortName = meta.Collection(), meta.Mpaa, meta.SortTitle
 	movie.Taglines, movie.ProviderID = meta.TaglineList(), meta.ProviderID()
+	if meta.FileInfo != nil && !meta.FileInfo.MatchesSource(url, hash) {
+		meta.FileInfo = nil
+	}
 	movie.Genres, movie.Tags, movie.Studios, movie.RuntimeSeconds = meta.Genres, meta.Tags, meta.Studios, meta.RuntimeSeconds()
 }
 

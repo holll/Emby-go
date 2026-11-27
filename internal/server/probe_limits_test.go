@@ -133,7 +133,7 @@ func TestProbeOutputLimitsHTTPFailureAndRecovery(t *testing.T) {
 			if nfoProbeState(movie.NFOPath).Version != probeVersion {
 				t.Fatal("healthy recovery did not save probe marker")
 			}
-			cached, ok := loadMediaInfo(movie.SourcePath, "https://fixture.invalid/bad.mp4")
+			cached, ok := readMediaInfoFile(movie.SourcePath)
 			if !ok || len(cached.FFProbe) == 0 {
 				t.Fatal("healthy recovery did not save raw output")
 			}
@@ -220,7 +220,7 @@ func TestProbeOutputLimitsBatchContinues(t *testing.T) {
 			if nfoProbeState(strings.TrimSuffix(healthySource, ".strm")+".nfo").Version != probeVersion {
 				t.Fatal("subsequent healthy target not processed")
 			}
-			if cached, ok := loadMediaInfo(healthySource, "https://fixture.invalid/healthy.mp4"); !ok || len(cached.FFProbe) == 0 {
+			if cached, ok := readMediaInfoFile(healthySource); !ok || len(cached.FFProbe) == 0 {
 				t.Fatal("healthy target raw output not saved")
 			}
 			gv, _ := strconv.Atoi(g)

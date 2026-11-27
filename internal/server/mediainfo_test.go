@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -82,6 +84,75 @@ func newProbeTestApp(t *testing.T, root string) (*App, *httptest.Server, string)
 	return app, ts, token
 }
 
+func TestMediaInfoInvalidatesOnSTRMChange(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "Film CD1.strm")
+	part := filepath.Join(root, "Film CD2.strm")
+	meta := filepath.Join(root, "Film CD1.nfo")
+	const mainURL = "https://fixture.invalid/a.mp4"
+	const partURL = "https://fixture.invalid/b.mp4"
+	writeFile(t, main, mainURL+"\n")
+	writeFile(t, part, partURL+"\n")
+	writeFile(t, meta, "<movie><title>Film</title></movie>")
+	app, ts, token := newProbeTestApp(t, root)
+	id, err := app.db.MovieIDByPath(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := app.db.Movie(id)
+	if err != nil || len(m.AdditionalParts) != 1 {
+		t.Fatalf("expected a two-part movie: %+v, %v", m, err)
+	}
+	digest := func(content string) string {
+		sum := sha256.Sum256([]byte(content))
+		return hex.EncodeToString(sum[:])
+	}
+	if err := app.writeProbeNFO(m, mainURL, digest(mainURL+"\n"), probe.Info{SizeBytes: 123456, DurationSeconds: 60, Video: &probe.VideoInfo{Codec: "h264", Width: 1280}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveMediaInfo(part, partURL, digest(partURL+"\n"), []byte(`{"streams":[{"codec_type":"video","codec_name":"hevc","width":1920}],"format":{"size":"654321"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	mainID := strconv.FormatInt(id, 10)
+	check := func(path, codec string) {
+		t.Helper()
+		status, raw := doJSON(t, ts, http.MethodGet, path, token, "")
+		if status != 200 || (codec != "" && !strings.Contains(string(raw), codec)) || (codec == "" && (strings.Contains(string(raw), `"Codec":`) || strings.Contains(string(raw), `"Size":`))) {
+			t.Fatalf("GET %s expected codec %q (empty means unprobed): %d %s", path, codec, status, raw)
+		}
+	}
+	detail := "/emby/Users/1/Items/" + mainID
+	list := "/emby/Users/1/Items?Ids=" + mainID + "&Fields=MediaSources,MediaStreams,Size"
+	mainPlayback := "/emby/Items/" + mainID + "/PlaybackInfo"
+	partPlayback := "/emby/Items/" + virtualPartID(id, 2) + "/PlaybackInfo"
+	for _, path := range []string{detail, list, mainPlayback} {
+		check(path, `"Codec":"h264"`)
+	}
+	check(partPlayback, `"Codec":"hevc"`)
+
+	// Same URL, same byte count and same mtime: only the content digest detects the edit.
+	before, err := os.Stat(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, part, partURL+" ")
+	if err := os.Chtimes(part, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	check(partPlayback, "") // must not borrow the main file's h264 metadata
+	check(detail, `"Codec":"h264"`)
+
+	writeFile(t, main, "https://fixture.invalid/c.mp4\n")
+	for _, path := range []string{detail, list, mainPlayback, partPlayback} {
+		check(path, "") // even with warmed DTO/NFO caches and no scan
+	}
+	for _, path := range []string{meta, mediaInfoPath(part)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("read-side invalidation must not delete %s: %v", path, err)
+		}
+	}
+}
+
 // TestMediaInfoReuse 用「媒体源实际收到的请求数」证明复用生效：
 // 重复的全库探测必须是零请求，缺 NFO 时用本地原始数据回填也必须零请求。
 func TestMediaInfoReuse(t *testing.T) {
@@ -92,7 +163,8 @@ func TestMediaInfoReuse(t *testing.T) {
 	root := t.TempDir()
 	strm := filepath.Join(root, "film.strm")
 	nfoPath := filepath.Join(root, "film.nfo")
-	writeFile(t, strm, media.URL+"/probe-sample.mp4\n")
+	source := media.URL + "/probe-sample.mp4?token=query-secret/segment#fragment-secret"
+	writeFile(t, strm, source+"\n")
 	writeFile(t, nfoPath, "<movie>\n  <title>Film</title>\n</movie>")
 
 	_, ts, token := newProbeTestApp(t, root)
@@ -140,13 +212,18 @@ func TestMediaInfoReuse(t *testing.T) {
 	if file.ProbeVersion != probeVersion {
 		t.Errorf("probe_version = %d, want %d", file.ProbeVersion, probeVersion)
 	}
-	if file.Source != media.URL+"/probe-sample.mp4" {
-		t.Errorf("source = %q", file.Source)
+	if sum := sha256.Sum256([]byte(source + "\n")); file.SourceHash != hex.EncodeToString(sum[:]) || nfoProbeState(nfoPath).Hash != file.SourceHash {
+		t.Fatalf("sidecar/NFO digest mismatch: %q / %q", file.SourceHash, nfoProbeState(nfoPath).Hash)
+	}
+	for _, forbidden := range []string{`"source"`, `"filename"`, media.URL, "query-secret", "fragment-secret"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("hashed sidecar still contains %q", forbidden)
+		}
 	}
 	if file.MediaFile != "probe-sample.mp4" {
 		t.Errorf("media_file = %q", file.MediaFile)
 	}
-	// 原始输出必须完整保留（这是将来新增字段免重探的原料）
+	// 除输入地址外，保留技术字段供将来免重探回填。
 	if !strings.Contains(string(file.FFProbe), "\"codec_name\"") || !strings.Contains(string(file.FFProbe), "\"format\"") {
 		t.Errorf("ffprobe 原始输出不完整: %s", file.FFProbe)
 	}
@@ -168,6 +245,9 @@ func TestMediaInfoReuse(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(hits); got != afterFirst {
 		t.Errorf("回填访问了媒体源 %d 次（应为 0：本地原始数据足够）", got-afterFirst)
+	}
+	if state := nfoProbeState(nfoPath); state.URL != source || state.Hash != file.SourceHash {
+		t.Fatalf("backfilled NFO changed source markers: %+v", state)
 	}
 	backfilled, _ := os.ReadFile(nfoPath)
 	for _, want := range []string{"<width>320</width>", "<size>9260</size>", "<probeversion>1</probeversion>", "<customtag>keep</customtag>"} {
@@ -195,6 +275,9 @@ func TestMediaInfoReuse(t *testing.T) {
 	json.Unmarshal(rawUpgraded, &upgraded)
 	if upgraded.ProbeVersion != probeVersion {
 		t.Errorf("回填后缓存版本 = %d, want %d", upgraded.ProbeVersion, probeVersion)
+	}
+	if upgraded.Source != "" || upgraded.SourceHash != file.SourceHash || upgraded.MediaFile != file.MediaFile {
+		t.Errorf("upgraded sidecar lost hash-only identity: source=%q hash=%q filename=%q", upgraded.Source, upgraded.SourceHash, upgraded.MediaFile)
 	}
 
 	// —— 强制探测：语义是「现在重新探」，必须真的访问源并刷新缓存 ——
@@ -253,31 +336,59 @@ func TestLoadMediaInfoValidation(t *testing.T) {
 	source := "http://x/f.mp4"
 
 	// 不存在
-	if _, ok := loadMediaInfo(strm, source); ok {
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
 		t.Error("缓存不存在时应返回 false")
 	}
 	// 损坏 JSON
 	os.WriteFile(path, []byte("{not json"), 0644)
-	if _, ok := loadMediaInfo(strm, source); ok {
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
 		t.Error("缓存损坏时应返回 false")
 	}
 	// ffprobe 段缺失
 	os.WriteFile(path, []byte(`{"probe_version":1,"source":"http://x/f.mp4"}`), 0644)
-	if _, ok := loadMediaInfo(strm, source); ok {
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
 		t.Error("ffprobe 段为空时应返回 false")
 	}
 	// 源不一致（.strm 已指向别的文件）→ 旧参数不适用
 	valid, _ := json.Marshal(mediaInfoFile{ProbeVersion: 1, Source: "http://x/other.mp4", FFProbe: json.RawMessage(`{"streams":[1]}`)})
 	os.WriteFile(path, valid, 0644)
-	if _, ok := loadMediaInfo(strm, source); ok {
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
 		t.Error("源变化时应返回 false（必须重探）")
 	}
 	// 正常
 	valid, _ = json.Marshal(mediaInfoFile{ProbeVersion: 1, Source: source, FFProbe: json.RawMessage(`{"streams":[1]}`)})
 	os.WriteFile(path, valid, 0644)
-	file, ok := loadMediaInfo(strm, source)
+	file, ok := loadMediaInfo(strm, source, "")
 	if !ok || file.ProbeVersion != 1 {
 		t.Errorf("有效缓存应读取成功: ok=%v file=%+v", ok, file)
+	}
+}
+
+func TestLoadMediaInfoFileBoundary(t *testing.T) {
+	const source = "https://example.invalid/movie.mp4"
+	strm := filepath.Join(t.TempDir(), "movie.strm")
+	writeFile(t, strm, source+"\n")
+	sidecar := mediaInfoPath(strm)
+	if err := os.Mkdir(sidecar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
+		t.Fatal("accepted a directory as a sidecar")
+	}
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatal(err)
+	}
+
+	const valid = `{"source":"` + source + `","ffprobe":{"streams":[1]}}`
+	// JSON trailing whitespace is valid, so this distinguishes a byte cap from
+	// accepting an oversized file after decoding only its valid prefix.
+	writeFile(t, sidecar, valid+strings.Repeat(" ", maxMediaInfoSize-len(valid)))
+	if _, ok := loadMediaInfo(strm, source, ""); !ok {
+		t.Fatal("rejected a valid legacy file at the size limit")
+	}
+	writeFile(t, sidecar, valid+strings.Repeat(" ", maxMediaInfoSize-len(valid)+1))
+	if _, ok := loadMediaInfo(strm, source, ""); ok {
+		t.Fatal("accepted a file over the size limit")
 	}
 }
 
@@ -287,14 +398,14 @@ func TestSaveMediaInfoAtomic(t *testing.T) {
 	strm := filepath.Join(root, "f.strm")
 	writeFile(t, strm, "http://x/f.mp4\n")
 	raw := []byte(`{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}],"format":{"duration":"12.5","size":"12345"}}`)
-	if err := saveMediaInfo(strm, "http://x/f.mp4", raw); err != nil {
+	if err := saveMediaInfo(strm, "http://x/f.mp4", "", raw); err != nil {
 		t.Fatalf("saveMediaInfo: %v", err)
 	}
 	path := mediaInfoPath(strm)
 	if _, err := os.Stat(path + ".tmp"); err == nil {
 		t.Error("不应残留 .tmp")
 	}
-	file, ok := loadMediaInfo(strm, "http://x/f.mp4")
+	file, ok := loadMediaInfo(strm, "http://x/f.mp4", "")
 	if !ok {
 		t.Fatal("写入后应可读回")
 	}

@@ -28,7 +28,7 @@ func TestProbeReportsSavedFilesWithUnconfirmedVersions(t *testing.T) {
 				writeFile(t, m.SourcePath, "https://fixture.invalid/movie.mp4\n")
 				writeFile(t, m.NFOPath, "<movie><title>Keep</title></movie>")
 				raw := []byte(`{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}],"format":{"duration":"12.5","size":"12345"}}`)
-				if err = saveMediaInfo(m.SourcePath, "https://fixture.invalid/movie.mp4", raw); err != nil {
+				if err = saveMediaInfo(m.SourcePath, "https://fixture.invalid/movie.mp4", "", raw); err != nil {
 					t.Fatal(err)
 				}
 				targets = append(targets, probeTarget{Movie: m, Path: m.SourcePath, Primary: true, Index: i + 1})

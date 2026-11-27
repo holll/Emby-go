@@ -174,12 +174,23 @@ type FileInfo struct {
 	// 用于在全库探测时精确判定「是否已探测过」——不能只看 <streamdetails> 是否存在，
 	// 因为刮削器也会写 streamdetails（且常常不完整），那样会把该补齐的条目永久跳过。
 	// 0（缺省）表示未经本服务探测；探测逻辑新增字段时提升版本即可让旧条目自动重探。
-	ProbeVersion int `xml:"probeversion,omitempty"`
-	// ProbeURL 记录探测时的直链。.strm 换源后（换片源、修失效链接）旧参数即失效，
-	// 必须凭它识别出来并重探，否则会一直沿用错误的分辨率/码率。
-	// 空值表示该条目由旧版本探测写入、未记录直链，此时仅凭 ProbeVersion 判定。
-	ProbeURL      string         `xml:"probeurl,omitempty"`
+	ProbeVersion  int            `xml:"probeversion,omitempty"`
+	ProbeURL      string         `xml:"probeurl,omitempty"`  // 旧版仅能按直链验证
+	ProbeHash     string         `xml:"probehash,omitempty"` // 探测时 STRM 原始字节的 SHA-256
 	StreamDetails *StreamDetails `xml:"streamdetails,omitempty"`
+}
+
+// MatchesSource accepts unmarked, external NFO metadata as before. A legacy
+// probe without either a digest or a URL cannot be attributed to this source.
+func (f FileInfo) MatchesSource(url, hash string) bool {
+	if f.ProbeHash != "" {
+		return f.ProbeHash == hash
+	}
+	legacyURL := strings.TrimSpace(f.ProbeURL)
+	if f.ProbeVersion == 0 && legacyURL == "" {
+		return true
+	}
+	return legacyURL != "" && legacyURL == url
 }
 
 // FileInfoMeta 写入 <fileinfo> 的探测元信息。
@@ -187,6 +198,7 @@ type FileInfoMeta struct {
 	Size         int64
 	ProbeVersion int
 	ProbeURL     string
+	ProbeHash    string
 }
 
 // MovieMeta 既是 NFO 的解析目标，也是整体重写（Save）的输出源。
@@ -455,6 +467,7 @@ func renderFileInfo(meta FileInfoMeta, details *StreamDetails) string {
 	writeNumber(&builder, 4, "size", meta.Size)
 	writeNumber(&builder, 4, "probeversion", int64(meta.ProbeVersion))
 	writeValue(&builder, 4, "probeurl", meta.ProbeURL)
+	writeValue(&builder, 4, "probehash", meta.ProbeHash)
 	builder.WriteString("    <streamdetails>\n")
 	if video := details.Video; video != nil {
 		builder.WriteString("      <video>\n")

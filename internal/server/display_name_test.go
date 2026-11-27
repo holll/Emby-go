@@ -29,7 +29,7 @@ func TestMovieDisplayDTO(t *testing.T) {
 			m.AdditionalParts = []string{"/library/ABC-123-CD2.strm"}
 			before := m
 			a := &App{serverID: "display-test"}
-			item := a.embyItemActors(m, store.UserData{}, nil, true)
+			item, _ := a.embyItemActors(m, store.UserData{}, nil, true)
 			if item["Name"] != tc.title || item["SortName"] != tc.sort || item["Id"] != "42" || item["PartCount"] != 2 || item["ParentId"] != externalLibraryID(7) {
 				t.Fatalf("movie DTO: %+v", item)
 			}

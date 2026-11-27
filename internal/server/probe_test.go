@@ -339,11 +339,11 @@ func TestProbeStateIsCurrent(t *testing.T) {
 		{"版本偏低", probeState{Version: probeVersion - 1, URL: url}, false},
 		{"从未探测", probeState{}, false},
 		{"换源（直链不同）", probeState{Version: probeVersion, URL: "https://cdn.example/other.mp4"}, false},
-		// 旧版本写入的条目没有 <probeurl>：只认版本号，避免升级后全库重探
-		{"无直链记录（旧条目）", probeState{Version: probeVersion}, true},
+		// 旧版本没有直链也没有哈希，不能证明仍匹配
+		{"无直链记录（旧条目）", probeState{Version: probeVersion}, false},
 	}
 	for _, tc := range cases {
-		if got := tc.state.isCurrent(url); got != tc.want {
+		if got := tc.state.isCurrent(url, ""); got != tc.want {
 			t.Errorf("%s: isCurrent = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -354,10 +354,10 @@ func TestProbeStateIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := nfoProbeState(path)
-	if state.URL != url || !state.isCurrent(url) {
+	if state.URL != url || !state.isCurrent(url, "") {
 		t.Errorf("回读状态 = %+v, want 直链 %q 且有效", state, url)
 	}
-	if state.isCurrent("https://cdn.example/changed.mp4") {
+	if state.isCurrent("https://cdn.example/changed.mp4", "") {
 		t.Error("换源后应判定为失效")
 	}
 }

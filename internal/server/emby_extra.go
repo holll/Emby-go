@@ -89,7 +89,7 @@ func (a *App) sessions(c *gin.Context) {
 		if movie, err := a.db.Movie(s.MovieID); err == nil && movie.IsVisible() {
 			if a.canViewMovie(c, movie) {
 				data, _ := a.db.DataUser(s.UserID, s.MovieID)
-				item["NowPlayingItem"] = a.embyItemActors(movie, data, nil, false)
+				item["NowPlayingItem"] = a.embyItem(movie, data)
 			} else {
 				continue
 			}

@@ -145,7 +145,7 @@ func TestSaveMediaInfoConcurrentSameTarget(t *testing.T) {
 	path := mediaInfoPath(strm)
 
 	// 先写一份完整的旧缓存，保证读者一开始就有东西可读。
-	if err := saveMediaInfo(strm, "http://example.invalid/movie.mp4", probeFixtureJSON("old")); err != nil {
+	if err := saveMediaInfo(strm, "http://example.invalid/movie.mp4", "", probeFixtureJSON("old")); err != nil {
 		t.Fatalf("初始 saveMediaInfo: %v", err)
 	}
 
@@ -188,7 +188,7 @@ func TestSaveMediaInfoConcurrentSameTarget(t *testing.T) {
 			defer writerWg.Done()
 			for r := 0; r < rounds; r++ {
 				tag := fmt.Sprintf("w%d-r%d", id, r)
-				if err := saveMediaInfo(strm, "http://example.invalid/movie.mp4", probeFixtureJSON(tag)); err != nil {
+				if err := saveMediaInfo(strm, "http://example.invalid/movie.mp4", "", probeFixtureJSON(tag)); err != nil {
 					t.Errorf("并发 saveMediaInfo: %v", err)
 					return
 				}
@@ -222,10 +222,10 @@ func TestSaveMediaInfoKeepsEveryField(t *testing.T) {
 		t.Fatalf("准备 .strm: %v", err)
 	}
 	source := "http://example.invalid/clip.mp4"
-	if err := saveMediaInfo(strm, source, probeFixtureJSON("keep")); err != nil {
+	if err := saveMediaInfo(strm, source, "", probeFixtureJSON("keep")); err != nil {
 		t.Fatalf("saveMediaInfo: %v", err)
 	}
-	got, ok := loadMediaInfo(strm, source)
+	got, ok := loadMediaInfo(strm, source, "")
 	if !ok {
 		t.Fatal("刚写入的缓存应能被 loadMediaInfo 接受")
 	}

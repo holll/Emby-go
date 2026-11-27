@@ -245,8 +245,13 @@ func TestMovieParentCacheUpgrade(t *testing.T) {
 				}
 			}
 		}
-		if recorder.responseWrites.Load() != writes+1 || recorder.warmReads.Load() != warm+1 {
-			t.Fatalf("%s: response did not write once and hit once: writes=%d warm=%d", path, recorder.responseWrites.Load()-writes, recorder.warmReads.Load()-warm)
+		// Detail always contains media sources and must revalidate the STRM on read.
+		want := int32(1)
+		if path == fmt.Sprintf("/emby/Users/1/Items/%d", victim) {
+			want = 0
+		}
+		if recorder.responseWrites.Load()-writes != want || recorder.warmReads.Load()-warm != want {
+			t.Fatalf("%s: writes=%d warm=%d; want %d each", path, recorder.responseWrites.Load()-writes, recorder.warmReads.Load()-warm, want)
 		}
 	}
 	if recorder.legacyReads.Load() != 0 {
@@ -287,7 +292,7 @@ func TestMoviePartParentAndProgressCache(t *testing.T) {
 		t.Fatalf("part must retain main movie parent: %+v", part)
 	}
 	main := get(rawID)
-	get(rawID) // Build and hit the actual new detail cache key.
+	get(rawID) // Repeat the read before updating playback progress.
 	if main["ParentId"] != externalLibraryID(lib.ID) {
 		t.Fatalf("main parent: %+v", main)
 	}
@@ -306,7 +311,7 @@ func TestMoviePartParentAndProgressCache(t *testing.T) {
 	updated := get(rawID)
 	data, ok := updated["UserData"].(map[string]any)
 	if !ok || data["PlaybackPositionTicks"] != float64(123000000) || data["PlayCount"] != float64(0) {
-		t.Fatalf("progress failed to invalidate canonical detail cache: %+v", updated)
+		t.Fatalf("canonical detail did not reflect progress: %+v", updated)
 	}
 	if updated["ParentId"] != externalLibraryID(lib.ID) || get(partID)["ParentId"] != rawID {
 		t.Fatal("progress changed parent semantics")

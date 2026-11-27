@@ -18,7 +18,7 @@ import (
 
 // 管理端单条详情：媒体墙详情抽屉的数据源。
 //
-// 只读，不含编辑/收藏/标记已看。技术参数复用 streamsFor()（主文件读 NFO、
+// 只读，不含编辑/收藏/标记已看。技术参数复用 sourceMediaInfo()（主文件读 NFO、
 // 分段读各自 mediainfo.json），演员复用批量关联读取，不重复实现解析逻辑。
 
 // detailFile 一个媒体文件（主文件或分段）的展示信息。
@@ -74,28 +74,21 @@ func (a *App) adminItemDetail(c *gin.Context) {
 	paths := append([]string{movie.SourcePath}, movie.AdditionalParts...)
 	files := make([]detailFile, 0, len(paths))
 	for i, path := range paths {
-		streams, probed := a.detailStreams(movie, path, i == 0)
+		entry := a.sourceMediaInfo(movie, path)
 		file := detailFile{
 			Index: i + 1, Path: path, Name: filepath.Base(path),
-			Role: "part", Streams: streams, Probed: probed,
+			Role: "main", Streams: entry.streams, Probed: entry.probed, Size: entry.size,
 		}
-		if i == 0 {
-			file.Role = "main"
-			// 主文件体积取探测写入 NFO 的 <fileinfo><size>：.strm 本身只有几十字节，
-			// 对用户没有意义；探测前的回退值是 .strm 的真实大小。
-			if _, size := a.nfoFileInfo(movie); size > 0 {
-				file.Size = size
-			} else {
-				file.Size = fileSize(path)
+		if i != 0 {
+			file.Role, file.MediaInfo = "part", mediaInfoPath(path)
+			if !entry.probed {
+				file.Streams = nil
 			}
-		} else {
-			file.MediaInfo = mediaInfoPath(path)
+		} else if entry.stale {
+			movie.RuntimeSeconds = entry.runtime
+		}
+		if file.Size <= 0 {
 			file.Size = fileSize(path)
-			if raw, ok := readMediaInfoFile(path); ok {
-				if info, err := infoFromMediaInfo(raw); err == nil && info.SizeBytes > 0 {
-					file.Size = info.SizeBytes
-				}
-			}
 		}
 		files = append(files, file)
 	}
@@ -179,32 +172,4 @@ func modifiedAt(path string) string {
 		return info.ModTime().Format(time.RFC3339)
 	}
 	return ""
-}
-
-// detailStreams 返回某个媒体文件的流信息与「是否已探测」。
-//
-// 主文件的「已探测」以 NFO 是否有 <streamdetails> 为准；分段以是否存在自己的
-// mediainfo.json 为准——分段没有缓存时 streamsFor 会回退主文件 NFO，
-// 那不是分段的探测结果，必须报未探测，否则页面会把主文件参数标成分段的。
-func (a *App) detailStreams(movie store.Movie, path string, primary bool) ([]gin.H, bool) {
-	if !primary {
-		file, ok := readMediaInfoFile(path)
-		if !ok {
-			return nil, false
-		}
-		info, err := infoFromMediaInfo(file)
-		if err != nil {
-			return nil, false
-		}
-		streams := buildStreams(streamDetailsFromProbe(info))
-		return streams, len(streams) > 0
-	}
-	streams, _ := a.streamsFor(movie, path)
-	return streams, a.nfoProbed(movie)
-}
-
-// nfoProbed 判断影片主文件是否已被探测（NFO 里有可用的 <streamdetails>）。
-// 复用 nfoEntry 的进程内缓存：详情页此前在本文件里再读一遍 NFO（XML 解析 + 读盘）。
-func (a *App) nfoProbed(movie store.Movie) bool {
-	return a.nfoEntry(movie).probed
 }

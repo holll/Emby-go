@@ -884,7 +884,7 @@ func buildRecords(lib store.Library, inputs *groupInputs, manualPaths map[string
 			record.metaError = nfoNote(unreadablePath, unreadableErr)
 		}
 		if selected.present && selected.parseErr == nil {
-			applyMeta(&record.movie, selected.meta, selected.path)
+			applyMeta(&record.movie, selected.meta, selected.path, member.content, member.digest)
 			for _, actor := range selected.meta.Actors {
 				record.actors = append(record.actors, store.ActorRef{Name: actor.Name, AvatarURL: strings.TrimSpace(actor.Thumb)})
 			}

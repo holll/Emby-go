@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -35,6 +37,24 @@ func ReadSource(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return sourceLine(data)
+}
+
+// ReadSourceWithHash reads the URL and SHA-256 of the same bounded STRM bytes.
+func ReadSourceWithHash(path string) (url, hash string, err error) {
+	data, err := readSourceFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	url, err = sourceLine(data)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(data)
+	return url, hex.EncodeToString(sum[:]), nil
+}
+
+func sourceLine(data []byte) (string, error) {
 	text := string(data)
 	line := firstLine(text)
 	if line == "" && !strings.Contains(text, "\n") {

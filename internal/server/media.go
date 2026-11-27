@@ -735,7 +735,12 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 	directStream := authenticatedStreamURL(stream+"?MediaSourceId="+mediaSourceId+"&Static=true", requestToken(c))
 	// 主文件取 NFO 的 streamdetails，分段取它自己的 mediainfo.json；
 	// 两者都没有时才给通用视频轨。
-	streams, size := a.streamsFor(m, sourcePath)
+	entry := a.sourceMediaInfo(m, sourcePath)
+	streams, size := entry.streams, entry.size
+	runtime := m.RuntimeSeconds
+	if entry.stale || sourcePath != m.SourcePath {
+		runtime = entry.runtime
+	}
 	// Path 给的是 .strm 在服务器文件系统里的路径，与真实 Emby 一致
 	// （真实 Emby 的 MediaSource.Path 也是服务器绝对路径）。
 	// 可播放地址在 DirectStreamUrl：客户端若直接拿 Path 当 URL 用会取不到内容，
@@ -756,7 +761,7 @@ func (a *App) mediaSourceFor(m store.Movie, id, sourcePath string, c *gin.Contex
 		"IsRemote":                   true,
 		"HasMixedProtocols":          false,
 		"Type":                       "Default",
-		"RunTimeTicks":               m.RuntimeSeconds * 10000000,
+		"RunTimeTicks":               runtime * 10000000,
 		"SupportsTranscoding":        false,
 		"SupportsDirectStream":       true,
 		"SupportsDirectPlay":         true,
@@ -982,29 +987,26 @@ func streamsBitrate(streams []gin.H) int64 {
 //
 // 主文件读影片 NFO（Emby/Kodi 的约定位置）；分段读它自己的 mediainfo.json——
 // 一个 NFO 只能描述主文件，分段的技术参数只可能存在于各自的探测缓存里。
-// 缺缓存时回退主文件的 NFO，保证客户端至少能看到影片级信息而不是空白。
-func (a *App) streamsFor(m store.Movie, strmPath string) ([]gin.H, int64) {
+// 分段没有自己的有效缓存时只返回通用轨，不借用主文件技术参数。
+func (a *App) sourceMediaInfo(m store.Movie, strmPath string) nfoCacheEntry {
 	if strmPath == "" || strmPath == m.SourcePath {
-		return a.nfoFileInfo(m)
+		return a.nfoEntry(m)
 	}
 	if file, ok := readMediaInfoFile(strmPath); ok {
 		if info, err := infoFromMediaInfo(file); err == nil {
-			return buildStreams(streamDetailsFromProbe(info)), info.SizeBytes
+			streams := buildStreams(streamDetailsFromProbe(info))
+			if len(streams) > 0 {
+				return nfoCacheEntry{streams: streams, size: info.SizeBytes, runtime: info.DurationSeconds, probed: true}
+			}
 		}
 	}
-	return a.nfoFileInfo(m)
+	return nfoCacheEntry{streams: genericVideoStream(), stale: true}
 }
 
 // genericVideoStream 未探测（或 NFO 没有可用流信息）时的回退轨。
 // 仅驱动直连播放决策，不伪造具体参数。
 func genericVideoStream() []gin.H {
 	return []gin.H{{"Type": "Video", "Index": 0, "IsDefault": true, "IsForced": false, "IsExternal": false}}
-}
-
-// nfoFileInfo 一次解析出 NFO 的流信息与媒体体积（Size 供 MediaSource.Size 使用）。
-func (a *App) nfoFileInfo(m store.Movie) ([]gin.H, int64) {
-	entry := a.nfoEntry(m)
-	return entry.streams, entry.size
 }
 
 // nfoCacheMaxEntries NFO 缓存条目上限。缓存按「路径 + 文件 mtime」存，
@@ -1019,11 +1021,28 @@ const nfoCacheMaxEntries = 20000
 // 用 mtime 做键之后，文件没变就一直命中，外部改了 NFO（mtime 变）立刻重读。
 // tag 本身有 5 分钟进程内缓存，命中路径不会每次都 stat 媒体盘。
 func (a *App) nfoEntry(m store.Movie) nfoCacheEntry {
+	entry := a.cachedNFOEntry(m.NFOPath)
+	if entry.hasProbeSource() && !entry.matchesSTRM(m.SourcePath) {
+		return nfoCacheEntry{streams: genericVideoStream(), runtime: entry.runtime, stale: true}
+	}
+	return entry
+}
+
+func (e nfoCacheEntry) hasProbeSource() bool {
+	return e.source.ProbeVersion != 0 || e.source.ProbeURL != "" || e.source.ProbeHash != ""
+}
+
+func (e nfoCacheEntry) matchesSTRM(path string) bool {
+	url, hash, err := scanner.ReadSourceWithHash(path)
+	return err == nil && e.source.MatchesSource(url, hash)
+}
+
+func (a *App) cachedNFOEntry(path string) nfoCacheEntry {
 	fallback := nfoCacheEntry{streams: genericVideoStream()}
-	if m.NFOPath == "" {
+	if path == "" {
 		return fallback
 	}
-	key := m.NFOPath + "|" + a.posterTag(m.NFOPath)
+	key := path + "|" + a.posterTag(path)
 	a.nfoMu.Lock()
 	if e, ok := a.nfos[key]; ok {
 		a.nfoMu.Unlock()
@@ -1033,9 +1052,11 @@ func (a *App) nfoEntry(m store.Movie) nfoCacheEntry {
 
 	entry := fallback
 	entry.ts, entry.neg = time.Now(), true
-	meta, err := nfo.Read(m.NFOPath)
+	meta, err := nfo.Read(path)
 	if err == nil && meta.FileInfo != nil {
 		entry.size = meta.FileInfo.Size
+		entry.runtime = meta.Runtime * 60
+		entry.source = nfo.FileInfo{ProbeVersion: meta.FileInfo.ProbeVersion, ProbeURL: meta.FileInfo.ProbeURL, ProbeHash: meta.FileInfo.ProbeHash}
 		if details := meta.FileInfo.StreamDetails; details != nil {
 			if out := buildStreams(details); len(out) > 0 {
 				entry.streams, entry.probed, entry.neg = out, true, false
@@ -1553,15 +1574,12 @@ func (a *App) applyPlaybackEvent(c *gin.Context, req playbackEventRequest, kind 
 	// 进度心跳（Progress）几秒一次，若每次都 BumpVersion，列表/实体/详情/相似缓存
 	// （key 含 g:version）会被反复打掉，等于没有缓存。进度本身只影响进度条，
 	// 落一个 TTL 无所谓（列表 15s），代价远小于全站 cache miss 风暴。
-	// 因此：只有真正改变归属状态的 Stopped 才提升版本号（全站失效，低频）；
-	// 心跳只精确失效该片的详情缓存（它 TTL 1 小时，不失效会长时间显示旧进度）。
+	// 只有 Stopped 提升列表版本；详情直接读取最新状态。
 	if isStopped {
 		if err := a.db.BumpVersion(movie.LibraryID); err != nil {
 			apiError(c, 500, err.Error())
 			return
 		}
-	} else {
-		a.cache.Delete(movieDetailCacheKey(a.db.Version("g:version"), a.currentUserID(c), strconv.FormatInt(id, 10)))
 	}
 	// 文档 PlaystateService 对 /Sessions/Playing|Progress|Stopped 全部写 200。
 	c.Status(http.StatusOK)

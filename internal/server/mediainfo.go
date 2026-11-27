@@ -3,36 +3,43 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"emby-go/internal/probe"
+	"emby-go/internal/regularfile"
+	"emby-go/internal/scanner"
 )
 
-// mediainfo.json：.strm 同目录下的探测缓存，保存 ffprobe 的原始 JSON。
+// mediainfo.json：.strm 同目录下的探测缓存，保存 ffprobe 的技术数据。
 //
 // 为什么要这个文件（而不是只看 NFO）：
 //  1. 「是否已探测」需要一个确定判据。看 NFO 有没有 <streamdetails> 不可靠——
 //     刮削器也会写 streamdetails（且常不完整：缺位深/色彩特性/体积），
 //     按有无判定会把该补齐的条目永久跳过。
-//  2. 原始输出完整保留。NFO 只承载映射后的子集（丢掉 TimeBase/Chapters/color_range 等），
+//  2. 除了输入地址，保留原始输出。NFO 只承载映射后的子集（丢掉 TimeBase/Chapters/color_range 等），
 //     有了原始数据，将来新增字段可直接在本地回填，不必为补一个字段重新联网探测
 //     （远程直链单条要 20-30 秒）。
 const (
 	mediaInfoName       = "mediainfo.json"
 	mediaInfoNameSuffix = ".mediainfo.json"
+	maxMediaInfoSize    = 8 << 20 // 4 MiB ffprobe stdout plus room for the legacy URL and envelope.
 )
 
 // mediaInfoFile mediainfo.json 的结构：探测元信息 + ffprobe 原始输出。
 type mediaInfoFile struct {
-	ProbeVersion int             `json:"probe_version"` // 写入时的探测版本，用于版本升级判定
-	ProbedAt     string          `json:"probed_at"`     // 探测时间（UTC RFC3339）
-	Source       string          `json:"source"`        // 探测用的直链，变化即视为缓存过期
-	MediaFile    string          `json:"media_file"`    // 媒体文件名，供人工核对归属
-	FFProbe      json.RawMessage `json:"ffprobe"`       // ffprobe 原始输出
+	ProbeVersion int             `json:"probe_version"`         // 写入时的探测版本，用于版本升级判定
+	ProbedAt     string          `json:"probed_at"`             // 探测时间（UTC RFC3339）
+	Source       string          `json:"source,omitempty"`      // 旧缓存按直链匹配
+	SourceHash   string          `json:"source_hash,omitempty"` // STRM 原始字节的 SHA-256
+	MediaFile    string          `json:"media_file"`            // 媒体文件名，供人工核对归属
+	FFProbe      json.RawMessage `json:"ffprobe"`               // ffprobe 原始输出
 }
 
 // mediaInfoPath 返回 .strm 对应的 mediainfo.json 路径。
@@ -60,14 +67,19 @@ func mediaInfoPath(strmPath string) string {
 }
 
 // loadMediaInfo 读取并校验缓存。任一条件不满足即返回 false（调用方会重新探测）：
-//   - 文件不存在/读不动 —— 没有缓存
+//   - 文件不存在、不是普通文件、超限或读不动 —— 没有缓存
 //   - JSON 解析失败或 ffprobe 段为空 —— 缓存损坏
-//   - 记录的直链与当前 .strm 指向不一致 —— 源已更换，旧参数不再适用
+//   - STRM 哈希不匹配（旧缓存按直链比较）—— 不复用旧参数
 //
 // 不在此处比较 ProbeVersion：版本判定留给调用方，便于区分「跳过」与「可本地升级」。
-func loadMediaInfo(strmPath, source string) (mediaInfoFile, bool) {
-	raw, err := os.ReadFile(mediaInfoPath(strmPath))
+func loadMediaInfo(strmPath, source, sourceHash string) (mediaInfoFile, bool) {
+	sidecar, err := regularfile.Open(mediaInfoPath(strmPath))
 	if err != nil {
+		return mediaInfoFile{}, false
+	}
+	defer sidecar.Close()
+	raw, err := io.ReadAll(io.LimitReader(sidecar, maxMediaInfoSize+1))
+	if err != nil || len(raw) > maxMediaInfoSize {
 		return mediaInfoFile{}, false
 	}
 	var file mediaInfoFile
@@ -77,7 +89,7 @@ func loadMediaInfo(strmPath, source string) (mediaInfoFile, bool) {
 	if len(file.FFProbe) == 0 {
 		return mediaInfoFile{}, false
 	}
-	if file.Source != source {
+	if file.SourceHash != "" && file.SourceHash != sourceHash || file.SourceHash == "" && (file.Source == "" || file.Source != source) {
 		return mediaInfoFile{}, false
 	}
 	return file, true
@@ -85,13 +97,33 @@ func loadMediaInfo(strmPath, source string) (mediaInfoFile, bool) {
 
 // saveMediaInfo 原子写入缓存（先写临时文件再改名，避免中途失败留半截 JSON）。
 // 使用紧凑 JSON，减少缓存文件的空白字符与体积。
-func saveMediaInfo(strmPath, source string, raw []byte) error {
+func saveMediaInfo(strmPath, source, sourceHash string, raw []byte) error {
 	file := mediaInfoFile{
 		ProbeVersion: probeVersion,
 		ProbedAt:     time.Now().UTC().Format(time.RFC3339),
-		Source:       source,
+		SourceHash:   sourceHash,
 		MediaFile:    mediaBaseName(source),
 		FFProbe:      json.RawMessage(raw),
+	}
+	if sourceHash == "" {
+		file.Source = source
+	} else {
+		// ffprobe echoes its input URL in format.filename; remove it but preserve the technical fields.
+		var output map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &output); err != nil {
+			return err
+		}
+		if formatJSON := output["format"]; len(formatJSON) != 0 {
+			var format map[string]json.RawMessage
+			if err := json.Unmarshal(formatJSON, &format); err != nil {
+				return err
+			}
+			if _, ok := format["filename"]; ok {
+				delete(format, "filename")
+				output["format"], _ = json.Marshal(format)
+				file.FFProbe, _ = json.Marshal(output)
+			}
+		}
 	}
 	encoded, err := json.Marshal(file)
 	if err != nil {
@@ -107,26 +139,20 @@ func saveMediaInfo(strmPath, source string, raw []byte) error {
 
 // mediaBaseName 取直链末尾的文件名，仅用于人工核对缓存归属。
 func mediaBaseName(source string) string {
-	trimmed := strings.TrimRight(strings.TrimSpace(source), "/")
-	if idx := strings.LastIndexAny(trimmed, "/\\"); idx >= 0 {
-		trimmed = trimmed[idx+1:]
+	parsed, err := url.Parse(source)
+	if err != nil || strings.Trim(parsed.EscapedPath(), "/") == "" {
+		return ""
 	}
-	return trimmed
+	return path.Base(parsed.EscapedPath())
 }
 
-// readMediaInfoFile 读取缓存文件本身，不校验来源。
-// 供「按 .strm 路径展示媒体信息」的只读场景使用：那里拿不到待比对的直链，
-// 也不该因为源变更就让客户端一片空白（源变更会在下次探测时被 loadMediaInfo 拦下并重探）。
+// readMediaInfoFile validates the cache against the current STRM before display.
 func readMediaInfoFile(strmPath string) (mediaInfoFile, bool) {
-	raw, err := os.ReadFile(mediaInfoPath(strmPath))
+	url, hash, err := scanner.ReadSourceWithHash(strmPath)
 	if err != nil {
 		return mediaInfoFile{}, false
 	}
-	var file mediaInfoFile
-	if err := json.Unmarshal(raw, &file); err != nil || len(file.FFProbe) == 0 {
-		return mediaInfoFile{}, false
-	}
-	return file, true
+	return loadMediaInfo(strmPath, url, hash)
 }
 
 // removeMediaInfo 删除缓存；源文件已消失时清理陈旧缓存用。
